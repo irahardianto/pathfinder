@@ -45,6 +45,13 @@ fn extract_symbols_recursive(
             None
         };
 
+        // Handle impl blocks (Rust-style): extract the implementing type name and
+        // list all associated functions as Method children under that type.
+        if types.impl_kinds.contains(&kind) {
+            extract_impl_block(child, source, types, parent_path, out);
+            continue;
+        }
+
         if let Some(sk) = sym_kind {
             // Try to extract the name
             if let Some(name_node) = child
@@ -101,6 +108,74 @@ fn extract_symbols_recursive(
         // If not a recognized symbol, or we failed to extract a name, still recurse down
         // to find nested symbols (like functions inside export blocks)
         extract_symbols_recursive(child, source, types, parent_path, out);
+    }
+}
+
+/// Extract methods from a Rust `impl_item` node.
+///
+/// Reads the implementing type from the `type` field, then iterates the `body`
+/// `declaration_list` to extract associated `function_item` nodes as `Method`
+/// children. The resulting symbol is appended directly to `out` so that the
+/// repo-map renderer can display it under its type name.
+fn extract_impl_block(
+    node: Node,
+    source: &[u8],
+    types: &crate::language::LanguageNodeTypes,
+    parent_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+) {
+    // The `type` field holds the type being implemented (e.g., `MyStruct`).
+    let Some(type_node) = node.child_by_field_name("type") else {
+        return;
+    };
+    let Ok(type_name) = std::str::from_utf8(&source[type_node.byte_range()]) else {
+        return;
+    };
+    let type_name = type_name.trim().to_string();
+    let impl_path = if parent_path.is_empty() {
+        type_name.clone()
+    } else {
+        format!("{parent_path}.{type_name}")
+    };
+
+    // Collect all child function_items from the impl body as Method symbols.
+    let mut methods: Vec<ExtractedSymbol> = Vec::new();
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut body_cursor = body.walk();
+        for item in body.named_children(&mut body_cursor) {
+            if !types.function_kinds.contains(&item.kind()) {
+                continue;
+            }
+            let Some(name_node) = item.child_by_field_name("name") else {
+                continue;
+            };
+            let Ok(method_name) = std::str::from_utf8(&source[name_node.byte_range()]) else {
+                continue;
+            };
+            let method_name = method_name.trim().to_string();
+            let method_path = format!("{impl_path}.{method_name}");
+            methods.push(ExtractedSymbol {
+                name: method_name,
+                semantic_path: method_path,
+                kind: SymbolKind::Method,
+                byte_range: item.byte_range(),
+                start_line: item.start_position().row,
+                end_line: item.end_position().row,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    if !methods.is_empty() {
+        out.push(ExtractedSymbol {
+            name: type_name,
+            semantic_path: impl_path,
+            kind: SymbolKind::Impl,
+            byte_range: node.byte_range(),
+            start_line: node.start_position().row,
+            end_line: node.end_position().row,
+            children: methods,
+        });
     }
 }
 
@@ -264,5 +339,36 @@ mod tests {
 
         let path = find_enclosing_symbol(&syms, 1).unwrap();
         assert_eq!(path, "A");
+    }
+
+    #[test]
+    fn test_extract_rust_impl_methods() {
+        let source = b"struct MyStruct;\nimpl MyStruct {\n    fn foo(&self) {}\n    fn bar(&mut self) {}\n}\n";
+        let tree = AstParser::parse_source(SupportedLanguage::Rust, source).unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        // Expect: one Struct + one Impl (with 2 Method children)
+        let impl_sym = syms.iter().find(|s| s.kind == SymbolKind::Impl).unwrap();
+        assert_eq!(impl_sym.name, "MyStruct");
+        assert_eq!(impl_sym.semantic_path, "MyStruct");
+        assert_eq!(impl_sym.children.len(), 2);
+        assert_eq!(impl_sym.children[0].name, "foo");
+        assert_eq!(impl_sym.children[0].kind, SymbolKind::Method);
+        assert_eq!(impl_sym.children[0].semantic_path, "MyStruct.foo");
+        assert_eq!(impl_sym.children[1].name, "bar");
+        assert_eq!(impl_sym.children[1].kind, SymbolKind::Method);
+        assert_eq!(impl_sym.children[1].semantic_path, "MyStruct.bar");
+    }
+
+    #[test]
+    fn test_extract_rust_free_functions_unchanged() {
+        // Free functions at the crate root should still be extracted as Function
+        let source = b"fn compute(x: u32) -> u32 { x * 2 }\n";
+        let tree = AstParser::parse_source(SupportedLanguage::Rust, source).unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "compute");
+        assert_eq!(syms[0].kind, SymbolKind::Function);
     }
 }

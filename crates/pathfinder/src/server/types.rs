@@ -34,6 +34,30 @@ pub struct SearchCodebaseParams {
     pub context_lines: u32,
 }
 
+/// Visibility filter for `get_repo_map`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    /// Include only public symbols (default).
+    #[default]
+    Public,
+    /// Include all symbols including private ones.
+    All,
+}
+
+/// Import inclusion policy for `get_repo_map`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IncludeImports {
+    /// Do not include any imports.
+    None,
+    /// Include only third-party imports (default).
+    #[default]
+    ThirdParty,
+    /// Include all imports.
+    All,
+}
+
 /// Parameters for `get_repo_map`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetRepoMapParams {
@@ -47,12 +71,12 @@ pub struct GetRepoMapParams {
     #[serde(default = "default_depth")]
     pub depth: u32,
     /// Visibility filter: `public` or `all`.
-    #[serde(default = "default_visibility")]
-    pub visibility: String,
+    #[serde(default)]
+    pub visibility: Visibility,
     /// Import inclusion: `none`, `third_party`, or `all`.
-    #[serde(default = "default_include_imports")]
+    #[serde(default)]
     #[allow(dead_code)]
-    pub include_imports: String,
+    pub include_imports: IncludeImports,
 }
 
 /// Parameters for `read_symbol_scope`.
@@ -259,6 +283,10 @@ pub struct GetRepoMapResponse {
     pub files_in_scope: usize,
     pub coverage_percent: u8,
     pub version_hashes: std::collections::HashMap<String, String>,
+    /// Always `true` while visibility filtering is not yet implemented.
+    /// Agents should treat all symbols as public regardless of `visibility` param.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility_degraded: Option<bool>,
 }
 
 /// The response for `read_symbol_scope`.
@@ -338,12 +366,6 @@ pub(crate) fn default_max_tokens() -> u32 {
 }
 pub(crate) fn default_depth() -> u32 {
     3
-}
-pub(crate) fn default_visibility() -> String {
-    "public".to_owned()
-}
-pub(crate) fn default_include_imports() -> String {
-    "third_party".to_owned()
 }
 pub(crate) fn default_max_depth() -> u32 {
     2

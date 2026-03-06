@@ -197,20 +197,27 @@ impl PathfinderServer {
         tracing::info!(tool = "get_repo_map", path = %params.path, "get_repo_map: start");
 
         let target_path = std::path::Path::new(&params.path);
-        
+
         // Sandbox check
         if let Err(e) = self.sandbox.check(target_path) {
             tracing::warn!(tool = "get_repo_map", path = %params.path, error = %e, "get_repo_map: access denied");
             return Err(pathfinder_to_error_data(&e));
         }
 
-        let result = match self.surgeon.generate_skeleton(
-            self.workspace_root.path(),
-            target_path,
-            params.max_tokens,
-            params.depth,
-            &params.visibility,
-        ).await {
+        let result = match self
+            .surgeon
+            .generate_skeleton(
+                self.workspace_root.path(),
+                target_path,
+                params.max_tokens,
+                params.depth,
+                match params.visibility {
+                    crate::server::types::Visibility::Public => "public",
+                    crate::server::types::Visibility::All => "all",
+                },
+            )
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 let pfe = match e {
@@ -257,6 +264,9 @@ impl PathfinderServer {
             files_in_scope: result.files_in_scope,
             coverage_percent: result.coverage_percent,
             version_hashes: result.version_hashes,
+            // Visibility filtering is not yet implemented; all symbols are returned.
+            // Always signal degraded so agents know the param has no effect.
+            visibility_degraded: Some(true),
         }))
     }
 
@@ -653,20 +663,37 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
-        // 2. Verify file exists
-        if !absolute_path.exists() {
-            let err = PathfinderError::FileNotFound {
-                path: relative_path.to_path_buf(),
-            };
-            tracing::warn!(tool = "delete_file", error = %err, "file not found");
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        // 3. OCC — verify base_version matches current file hash
+        // 2. OCC — read the file, verify base_version matches current hash.
+        // Handles NotFound atomically (no TOCTOU race between .exists() and read).
         let current_content = match tfs::read(&absolute_path).await {
             Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let err = PathfinderError::FileNotFound {
+                    path: relative_path.to_path_buf(),
+                };
+                let duration_ms = start.elapsed().as_millis();
+                tracing::warn!(
+                    tool = "delete_file",
+                    error = %err,
+                    error_code = err.error_code(),
+                    error_message = %err,
+                    duration_ms,
+                    engines_used = ?(&[] as &[&str]),
+                    "file not found"
+                );
+                return Err(pathfinder_to_error_data(&err));
+            }
             Err(e) => {
-                tracing::warn!(tool = "delete_file", error = %e, "failed to read file for OCC");
+                let duration_ms = start.elapsed().as_millis();
+                tracing::warn!(
+                    tool = "delete_file",
+                    error = %e,
+                    error_code = "INTERNAL_ERROR",
+                    error_message = %e,
+                    duration_ms,
+                    engines_used = ?(&[] as &[&str]),
+                    "failed to read file for OCC"
+                );
                 return Err(io_error_data(format!("failed to read file: {e}")));
             }
         };
@@ -1065,10 +1092,13 @@ mod tests {
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        
+
         let mock_surgeon = MockSurgeon::new();
-        mock_surgeon.generate_skeleton_results.lock().unwrap().push(Ok(
-            pathfinder_treesitter::repo_map::RepoMapResult {
+        mock_surgeon
+            .generate_skeleton_results
+            .lock()
+            .unwrap()
+            .push(Ok(pathfinder_treesitter::repo_map::RepoMapResult {
                 skeleton: "class Mock {}".to_string(),
                 tech_stack: vec!["TypeScript".to_string()],
                 files_scanned: 1,
@@ -1076,8 +1106,7 @@ mod tests {
                 files_in_scope: 1,
                 coverage_percent: 100,
                 version_hashes: std::collections::HashMap::new(),
-            }
-        ));
+            }));
 
         let server = PathfinderServer::with_engines(
             ws,
@@ -1091,8 +1120,8 @@ mod tests {
             path: ".".to_string(),
             max_tokens: 1000,
             depth: 3,
-            visibility: "public".to_string(),
-            include_imports: "none".to_string(),
+            visibility: crate::server::types::Visibility::Public,
+            include_imports: crate::server::types::IncludeImports::None,
         };
 
         let result = server.get_repo_map(Parameters(params)).await;
@@ -1101,6 +1130,55 @@ mod tests {
         assert_eq!(response.skeleton, "class Mock {}");
         assert_eq!(response.files_scanned, 1);
         assert_eq!(response.coverage_percent, 100);
+        // Visibility filtering is not implemented; always degraded
+        assert_eq!(response.visibility_degraded, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_get_repo_map_visibility_degraded() {
+        // Even when visibility = All, the response should always be visibility_degraded: Some(true)
+        // because the feature is not yet implemented.
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .generate_skeleton_results
+            .lock()
+            .unwrap()
+            .push(Ok(pathfinder_treesitter::repo_map::RepoMapResult {
+                skeleton: String::new(),
+                tech_stack: vec![],
+                files_scanned: 0,
+                files_truncated: 0,
+                files_in_scope: 0,
+                coverage_percent: 100,
+                version_hashes: std::collections::HashMap::new(),
+            }));
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon),
+        );
+
+        let params = GetRepoMapParams {
+            visibility: crate::server::types::Visibility::All,
+            ..Default::default()
+        };
+        let result = server
+            .get_repo_map(Parameters(params))
+            .await
+            .expect("should succeed");
+        assert_eq!(
+            result.0.visibility_degraded,
+            Some(true),
+            "visibility_degraded must be Some(true) regardless of requested visibility"
+        );
     }
 
     #[tokio::test]
@@ -1109,7 +1187,7 @@ mod tests {
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        
+
         let mock_surgeon = MockSurgeon::new();
         let server = PathfinderServer::with_engines(
             ws,
@@ -1330,7 +1408,7 @@ mod tests {
         assert!(result.is_ok(), "Expected success, got {:?}", result.err());
         assert!(!abs.exists(), "File should be gone");
 
-        // FILE_NOT_FOUND — file is already deleted
+        // FILE_NOT_FOUND — file is already deleted, now handled via tfs::read NotFound (no pre-check race)
         let result2 = server
             .delete_file(Parameters(DeleteFileParams {
                 filepath: filepath.to_owned(),

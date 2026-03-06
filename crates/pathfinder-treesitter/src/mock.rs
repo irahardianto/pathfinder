@@ -107,7 +107,10 @@ impl Surgeon for MockSurgeon {
             visibility.to_string(),
         ));
         let mut results = self.generate_skeleton_results.lock().unwrap();
-        assert!(!results.is_empty(), "MockSurgeon: Unexpected call to generate_skeleton");
+        assert!(
+            !results.is_empty(),
+            "MockSurgeon: Unexpected call to generate_skeleton"
+        );
         results.remove(0)
     }
 }

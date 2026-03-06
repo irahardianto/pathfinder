@@ -7,6 +7,10 @@ pub struct LanguageNodeTypes {
     pub function_kinds: &'static [&'static str],
     pub class_kinds: &'static [&'static str],
     pub method_kinds: &'static [&'static str],
+    /// Node kinds that represent impl blocks (e.g. `impl_item` in Rust).
+    /// When non-empty, the extractor will descent into these nodes and extract
+    /// their child function items as `SymbolKind::Method` under the impl type.
+    pub impl_kinds: &'static [&'static str],
     pub constant_kinds: &'static [&'static str],
 }
 
@@ -58,24 +62,30 @@ impl SupportedLanguage {
                 function_kinds: &["function_declaration"],
                 class_kinds: &["type_declaration"],
                 method_kinds: &["method_declaration"],
+                impl_kinds: &[],
                 constant_kinds: &["const_declaration", "var_declaration"],
             },
             Self::TypeScript | Self::Tsx | Self::JavaScript => &LanguageNodeTypes {
                 function_kinds: &["function_declaration", "generator_function_declaration"],
                 class_kinds: &["class_declaration", "interface_declaration"],
                 method_kinds: &["method_definition"],
+                impl_kinds: &[],
                 constant_kinds: &["lexical_declaration", "variable_declaration"],
             },
             Self::Python => &LanguageNodeTypes {
                 function_kinds: &["function_definition", "decorated_definition"],
                 class_kinds: &["class_definition"],
                 method_kinds: &[], // Python treats methods as functions inside classes
+                impl_kinds: &[],
                 constant_kinds: &[],
             },
             Self::Rust => &LanguageNodeTypes {
                 function_kinds: &["function_item"],
                 class_kinds: &["struct_item", "enum_item", "trait_item"],
-                method_kinds: &[], // Inside impl_item
+                method_kinds: &[],
+                // `impl_item` nodes contain associated functions — handled separately
+                // so that methods are grouped under the implementing type's name.
+                impl_kinds: &["impl_item"],
                 constant_kinds: &["const_item", "static_item"],
             },
         }

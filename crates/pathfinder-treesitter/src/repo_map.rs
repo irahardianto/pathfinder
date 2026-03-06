@@ -36,12 +36,12 @@ const MAX_TOKENS_PER_FILE: u32 = 512;
 pub fn render_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
     let mut out = String::new();
     render_symbols_recursive(symbols, 0, &mut out);
-    
+
     // Check if the file is too large
     if estimate_tokens(&out) > MAX_TOKENS_PER_FILE {
         return render_truncated_file_skeleton(symbols);
     }
-    
+
     out
 }
 
@@ -59,10 +59,10 @@ fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut
             SymbolKind::Interface => "interface ",
             SymbolKind::Enum => "enum ",
         };
-        
+
         let declaration = format!("{}{}", prefix, sym.name);
         let _ = writeln!(out, "{}{} // {}", indent, declaration, sym.semantic_path);
-        
+
         if !sym.children.is_empty() {
             render_symbols_recursive(&sym.children, depth + 1, out);
         }
@@ -75,17 +75,25 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
     for sym in symbols {
         use crate::surgeon::SymbolKind;
         if sym.kind == SymbolKind::Class || sym.kind == SymbolKind::Struct {
-            let prefix = if sym.kind == SymbolKind::Class { "class " } else { "struct " };
+            let prefix = if sym.kind == SymbolKind::Class {
+                "class "
+            } else {
+                "struct "
+            };
             let declaration = format!("{}{}", prefix, sym.name);
             let _ = writeln!(out, "{} // {}", declaration, sym.semantic_path);
-            
-            let method_count = sym.children.iter().filter(|c| c.kind == SymbolKind::Method).count();
+
+            let method_count = sym
+                .children
+                .iter()
+                .filter(|c| c.kind == SymbolKind::Method)
+                .count();
             if method_count > 0 {
                 let _ = writeln!(out, "  // ... {method_count} methods omitted");
             }
         }
     }
-    
+
     // Add a warning comment at the top if we had to collapse
     if out.is_empty() {
         "// [TRUNCATED - NO CLASSES EXTRACTED]".to_string()
@@ -95,7 +103,7 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
 }
 
 /// Generate an AST-based skeleton of a directory.
-/// 
+///
 /// # Errors
 /// Returns `SurgeonError` if an operation on the AST fails.
 pub async fn generate_skeleton_text(
@@ -104,7 +112,7 @@ pub async fn generate_skeleton_text(
     target_path: &Path,
     max_tokens: u32,
     depth: u32,
-    _visibility: &str, // Currently ignored, treats everything as public
+    _visibility: &str, // Not yet implemented; all symbols are included regardless of visibility.
 ) -> Result<RepoMapResult, SurgeonError> {
     use ignore::WalkBuilder;
     use pathfinder_common::types::VersionHash;
@@ -112,7 +120,7 @@ pub async fn generate_skeleton_text(
     let abs_target = workspace_root.join(target_path);
 
     let mut builder = WalkBuilder::new(&abs_target);
-    builder.max_depth(Some(depth as usize)); // WalkBuilder handles max_depth 
+    builder.max_depth(Some(depth as usize)); // WalkBuilder handles max_depth
     builder.require_git(false);
     builder.hidden(true); // Ignore hidden files
     builder.add_custom_ignore_filename(".pathfinderignore"); // Standard ignore from searcher
@@ -140,25 +148,37 @@ pub async fn generate_skeleton_text(
         let rel_path = path.strip_prefix(workspace_root).unwrap_or(path);
 
         // Only parse supported languages
-        let Some(lang) = crate::language::SupportedLanguage::detect(path) else { continue };
+        let Some(lang) = crate::language::SupportedLanguage::detect(path) else {
+            continue;
+        };
 
         if !tech_stack.contains(&lang) {
             tech_stack.push(lang);
         }
 
-        // We need to fetch the file contents. The surgeon's `read_symbol_scope` is meant for deep contexts,
-        // but `extract_symbols` is directly parsing. However, we need the version_hash.
-        // For AST-based repo map, we just use Surgeon::extract_symbols and assume it populates cache.
-        // Wait, extract_symbols doesn't return version_hash. 
-        // We probably need to read the file manually to get version hash, or just return an empty hash for now,
-        // but PRD says "returns version_hashes per file for immediate editing." Let's calculate it manually since we don't have it directly.
-        let source = std::fs::read(path).unwrap_or_default();
+        // Read the raw file bytes to compute a per-file version hash.
+        // `extract_symbols` does not return a hash, so we read the file separately.
+        // Files that fail to read (e.g., permission denied, race-deleted) are skipped
+        // so a transient I/O error does not corrupt the hash map with empty-byte hashes.
+        let source = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "get_repo_map: skipping file (read failed)"
+                );
+                continue;
+            }
+        };
         let hash = VersionHash::compute(&source);
-        
+
         version_hashes.insert(rel_path.display().to_string(), hash.to_string());
 
         // AST extraction
-        let Ok(symbols) = surgeon.extract_symbols(workspace_root, rel_path).await else { continue };
+        let Ok(symbols) = surgeon.extract_symbols(workspace_root, rel_path).await else {
+            continue;
+        };
 
         if symbols.is_empty() {
             continue;
@@ -168,14 +188,22 @@ pub async fn generate_skeleton_text(
 
         let file_skeleton = render_file_skeleton(&symbols);
         let file_skeleton_tokens = estimate_tokens(&file_skeleton);
-        
-        let path_header = format!("\nFile: {}\n{}\n", rel_path.display(), "=".repeat(rel_path.display().to_string().len() + 6));
-        
+
+        let path_header = format!(
+            "\nFile: {}\n{}\n",
+            rel_path.display(),
+            "=".repeat(rel_path.display().to_string().len() + 6)
+        );
+
         let current_tokens = estimate_tokens(&skeleton_out);
         if current_tokens + file_skeleton_tokens > max_tokens {
             if current_tokens + 50 <= max_tokens {
                 use std::fmt::Write;
-                let _ = write!(skeleton_out, "\n// [... Omitted {} due to token budget]\n", rel_path.display());
+                let _ = write!(
+                    skeleton_out,
+                    "\n// [... Omitted {} due to token budget]\n",
+                    rel_path.display()
+                );
             }
             files_truncated += 1;
             continue;
@@ -186,7 +214,11 @@ pub async fn generate_skeleton_text(
     }
 
     let coverage_percent = if files_in_scope > 0 {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         let percent = ((files_scanned as f32 / files_in_scope as f32) * 100.0) as u8;
         percent
     } else {
@@ -256,7 +288,7 @@ mod tests {
                 children: vec![],
             });
         }
-        
+
         // This class with 100 methods with long names easily exceeds 512 tokens (~2000 chars)
         let symbols = vec![ExtractedSymbol {
             name: "MyGiganticClass".to_string(),
