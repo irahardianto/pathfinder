@@ -83,13 +83,6 @@ impl PathfinderServer {
             Err(e) => {
                 let duration_ms = start.elapsed().as_millis();
 
-                // Convert SurgeonError to PathfinderError if possible, or io_error
-                let error_data = crate::server::helpers::treesitter_error_to_error_data(
-                    &e,
-                    &params.semantic_path,
-                    &semantic_path.file_path,
-                );
-
                 tracing::warn!(
                     tool = "read_symbol_scope",
                     error = %e,
@@ -98,6 +91,9 @@ impl PathfinderServer {
                     engines_used = ?["tree-sitter"],
                     "read_symbol_scope: failed"
                 );
+
+                // Convert SurgeonError to PathfinderError if possible, or io_error
+                let error_data = crate::server::helpers::treesitter_error_to_error_data(e);
                 Err(error_data)
             }
         }

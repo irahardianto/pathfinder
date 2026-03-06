@@ -18,12 +18,19 @@ impl AstParser {
     ///
     /// Returns a `SurgeonError` if the parser cannot be created or parsing fails.
     #[instrument(skip_all, fields(language = ?lang))]
-    pub fn parse_source(lang: SupportedLanguage, source: &[u8]) -> Result<Tree, SurgeonError> {
+    pub fn parse_source(
+        path: &std::path::Path,
+        lang: SupportedLanguage,
+        source: &[u8],
+    ) -> Result<Tree, SurgeonError> {
         let mut parser = Parser::new();
 
         parser
             .set_language(&lang.grammar())
-            .map_err(|e| SurgeonError::ParseError(format!("Failed to set language: {e}")))?;
+            .map_err(|e| SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!("Failed to set language: {e}"),
+            })?;
 
         // The timeout forces tree-sitter to give up on pathological inputs.
         // We set it to 500ms which is way more than enough for normal files.
@@ -31,7 +38,10 @@ impl AstParser {
 
         let tree = parser
             .parse(source, None)
-            .ok_or_else(|| SurgeonError::ParseError("Parser returned None or timed out".into()))?;
+            .ok_or_else(|| SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: "Parser returned None or timed out".into(),
+            })?;
 
         Ok(tree)
     }
@@ -45,7 +55,12 @@ mod tests {
     #[test]
     fn test_parse_go_source() {
         let source = b"package main\n\nfunc main() {\n\tprintln(\"Hello\")\n}";
-        let tree = AstParser::parse_source(SupportedLanguage::Go, source).expect("should parse");
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .expect("should parse");
         let root = tree.root_node();
         assert_eq!(root.kind(), "source_file");
         // Ensure it found the function_declaration
@@ -55,8 +70,12 @@ mod tests {
     #[test]
     fn test_parse_typescript_source() {
         let source = b"export class User {\n  private id: string;\n  constructor() {}\n}";
-        let tree =
-            AstParser::parse_source(SupportedLanguage::TypeScript, source).expect("should parse");
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .expect("should parse");
         let root = tree.root_node();
         assert_eq!(root.kind(), "program");
     }
@@ -66,8 +85,12 @@ mod tests {
         // Tree-sitter is fault-tolerant and always returns a tree, even for invalid syntax.
         // It injects ERROR nodes.
         let source = b"func this is not valid go { { ++ }";
-        let tree =
-            AstParser::parse_source(SupportedLanguage::Go, source).expect("should still parse");
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .expect("should still parse");
         assert!(tree.root_node().has_error());
     }
 }

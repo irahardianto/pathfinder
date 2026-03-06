@@ -58,6 +58,10 @@ pub enum PathfinderError {
     #[error("LSP error: {message}")]
     LspError { message: String },
 
+    /// A generic I/O error occurred.
+    #[error("I/O error: {message}")]
+    IoError { message: String },
+
     /// LSP didn't respond within timeout.
     #[error("LSP timeout after {timeout_ms}ms")]
     LspTimeout { timeout_ms: u64 },
@@ -112,6 +116,7 @@ impl PathfinderError {
             Self::LspError { .. } => "LSP_ERROR",
             Self::LspTimeout { .. } => "LSP_TIMEOUT",
             Self::AccessDenied { .. } => "ACCESS_DENIED",
+            Self::IoError { .. } => "INTERNAL_ERROR",
             Self::ParseError { .. } => "PARSE_ERROR",
             Self::UnsupportedLanguage { .. } => "UNSUPPORTED_LANGUAGE",
             Self::InvalidTarget { .. } => "INVALID_TARGET",
@@ -277,6 +282,9 @@ mod tests {
             PathfinderError::AmbiguousMatch {
                 filepath: "a".into(),
                 occurrences: 0,
+            },
+            PathfinderError::IoError {
+                message: "disk full".into(),
             },
         ];
 

@@ -302,89 +302,95 @@ impl Default for RipgrepScout {
 #[async_trait::async_trait]
 impl Scout for RipgrepScout {
     async fn search(&self, params: &SearchParams) -> Result<SearchResult, SearchError> {
-        tracing::debug!(
-            query = %params.query,
-            is_regex = params.is_regex,
-            path_glob = %params.path_glob,
-            max_results = params.max_results,
-            "Scout: starting search"
-        );
-
-        let matcher = Self::build_matcher(params)?;
-        let files = Self::walk_files(params);
-
-        let match_buf: Mutex<Vec<SearchMatch>> = Mutex::new(Vec::new());
-        let total_count: Mutex<usize> = Mutex::new(0);
-        let mut truncated = false;
-
-        let mut searcher = SearcherBuilder::new()
-            .line_number(true)
-            .before_context(params.context_lines)
-            .after_context(params.context_lines)
-            .build();
-
-        for (abs_path, relative) in &files {
-            let matches_before = {
-                // ALLOW: lock is only poisoned on panic from within this function
-                match_buf
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .len()
-            };
-
-            let mut sink = MatchCollector::new(
-                relative.clone(),
-                &match_buf,
-                &total_count,
-                params.max_results,
-                params.context_lines,
+        let params_clone = params.clone();
+        tokio::task::spawn_blocking(move || {
+            let params = &params_clone;
+            tracing::debug!(
+                query = %params.query,
+                is_regex = params.is_regex,
+                path_glob = %params.path_glob,
+                max_results = params.max_results,
+                "Scout: starting search"
             );
 
-            if let Err(e) = searcher.search_path(&matcher, abs_path, &mut sink) {
-                tracing::error!(file = %relative, error = %e, "Scout: failed to search file");
-                return Err(SearchError::Engine(format!(
-                    "failed to search {relative}: {e}"
-                )));
+            let matcher = Self::build_matcher(params)?;
+            let files = Self::walk_files(params);
+
+            let match_buf: Mutex<Vec<SearchMatch>> = Mutex::new(Vec::new());
+            let total_count: Mutex<usize> = Mutex::new(0);
+            let mut truncated = false;
+
+            let mut searcher = SearcherBuilder::new()
+                .line_number(true)
+                .before_context(params.context_lines)
+                .after_context(params.context_lines)
+                .build();
+
+            for (abs_path, relative) in &files {
+                let matches_before = {
+                    // ALLOW: lock is only poisoned on panic from within this function
+                    match_buf
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .len()
+                };
+
+                let mut sink = MatchCollector::new(
+                    relative.clone(),
+                    &match_buf,
+                    &total_count,
+                    params.max_results,
+                    params.context_lines,
+                );
+
+                if let Err(e) = searcher.search_path(&matcher, abs_path, &mut sink) {
+                    tracing::error!(file = %relative, error = %e, "Scout: failed to search file");
+                    return Err(SearchError::Engine(format!(
+                        "failed to search {relative}: {e}"
+                    )));
+                }
+
+                // Only hash the file when it produced at least one new match.
+                // This avoids reading every file into memory just to compute a hash.
+                let matches_after = {
+                    match_buf
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .len()
+                };
+                if matches_after > matches_before {
+                    let bytes = std::fs::read(abs_path).map_err(|e| {
+                        tracing::error!(file = %relative, error = %e, "Scout: failed to read file for hashing");
+                        SearchError::Engine(format!("failed to hash {relative}: {e}"))
+                    })?;
+                    let hash = VersionHash::compute(&bytes).as_str().to_owned();
+                    sink.backfill_hash(&hash);
+                }
+
+                if sink.truncated {
+                    truncated = true;
+                }
             }
 
-            // Only hash the file when it produced at least one new match.
-            // This avoids reading every file into memory just to compute a hash.
-            let matches_after = {
-                match_buf
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .len()
-            };
-            if matches_after > matches_before {
-                let bytes = std::fs::read(abs_path).map_err(|e| {
-                    tracing::error!(file = %relative, error = %e, "Scout: failed to read file for hashing");
-                    SearchError::Engine(format!("failed to hash {relative}: {e}"))
-                })?;
-                let hash = VersionHash::compute(&bytes).as_str().to_owned();
-                sink.backfill_hash(&hash);
-            }
+            // ALLOW: lock is only poisoned on panic from within this function
+            let collected = match_buf.into_inner().unwrap_or_default();
+            let total = total_count.into_inner().unwrap_or_default();
 
-            if sink.truncated {
-                truncated = true;
-            }
-        }
+            tracing::debug!(
+                total_matches = total,
+                returned = collected.len(),
+                truncated,
+                "Scout: search complete"
+            );
 
-        // ALLOW: lock is only poisoned on panic from within this function
-        let collected = match_buf.into_inner().unwrap_or_default();
-        let total = total_count.into_inner().unwrap_or_default();
-
-        tracing::debug!(
-            total_matches = total,
-            returned = collected.len(),
-            truncated,
-            "Scout: search complete"
-        );
-
-        Ok(SearchResult {
-            matches: collected,
-            total_matches: total,
-            truncated,
+            Ok(SearchResult {
+                matches: collected,
+                total_matches: total,
+                truncated,
+            })
         })
+        .await
+        .map_err(|e| SearchError::Engine(format!("spawn_blocking failed: {e}")))?
     }
 }
 

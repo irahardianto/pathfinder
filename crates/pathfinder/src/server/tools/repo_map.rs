@@ -1,7 +1,7 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
 use crate::server::helpers::pathfinder_to_error_data;
-use crate::server::types::{GetRepoMapParams, GetRepoMapResponse, Visibility};
+use crate::server::types::{GetRepoMapParams, GetRepoMapResponse};
 use crate::server::PathfinderServer;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
@@ -36,19 +36,15 @@ impl PathfinderServer {
                 params.max_tokens,
                 params.depth,
                 match params.visibility {
-                    Visibility::Public => "public",
-                    Visibility::All => "all",
+                    pathfinder_common::types::Visibility::Public => "public",
+                    pathfinder_common::types::Visibility::All => "all",
                 },
             )
             .await
         {
             Ok(r) => r,
             Err(e) => {
-                return Err(crate::server::helpers::treesitter_error_to_error_data(
-                    &e,
-                    &params.path,
-                    target_path,
-                ));
+                return Err(crate::server::helpers::treesitter_error_to_error_data(e));
             }
         };
 

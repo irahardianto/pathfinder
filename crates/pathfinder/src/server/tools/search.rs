@@ -47,21 +47,19 @@ impl PathfinderServer {
             Ok(result) => {
                 let mut enriched_matches = result.matches;
 
-                // Populate enclosing_semantic_path using Surgeon
-                for m in &mut enriched_matches {
+                // Populate enclosing_semantic_path using Surgeon concurrently
+                let futures = enriched_matches.iter_mut().map(|m| async {
                     let file_path = Path::new(&m.file);
+                    let line = usize::try_from(m.line).unwrap_or(usize::MAX);
                     if let Ok(Some(symbol)) = self
                         .surgeon
-                        .enclosing_symbol(
-                            self.workspace_root.path(),
-                            file_path,
-                            usize::try_from(m.line).unwrap_or(usize::MAX),
-                        )
+                        .enclosing_symbol(self.workspace_root.path(), file_path, line)
                         .await
                     {
                         m.enclosing_semantic_path = Some(format!("{}::{}", m.file, symbol));
                     }
-                }
+                });
+                futures::future::join_all(futures).await;
 
                 let duration_ms = start.elapsed().as_millis();
                 tracing::info!(

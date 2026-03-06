@@ -90,13 +90,15 @@ impl Surgeon for MockSurgeon {
         file_path: &Path,
         line: usize,
     ) -> Result<Option<String>, SurgeonError> {
-        self.enclosing_symbol_calls.lock().unwrap().push((
-            workspace_root.to_path_buf(),
-            file_path.to_path_buf(),
-            line,
-        ));
+        self.enclosing_symbol_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((workspace_root.to_path_buf(), file_path.to_path_buf(), line));
 
-        let mut results = self.enclosing_symbol_results.lock().unwrap();
+        let mut results = self
+            .enclosing_symbol_results
+            .lock()
+            .expect("mutex poisoned");
         if results.is_empty() {
             panic!("MockSurgeon: Unexpected call to enclosing_symbol");
         }

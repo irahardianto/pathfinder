@@ -257,7 +257,9 @@ pub enum FilterMode {
 }
 
 /// Visibility filter for `get_repo_map`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
     /// Only exported/public symbols.
@@ -268,7 +270,9 @@ pub enum Visibility {
 }
 
 /// Import inclusion mode for `get_repo_map`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum IncludeImports {
     /// Omit all imports.

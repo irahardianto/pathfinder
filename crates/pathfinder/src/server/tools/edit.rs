@@ -185,31 +185,10 @@ impl PathfinderServer {
 
         let new_bytes = new_content.as_bytes();
 
-        // ── Step 8: TOCTOU late-check ─────────────────────────────────
-        // Re-read and re-hash the file immediately before write.
-        // Any modification since our OCC check above → abort.
-        let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-        let disk_bytes = tokio::fs::read(&absolute_path)
-            .await
-            .map_err(|e| io_error_data(format!("TOCTOU re-read failed: {e}")))?;
-        let disk_hash = VersionHash::compute(&disk_bytes);
-        if disk_hash != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: disk_hash.as_str().to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        // ── Step 9: Write to disk ─────────────────────────────────────
-        // Use `tokio::fs::write` for in-place write (preserves inode, avoids
-        // rename-swap artifacts that would confuse file watchers).
-        tokio::fs::write(&absolute_path, new_bytes)
-            .await
-            .map_err(|e| io_error_data(format!("write failed: {e}")))?;
-
-        // ── Step 10: Compute new version hash ─────────────────────────
-        let new_hash = VersionHash::compute(new_bytes);
+        // ── Step 8 & 9: TOCTOU late-check & Write ─────────────────────
+        let new_hash = self
+            .flush_edit_with_toctou(&semantic_path, &current_hash, new_bytes)
+            .await?;
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
@@ -301,25 +280,9 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(indented.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
-        let disk_bytes = tokio::fs::read(&absolute_path)
-            .await
-            .map_err(|e| io_error_data(format!("failed to re-read for TOCTOU check: {e}")))?;
-        let disk_hash = VersionHash::compute(&disk_bytes);
-
-        if disk_hash != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: disk_hash.as_str().to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        tokio::fs::write(&absolute_path, &new_bytes)
-            .await
-            .map_err(|e| io_error_data(format!("write failed: {e}")))?;
-
-        let new_hash = VersionHash::compute(&new_bytes);
+        let new_hash = self
+            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
+            .await?;
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
@@ -357,9 +320,8 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
-        let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
-
         let (insert_byte, indent_column, source, current_hash) = if semantic_path.is_bare_file() {
+            let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
             let bytes = tokio::fs::read(&absolute_path)
                 .await
                 .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
@@ -421,23 +383,9 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(sep.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let disk_bytes = tokio::fs::read(&absolute_path)
-            .await
-            .map_err(|e| io_error_data(format!("failed to re-read for TOCTOU check: {e}")))?;
-        let disk_hash = VersionHash::compute(&disk_bytes);
-        if disk_hash != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: disk_hash.as_str().to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        tokio::fs::write(&absolute_path, &new_bytes)
-            .await
-            .map_err(|e| io_error_data(format!("write failed: {e}")))?;
-
-        let new_hash = VersionHash::compute(&new_bytes);
+        let new_hash = self
+            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
+            .await?;
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
@@ -475,9 +423,8 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
-        let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
-
         let (insert_byte, indent_column, source, current_hash) = if semantic_path.is_bare_file() {
+            let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
             let bytes = tokio::fs::read(&absolute_path)
                 .await
                 .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
@@ -535,23 +482,9 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(after_sep.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let disk_bytes = tokio::fs::read(&absolute_path)
-            .await
-            .map_err(|e| io_error_data(format!("failed to re-read for TOCTOU check: {e}")))?;
-        let disk_hash = VersionHash::compute(&disk_bytes);
-        if disk_hash != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: disk_hash.as_str().to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        tokio::fs::write(&absolute_path, &new_bytes)
-            .await
-            .map_err(|e| io_error_data(format!("write failed: {e}")))?;
-
-        let new_hash = VersionHash::compute(&new_bytes);
+        let new_hash = self
+            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
+            .await?;
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
@@ -649,25 +582,9 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(sep);
         new_bytes.extend_from_slice(after);
 
-        let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
-        let disk_bytes = tokio::fs::read(&absolute_path)
-            .await
-            .map_err(|e| io_error_data(format!("failed to re-read for TOCTOU check: {e}")))?;
-        let disk_hash = VersionHash::compute(&disk_bytes);
-
-        if disk_hash != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: disk_hash.as_str().to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        tokio::fs::write(&absolute_path, &new_bytes)
-            .await
-            .map_err(|e| io_error_data(format!("write failed: {e}")))?;
-
-        let new_hash = VersionHash::compute(&new_bytes);
+        let new_hash = self
+            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
+            .await?;
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
@@ -778,7 +695,7 @@ impl PathfinderServer {
             }
             "insert_before" | "insert_after" => {
                 let current_hash = if semantic_path.is_bare_file() {
-                    let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
+                    let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
                     let bytes = tokio::fs::read(&absolute_path)
                         .await
                         .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
@@ -861,6 +778,39 @@ impl PathfinderServer {
             validation_skipped: Some(true),
             validation_skipped_reason: Some("no_lsp".to_owned()),
         }))
+    }
+
+    /// Helper to perform the final TOCTOU check and write the modified file to disk.
+    /// Re-reads the file, ensures its current hash still matches `current_hash`,
+    /// then writes `new_bytes` to disk in-place.
+    async fn flush_edit_with_toctou(
+        &self,
+        semantic_path: &SemanticPath,
+        current_hash: &VersionHash,
+        new_bytes: &[u8],
+    ) -> Result<VersionHash, ErrorData> {
+        let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+
+        let disk_bytes = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("TOCTOU re-read failed: {e}")))?;
+        let disk_hash = VersionHash::compute(&disk_bytes);
+
+        if disk_hash != *current_hash {
+            let err = PathfinderError::VersionMismatch {
+                path: semantic_path.file_path.clone(),
+                current_version_hash: disk_hash.as_str().to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        // Use `tokio::fs::write` for in-place write (preserves inode, avoids
+        // rename-swap artifacts that would confuse file watchers).
+        tokio::fs::write(&absolute_path, new_bytes)
+            .await
+            .map_err(|e| io_error_data(format!("write failed: {e}")))?;
+
+        Ok(VersionHash::compute(new_bytes))
     }
 }
 

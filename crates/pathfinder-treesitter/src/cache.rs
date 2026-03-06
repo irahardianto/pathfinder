@@ -79,10 +79,10 @@ impl AstCache {
 
         // Check cache while holding the lock; release before any async I/O.
         {
-            let mut lock = self
-                .entries
-                .lock()
-                .map_err(|_| SurgeonError::ParseError("Lock poisoned".into()))?;
+            let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: "Lock poisoned".into(),
+            })?;
 
             if let Some(entry) = lock.get_mut(path) {
                 if entry.mtime == current_mtime && entry.lang == lang {
@@ -95,13 +95,13 @@ impl AstCache {
         // --- Slow path: full read + hash + parse ---
         let content = tokio::fs::read(path).await?;
         let current_hash = VersionHash::compute(&content);
-        let tree = AstParser::parse_source(lang, &content)?;
+        let tree = AstParser::parse_source(path, lang, &content)?;
 
         // Re-acquire the lock to insert/update.
-        let mut lock = self
-            .entries
-            .lock()
-            .map_err(|_| SurgeonError::ParseError("Lock poisoned".into()))?;
+        let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
+            path: path.to_path_buf(),
+            reason: "Lock poisoned".into(),
+        })?;
 
         // Free up space if needed (only for brand-new entries).
         if lock.len() >= self.max_entries && !lock.contains_key(path) {

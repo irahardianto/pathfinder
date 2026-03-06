@@ -34,30 +34,6 @@ pub struct SearchCodebaseParams {
     pub context_lines: u32,
 }
 
-/// Visibility filter for `get_repo_map`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Visibility {
-    /// Include only public symbols (default).
-    #[default]
-    Public,
-    /// Include all symbols including private ones.
-    All,
-}
-
-/// Import inclusion policy for `get_repo_map`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum IncludeImports {
-    /// Do not include any imports.
-    None,
-    /// Include only third-party imports (default).
-    #[default]
-    ThirdParty,
-    /// Include all imports.
-    All,
-}
-
 /// Parameters for `get_repo_map`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetRepoMapParams {
@@ -72,11 +48,11 @@ pub struct GetRepoMapParams {
     pub depth: u32,
     /// Visibility filter: `public` or `all`.
     #[serde(default)]
-    pub visibility: Visibility,
+    pub visibility: pathfinder_common::types::Visibility,
     /// Import inclusion: `none`, `third_party`, or `all`.
     #[serde(default)]
     #[allow(dead_code)]
-    pub include_imports: IncludeImports,
+    pub include_imports: pathfinder_common::types::IncludeImports,
 }
 
 /// Parameters for `read_symbol_scope`.

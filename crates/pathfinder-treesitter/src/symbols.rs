@@ -296,7 +296,12 @@ mod tests {
     #[test]
     fn test_extract_go_function() {
         let source = b"package main\n\nfunc Login() {}\n";
-        let tree = AstParser::parse_source(SupportedLanguage::Go, source).unwrap();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
 
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
         assert_eq!(syms.len(), 1);
@@ -307,7 +312,12 @@ mod tests {
     #[test]
     fn test_extract_ts_class_with_methods() {
         let source = b"class AuthService {\n  login() {}\n  logout() {}\n}";
-        let tree = AstParser::parse_source(SupportedLanguage::TypeScript, source).unwrap();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
 
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
         assert_eq!(syms.len(), 1);
@@ -323,7 +333,12 @@ mod tests {
     #[test]
     fn test_did_you_mean() {
         let source = b"class AuthService {\n  login() {}\n}";
-        let tree = AstParser::parse_source(SupportedLanguage::TypeScript, source).unwrap();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
 
         let chain = SymbolChain::parse("AuthService.logni").unwrap();
@@ -334,7 +349,12 @@ mod tests {
     #[test]
     fn test_find_enclosing_symbol() {
         let source = b"func A() {\n  // line 1 \n}\nfunc B() {}\n";
-        let tree = AstParser::parse_source(SupportedLanguage::Go, source).unwrap();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
 
         let path = find_enclosing_symbol(&syms, 1).unwrap();
@@ -344,7 +364,12 @@ mod tests {
     #[test]
     fn test_extract_rust_impl_methods() {
         let source = b"struct MyStruct;\nimpl MyStruct {\n    fn foo(&self) {}\n    fn bar(&mut self) {}\n}\n";
-        let tree = AstParser::parse_source(SupportedLanguage::Rust, source).unwrap();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
         // Expect: one Struct + one Impl (with 2 Method children)
@@ -364,7 +389,12 @@ mod tests {
     fn test_extract_rust_free_functions_unchanged() {
         // Free functions at the crate root should still be extracted as Function
         let source = b"fn compute(x: u32) -> u32 { x * 2 }\n";
-        let tree = AstParser::parse_source(SupportedLanguage::Rust, source).unwrap();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
         assert_eq!(syms.len(), 1);

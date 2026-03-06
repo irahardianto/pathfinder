@@ -71,7 +71,10 @@ impl TreeSitterSurgeon {
         // Find the tree-sitter node that exactly matches the symbol's byte range
         let sym_node = root
             .named_descendant_for_byte_range(symbol_byte_range.start, symbol_byte_range.end)
-            .ok_or_else(|| SurgeonError::ParseError("symbol node not found in AST".to_owned()))?;
+            .ok_or_else(|| SurgeonError::ParseError {
+                path: std::path::PathBuf::from(symbol_path),
+                reason: "symbol node not found in AST".to_owned(),
+            })?;
 
         // Try the `body` field first (covers Go, TypeScript, JavaScript, Python, Rust)
         let body_node = sym_node
@@ -185,7 +188,10 @@ impl Surgeon for TreeSitterSurgeon {
             })?;
 
         let content = std::str::from_utf8(&source[symbol.byte_range.clone()])
-            .map_err(|_| SurgeonError::ParseError("Symbol source is not valid UTF-8".into()))?
+            .map_err(|_| SurgeonError::ParseError {
+                path: semantic_path.file_path.clone(),
+                reason: "Symbol source is not valid UTF-8".into(),
+            })?
             .to_string();
 
         let language_str = lang.as_str();

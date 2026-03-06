@@ -17,8 +17,11 @@ pub enum SurgeonError {
     UnsupportedLanguage(PathBuf),
 
     /// A parsing error occurred.
-    #[error("parse error: {0}")]
-    ParseError(String),
+    #[error("parse error in {path}: {reason}")]
+    ParseError {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 
     /// A file-system error occurred when attempting to read source files.
     #[error("filesystem error: {0}")]
@@ -29,4 +32,32 @@ pub enum SurgeonError {
     /// E.g., calling `replace_body` on a constant or abstract declaration.
     #[error("invalid target: {reason} (path: {path})")]
     InvalidTarget { path: String, reason: String },
+}
+
+impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
+    fn from(error: SurgeonError) -> Self {
+        match error {
+            SurgeonError::SymbolNotFound { path, did_you_mean } => {
+                pathfinder_common::error::PathfinderError::SymbolNotFound {
+                    semantic_path: path,
+                    did_you_mean,
+                }
+            }
+            SurgeonError::UnsupportedLanguage(path) => {
+                pathfinder_common::error::PathfinderError::UnsupportedLanguage { path }
+            }
+            SurgeonError::ParseError { path, reason } => {
+                pathfinder_common::error::PathfinderError::ParseError { path, reason }
+            }
+            SurgeonError::Io(err) => pathfinder_common::error::PathfinderError::IoError {
+                message: err.to_string(),
+            },
+            SurgeonError::InvalidTarget { path, reason } => {
+                pathfinder_common::error::PathfinderError::InvalidTarget {
+                    semantic_path: path,
+                    reason,
+                }
+            }
+        }
+    }
 }
