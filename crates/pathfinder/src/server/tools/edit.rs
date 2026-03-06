@@ -15,7 +15,7 @@
 use crate::server::helpers::{io_error_data, pathfinder_to_error_data};
 use crate::server::types::{
     DeleteSymbolParams, EditResponse, EditValidation, InsertAfterParams, InsertBeforeParams,
-    ReplaceBodyParams, ReplaceFullParams,
+    ReplaceBodyParams, ReplaceFullParams, ValidateOnlyParams,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
@@ -97,11 +97,7 @@ impl PathfinderServer {
         {
             Ok(r) => r,
             Err(e) => {
-                return Err(crate::server::helpers::treesitter_error_to_error_data(
-                    &e,
-                    &params.semantic_path,
-                    &semantic_path.file_path,
-                ));
+                return Err(crate::server::helpers::treesitter_error_to_error_data(e));
             }
         };
 
@@ -280,11 +276,7 @@ impl PathfinderServer {
         {
             Ok(r) => r,
             Err(e) => {
-                return Err(crate::server::helpers::treesitter_error_to_error_data(
-                    &e,
-                    &params.semantic_path,
-                    &semantic_path.file_path,
-                ));
+                return Err(crate::server::helpers::treesitter_error_to_error_data(e));
             }
         };
 
@@ -381,11 +373,7 @@ impl PathfinderServer {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(crate::server::helpers::treesitter_error_to_error_data(
-                        &e,
-                        &params.semantic_path,
-                        &semantic_path.file_path,
-                    ));
+                    return Err(crate::server::helpers::treesitter_error_to_error_data(e));
                 }
             };
             (
@@ -503,11 +491,7 @@ impl PathfinderServer {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(crate::server::helpers::treesitter_error_to_error_data(
-                        &e,
-                        &params.semantic_path,
-                        &semantic_path.file_path,
-                    ));
+                    return Err(crate::server::helpers::treesitter_error_to_error_data(e));
                 }
             };
             (
@@ -621,11 +605,7 @@ impl PathfinderServer {
         {
             Ok(r) => r,
             Err(e) => {
-                return Err(crate::server::helpers::treesitter_error_to_error_data(
-                    &e,
-                    &params.semantic_path,
-                    &semantic_path.file_path,
-                ));
+                return Err(crate::server::helpers::treesitter_error_to_error_data(e));
             }
         };
 
@@ -702,6 +682,180 @@ impl PathfinderServer {
         Ok(Json(EditResponse {
             success: true,
             new_version_hash: Some(new_hash.as_str().to_owned()),
+            formatted: false,
+            validation: EditValidation::skipped(),
+            validation_skipped: Some(true),
+            validation_skipped_reason: Some("no_lsp".to_owned()),
+        }))
+    }
+
+    /// Core logic for the `validate_only` tool (PRD Epic 5, Story 5.7).
+    ///
+    /// Dry-runs an edit operation WITHOUT writing to disk. Uses the same pipeline
+    /// for resolution, normalization, and OCC checking, but skips the TOCTOU check
+    /// and disk write. Always returns `new_version_hash: None`.
+    #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path, edit_type = %params.edit_type))]
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn validate_only_impl(
+        &self,
+        params: ValidateOnlyParams,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        let start = std::time::Instant::now();
+        tracing::info!(
+            tool = "validate_only",
+            semantic_path = %params.semantic_path,
+            edit_type = %params.edit_type,
+            "validate_only: start"
+        );
+
+        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
+            return Err(io_error_data("invalid semantic path"));
+        };
+
+        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            return Err(pathfinder_to_error_data(&e));
+        }
+
+        // We use the requested edit_type to dispatch to the correct resolution logic
+        match params.edit_type.as_str() {
+            "replace_body" => {
+                if semantic_path.is_bare_file() {
+                    let err = PathfinderError::InvalidTarget {
+                        semantic_path: params.semantic_path.clone(),
+                        reason: "replace_body requires a symbol path".to_owned(),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                }
+
+                let (_body_range, _source, current_hash) = match self
+                    .surgeon
+                    .resolve_body_range(self.workspace_root.path(), &semantic_path)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(crate::server::helpers::treesitter_error_to_error_data(e))
+                    }
+                };
+
+                let claimed = VersionHash::from_raw(params.base_version.clone());
+                if claimed != current_hash {
+                    let err = PathfinderError::VersionMismatch {
+                        path: semantic_path.file_path.clone(),
+                        current_version_hash: current_hash.as_str().to_owned(),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                }
+            }
+            "replace_full" => {
+                if semantic_path.is_bare_file() {
+                    let err = PathfinderError::InvalidTarget {
+                        semantic_path: params.semantic_path.clone(),
+                        reason: "replace_full requires a symbol path".to_owned(),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                }
+
+                let (_full_range, _source, current_hash) = match self
+                    .surgeon
+                    .resolve_full_range(self.workspace_root.path(), &semantic_path)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(crate::server::helpers::treesitter_error_to_error_data(e))
+                    }
+                };
+
+                let claimed = VersionHash::from_raw(params.base_version.clone());
+                if claimed != current_hash {
+                    let err = PathfinderError::VersionMismatch {
+                        path: semantic_path.file_path.clone(),
+                        current_version_hash: current_hash.as_str().to_owned(),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                }
+            }
+            "insert_before" | "insert_after" => {
+                let current_hash = if semantic_path.is_bare_file() {
+                    let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
+                    let bytes = tokio::fs::read(&absolute_path)
+                        .await
+                        .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+                    VersionHash::compute(&bytes)
+                } else {
+                    let (_symbol_range, _source, hash) = match self
+                        .surgeon
+                        .resolve_symbol_range(self.workspace_root.path(), &semantic_path)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Err(crate::server::helpers::treesitter_error_to_error_data(e))
+                        }
+                    };
+                    hash
+                };
+
+                let claimed = VersionHash::from_raw(params.base_version.clone());
+                if claimed != current_hash {
+                    let err = PathfinderError::VersionMismatch {
+                        path: semantic_path.file_path.clone(),
+                        current_version_hash: current_hash.as_str().to_owned(),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                }
+            }
+            "delete" => {
+                if semantic_path.is_bare_file() {
+                    let err = PathfinderError::InvalidTarget {
+                        semantic_path: params.semantic_path.clone(),
+                        reason: "delete requires a symbol path".to_owned(),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                }
+
+                let (_full_range, _source, current_hash) = match self
+                    .surgeon
+                    .resolve_full_range(self.workspace_root.path(), &semantic_path)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(crate::server::helpers::treesitter_error_to_error_data(e))
+                    }
+                };
+
+                let claimed = VersionHash::from_raw(params.base_version.clone());
+                if claimed != current_hash {
+                    let err = PathfinderError::VersionMismatch {
+                        path: semantic_path.file_path.clone(),
+                        current_version_hash: current_hash.as_str().to_owned(),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                }
+            }
+            unknown => {
+                return Err(io_error_data(format!("unknown edit_type: {unknown}")));
+            }
+        }
+
+        // We do not parse or check new_code during validate_only since we don't
+        // have an LSP connected to actually validate the compilation result anyway.
+        // It's purely an OCC + existence + Sandbox check that the path is valid.
+
+        let duration_ms = start.elapsed().as_millis();
+        tracing::info!(
+            tool = "validate_only",
+            semantic_path = %params.semantic_path,
+            duration_ms,
+            engines_used = ?["tree-sitter"],
+            "validate_only: complete"
+        );
+
+        Ok(Json(EditResponse {
+            success: true,
+            new_version_hash: None, // No file written
             formatted: false,
             validation: EditValidation::skipped(),
             validation_skipped: Some(true),
@@ -1214,5 +1368,210 @@ mod tests {
         assert!(!written.contains("Login"));
         assert!(!written.contains("// DOC"));
         assert_eq!(written, "package main\n\nfunc Next() {}");
+    }
+
+    // ── validate_only tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_validate_only_replace_body() {
+        let ws_dir = tempdir().expect("temp dir");
+        let src = "func Login() {\n    // old body\n}\n";
+        let filepath = "src/auth.go";
+        let abs = ws_dir.path().join(filepath);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, src).unwrap();
+
+        let src_bytes = src.as_bytes();
+        let hash = VersionHash::compute(src_bytes);
+
+        let open = src.find('{').unwrap();
+        let close = src.rfind('}').unwrap() + 1;
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .resolve_body_range_results
+            .lock()
+            .unwrap()
+            .push(Ok((
+                make_body_range(open, close, 0, 4),
+                src_bytes.to_vec(),
+                hash.clone(),
+            )));
+
+        let server = make_server(&ws_dir, mock_surgeon);
+
+        let params = ValidateOnlyParams {
+            semantic_path: format!("{filepath}::Login"),
+            edit_type: "replace_body".to_string(),
+            new_code: Some("    return nil".to_string()),
+            base_version: hash.as_str().to_owned(),
+        };
+
+        let result = server
+            .validate_only(Parameters(params))
+            .await
+            .expect("should succeed");
+        let resp = result.0;
+
+        assert!(resp.success);
+        assert!(resp.new_version_hash.is_none());
+        assert_eq!(resp.validation.status, "skipped");
+        assert_eq!(resp.validation_skipped, Some(true));
+
+        // Verify the file was NOT written
+        let written = std::fs::read_to_string(&abs).unwrap();
+        assert!(
+            !written.contains("return nil"),
+            "File should not be modified"
+        );
+        assert!(
+            written.contains("old body"),
+            "File should retain original content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_only_version_mismatch() {
+        let ws_dir = tempdir().expect("temp dir");
+        let src = "func Login() {\n    // old body\n}\n";
+        let filepath = "src/auth.go";
+        let abs = ws_dir.path().join(filepath);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, src).unwrap();
+
+        let src_bytes = src.as_bytes();
+        let real_hash = VersionHash::compute(src_bytes);
+        let stale_hash = "sha256:stale000".to_owned();
+
+        let open = src.find('{').unwrap();
+        let close = src.rfind('}').unwrap() + 1;
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .resolve_body_range_results
+            .lock()
+            .unwrap()
+            .push(Ok((
+                make_body_range(open, close, 0, 4),
+                src_bytes.to_vec(),
+                real_hash,
+            )));
+
+        let server = make_server(&ws_dir, mock_surgeon);
+
+        let params = ValidateOnlyParams {
+            semantic_path: format!("{filepath}::Login"),
+            edit_type: "replace_body".to_string(),
+            new_code: Some("return nil".to_string()),
+            base_version: stale_hash,
+        };
+
+        let result = server.validate_only(Parameters(params)).await;
+        let Err(err) = result else {
+            panic!("expected VERSION_MISMATCH error");
+        };
+
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "VERSION_MISMATCH");
+    }
+
+    #[tokio::test]
+    async fn test_validate_only_invalid_edit_type() {
+        let ws_dir = tempdir().expect("temp dir");
+        let server = make_server(&ws_dir, MockSurgeon::new());
+
+        let params = ValidateOnlyParams {
+            semantic_path: "src/auth.go::Login".to_string(),
+            edit_type: "foo_bar".to_string(),
+            new_code: Some("return nil".to_string()),
+            base_version: "sha256:any".to_owned(),
+        };
+
+        let result = server.validate_only(Parameters(params)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_only_delete() {
+        let ws_dir = tempdir().expect("temp dir");
+        let src = "func Login() {}";
+        let filepath = "src/auth.go";
+        let abs = ws_dir.path().join(filepath);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, src).unwrap();
+
+        let src_bytes = src.as_bytes();
+        let hash = VersionHash::compute(src_bytes);
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .resolve_full_range_results
+            .lock()
+            .unwrap()
+            .push(Ok((
+                pathfinder_treesitter::surgeon::FullRange {
+                    start_byte: 0,
+                    end_byte: src_bytes.len(),
+                    indent_column: 0,
+                },
+                src_bytes.to_vec(),
+                hash.clone(),
+            )));
+
+        let server = make_server(&ws_dir, mock_surgeon);
+
+        let params = ValidateOnlyParams {
+            semantic_path: format!("{filepath}::Login"),
+            edit_type: "delete".to_string(),
+            new_code: None,
+            base_version: hash.as_str().to_owned(),
+        };
+
+        let result = server
+            .validate_only(Parameters(params))
+            .await
+            .expect("should succeed");
+        assert!(result.0.success);
+        assert!(result.0.new_version_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_validate_only_real_parser_go() {
+        use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+        let ws_dir = tempdir().expect("temp dir");
+
+        let src = "package main\n\nfunc Login() {\n    // old body\n}\n";
+        let filepath = "src/auth.go";
+        let abs = ws_dir.path().join(filepath);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, src).unwrap();
+
+        let hash = VersionHash::compute(src.as_bytes());
+
+        let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+        let server = make_server_dyn(&ws_dir, real_surgeon);
+
+        let params = ValidateOnlyParams {
+            semantic_path: format!("{filepath}::Login"),
+            edit_type: "replace_full".to_string(),
+            new_code: Some("func NewLogin() {}".to_string()),
+            base_version: hash.as_str().to_owned(),
+        };
+
+        let result = server
+            .validate_only(Parameters(params))
+            .await
+            .expect("should succeed");
+        assert!(result.0.success);
+        assert!(result.0.new_version_hash.is_none());
+
+        // Ensure disk untouched
+        let written = std::fs::read_to_string(&abs).unwrap();
+        assert!(written.contains("func Login() {"));
     }
 }

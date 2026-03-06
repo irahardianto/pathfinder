@@ -214,12 +214,11 @@ impl PathfinderServer {
         name = "validate_only",
         description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit."
     )]
-    #[allow(clippy::unused_self)]
-    fn validate_only(
+    async fn validate_only(
         &self,
-        Parameters(_params): Parameters<ValidateOnlyParams>,
-    ) -> Json<StubResponse> {
-        stub_response("validate_only")
+        Parameters(params): Parameters<ValidateOnlyParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.validate_only_impl(params).await
     }
 
     #[tool(
@@ -324,8 +323,8 @@ mod tests {
             path: ".".to_string(),
             max_tokens: 1000,
             depth: 3,
-            visibility: crate::server::types::Visibility::Public,
-            include_imports: crate::server::types::IncludeImports::None,
+            visibility: pathfinder_common::types::Visibility::Public,
+            include_imports: pathfinder_common::types::IncludeImports::None,
         };
 
         let result = server.get_repo_map(Parameters(params)).await;
@@ -371,7 +370,7 @@ mod tests {
         );
 
         let params = GetRepoMapParams {
-            visibility: crate::server::types::Visibility::All,
+            visibility: pathfinder_common::types::Visibility::All,
             ..Default::default()
         };
         let result = server
