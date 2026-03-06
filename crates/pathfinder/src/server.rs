@@ -170,48 +170,44 @@ impl PathfinderServer {
         name = "replace_full",
         description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks."
     )]
-    #[allow(clippy::unused_self)]
-    fn replace_full(
+    async fn replace_full(
         &self,
-        Parameters(_params): Parameters<ReplaceFullParams>,
-    ) -> Json<StubResponse> {
-        stub_response("replace_full")
+        Parameters(params): Parameters<ReplaceFullParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.replace_full_impl(params).await
     }
 
     #[tool(
         name = "insert_before",
         description = "Insert new code BEFORE a target symbol. To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::'. Pathfinder automatically adds one blank line between your code and the target."
     )]
-    #[allow(clippy::unused_self)]
-    fn insert_before(
+    async fn insert_before(
         &self,
-        Parameters(_params): Parameters<InsertBeforeParams>,
-    ) -> Json<StubResponse> {
-        stub_response("insert_before")
+        Parameters(params): Parameters<InsertBeforeParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.insert_before_impl(params).await
     }
 
     #[tool(
         name = "insert_after",
         description = "Insert new code AFTER a target symbol. To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::'. Pathfinder automatically adds one blank line between the target and your code."
     )]
-    #[allow(clippy::unused_self)]
-    fn insert_after(
+    async fn insert_after(
         &self,
-        Parameters(_params): Parameters<InsertAfterParams>,
-    ) -> Json<StubResponse> {
-        stub_response("insert_after")
+        Parameters(params): Parameters<InsertAfterParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.insert_after_impl(params).await
     }
 
     #[tool(
         name = "delete_symbol",
         description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method (e.g., 'AuthService.login'), only that method is deleted."
     )]
-    #[allow(clippy::unused_self)]
-    fn delete_symbol(
+    async fn delete_symbol(
         &self,
-        Parameters(_params): Parameters<DeleteSymbolParams>,
-    ) -> Json<StubResponse> {
-        stub_response("delete_symbol")
+        Parameters(params): Parameters<DeleteSymbolParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.delete_symbol_impl(params).await
     }
 
     #[tool(

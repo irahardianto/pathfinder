@@ -50,6 +50,33 @@ pub struct BodyRange {
     pub body_indent_column: usize,
 }
 
+/// The byte range and context spanning an entire declaration (including decorators, doc comments, etc).
+///
+/// Used by `replace_full` and `delete_symbol` to replace or remove the entire symbol.
+#[derive(Debug, Clone)]
+pub struct FullRange {
+    /// Byte offset of the start of the entire declaration (including preceding doc comments/decorators).
+    pub start_byte: usize,
+    /// Byte offset of the end of the declaration (exclusive).
+    pub end_byte: usize,
+    /// Column (0-indexed) of the symbol's start (excluding comments), used for indentation.
+    pub indent_column: usize,
+}
+
+/// The byte range and context used to position new code around an existing symbol.
+///
+/// Functionally identical to `FullRange` data, but semantically distinct. Used
+/// by `insert_before` and `insert_after`.
+#[derive(Debug, Clone)]
+pub struct SymbolRange {
+    /// Byte offset of the start of the entire declaration.
+    pub start_byte: usize,
+    /// Byte offset of the end of the declaration.
+    pub end_byte: usize,
+    /// Column (0-indexed) of the symbol's start, used as the baseline indentation for inserted code.
+    pub indent_column: usize,
+}
+
 /// The `Surgeon` trait — testability boundary for AST-aware operations.
 ///
 /// Consumers depend on this trait rather than the concrete `TreeSitterSurgeon`,
@@ -104,4 +131,22 @@ pub trait Surgeon: Send + Sync {
         workspace_root: &Path,
         semantic_path: &SemanticPath,
     ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError>;
+
+    /// Resolve the full byte range for a symbol, including decorators and doc comments.
+    ///
+    /// Used by `replace_full` and `delete_symbol`.
+    async fn resolve_full_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(FullRange, Vec<u8>, VersionHash), SurgeonError>;
+
+    /// Resolve the symbol byte range for insertion operations.
+    ///
+    /// Used by `insert_before` and `insert_after`.
+    async fn resolve_symbol_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError>;
 }

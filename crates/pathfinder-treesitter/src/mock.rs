@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::manual_assert)]
 
 use crate::error::SurgeonError;
-use crate::surgeon::{BodyRange, ExtractedSymbol, Surgeon};
+use crate::surgeon::{BodyRange, ExtractedSymbol, FullRange, Surgeon, SymbolRange};
 use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -18,6 +18,12 @@ pub struct MockSurgeon {
     #[allow(clippy::type_complexity)]
     pub resolve_body_range_results:
         Mutex<Vec<Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError>>>,
+    #[allow(clippy::type_complexity)]
+    pub resolve_full_range_results:
+        Mutex<Vec<Result<(FullRange, Vec<u8>, VersionHash), SurgeonError>>>,
+    #[allow(clippy::type_complexity)]
+    pub resolve_symbol_range_results:
+        Mutex<Vec<Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError>>>,
 
     // Call history
     pub read_symbol_scope_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
@@ -26,6 +32,8 @@ pub struct MockSurgeon {
     #[allow(clippy::type_complexity)]
     pub generate_skeleton_calls: Mutex<Vec<(PathBuf, PathBuf, u32, u32, String)>>,
     pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    pub resolve_full_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    pub resolve_symbol_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
 }
 
 impl MockSurgeon {
@@ -135,6 +143,48 @@ impl Surgeon for MockSurgeon {
         assert!(
             !results.is_empty(),
             "MockSurgeon: Unexpected call to resolve_body_range"
+        );
+        results.remove(0)
+    }
+
+    async fn resolve_full_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(FullRange, Vec<u8>, VersionHash), SurgeonError> {
+        self.resolve_full_range_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((workspace_root.to_path_buf(), semantic_path.clone()));
+
+        let mut results = self
+            .resolve_full_range_results
+            .lock()
+            .expect("mutex poisoned");
+        assert!(
+            !results.is_empty(),
+            "MockSurgeon: Unexpected call to resolve_full_range"
+        );
+        results.remove(0)
+    }
+
+    async fn resolve_symbol_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError> {
+        self.resolve_symbol_range_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((workspace_root.to_path_buf(), semantic_path.clone()));
+
+        let mut results = self
+            .resolve_symbol_range_results
+            .lock()
+            .expect("mutex poisoned");
+        assert!(
+            !results.is_empty(),
+            "MockSurgeon: Unexpected call to resolve_symbol_range"
         );
         results.remove(0)
     }

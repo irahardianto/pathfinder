@@ -1,7 +1,7 @@
 use crate::cache::AstCache;
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
-use crate::surgeon::{BodyRange, ExtractedSymbol, Surgeon};
+use crate::surgeon::{BodyRange, ExtractedSymbol, FullRange, Surgeon, SymbolRange};
 use crate::symbols::{
     did_you_mean, extract_symbols_from_tree, find_enclosing_symbol, resolve_symbol_chain,
 };
@@ -113,6 +113,45 @@ impl TreeSitterSurgeon {
                 ),
             })
         }
+    }
+
+    fn expand_to_full_start_byte(source: &[u8], mut start_byte: usize) -> usize {
+        loop {
+            let line_start = source[..start_byte]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |pos| pos + 1);
+
+            if line_start == 0 {
+                break;
+            }
+
+            let prev_line_end = line_start - 1; // before \n
+            let prev_line_start = source[..prev_line_end]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |pos| pos + 1);
+
+            let prev_line = &source[prev_line_start..prev_line_end];
+            let trimmed = String::from_utf8_lossy(prev_line);
+            let trimmed_ref = trimmed.trim();
+
+            if trimmed_ref.is_empty() {
+                break;
+            }
+
+            if trimmed_ref.starts_with("//")
+                || trimmed_ref.starts_with("/*")
+                || trimmed_ref.starts_with('*')
+                || trimmed_ref.starts_with('#')
+                || trimmed_ref.starts_with('@')
+            {
+                start_byte = prev_line_start;
+            } else {
+                break;
+            }
+        }
+        start_byte
     }
 }
 
@@ -276,6 +315,72 @@ impl Surgeon for TreeSitterSurgeon {
             },
             source,
             version_hash,
+        ))
+    }
+
+    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
+    async fn resolve_full_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(FullRange, Vec<u8>, VersionHash), SurgeonError> {
+        let chain =
+            semantic_path
+                .symbol_chain
+                .as_ref()
+                .ok_or_else(|| SurgeonError::SymbolNotFound {
+                    path: semantic_path.to_string(),
+                    did_you_mean: vec![],
+                })?;
+
+        let (_lang, _tree, source, version_hash, symbols) = self
+            .cached_parse(workspace_root, &semantic_path.file_path)
+            .await?;
+
+        let symbol =
+            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
+                path: semantic_path.to_string(),
+                did_you_mean: did_you_mean(&symbols, chain, 3),
+            })?;
+
+        let start_byte = Self::expand_to_full_start_byte(&source, symbol.byte_range.start);
+        let end_byte = symbol.byte_range.end;
+
+        let last_newline_pos = source[..symbol.byte_range.start]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1);
+        let indent_column = symbol.byte_range.start.saturating_sub(last_newline_pos);
+
+        Ok((
+            FullRange {
+                start_byte,
+                end_byte,
+                indent_column,
+            },
+            source,
+            version_hash,
+        ))
+    }
+
+    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
+    async fn resolve_symbol_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError> {
+        let (full_range, source, hash) = self
+            .resolve_full_range(workspace_root, semantic_path)
+            .await?;
+
+        Ok((
+            SymbolRange {
+                start_byte: full_range.start_byte,
+                end_byte: full_range.end_byte,
+                indent_column: full_range.indent_column,
+            },
+            source,
+            hash,
         ))
     }
 }
