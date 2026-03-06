@@ -1,11 +1,11 @@
 use crate::cache::AstCache;
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
-use crate::surgeon::{ExtractedSymbol, Surgeon};
+use crate::surgeon::{BodyRange, ExtractedSymbol, Surgeon};
 use crate::symbols::{
     did_you_mean, extract_symbols_from_tree, find_enclosing_symbol, resolve_symbol_chain,
 };
-use pathfinder_common::types::{SemanticPath, SymbolScope};
+use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
 use std::path::Path;
 use tracing::instrument;
 
@@ -32,6 +32,7 @@ impl TreeSitterSurgeon {
     ) -> Result<
         (
             SupportedLanguage,
+            tree_sitter::Tree,
             Vec<u8>,
             pathfinder_common::types::VersionHash,
             Vec<ExtractedSymbol>,
@@ -51,7 +52,67 @@ impl TreeSitterSurgeon {
 
         let hash = pathfinder_common::types::VersionHash::compute(&source);
 
-        Ok((lang, source, hash, symbols))
+        Ok((lang, tree, source, hash, symbols))
+    }
+
+    /// Find the body node byte range for a resolved symbol node.
+    ///
+    /// Walks tree-sitter child nodes to find the body/block field. Returns
+    /// `(open_brace_byte, close_brace_byte)` or an error if the target has
+    /// no body.
+    fn find_body_bytes(
+        tree: &tree_sitter::Tree,
+        source: &[u8],
+        symbol_byte_range: std::ops::Range<usize>,
+        symbol_path: &str,
+    ) -> Result<(usize, usize), SurgeonError> {
+        let root = tree.root_node();
+
+        // Find the tree-sitter node that exactly matches the symbol's byte range
+        let sym_node = root
+            .named_descendant_for_byte_range(symbol_byte_range.start, symbol_byte_range.end)
+            .ok_or_else(|| SurgeonError::ParseError("symbol node not found in AST".to_owned()))?;
+
+        // Try the `body` field first (covers Go, TypeScript, JavaScript, Python, Rust)
+        let body_node = sym_node
+            .child_by_field_name("body")
+            // Fall back to walking named children for any unusual grammar.
+            .or_else(|| {
+                let mut cursor = sym_node.walk();
+                // Materialize the result so cursor is dropped before or_else returns
+                let found = sym_node.named_children(&mut cursor).find(|c| {
+                    matches!(
+                        c.kind(),
+                        "block"
+                            | "statement_block"
+                            | "compound_statement"
+                            | "class_body"
+                            | "declaration_list"
+                    )
+                });
+                found
+            });
+
+        if let Some(body) = body_node {
+            // Return the byte offsets of the opening/closing brace characters.
+            // Most grammars include the braces in the body node range.
+            Ok((body.start_byte(), body.end_byte()))
+        } else {
+            // Check if the symbol kind is simply not body-bearing
+            let source_snippet = std::str::from_utf8(&source[symbol_byte_range])
+                .unwrap_or("<non-utf8>")
+                .chars()
+                .take(80)
+                .collect::<String>();
+
+            Err(SurgeonError::InvalidTarget {
+                path: symbol_path.to_owned(),
+                reason: format!(
+                    "symbol has no block body (snippet: \"{source_snippet}...\"). \
+                     Use replace_full for declarations without a body."
+                ),
+            })
+        }
     }
 }
 
@@ -70,7 +131,7 @@ impl Surgeon for TreeSitterSurgeon {
             }
         })?;
 
-        let (lang, source, version_hash, symbols) = self
+        let (lang, _tree, source, version_hash, symbols) = self
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
@@ -84,14 +145,7 @@ impl Surgeon for TreeSitterSurgeon {
             .map_err(|_| SurgeonError::ParseError("Symbol source is not valid UTF-8".into()))?
             .to_string();
 
-        let language_str = match lang {
-            SupportedLanguage::Go => "go",
-            SupportedLanguage::TypeScript => "typescript",
-            SupportedLanguage::Tsx => "tsx",
-            SupportedLanguage::JavaScript => "javascript",
-            SupportedLanguage::Python => "python",
-            SupportedLanguage::Rust => "rust",
-        };
+        let language_str = lang.as_str();
 
         Ok(SymbolScope {
             content,
@@ -108,7 +162,7 @@ impl Surgeon for TreeSitterSurgeon {
         workspace_root: &Path,
         file_path: &Path,
     ) -> Result<Vec<ExtractedSymbol>, SurgeonError> {
-        let (_, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
+        let (_, _, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
         Ok(symbols)
     }
 
@@ -119,7 +173,7 @@ impl Surgeon for TreeSitterSurgeon {
         file_path: &Path,
         line: usize,
     ) -> Result<Option<String>, SurgeonError> {
-        let (_, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
+        let (_, _, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
         Ok(find_enclosing_symbol(&symbols, line.saturating_sub(1)))
     }
 
@@ -141,6 +195,88 @@ impl Surgeon for TreeSitterSurgeon {
             visibility,
         )
         .await
+    }
+
+    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
+    async fn resolve_body_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError> {
+        let chain =
+            semantic_path
+                .symbol_chain
+                .as_ref()
+                .ok_or_else(|| SurgeonError::SymbolNotFound {
+                    path: semantic_path.to_string(),
+                    did_you_mean: vec![],
+                })?;
+
+        // Use the shared parse/cache/extract pipeline
+        let (_lang, tree, source, version_hash, symbols) = self
+            .cached_parse(workspace_root, &semantic_path.file_path)
+            .await?;
+
+        let symbol =
+            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
+                path: semantic_path.to_string(),
+                did_you_mean: did_you_mean(&symbols, chain, 3),
+            })?;
+
+        let last_newline_pos = source[..symbol.byte_range.start]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1);
+        let indent_column = symbol.byte_range.start.saturating_sub(last_newline_pos);
+
+        let (start_byte, end_byte) = Self::find_body_bytes(
+            &tree,
+            &source,
+            symbol.byte_range.clone(),
+            &semantic_path.to_string(),
+        )?;
+
+        // Detect actual body indentation
+        let mut body_indent_column = indent_column + 4; // default fallback
+
+        let is_brace_block = source.get(start_byte) == Some(&b'{');
+
+        if is_brace_block {
+            if let Ok(inner_str) = std::str::from_utf8(&source[(start_byte + 1)..end_byte]) {
+                // Find the first line that is purely inside the block and not on the same line as `{`
+                let mut lines = inner_str.split('\n');
+                let _same_line_as_brace = lines.next();
+
+                for line in lines {
+                    if !line.trim().is_empty() {
+                        body_indent_column = line.len() - line.trim_start().len();
+                        break;
+                    }
+                }
+            }
+        } else {
+            let line_start = source[..start_byte]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |pos| pos + 1);
+
+            if let Ok(full_str) = std::str::from_utf8(&source[line_start..end_byte]) {
+                if let Some(line) = full_str.lines().next() {
+                    body_indent_column = line.len() - line.trim_start().len();
+                }
+            }
+        }
+
+        Ok((
+            BodyRange {
+                start_byte,
+                end_byte,
+                indent_column,
+                body_indent_column,
+            },
+            source,
+            version_hash,
+        ))
     }
 }
 

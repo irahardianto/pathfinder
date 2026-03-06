@@ -159,12 +159,11 @@ impl PathfinderServer {
         name = "replace_body",
         description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks."
     )]
-    #[allow(clippy::unused_self)]
-    fn replace_body(
+    async fn replace_body(
         &self,
-        Parameters(_params): Parameters<ReplaceBodyParams>,
-    ) -> Json<StubResponse> {
-        stub_response("replace_body")
+        Parameters(params): Parameters<ReplaceBodyParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.replace_body_impl(params).await
     }
 
     #[tool(

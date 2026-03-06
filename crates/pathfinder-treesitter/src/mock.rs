@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::manual_assert)]
 
 use crate::error::SurgeonError;
-use crate::surgeon::{ExtractedSymbol, Surgeon};
-use pathfinder_common::types::{SemanticPath, SymbolScope};
+use crate::surgeon::{BodyRange, ExtractedSymbol, Surgeon};
+use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -15,6 +15,9 @@ pub struct MockSurgeon {
     pub extract_symbols_results: Mutex<Vec<Result<Vec<ExtractedSymbol>, SurgeonError>>>,
     pub enclosing_symbol_results: Mutex<Vec<Result<Option<String>, SurgeonError>>>,
     pub generate_skeleton_results: Mutex<Vec<Result<crate::repo_map::RepoMapResult, SurgeonError>>>,
+    #[allow(clippy::type_complexity)]
+    pub resolve_body_range_results:
+        Mutex<Vec<Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError>>>,
 
     // Call history
     pub read_symbol_scope_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
@@ -22,6 +25,7 @@ pub struct MockSurgeon {
     pub enclosing_symbol_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
     #[allow(clippy::type_complexity)]
     pub generate_skeleton_calls: Mutex<Vec<(PathBuf, PathBuf, u32, u32, String)>>,
+    pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
 }
 
 impl MockSurgeon {
@@ -110,6 +114,27 @@ impl Surgeon for MockSurgeon {
         assert!(
             !results.is_empty(),
             "MockSurgeon: Unexpected call to generate_skeleton"
+        );
+        results.remove(0)
+    }
+
+    async fn resolve_body_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError> {
+        self.resolve_body_range_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((workspace_root.to_path_buf(), semantic_path.clone()));
+
+        let mut results = self
+            .resolve_body_range_results
+            .lock()
+            .expect("mutex poisoned");
+        assert!(
+            !results.is_empty(),
+            "MockSurgeon: Unexpected call to resolve_body_range"
         );
         results.remove(0)
     }

@@ -299,6 +299,51 @@ pub struct ReadSymbolScopeResponse {
     pub language: String,
 }
 
+/// The response for all AST-aware edit tools:
+/// `replace_body`, `replace_full`, `insert_before`, `insert_after`,
+/// `delete_symbol`, and `validate_only`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct EditResponse {
+    /// Whether the edit succeeded (always `true` for non-`validate_only` tools).
+    pub success: bool,
+    /// SHA-256 hash of the file after the edit. `None` for `validate_only`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_version_hash: Option<String>,
+    /// Whether the code was reformatted (always `false` until LSP formatting is wired).
+    pub formatted: bool,
+    /// LSP validation result.
+    pub validation: EditValidation,
+    /// `true` when LSP validation was skipped (no language server available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_skipped: Option<bool>,
+    /// Machine-readable reason why validation was skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_skipped_reason: Option<String>,
+}
+
+/// LSP validation result embedded in `EditResponse`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct EditValidation {
+    /// `"passed"`, `"failed"`, or `"skipped"`.
+    pub status: String,
+    /// Errors introduced by the edit.
+    pub introduced_errors: Vec<pathfinder_common::error::DiagnosticError>,
+    /// Errors resolved by the edit.
+    pub resolved_errors: Vec<pathfinder_common::error::DiagnosticError>,
+}
+
+impl EditValidation {
+    /// Return a skipped validation result (no LSP available).
+    #[must_use]
+    pub fn skipped() -> Self {
+        Self {
+            status: "skipped".to_owned(),
+            introduced_errors: vec![],
+            resolved_errors: vec![],
+        }
+    }
+}
+
 /// The response for `create_file`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CreateFileResponse {

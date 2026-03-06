@@ -3,7 +3,6 @@
 use crate::server::helpers::{io_error_data, pathfinder_to_error_data};
 use crate::server::types::{ReadSymbolScopeParams, ReadSymbolScopeResponse};
 use crate::server::PathfinderServer;
-use pathfinder_common::error::PathfinderError;
 use pathfinder_common::types::SemanticPath;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
@@ -13,6 +12,7 @@ impl PathfinderServer {
     ///
     /// Parses the semantic path, performs a sandbox check, then delegates
     /// to the `Surgeon` to extract the AST-located symbol scope.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn read_symbol_scope_impl(
         &self,
         params: ReadSymbolScopeParams,
@@ -84,33 +84,11 @@ impl PathfinderServer {
                 let duration_ms = start.elapsed().as_millis();
 
                 // Convert SurgeonError to PathfinderError if possible, or io_error
-                let error_data = match &e {
-                    pathfinder_treesitter::SurgeonError::SymbolNotFound {
-                        path: _,
-                        did_you_mean,
-                    } => {
-                        let err = PathfinderError::SymbolNotFound {
-                            semantic_path: semantic_path.to_string(),
-                            did_you_mean: did_you_mean.clone(),
-                        };
-                        pathfinder_to_error_data(&err)
-                    }
-                    pathfinder_treesitter::SurgeonError::UnsupportedLanguage(_) => {
-                        let err = PathfinderError::UnsupportedLanguage {
-                            path: semantic_path.file_path.clone(),
-                        };
-                        pathfinder_to_error_data(&err)
-                    }
-                    pathfinder_treesitter::SurgeonError::Io(_) => {
-                        let err = PathfinderError::FileNotFound {
-                            path: semantic_path.file_path.clone(),
-                        };
-                        pathfinder_to_error_data(&err)
-                    }
-                    pathfinder_treesitter::SurgeonError::ParseError(msg) => {
-                        io_error_data(format!("Parse error: {msg}"))
-                    }
-                };
+                let error_data = crate::server::helpers::treesitter_error_to_error_data(
+                    &e,
+                    &params.semantic_path,
+                    &semantic_path.file_path,
+                );
 
                 tracing::warn!(
                     tool = "read_symbol_scope",

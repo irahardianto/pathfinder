@@ -29,6 +29,40 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
     ErrorData::new(ErrorCode::INTERNAL_ERROR, err.error_code(), data)
 }
 
+/// Convert a `SurgeonError` into a `PathfinderError` and then to an [`ErrorData`].
+/// This centralizes the exhaustive matching of AST errors to our standard error taxonomy.
+pub(crate) fn treesitter_error_to_error_data(
+    e: &pathfinder_treesitter::SurgeonError,
+    path_str: &str,
+    file_path: &Path,
+) -> ErrorData {
+    let pfe = match e {
+        pathfinder_treesitter::SurgeonError::SymbolNotFound { did_you_mean, .. } => {
+            PathfinderError::SymbolNotFound {
+                semantic_path: path_str.to_owned(),
+                did_you_mean: did_you_mean.clone(),
+            }
+        }
+        pathfinder_treesitter::SurgeonError::UnsupportedLanguage(_) => {
+            PathfinderError::UnsupportedLanguage {
+                path: file_path.to_path_buf(),
+            }
+        }
+        pathfinder_treesitter::SurgeonError::ParseError(msg) => PathfinderError::ParseError {
+            path: file_path.to_path_buf(),
+            reason: msg.clone(),
+        },
+        pathfinder_treesitter::SurgeonError::InvalidTarget { path, reason } => {
+            PathfinderError::InvalidTarget {
+                semantic_path: path.clone(),
+                reason: reason.clone(),
+            }
+        }
+        pathfinder_treesitter::SurgeonError::Io(err) => return io_error_data(err.to_string()),
+    };
+    pathfinder_to_error_data(&pfe)
+}
+
 /// Wrap a plain IO / infrastructure message in an [`ErrorData`].
 pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
     ErrorData::internal_error(msg, None)

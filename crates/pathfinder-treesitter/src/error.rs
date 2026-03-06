@@ -23,4 +23,10 @@ pub enum SurgeonError {
     /// A file-system error occurred when attempting to read source files.
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The target symbol is incompatible with the requested edit operation.
+    ///
+    /// E.g., calling `replace_body` on a constant or abstract declaration.
+    #[error("invalid target: {reason} (path: {path})")]
+    InvalidTarget { path: String, reason: String },
 }

@@ -41,6 +41,19 @@ impl SupportedLanguage {
         }
     }
 
+    /// Return the string representation of the language.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Go => "go",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
+            Self::JavaScript => "javascript",
+            Self::Python => "python",
+            Self::Rust => "rust",
+        }
+    }
+
     /// Load the corresponding tree-sitter language grammar.
     #[must_use]
     pub fn grammar(&self) -> Language {

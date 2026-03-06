@@ -1,5 +1,5 @@
 use crate::error::SurgeonError;
-use pathfinder_common::types::{SemanticPath, SymbolScope};
+use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
 use std::path::Path;
 
 /// Information about a symbol successfully extracted from the AST.
@@ -32,6 +32,22 @@ pub enum SymbolKind {
     Constant,
     Interface,
     Enum,
+}
+
+/// The byte range and context needed to splice a new body into a symbol.
+///
+/// Used by `replace_body` to locate the content region inside a function's
+/// braces (or equivalent block delimiters in the target language).
+#[derive(Debug, Clone)]
+pub struct BodyRange {
+    /// Byte offset of the start of the body block in the file.
+    pub start_byte: usize,
+    /// Byte offset of the end of the body block in the file (exclusive).
+    pub end_byte: usize,
+    /// Column (0-indexed) of the symbol's starting line, used for re-indentation.
+    pub indent_column: usize,
+    /// Column (0-indexed) of the first non-empty line inside the body.
+    pub body_indent_column: usize,
 }
 
 /// The `Surgeon` trait — testability boundary for AST-aware operations.
@@ -72,4 +88,20 @@ pub trait Surgeon: Send + Sync {
         depth: u32,
         visibility: &str,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError>;
+
+    /// Resolve the body byte range and indent column for a symbol.
+    ///
+    /// Returns the `BodyRange` (brace positions + indent column) along with
+    /// the raw file source bytes and the current `VersionHash` for OCC.
+    ///
+    /// # Errors
+    /// - `SurgeonError::SymbolNotFound` — semantic path does not resolve
+    /// - `SurgeonError::InvalidTarget` — target symbol has no body (e.g., constant)
+    /// - `SurgeonError::UnsupportedLanguage` — file language not supported
+    /// - `SurgeonError::Io` — file cannot be read
+    async fn resolve_body_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError>;
 }

@@ -1,6 +1,6 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
-use crate::server::helpers::{io_error_data, pathfinder_to_error_data};
+use crate::server::helpers::pathfinder_to_error_data;
 use crate::server::types::{GetRepoMapParams, GetRepoMapResponse, Visibility};
 use crate::server::PathfinderServer;
 use rmcp::handler::server::wrapper::Json;
@@ -44,29 +44,11 @@ impl PathfinderServer {
         {
             Ok(r) => r,
             Err(e) => {
-                let pfe = match e {
-                    pathfinder_treesitter::error::SurgeonError::ParseError(reason) => {
-                        pathfinder_common::error::PathfinderError::ParseError {
-                            path: target_path.to_path_buf(),
-                            reason,
-                        }
-                    }
-                    pathfinder_treesitter::error::SurgeonError::UnsupportedLanguage(_) => {
-                        pathfinder_common::error::PathfinderError::UnsupportedLanguage {
-                            path: target_path.to_path_buf(),
-                        }
-                    }
-                    pathfinder_treesitter::error::SurgeonError::SymbolNotFound { .. } => {
-                        pathfinder_common::error::PathfinderError::SymbolNotFound {
-                            semantic_path: params.path.clone(),
-                            did_you_mean: vec![],
-                        }
-                    }
-                    pathfinder_treesitter::error::SurgeonError::Io(err) => {
-                        return Err(io_error_data(err.to_string()));
-                    }
-                };
-                return Err(pathfinder_to_error_data(&pfe));
+                return Err(crate::server::helpers::treesitter_error_to_error_data(
+                    &e,
+                    &params.path,
+                    target_path,
+                ));
             }
         };
 
