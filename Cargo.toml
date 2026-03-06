@@ -2,6 +2,7 @@
 members = [
     "crates/pathfinder",
     "crates/pathfinder-common",
+    "crates/pathfinder-lsp",
     "crates/pathfinder-search",
     "crates/pathfinder-treesitter",
 ]

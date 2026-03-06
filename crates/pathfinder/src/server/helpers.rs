@@ -1,11 +1,9 @@
 //! Shared helper functions for Pathfinder MCP tool handlers.
 //!
-//! Contains error conversion utilities, the stub-response builder, and
-//! the file-language detector used by `read_file`.
+//! Contains error conversion utilities and the file-language detector
+//! used by `read_file`.
 
-use super::types::StubResponse;
 use pathfinder_common::error::PathfinderError;
-use rmcp::handler::server::wrapper::Json;
 use rmcp::model::{ErrorCode, ErrorData};
 use std::path::Path;
 
@@ -38,20 +36,6 @@ pub(crate) fn treesitter_error_to_error_data(e: pathfinder_treesitter::SurgeonEr
 /// Wrap a plain IO / infrastructure message in an [`ErrorData`].
 pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
     ErrorData::internal_error(msg, None)
-}
-
-// ── Stub Response Helper ────────────────────────────────────────────
-
-/// Return a standard `NOT_IMPLEMENTED` response for unbuilt tool stubs.
-pub(crate) fn stub_response(tool_name: &str) -> Json<StubResponse> {
-    tracing::info!(tool = tool_name, "{tool_name}: start");
-    let response = Json(StubResponse {
-        error: "NOT_IMPLEMENTED".to_owned(),
-        message: format!("Tool '{tool_name}' is not yet implemented. Coming in a future epic."),
-        details: std::collections::HashMap::new(),
-    });
-    tracing::info!(tool = tool_name, "{tool_name}: complete (stub)");
-    response
 }
 
 // ── Language Detection ──────────────────────────────────────────────

@@ -360,13 +360,98 @@ pub struct ValidationResult {
     pub introduced_errors: Vec<pathfinder_common::error::DiagnosticError>,
 }
 
-/// A generic response for stubbed tools.
+// ── Navigation Tool Response Types ─────────────────────────────────
+
+/// A dependency signature extracted for `read_with_deep_context`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct StubResponse {
-    pub error: String,
-    pub message: String,
-    pub details: std::collections::HashMap<String, String>,
+pub struct DeepContextDependency {
+    /// Semantic path of the called symbol.
+    pub semantic_path: String,
+    /// Extracted signature (declaration line only, no body).
+    pub signature: String,
+    /// File path relative to workspace root.
+    pub file: String,
+    /// 1-indexed line of the definition.
+    pub line: usize,
 }
+
+/// The response for `read_with_deep_context`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ReadWithDeepContextResponse {
+    /// The source code of the requested symbol (same as `read_symbol_scope`).
+    pub content: String,
+    /// Start line of the symbol (1-indexed).
+    pub start_line: usize,
+    /// End line of the symbol (1-indexed).
+    pub end_line: usize,
+    /// OCC version hash for the symbol's file.
+    pub version_hash: String,
+    /// Detected language.
+    pub language: String,
+    /// Signatures of all symbols called by this one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DeepContextDependency>,
+    /// `true` when LSP dependency resolution was unavailable (Tree-sitter only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    /// Reason for degradation (e.g., `"no_lsp"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
+}
+
+/// The response for `get_definition`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct GetDefinitionResponse {
+    /// Relative file path of the definition site.
+    pub file: String,
+    /// 1-indexed line number of the definition.
+    pub line: u32,
+    /// 1-indexed column number.
+    pub column: u32,
+    /// First line of the definition (code preview).
+    pub preview: String,
+    /// `true` when LSP was unavailable and no fallback was possible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    /// Reason for degradation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
+}
+
+/// A single reference in an impact analysis.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ImpactReference {
+    /// Semantic path of the referencing/referenced symbol.
+    pub semantic_path: String,
+    /// File path relative to workspace root.
+    pub file: String,
+    /// 1-indexed line of the call site or definition.
+    pub line: usize,
+    /// A short code snippet showing the call site or declaration.
+    pub snippet: String,
+    /// OCC version hash for this file.
+    pub version_hash: String,
+}
+
+/// The response for `analyze_impact`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct AnalyzeImpactResponse {
+    /// Symbols that call the target (caller graph).
+    pub incoming: Vec<ImpactReference>,
+    /// Symbols the target calls (callee graph).
+    pub outgoing: Vec<ImpactReference>,
+    /// Number of transitive levels traversed.
+    pub depth_reached: u32,
+    /// Total files referenced (for `version_hashes`).
+    pub files_referenced: usize,
+    /// `true` when LSP call hierarchy was unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    /// Reason for degradation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
+}
+
 
 // ── Default Value Functions ─────────────────────────────────────────
 

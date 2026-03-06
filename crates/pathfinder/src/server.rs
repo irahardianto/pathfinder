@@ -8,20 +8,21 @@
 //! - [`tools`] — handler logic, one submodule per tool group:
 //!   - [`tools::search`] — `search_codebase`
 //!   - [`tools::repo_map`] — `get_repo_map`
-//!   - [`tools::symbols`] — `read_symbol_scope`
+//!   - [`tools::symbols`] — `read_symbol_scope`, `read_with_deep_context`
+//!   - [`tools::navigation`] — `get_definition`, `analyze_impact`
 //!   - [`tools::file_ops`] — `create_file`, `delete_file`, `read_file`, `write_file`
 
 mod helpers;
 mod tools;
 pub mod types;
 
-use helpers::stub_response;
 #[allow(clippy::wildcard_imports)]
 use types::*;
 
 use pathfinder_common::config::PathfinderConfig;
 use pathfinder_common::sandbox::Sandbox;
 use pathfinder_common::types::WorkspaceRoot;
+use pathfinder_lsp::{Lawyer, NoOpLawyer};
 use pathfinder_search::{RipgrepScout, Scout};
 use pathfinder_treesitter::{Surgeon, TreeSitterSurgeon};
 
@@ -44,11 +45,15 @@ pub struct PathfinderServer {
     sandbox: Arc<Sandbox>,
     scout: Arc<dyn Scout>,
     surgeon: Arc<dyn Surgeon>,
+    lawyer: Arc<dyn Lawyer>,
     tool_router: ToolRouter<Self>,
 }
 
 impl PathfinderServer {
     /// Create a new Pathfinder server backed by the real Ripgrep scout and Tree-sitter surgeon.
+    ///
+    /// Uses a `NoOpLawyer` for LSP operations — tools requiring LSP will gracefully
+    /// degrade and return `"degraded": true` responses.
     #[must_use]
     pub fn new(workspace_root: WorkspaceRoot, config: PathfinderConfig) -> Self {
         let sandbox = Sandbox::new(workspace_root.path(), &config.sandbox);
@@ -61,7 +66,9 @@ impl PathfinderServer {
         )
     }
 
-    /// Create a server with injected engines (for testing).
+    /// Create a server with injected Scout and Surgeon engines (for testing).
+    ///
+    /// Uses a `NoOpLawyer` for LSP operations — keeps existing tests unchanged.
     #[must_use]
     pub fn with_engines(
         workspace_root: WorkspaceRoot,
@@ -70,12 +77,33 @@ impl PathfinderServer {
         scout: Arc<dyn Scout>,
         surgeon: Arc<dyn Surgeon>,
     ) -> Self {
+        Self::with_all_engines(
+            workspace_root,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(NoOpLawyer),
+        )
+    }
+
+    /// Create a server with all three engines injected (for testing with a `MockLawyer`).
+    #[must_use]
+    pub fn with_all_engines(
+        workspace_root: WorkspaceRoot,
+        config: PathfinderConfig,
+        sandbox: Sandbox,
+        scout: Arc<dyn Scout>,
+        surgeon: Arc<dyn Surgeon>,
+        lawyer: Arc<dyn Lawyer>,
+    ) -> Self {
         Self {
             workspace_root: Arc::new(workspace_root),
             config: Arc::new(config),
             sandbox: Arc::new(sandbox),
             scout,
             surgeon,
+            lawyer,
             tool_router: Self::tool_router(),
         }
     }
@@ -123,36 +151,33 @@ impl PathfinderServer {
         name = "read_with_deep_context",
         description = "Extract a symbol's source code PLUS the signatures of all functions it calls. Use this when you need to understand a function's dependencies before editing it."
     )]
-    #[allow(clippy::unused_self)]
-    fn read_with_deep_context(
+    async fn read_with_deep_context(
         &self,
-        Parameters(_params): Parameters<ReadWithDeepContextParams>,
-    ) -> Json<StubResponse> {
-        stub_response("read_with_deep_context")
+        Parameters(params): Parameters<ReadWithDeepContextParams>,
+    ) -> Result<Json<ReadWithDeepContextResponse>, ErrorData> {
+        self.read_with_deep_context_impl(params).await
     }
 
     #[tool(
         name = "get_definition",
         description = "Jump to where a symbol is defined. Provide a semantic path to a reference and get back the definition's file, line, and a code preview."
     )]
-    #[allow(clippy::unused_self)]
-    fn get_definition(
+    async fn get_definition(
         &self,
-        Parameters(_params): Parameters<GetDefinitionParams>,
-    ) -> Json<StubResponse> {
-        stub_response("get_definition")
+        Parameters(params): Parameters<GetDefinitionParams>,
+    ) -> Result<Json<GetDefinitionResponse>, ErrorData> {
+        self.get_definition_impl(params).await
     }
 
     #[tool(
         name = "analyze_impact",
         description = "Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Use this BEFORE refactoring to understand the blast radius of a change. Returns version_hashes for all referenced files."
     )]
-    #[allow(clippy::unused_self)]
-    fn analyze_impact(
+    async fn analyze_impact(
         &self,
-        Parameters(_params): Parameters<AnalyzeImpactParams>,
-    ) -> Json<StubResponse> {
-        stub_response("analyze_impact")
+        Parameters(params): Parameters<AnalyzeImpactParams>,
+    ) -> Result<Json<AnalyzeImpactResponse>, ErrorData> {
+        self.analyze_impact_impl(params).await
     }
 
     #[tool(

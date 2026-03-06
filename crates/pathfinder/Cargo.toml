@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 pathfinder-common = { path = "../pathfinder-common" }
+pathfinder-lsp = { path = "../pathfinder-lsp" }
 pathfinder-search = { path = "../pathfinder-search" }
 pathfinder-treesitter = { path = "../pathfinder-treesitter" }
 rmcp = { version = "1", features = ["server", "macros", "transport-io"] }
