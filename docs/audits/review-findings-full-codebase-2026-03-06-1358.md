@@ -24,7 +24,7 @@ _None found._
 ## Major Issues
 
 - [x] **[ARCH]** `server.rs` is a 1662-line monolith containing all 16 tool handlers, all parameter types, all response types, default-value functions, language detection, and error helpers. This violates SRP and the code organization principle of "10-50 line focused functions". It should be decomposed into modules (e.g., `tools/search.rs`, `tools/file_ops.rs`, `types/params.rs`, `types/responses.rs`). — [server.rs](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder/src/server.rs)
-  > **Partially resolved:** `types.rs` and `helpers.rs` extracted from `server.rs`. `server.rs` is still ~1791 lines with all handlers inline. Full per-tool decomposition (`tools/search.rs`, `tools/file_ops.rs`, etc.) is not yet done. **Remaining work.**
+  > **Resolved:** All handler implementations extracted to `server/tools/` submodules (`search.rs`, `repo_map.rs`, `symbols.rs`, `file_ops.rs`). The `#[tool_router]` impl block is now thin delegators calling `pub(crate)` impl methods in each module. `types.rs` and `helpers.rs` were already extracted. Committed in `c5b43a5`.
 
 - [x] **[ERR]** `pathfinder_to_error_data()` uses `unwrap_or_default()` on `serde_json::to_value(err.to_error_response())` (line 420). If serialization fails, the error data silently degrades to `null`/empty, losing vital debugging context. This should log a warning if serialization fails. — [server.rs:420](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder/src/server.rs#L416-L422)
   > **Resolved:** `helpers.rs::pathfinder_to_error_data` now matches on `serde_json::to_value` and calls `tracing::warn!(...)` before returning `None` on failure. The `unwrap_or_default` is gone.
@@ -48,8 +48,8 @@ _None found._
 - [ ] **[PAT]** `pathfinder-search` depends on `pathfinder-common` in Cargo.toml (line 11) but never uses it — no import from `pathfinder_common` exists in any of the crate's source files. This creates an unnecessary compile-time dependency. — [Cargo.toml:11](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/Cargo.toml#L11)
   > **Resolved:** `pathfinder-common` is no longer listed in `pathfinder-search/Cargo.toml`.
 
-- [ ] **[PAT]** Duplicate SHA-256 hashing logic: `compute_hash()` in `ripgrep.rs` and `VersionHash::compute()` in `types.rs` and `hash_file()` in `file_watcher.rs` all implement the exact same `sha256:{hex}` format. Consolidate to `VersionHash::compute()` as the single source of truth. — [ripgrep.rs:20-23](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/src/ripgrep.rs#L20-L23), [file_watcher.rs:129-133](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-common/src/file_watcher.rs#L129-L133)
-  > **Partially resolved:** `hash_file()` in `file_watcher.rs` now delegates to `VersionHash::compute()`. `ripgrep.rs::compute_hash()` still maintains its own SHA-256 implementation with a doc comment noting intentional dep avoidance. **Remaining work** (requires either adding `pathfinder-common` back as a dep or accepting the duplication).
+- [x] **[PAT]** Duplicate SHA-256 hashing logic: `compute_hash()` in `ripgrep.rs` and `VersionHash::compute()` in `types.rs` and `hash_file()` in `file_watcher.rs` all implement the exact same `sha256:{hex}` format. Consolidate to `VersionHash::compute()` as the single source of truth. — [ripgrep.rs:20-23](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/src/ripgrep.rs#L20-L23), [file_watcher.rs:129-133](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-common/src/file_watcher.rs#L129-L133)
+  > **Resolved:** `pathfinder-common` added as a dep to `pathfinder-search`. The local `compute_hash()` function and `sha2` direct import deleted. `ripgrep.rs` now calls `VersionHash::compute(&bytes).as_str().to_owned()` directly. Single source of truth established. Committed in `c5b43a5`.
 
 ---
 
@@ -63,12 +63,11 @@ _None found._
 
 ---
 
-## Open Items (2 remaining)
+## Open Items (0 remaining)
 
-| #   | Severity | Finding                                                            | Status |
-| --- | -------- | ------------------------------------------------------------------ | ------ |
-| 1   | **ARCH** | `server.rs` monolith — full per-tool module decomposition not done | Open   |
-| 2   | **PAT**  | `compute_hash` in `ripgrep.rs` duplicates `VersionHash::compute()` | Open   |
+| #                     | Severity | Finding | Status |
+| --------------------- | -------- | ------- | ------ |
+| All findings resolved | —        | —       | ✔ Done |
 
 ---
 
