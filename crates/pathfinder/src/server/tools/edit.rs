@@ -9,7 +9,7 @@
 //! 6. Indentation pre-pass (dedent → reindent to AST column)
 //! 7. Splice normalized code into scope byte range
 //! 8. TOCTOU late-check: re-read, re-hash immediately before write
-//! 9. `std::fs::write` (in-place, preserves inode)
+//! 9. `tokio::fs::write` (in-place, preserves inode)
 //! 10. Compute and return new `version_hash`
 
 use crate::server::helpers::{io_error_data, pathfinder_to_error_data};
@@ -368,7 +368,9 @@ impl PathfinderServer {
         let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
 
         let (insert_byte, indent_column, source, current_hash) = if semantic_path.is_bare_file() {
-            let bytes = tokio::fs::read(&absolute_path).await.unwrap_or_default();
+            let bytes = tokio::fs::read(&absolute_path)
+                .await
+                .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
             let hash = VersionHash::compute(&bytes);
             (0, 0, bytes, hash)
         } else {
@@ -431,7 +433,9 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(sep.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let disk_bytes = tokio::fs::read(&absolute_path).await.unwrap_or_default();
+        let disk_bytes = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("failed to re-read for TOCTOU check: {e}")))?;
         let disk_hash = VersionHash::compute(&disk_bytes);
         if disk_hash != current_hash {
             let err = PathfinderError::VersionMismatch {
@@ -486,7 +490,9 @@ impl PathfinderServer {
         let absolute_path = self.workspace_root.path().join(&semantic_path.file_path);
 
         let (insert_byte, indent_column, source, current_hash) = if semantic_path.is_bare_file() {
-            let bytes = tokio::fs::read(&absolute_path).await.unwrap_or_default();
+            let bytes = tokio::fs::read(&absolute_path)
+                .await
+                .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
             let hash = VersionHash::compute(&bytes);
             (bytes.len(), 0, bytes, hash)
         } else {
@@ -545,7 +551,9 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(after_sep.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let disk_bytes = tokio::fs::read(&absolute_path).await.unwrap_or_default();
+        let disk_bytes = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("failed to re-read for TOCTOU check: {e}")))?;
         let disk_hash = VersionHash::compute(&disk_bytes);
         if disk_hash != current_hash {
             let err = PathfinderError::VersionMismatch {

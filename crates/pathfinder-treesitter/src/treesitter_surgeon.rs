@@ -122,15 +122,19 @@ impl TreeSitterSurgeon {
                 .rposition(|&b| b == b'\n')
                 .map_or(0, |pos| pos + 1);
 
-            if line_start == 0 {
-                break;
-            }
-
-            let prev_line_end = line_start - 1; // before \n
-            let prev_line_start = source[..prev_line_end]
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map_or(0, |pos| pos + 1);
+            let (prev_line_start, prev_line_end) = if line_start == 0 {
+                if start_byte == 0 {
+                    break;
+                }
+                (0, start_byte)
+            } else {
+                let end = line_start - 1; // before \n
+                let start = source[..end]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |pos| pos + 1);
+                (start, end)
+            };
 
             let prev_line = &source[prev_line_start..prev_line_end];
             let trimmed = String::from_utf8_lossy(prev_line);
