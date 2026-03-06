@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/pathfinder",
+    "crates/pathfinder-common",
+    "crates/pathfinder-search",
+    "crates/pathfinder-treesitter",
+]
+resolver = "2"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+
+[workspace.lints.rust]
+unsafe_code = "deny"

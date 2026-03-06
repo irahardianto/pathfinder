@@ -1,0 +1,28 @@
+[package]
+name = "pathfinder-search"
+version = "0.1.0"
+edition = "2021"
+description = "The Scout — Ripgrep-powered text search engine for Pathfinder"
+
+[lints]
+workspace = true
+
+[dependencies]
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+ignore = "0.4"
+globset = "0.4"
+sha2 = "0.10"
+regex = "1"
+tokio = { version = "1", features = ["fs", "rt"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+async-trait = "0.1"
+schemars = "1.2.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
