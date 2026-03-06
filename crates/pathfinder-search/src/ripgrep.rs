@@ -12,22 +12,10 @@ use crate::types::{SearchMatch, SearchParams, SearchResult};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch};
 use ignore::WalkBuilder;
-use sha2::{Digest, Sha256};
+use pathfinder_common::types::VersionHash;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Mutex;
-
-// ── Version hash helper ──────────────────────────────────────────────
-
-/// Compute SHA-256 of `content` and return `"sha256:<hex>"`.
-///
-/// FORMAT: must match `VersionHash::compute()` in `pathfinder-common`.
-/// `pathfinder-search` intentionally omits the `pathfinder-common` dep;
-/// keep these two functions in sync.
-fn compute_hash(content: &[u8]) -> String {
-    let hash = Sha256::digest(content);
-    format!("sha256:{hash:x}")
-}
 
 // ── Sink implementation ──────────────────────────────────────────────
 
@@ -372,7 +360,7 @@ impl Scout for RipgrepScout {
                     tracing::error!(file = %relative, error = %e, "Scout: failed to read file for hashing");
                     SearchError::Engine(format!("failed to hash {relative}: {e}"))
                 })?;
-                let hash = compute_hash(&bytes);
+                let hash = VersionHash::compute(&bytes).as_str().to_owned();
                 sink.backfill_hash(&hash);
             }
 
