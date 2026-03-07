@@ -22,7 +22,7 @@ use types::*;
 use pathfinder_common::config::PathfinderConfig;
 use pathfinder_common::sandbox::Sandbox;
 use pathfinder_common::types::WorkspaceRoot;
-use pathfinder_lsp::{Lawyer, NoOpLawyer};
+use pathfinder_lsp::{Lawyer, LspClient, NoOpLawyer};
 use pathfinder_search::{RipgrepScout, Scout};
 use pathfinder_treesitter::{Surgeon, TreeSitterSurgeon};
 
@@ -50,19 +50,44 @@ pub struct PathfinderServer {
 }
 
 impl PathfinderServer {
-    /// Create a new Pathfinder server backed by the real Ripgrep scout and Tree-sitter surgeon.
+    /// Create a new Pathfinder server backed by the real Ripgrep scout, Tree-sitter
+    /// surgeon, and `LspClient` for LSP operations.
     ///
-    /// Uses a `NoOpLawyer` for LSP operations — tools requiring LSP will gracefully
-    /// degrade and return `"degraded": true` responses.
+    /// Zero-Config language detection (PRD §6.5) runs synchronously during construction.
+    /// LSP processes are started **lazily** — only when the first LSP-dependent tool call
+    /// is made for a given language.
+    ///
+    /// If Zero-Config detection fails (e.g., unreadable workspace directory), the server
+    /// falls back to `NoOpLawyer` and logs a warning. All tools remain functional in
+    /// degraded mode.
     #[must_use]
     pub fn new(workspace_root: WorkspaceRoot, config: PathfinderConfig) -> Self {
         let sandbox = Sandbox::new(workspace_root.path(), &config.sandbox);
-        Self::with_engines(
+
+        let lawyer: Arc<dyn Lawyer> = match LspClient::new(workspace_root.path()) {
+            Ok(client) => {
+                tracing::info!(
+                    workspace = %workspace_root.path().display(),
+                    "LspClient initialised (lazy, processes start on first use)"
+                );
+                Arc::new(client)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "LSP Zero-Config detection failed — degraded mode (NoOpLawyer)"
+                );
+                Arc::new(NoOpLawyer)
+            }
+        };
+
+        Self::with_all_engines(
             workspace_root,
             config,
             sandbox,
             Arc::new(RipgrepScout::new()),
             Arc::new(TreeSitterSurgeon::new(100)), // Cache capacity of 100 files
+            lawyer,
         )
     }
 
@@ -70,6 +95,7 @@ impl PathfinderServer {
     ///
     /// Uses a `NoOpLawyer` for LSP operations — keeps existing tests unchanged.
     #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_engines(
         workspace_root: WorkspaceRoot,
         config: PathfinderConfig,

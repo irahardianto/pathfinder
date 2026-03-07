@@ -110,10 +110,7 @@ impl Lawyer for MockLawyer {
 
         match next {
             Some(Ok(result)) => Ok(result),
-            Some(Err(msg)) => Err(LspError::Protocol {
-                code: -1,
-                message: msg,
-            }),
+            Some(Err(msg)) => Err(LspError::Protocol(msg)),
             None => Ok(None),
         }
     }
