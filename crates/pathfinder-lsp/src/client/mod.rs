@@ -18,6 +18,7 @@ mod transport;
 pub use capabilities::DetectedCapabilities;
 pub use detect::{detect_languages, language_id_for_extension, LanguageLsp};
 
+use crate::types::{LspDiagnostic, LspDiagnosticSeverity};
 use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use detect::LanguageLsp as LspDescriptor;
@@ -236,6 +237,35 @@ impl LspClient {
             })?
             .map_err(|_| LspError::ConnectionLost)?
     }
+
+    /// Send a JSON-RPC notification (fire-and-forget, no response expected).
+    ///
+    /// Notifications are sent on the stdin of the target process without
+    /// registering a response waiter — the LSP doesn't reply to them.
+    async fn notify(
+        &self,
+        language_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), LspError> {
+        let message = RequestDispatcher::make_notification(method, &params);
+        let guard = self.processes.read().await;
+        match guard.get(language_id) {
+            Some(ProcessEntry::Running(state)) => send(&state.process, &message).await,
+            Some(ProcessEntry::Unavailable(_)) | None => Err(LspError::NoLspAvailable),
+        }
+    }
+
+    /// Retrieve the detected capabilities for a language.
+    ///
+    /// Returns `Ok(caps)` when the process is running, else `NoLspAvailable`.
+    async fn capabilities_for(&self, language_id: &str) -> Result<DetectedCapabilities, LspError> {
+        let guard = self.processes.read().await;
+        match guard.get(language_id) {
+            Some(ProcessEntry::Running(state)) => Ok(state.process.capabilities.clone()),
+            Some(ProcessEntry::Unavailable(_)) | None => Err(LspError::NoLspAvailable),
+        }
+    }
 }
 
 #[async_trait]
@@ -289,6 +319,238 @@ impl Lawyer for LspClient {
 
         parse_definition_response(response)
     }
+
+    async fn did_open(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: &str,
+    ) -> Result<(), LspError> {
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        let params = json!({
+            "textDocument": {
+                "uri": file_uri.as_str(),
+                "languageId": language_id,
+                "version": 1,
+                "text": content
+            }
+        });
+
+        self.notify(language_id, "textDocument/didOpen", params)
+            .await?;
+        self.touch(language_id).await;
+        Ok(())
+    }
+
+    async fn did_change(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: &str,
+        version: i32,
+    ) -> Result<(), LspError> {
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        // Full content sync (TextDocumentSyncKind.Full = 1)
+        let params = json!({
+            "textDocument": {
+                "uri": file_uri.as_str(),
+                "version": version
+            },
+            "contentChanges": [{ "text": content }]
+        });
+
+        self.notify(language_id, "textDocument/didChange", params)
+            .await?;
+        self.touch(language_id).await;
+        Ok(())
+    }
+
+    async fn pull_diagnostics(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+    ) -> Result<Vec<LspDiagnostic>, LspError> {
+        let start = Instant::now();
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        // Check capability before sending the request
+        let caps = self.capabilities_for(language_id).await?;
+        if !caps.diagnostic_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "diagnosticProvider".to_owned(),
+            });
+        }
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        let params = json!({
+            "textDocument": { "uri": file_uri.as_str() }
+        });
+
+        let response = self
+            .request(
+                language_id,
+                "textDocument/diagnostic",
+                params,
+                Duration::from_secs(30),
+            )
+            .await?;
+
+        self.touch(language_id).await;
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::debug!(
+            language = language_id,
+            elapsed_ms = elapsed,
+            "textDocument/diagnostic complete"
+        );
+
+        parse_diagnostic_response(&response, file_path)
+    }
+
+    async fn range_formatting(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Option<String>, LspError> {
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        // Check capability before sending the request
+        let caps = self.capabilities_for(language_id).await?;
+        if !caps.formatting_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "documentFormattingProvider".to_owned(),
+            });
+        }
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        // LSP positions are 0-indexed, our API is 1-indexed
+        let params = json!({
+            "textDocument": { "uri": file_uri.as_str() },
+            "range": {
+                "start": { "line": start_line.saturating_sub(1), "character": 0 },
+                "end":   { "line": end_line.saturating_sub(1),   "character": 0 }
+            },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        });
+
+        let response = self
+            .request(
+                language_id,
+                "textDocument/rangeFormatting",
+                params,
+                Duration::from_secs(10),
+            )
+            .await?;
+
+        self.touch(language_id).await;
+
+        if response.is_null() {
+            return Ok(None);
+        }
+
+        // response is an array of TextEdit objects; we currently don't apply them
+        // (we just signal availability). The Tree-sitter indentation pre-pass
+        // is sufficient. Return None to indicate "no formatted text substitution".
+        Ok(None)
+    }
+}
+
+/// Parse the `textDocument/diagnostic` response into a `Vec<LspDiagnostic>`.
+///
+/// The response shape is: `{ "kind": "full", "items": [Diagnostic, ...] }`
+/// or `{ "kind": "unchanged", "resultId": "..." }` for unchanged results.
+fn parse_diagnostic_response(
+    response: &serde_json::Value,
+    file_path: &Path,
+) -> Result<Vec<LspDiagnostic>, LspError> {
+    // "unchanged" kind means diagnostics have not changed since last pull
+    if response.get("kind").and_then(|k| k.as_str()) == Some("unchanged") {
+        return Ok(vec![]);
+    }
+
+    let items = match response.get("items") {
+        Some(serde_json::Value::Array(arr)) => arr,
+        Some(_) => {
+            return Err(LspError::Protocol(
+                "diagnostics 'items' is not an array".to_owned(),
+            ))
+        }
+        // Some LSPs return flat arrays (not wrapped in {kind, items})
+        None => {
+            if let Some(arr) = response.as_array() {
+                return Ok(parse_diagnostic_items(arr, file_path));
+            }
+            return Ok(vec![]);
+        }
+    };
+
+    Ok(parse_diagnostic_items(items, file_path))
+}
+
+/// Parse an array of LSP `Diagnostic` objects.
+fn parse_diagnostic_items(items: &[serde_json::Value], file_path: &Path) -> Vec<LspDiagnostic> {
+    let mut result = Vec::with_capacity(items.len());
+    let file_str = file_path.to_string_lossy().into_owned();
+
+    for item in items {
+        let severity = match item["severity"].as_u64().unwrap_or(1) {
+            1 => LspDiagnosticSeverity::Error,
+            2 => LspDiagnosticSeverity::Warning,
+            3 => LspDiagnosticSeverity::Information,
+            _ => LspDiagnosticSeverity::Hint,
+        };
+
+        let message = item["message"].as_str().unwrap_or("").to_owned();
+        if message.is_empty() {
+            continue; // Skip diagnostics with no message
+        }
+
+        let code = item.get("code").and_then(|c| match c {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        });
+
+        let start_line = item["range"]["start"]["line"]
+            .as_u64()
+            .map_or(1, |l| u32::try_from(l + 1).unwrap_or(1));
+        let end_line = item["range"]["end"]["line"]
+            .as_u64()
+            .map_or(start_line, |l| u32::try_from(l + 1).unwrap_or(1));
+
+        result.push(LspDiagnostic {
+            severity,
+            code,
+            message,
+            file: file_str.clone(),
+            start_line,
+            end_line,
+        });
+    }
+
+    result
 }
 
 /// Parse the `textDocument/definition` response into a `DefinitionLocation`.

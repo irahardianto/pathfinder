@@ -3,7 +3,7 @@
 use crate::server::helpers::{io_error_data, language_from_path, pathfinder_to_error_data};
 use crate::server::types::{
     CreateFileParams, CreateFileResponse, DeleteFileParams, DeleteFileResponse, ReadFileParams,
-    ReadFileResponse, ValidationResult, WriteFileParams, WriteFileResponse,
+    ReadFileResponse, Replacement, ValidationResult, WriteFileParams, WriteFileResponse,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
@@ -14,12 +14,49 @@ use std::path::Path;
 use tokio::fs as tfs;
 use tokio::io::AsyncWriteExt as _;
 
+// ── Pure helpers ──────────────────────────────────────────────────────────────
+
+/// Apply a sequence of search-and-replace operations to `content`.
+///
+/// Each replacement must match the source text **exactly once** —
+/// zero matches returns [`PathfinderError::MatchNotFound`],
+/// more than one returns [`PathfinderError::AmbiguousMatch`].
+fn apply_replacements(
+    content: String,
+    replacements: &[Replacement],
+    relative_path: &Path,
+) -> Result<String, PathfinderError> {
+    let mut working = content;
+    for replacement in replacements {
+        let occurrences = working.matches(replacement.old_text.as_str()).count();
+        match occurrences {
+            0 => {
+                return Err(PathfinderError::MatchNotFound {
+                    filepath: relative_path.to_path_buf(),
+                });
+            }
+            1 => {
+                working = working.replacen(&replacement.old_text, &replacement.new_text, 1);
+            }
+            n => {
+                return Err(PathfinderError::AmbiguousMatch {
+                    filepath: relative_path.to_path_buf(),
+                    occurrences: n,
+                });
+            }
+        }
+    }
+    Ok(working)
+}
+
+// ── Tool handlers ─────────────────────────────────────────────────────────────
+
 impl PathfinderServer {
     /// Core logic for the `create_file` tool.
     ///
     /// Sandbox-checks the target path, creates parent directories, then
     /// atomically writes the file with `O_CREAT | O_EXCL` (create-new).
-    #[allow(clippy::too_many_lines)] // Multi-step atomic file creation — each step has distinct telemetry
+    #[tracing::instrument(skip(self, params), fields(filepath = %params.filepath))]
     pub(crate) async fn create_file_impl(
         &self,
         params: CreateFileParams,
@@ -28,41 +65,18 @@ impl PathfinderServer {
         let relative_path = Path::new(&params.filepath);
         let absolute_path = self.workspace_root.resolve(relative_path);
 
-        tracing::info!(
-            tool = "create_file",
-            filepath = %params.filepath,
-            "create_file: start"
-        );
+        tracing::info!(tool = "create_file", "create_file: start");
 
         // 1. Sandbox check
         if let Err(e) = self.sandbox.check(relative_path) {
-            let duration_ms = start.elapsed().as_millis();
-            let err_data = pathfinder_to_error_data(&e);
-            tracing::warn!(
-                tool = "create_file",
-                error = %e,
-                error_code = e.error_code(),
-                error_message = %e,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "sandbox check failed"
-            );
-            return Err(err_data);
+            tracing::warn!(tool = "create_file", error = %e, "sandbox check failed");
+            return Err(pathfinder_to_error_data(&e));
         }
 
         // 2. Create parent directories
         if let Some(parent) = absolute_path.parent() {
             if let Err(e) = tfs::create_dir_all(parent).await {
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "create_file",
-                    error = %e,
-                    error_code = "INTERNAL_ERROR",
-                    error_message = %e,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "failed to create parent directories"
-                );
+                tracing::warn!(tool = "create_file", error = %e, "failed to create parent directories");
                 return Err(io_error_data(format!(
                     "failed to create parent directories: {e}"
                 )));
@@ -79,19 +93,9 @@ impl PathfinderServer {
         match open_result {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(params.content.as_bytes()).await {
-                    let duration_ms = start.elapsed().as_millis();
-                    tracing::warn!(
-                        tool = "create_file",
-                        error = %e,
-                        error_code = "INTERNAL_ERROR",
-                        error_message = %e,
-                        duration_ms,
-                        engines_used = ?(&[] as &[&str]),
-                        "failed to write file content"
-                    );
+                    tracing::warn!(tool = "create_file", error = %e, "failed to write file content");
                     return Err(io_error_data(format!("failed to write file content: {e}")));
                 }
-
                 if let Err(e) = file.flush().await {
                     return Err(io_error_data(format!("failed to flush file: {e}")));
                 }
@@ -103,29 +107,11 @@ impl PathfinderServer {
                 let err = PathfinderError::FileAlreadyExists {
                     path: relative_path.to_path_buf(),
                 };
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "create_file",
-                    error = %err,
-                    error_code = err.error_code(),
-                    error_message = %err,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "file already exists"
-                );
+                tracing::warn!(tool = "create_file", error = %err, "file already exists");
                 return Err(pathfinder_to_error_data(&err));
             }
             Err(e) => {
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "create_file",
-                    error = %e,
-                    error_code = "INTERNAL_ERROR",
-                    error_message = %e,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "failed to create file"
-                );
+                tracing::warn!(tool = "create_file", error = %e, "failed to create file");
                 return Err(io_error_data(format!("failed to create file: {e}")));
             }
         }
@@ -135,7 +121,6 @@ impl PathfinderServer {
 
         tracing::info!(
             tool = "create_file",
-            filepath = %params.filepath,
             version_hash = %version_hash.as_str(),
             duration_ms,
             engines_used = ?(&[] as &[&str]),
@@ -174,16 +159,7 @@ impl PathfinderServer {
 
         // 1. Sandbox check
         if let Err(e) = self.sandbox.check(relative_path) {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "delete_file",
-                error = %e,
-                error_code = e.error_code(),
-                error_message = %e,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "sandbox check failed"
-            );
+            tracing::warn!(tool = "delete_file", error = %e, "sandbox check failed");
             return Err(pathfinder_to_error_data(&e));
         }
 
@@ -255,18 +231,8 @@ impl PathfinderServer {
 
         // 1. Sandbox check
         if let Err(e) = self.sandbox.check(relative_path) {
-            let duration_ms = start.elapsed().as_millis();
-            let err_data = pathfinder_to_error_data(&e);
-            tracing::warn!(
-                tool = "read_file",
-                error = %e,
-                error_code = e.error_code(),
-                error_message = %e,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "sandbox check failed"
-            );
-            return Err(err_data);
+            tracing::warn!(tool = "read_file", error = %e, "sandbox check failed");
+            return Err(pathfinder_to_error_data(&e));
         }
 
         // 2. Read file
@@ -276,29 +242,11 @@ impl PathfinderServer {
                 let err = PathfinderError::FileNotFound {
                     path: relative_path.to_path_buf(),
                 };
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "read_file",
-                    error = %err,
-                    error_code = err.error_code(),
-                    error_message = %err,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "file not found"
-                );
+                tracing::warn!(tool = "read_file", error = %err, "file not found");
                 return Err(pathfinder_to_error_data(&err));
             }
             Err(e) => {
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "read_file",
-                    error = %e,
-                    error_code = "INTERNAL_ERROR",
-                    error_message = %e,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "failed to read file"
-                );
+                tracing::warn!(tool = "read_file", error = %e, "failed to read file");
                 return Err(io_error_data(format!("failed to read file: {e}")));
             }
         };
@@ -343,10 +291,10 @@ impl PathfinderServer {
 
     /// Core logic for the `write_file` tool.
     ///
-    /// Supports two modes: full-content replacement and surgical search-and-replace.
-    /// Includes OCC version checking (with a late TOCTOU re-check before the write)
-    /// and sandbox authorization.
-    #[allow(clippy::too_many_lines)] // Multi-step write with OCC, TOCTOU check, two modes — each step has distinct telemetry
+    /// Supports two modes: full-content replacement and surgical search-and-replace
+    /// (via [`apply_replacements`]). Includes OCC version checking with a late
+    /// TOCTOU re-check before the write, and sandbox authorization.
+    #[tracing::instrument(skip(self, params), fields(filepath = %params.filepath))]
     pub(crate) async fn write_file_impl(
         &self,
         params: WriteFileParams,
@@ -357,25 +305,19 @@ impl PathfinderServer {
 
         tracing::info!(
             tool = "write_file",
-            filepath = %params.filepath,
-            mode = if params.content.is_some() { "full_replacement" } else { "search_and_replace" },
+            mode = if params.content.is_some() {
+                "full_replacement"
+            } else {
+                "search_and_replace"
+            },
             "write_file: start"
         );
 
         // 1. Validate mutually exclusive modes
         match (&params.content, &params.replacements) {
             (None, None) | (Some(_), Some(_)) => {
-                let duration_ms = start.elapsed().as_millis();
                 let e = "exactly one of 'content' or 'replacements' must be provided";
-                tracing::warn!(
-                    tool = "write_file",
-                    error = %e,
-                    error_code = "INVALID_TARGET",
-                    error_message = %e,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "invalid arguments"
-                );
+                tracing::warn!(tool = "write_file", error = %e, "invalid arguments");
                 return Err(io_error_data(e));
             }
             _ => {}
@@ -383,16 +325,7 @@ impl PathfinderServer {
 
         // 2. Sandbox check
         if let Err(e) = self.sandbox.check(relative_path) {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "write_file",
-                error = %e,
-                error_code = e.error_code(),
-                error_message = %e,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "sandbox check failed"
-            );
+            tracing::warn!(tool = "write_file", error = %e, "sandbox check failed");
             return Err(pathfinder_to_error_data(&e));
         }
 
@@ -403,29 +336,11 @@ impl PathfinderServer {
                 let err = PathfinderError::FileNotFound {
                     path: relative_path.to_path_buf(),
                 };
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "write_file",
-                    error = %err,
-                    error_code = err.error_code(),
-                    error_message = %err,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "file not found"
-                );
+                tracing::warn!(tool = "write_file", error = %err, "file not found");
                 return Err(pathfinder_to_error_data(&err));
             }
             Err(e) => {
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "write_file",
-                    error = %e,
-                    error_code = "INTERNAL_ERROR",
-                    error_message = %e,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "failed to read file"
-                );
+                tracing::warn!(tool = "write_file", error = %e, "failed to read file");
                 return Err(io_error_data(format!("failed to read file: {e}")));
             }
         };
@@ -437,88 +352,27 @@ impl PathfinderServer {
                 path: relative_path.to_path_buf(),
                 current_version_hash: current_hash.as_str().to_owned(),
             };
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "write_file",
-                error = %err,
-                error_code = err.error_code(),
-                error_message = %err,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "OCC version mismatch"
-            );
+            tracing::warn!(tool = "write_file", error = %err, "OCC version mismatch");
             return Err(pathfinder_to_error_data(&err));
         }
 
-        // 5. Compute new content
+        // 5. Compute new content (full replacement or search-and-replace)
         let new_content = if let Some(content) = params.content {
             content
         } else {
-            // Search-and-replace mode
             // SAFETY: validated above that exactly one of content/replacements is Some.
             let replacements = params.replacements.unwrap_or_default();
-            let mut working = current_content.clone();
-            for replacement in &replacements {
-                let occurrences = working.matches(replacement.old_text.as_str()).count();
-                match occurrences {
-                    0 => {
-                        let err = PathfinderError::MatchNotFound {
-                            filepath: relative_path.to_path_buf(),
-                        };
-                        let duration_ms = start.elapsed().as_millis();
-                        tracing::warn!(
-                            tool = "write_file",
-                            old_text = %replacement.old_text,
-                            error = %err,
-                            error_code = err.error_code(),
-                            error_message = %err,
-                            duration_ms,
-                            engines_used = ?(&[] as &[&str]),
-                            "match not found"
-                        );
-                        return Err(pathfinder_to_error_data(&err));
-                    }
-                    1 => {
-                        working = working.replacen(&replacement.old_text, &replacement.new_text, 1);
-                    }
-                    n => {
-                        let err = PathfinderError::AmbiguousMatch {
-                            filepath: relative_path.to_path_buf(),
-                            occurrences: n,
-                        };
-                        let duration_ms = start.elapsed().as_millis();
-                        tracing::warn!(
-                            tool = "write_file",
-                            old_text = %replacement.old_text,
-                            occurrences = n,
-                            error = %err,
-                            error_code = err.error_code(),
-                            error_message = %err,
-                            duration_ms,
-                            engines_used = ?(&[] as &[&str]),
-                            "ambiguous match"
-                        );
-                        return Err(pathfinder_to_error_data(&err));
-                    }
-                }
-            }
-            working
+            apply_replacements(current_content, &replacements, relative_path).map_err(|e| {
+                tracing::warn!(tool = "write_file", error = %e, "search_and_replace failed");
+                pathfinder_to_error_data(&e)
+            })?
         };
 
         // 6. TOCTOU late-check: re-read and re-hash immediately before write
         let late_content = match tfs::read(&absolute_path).await {
             Ok(b) => b,
             Err(e) => {
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "write_file",
-                    error = %e,
-                    error_code = "INTERNAL_ERROR",
-                    error_message = %e,
-                    duration_ms,
-                    engines_used = ?(&[] as &[&str]),
-                    "TOCTOU re-read failed"
-                );
+                tracing::warn!(tool = "write_file", error = %e, "TOCTOU re-read failed");
                 return Err(io_error_data(format!("TOCTOU re-read failed: {e}")));
             }
         };
@@ -528,31 +382,13 @@ impl PathfinderServer {
                 path: relative_path.to_path_buf(),
                 current_version_hash: late_hash.as_str().to_owned(),
             };
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "write_file",
-                error = %err,
-                error_code = err.error_code(),
-                error_message = %err,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "TOCTOU version mismatch on late-check"
-            );
+            tracing::warn!(tool = "write_file", error = %err, "TOCTOU version mismatch");
             return Err(pathfinder_to_error_data(&err));
         }
 
         // 7. Write to disk (in-place: preserves inode for HMR/watchers)
         if let Err(e) = tfs::write(&absolute_path, new_content.as_bytes()).await {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "write_file",
-                error = %e,
-                error_code = "INTERNAL_ERROR",
-                error_message = %e,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "failed to write file"
-            );
+            tracing::warn!(tool = "write_file", error = %e, "failed to write file");
             return Err(io_error_data(format!("failed to write file: {e}")));
         }
 
@@ -561,7 +397,6 @@ impl PathfinderServer {
 
         tracing::info!(
             tool = "write_file",
-            filepath = %params.filepath,
             duration_ms,
             engines_used = ?(&[] as &[&str]),
             "write_file: complete"

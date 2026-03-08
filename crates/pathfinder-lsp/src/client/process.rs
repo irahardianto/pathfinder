@@ -24,11 +24,10 @@ pub(super) struct ManagedProcess {
     pub(super) child: Child,
     /// Exclusive write handle to the LSP's stdin.
     pub(super) stdin: Mutex<tokio::io::BufWriter<ChildStdin>>,
-    /// The language this process serves (used in M3 for capability routing).
-    #[allow(dead_code)]
+    /// The language this process serves.
+    #[allow(dead_code)] // Kept for debugging/logging; not yet used in dispatch
     pub(super) language_id: String,
-    /// Capabilities negotiated during `initialize` (used in M3 for per-capability dispatch).
-    #[allow(dead_code)]
+    /// Capabilities negotiated during `initialize`.
     pub(super) capabilities: DetectedCapabilities,
     /// Last time this process was used (for idle-timeout tracking).
     pub(super) last_used: Instant,

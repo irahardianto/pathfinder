@@ -12,46 +12,23 @@ impl PathfinderServer {
     ///
     /// Parses the semantic path, performs a sandbox check, then delegates
     /// to the `Surgeon` to extract the AST-located symbol scope.
-    #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
     pub(crate) async fn read_symbol_scope_impl(
         &self,
         params: ReadSymbolScopeParams,
     ) -> Result<Json<ReadSymbolScopeResponse>, ErrorData> {
         let start = std::time::Instant::now();
 
-        tracing::info!(
-            tool = "read_symbol_scope",
-            semantic_path = %params.semantic_path,
-            "read_symbol_scope: start"
-        );
+        tracing::info!(tool = "read_symbol_scope", "read_symbol_scope: start");
 
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let duration_ms = start.elapsed().as_millis();
-            let e = "invalid semantic path format";
-            tracing::warn!(
-                tool = "read_symbol_scope",
-                error = %e,
-                error_code = "INVALID_TARGET",
-                error_message = %e,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "invalid semantic path"
-            );
-            return Err(io_error_data(e.to_string()));
+            tracing::warn!(tool = "read_symbol_scope", "invalid semantic path format");
+            return Err(io_error_data("invalid semantic path format"));
         };
 
         // Sandbox check on the file path
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "read_symbol_scope",
-                error = %e,
-                error_code = e.error_code(),
-                error_message = %e,
-                duration_ms,
-                engines_used = ?(&[] as &[&str]),
-                "sandbox check failed"
-            );
+            tracing::warn!(tool = "read_symbol_scope", error = %e, "sandbox check failed");
             return Err(pathfinder_to_error_data(&e));
         }
 
@@ -65,7 +42,6 @@ impl PathfinderServer {
                 let duration_ms = start.elapsed().as_millis();
                 tracing::info!(
                     tool = "read_symbol_scope",
-                    semantic_path = %params.semantic_path,
                     lines = (scope.end_line - scope.start_line + 1),
                     duration_ms,
                     engines_used = ?["tree-sitter"],
@@ -82,19 +58,14 @@ impl PathfinderServer {
             }
             Err(e) => {
                 let duration_ms = start.elapsed().as_millis();
-
                 tracing::warn!(
                     tool = "read_symbol_scope",
                     error = %e,
-                    error_message = %e,
                     duration_ms,
                     engines_used = ?["tree-sitter"],
                     "read_symbol_scope: failed"
                 );
-
-                // Convert SurgeonError to PathfinderError if possible, or io_error
-                let error_data = crate::server::helpers::treesitter_error_to_error_data(e);
-                Err(error_data)
+                Err(crate::server::helpers::treesitter_error_to_error_data(e))
             }
         }
     }

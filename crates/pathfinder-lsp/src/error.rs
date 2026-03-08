@@ -39,6 +39,17 @@ pub enum LspError {
     #[error("LSP connection lost")]
     ConnectionLost,
 
+    /// The LSP server is running but does not advertise the requested capability.
+    ///
+    /// For example, a server that doesn't implement Pull Diagnostics (LSP 3.17)
+    /// will trigger this error for `pull_diagnostics()` calls. Tool handlers
+    /// should return `validation_skipped: true, reason: "pull_diagnostics_unsupported"`.
+    #[error("LSP does not support capability: {capability}")]
+    UnsupportedCapability {
+        /// The LSP capability name (e.g., `"diagnosticProvider"`).
+        capability: String,
+    },
+
     /// I/O error communicating with the LSP process.
     #[error("LSP I/O error: {0}")]
     Io(#[source] std::io::Error),
