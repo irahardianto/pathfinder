@@ -29,17 +29,22 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if cli.lsp_trace {
+        if let Ok(dir) = "pathfinder_lsp::client::transport=debug".parse() {
+            filter = filter.add_directive(dir);
+        }
+    }
+
     // Initialize tracing to stderr (stdout is used by MCP stdio transport)
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .with_target(false)
         .init();
-
-    let cli = Cli::parse();
 
     tracing::info!(
         workspace = %cli.workspace_path.display(),
@@ -58,11 +63,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Create MCP server
     let server = PathfinderServer::new(workspace_root, config).await;
-
-    // If LSP tracing is requested, we could inject that config later when LSP is implemented.
-    if cli.lsp_trace {
-        tracing::info!("LSP tracing enabled via --lsp-trace");
-    }
 
     tracing::info!("Starting MCP stdio transport");
 

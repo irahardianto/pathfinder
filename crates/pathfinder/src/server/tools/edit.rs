@@ -1126,6 +1126,80 @@ impl PathfinderServer {
 
         Ok(VersionHash::compute(new_bytes))
     }
+
+    /// Helper function to perform LSP validation, TOCTOU check, and disk write.
+    /// This dries up the tail end of the edit tools.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Helper function to dry up edit tool validation and response tails."
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline for validation, write and response construction."
+    )]
+    async fn finalize_edit(
+        &self,
+        tool_name: &'static str,
+        semantic_path: &SemanticPath,
+        raw_semantic_path_str: &str,
+        source: &[u8],
+        new_bytes: &[u8],
+        current_hash: &VersionHash,
+        ignore_validation_failures: bool,
+        start_time: std::time::Instant,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        let original_str = std::str::from_utf8(source);
+        let new_str = std::str::from_utf8(new_bytes);
+        let validation_outcome = match (original_str, new_str) {
+            (Ok(orig), Ok(new)) => {
+                self.run_lsp_validation(
+                    &semantic_path.file_path,
+                    orig,
+                    new,
+                    ignore_validation_failures,
+                )
+                .await
+            }
+            _ => ValidationOutcome {
+                validation: EditValidation::skipped(),
+                skipped: Some(true),
+                skipped_reason: Some("utf8_error".to_owned()),
+                should_block: false,
+            },
+        };
+
+        if validation_outcome.should_block {
+            let introduced = validation_outcome.validation.introduced_errors.clone();
+            let err = PathfinderError::ValidationFailed {
+                count: introduced.len(),
+                introduced_errors: introduced,
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        let new_hash = self
+            .flush_edit_with_toctou(semantic_path, current_hash, new_bytes)
+            .await?;
+
+        let duration_ms = start_time.elapsed().as_millis();
+        tracing::info!(
+            tool = tool_name,
+            semantic_path = %raw_semantic_path_str,
+            duration_ms,
+            new_version_hash = new_hash.as_str(),
+            engines_used = ?["tree-sitter"],
+            "{tool_name}: complete"
+        );
+
+        Ok(Json(EditResponse {
+            success: true,
+            new_version_hash: Some(new_hash.as_str().to_owned()),
+            formatted: false,
+            validation: validation_outcome.validation,
+            validation_skipped: validation_outcome.skipped,
+            validation_skipped_reason: validation_outcome.skipped_reason,
+        }))
+    }
 }
 
 #[cfg(test)]

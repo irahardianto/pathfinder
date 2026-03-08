@@ -50,10 +50,16 @@ impl PathfinderServer {
             context_lines: params.context_lines as usize,
         };
 
+        let ripgrep_start = std::time::Instant::now();
         match self.scout.search(&search_params).await {
             Ok(result) => {
+                let ripgrep_ms = ripgrep_start.elapsed().as_millis();
+
                 let mut enriched_matches = result.matches;
+
+                let ts_start = std::time::Instant::now();
                 let node_types = self.enrich_matches(&mut enriched_matches).await;
+                let tree_sitter_parse_ms = ts_start.elapsed().as_millis();
 
                 let filtered_matches =
                     apply_filter_mode(enriched_matches, &node_types, params.filter_mode);
@@ -66,6 +72,8 @@ impl PathfinderServer {
                     returned = returned_count,
                     truncated = result.truncated,
                     filter_mode = ?params.filter_mode,
+                    ripgrep_ms,
+                    tree_sitter_parse_ms,
                     duration_ms,
                     engines_used = ?["ripgrep", "treesitter"],
                     "search_codebase: complete"

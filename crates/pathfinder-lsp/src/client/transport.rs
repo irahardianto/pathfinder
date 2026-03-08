@@ -72,8 +72,12 @@ where
         ))
     })?;
 
-    serde_json::from_slice(&body)
-        .map_err(|e| LspError::Protocol(format!("invalid JSON in LSP message: {e}")))
+    let body_value: Value = serde_json::from_slice(&body)
+        .map_err(|e| LspError::Protocol(format!("invalid JSON in LSP message: {e}")))?;
+
+    tracing::debug!(message = %body_value, "LSP RECV");
+
+    Ok(body_value)
 }
 
 /// Write one JSON-RPC message to `writer`.
@@ -87,6 +91,8 @@ pub(super) async fn write_message<W>(writer: &mut W, message: &Value) -> Result<
 where
     W: AsyncWriteExt + Unpin,
 {
+    tracing::debug!(message = %message, "LSP SEND");
+
     let body = serde_json::to_vec(message)
         .map_err(|e| LspError::Protocol(format!("serialising JSON-RPC message: {e}")))?;
 

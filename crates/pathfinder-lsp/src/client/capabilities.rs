@@ -31,6 +31,9 @@ pub struct DetectedCapabilities {
     /// Server supports Pull Diagnostics — `textDocument/diagnostic` (LSP 3.17).
     /// If false, edit tools use `validation_skipped: true`.
     pub diagnostic_provider: bool,
+    /// Server supports Pull Diagnostics — `workspace/diagnostic` (LSP 3.17).
+    /// Used for catching cross-file regressions during edits.
+    pub workspace_diagnostic_provider: bool,
 }
 
 impl DetectedCapabilities {
@@ -53,11 +56,20 @@ impl DetectedCapabilities {
             })
         };
 
+        let workspace_diagnostic_provider = caps
+            .get("diagnosticProvider")
+            .and_then(|v| v.get("workspaceDiagnostics"))
+            .is_some_and(|v| match v.as_bool() {
+                Some(b) => b,
+                None => !v.is_null(), // Object means supported
+            });
+
         Self {
             definition_provider: is_cap("definitionProvider"),
             call_hierarchy_provider: is_cap("callHierarchyProvider"),
             formatting_provider: is_cap("documentFormattingProvider"),
             diagnostic_provider: is_cap("diagnosticProvider"),
+            workspace_diagnostic_provider,
         }
     }
 }
@@ -75,6 +87,7 @@ mod tests {
         assert!(!detected.call_hierarchy_provider);
         assert!(!detected.formatting_provider);
         assert!(!detected.diagnostic_provider);
+        assert!(!detected.workspace_diagnostic_provider);
     }
 
     #[test]
@@ -92,6 +105,7 @@ mod tests {
         assert!(detected.call_hierarchy_provider);
         assert!(detected.formatting_provider);
         assert!(detected.diagnostic_provider);
+        assert!(!detected.workspace_diagnostic_provider);
     }
 
     #[test]
@@ -113,6 +127,7 @@ mod tests {
         assert!(detected.call_hierarchy_provider);
         assert!(detected.formatting_provider);
         assert!(detected.diagnostic_provider);
+        assert!(detected.workspace_diagnostic_provider);
     }
 
     #[test]
@@ -126,5 +141,6 @@ mod tests {
         let detected = DetectedCapabilities::from_response_json(&response);
         assert!(!detected.definition_provider);
         assert!(!detected.call_hierarchy_provider);
+        assert!(!detected.workspace_diagnostic_provider);
     }
 }
