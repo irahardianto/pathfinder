@@ -203,59 +203,18 @@ impl PathfinderServer {
 
         let new_bytes = new_content.as_bytes();
 
-        // ── Step 8: LSP validation (in-memory, before disk write) ────────
-        let original_str = std::str::from_utf8(&source)
-            .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")));
-        let validation_outcome = match original_str {
-            Ok(orig) => {
-                self.run_lsp_validation(
-                    &semantic_path.file_path,
-                    orig,
-                    &new_content,
-                    params.ignore_validation_failures,
-                )
-                .await
-            }
-            Err(_) => ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: Some(true),
-                skipped_reason: Some("utf8_error".to_owned()),
-                should_block: false,
-            },
-        };
-
-        if validation_outcome.should_block {
-            let introduced = validation_outcome.validation.introduced_errors.clone();
-            let err = PathfinderError::ValidationFailed {
-                count: introduced.len(),
-                introduced_errors: introduced,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        // ── Step 9 & 10: TOCTOU late-check & Write ────────────────────────
-        let new_hash = self
-            .flush_edit_with_toctou(&semantic_path, &current_hash, new_bytes)
-            .await?;
-
-        let duration_ms = start.elapsed().as_millis();
-        tracing::info!(
-            tool = "replace_body",
-            semantic_path = %params.semantic_path,
-            duration_ms,
-            new_version_hash = new_hash.as_str(),
-            engines_used = ?["tree-sitter"],
-            "replace_body: complete"
-        );
-
-        Ok(Json(EditResponse {
-            success: true,
-            new_version_hash: Some(new_hash.as_str().to_owned()),
-            formatted: false,
-            validation: validation_outcome.validation,
-            validation_skipped: validation_outcome.skipped,
-            validation_skipped_reason: validation_outcome.skipped_reason,
-        }))
+        // ── Steps 8–11: Validate → TOCTOU → Write → Respond ────────────
+        self.finalize_edit(
+            "replace_body",
+            &semantic_path,
+            &params.semantic_path,
+            &source,
+            new_bytes,
+            &current_hash,
+            params.ignore_validation_failures,
+            start,
+        )
+        .await
     }
 
     /// Core logic for the `replace_full` tool (PRD Epic 5, Story 5.4).
@@ -1133,10 +1092,6 @@ impl PathfinderServer {
         clippy::too_many_arguments,
         reason = "Helper function to dry up edit tool validation and response tails."
     )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequential pipeline for validation, write and response construction."
-    )]
     async fn finalize_edit(
         &self,
         tool_name: &'static str,
@@ -1209,12 +1164,85 @@ mod tests {
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{VersionHash, WorkspaceRoot};
+    use pathfinder_lsp::types::{DefinitionLocation, LspDiagnostic};
+    use pathfinder_lsp::{Lawyer, LspError};
     use pathfinder_search::MockScout;
     use pathfinder_treesitter::mock::MockSurgeon;
     use pathfinder_treesitter::surgeon::BodyRange;
     use rmcp::handler::server::wrapper::Parameters;
+    use std::path::Path;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// Minimal `Lawyer` that always returns `LspError::UnsupportedCapability` from
+    /// `pull_diagnostics`. Used to exercise the `pull_diagnostics_unsupported` branch
+    /// in `run_lsp_validation` (the `MockLawyer`'s queue can only inject `Protocol`
+    /// errors, not `UnsupportedCapability`).
+    struct UnsupportedDiagLawyer;
+
+    #[async_trait::async_trait]
+    impl Lawyer for UnsupportedDiagLawyer {
+        async fn goto_definition(
+            &self,
+            _workspace_root: &Path,
+            _file_path: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Option<DefinitionLocation>, LspError> {
+            Ok(None)
+        }
+        async fn did_open(
+            &self,
+            _workspace_root: &Path,
+            _file_path: &Path,
+            _content: &str,
+        ) -> Result<(), LspError> {
+            Ok(())
+        }
+        async fn did_change(
+            &self,
+            _workspace_root: &Path,
+            _file_path: &Path,
+            _content: &str,
+            _version: i32,
+        ) -> Result<(), LspError> {
+            Ok(())
+        }
+        async fn did_close(
+            &self,
+            _workspace_root: &Path,
+            _file_path: &Path,
+        ) -> Result<(), LspError> {
+            Ok(())
+        }
+        async fn pull_diagnostics(
+            &self,
+            _workspace_root: &Path,
+            _file_path: &Path,
+        ) -> Result<Vec<LspDiagnostic>, LspError> {
+            Err(LspError::UnsupportedCapability {
+                capability: "diagnosticProvider".into(),
+            })
+        }
+        async fn pull_workspace_diagnostics(
+            &self,
+            _workspace_root: &Path,
+            _file_path: &Path,
+        ) -> Result<Vec<LspDiagnostic>, LspError> {
+            Err(LspError::UnsupportedCapability {
+                capability: "diagnosticProvider".into(),
+            })
+        }
+        async fn range_formatting(
+            &self,
+            _workspace_root: &Path,
+            _file_path: &Path,
+            _start_line: u32,
+            _end_line: u32,
+        ) -> Result<Option<String>, LspError> {
+            Ok(None)
+        }
+    }
 
     fn make_server_dyn(
         ws_dir: &tempfile::TempDir,
@@ -1911,5 +1939,412 @@ mod tests {
         // Ensure disk untouched
         let written = std::fs::read_to_string(&abs).unwrap();
         assert!(written.contains("func Login() {"));
+    }
+
+    // ── run_lsp_validation tests ────────────────────────────────────────────
+    //
+    // `run_lsp_validation` is `async fn` on `PathfinderServer` (private), so we
+    // drive it indirectly via `replace_full_impl`, which calls it in the happy
+    // path after the body splice.  All tests inject a `MockLawyer` via
+    // `with_all_engines` and configure the desired lawyer behaviour before the
+    // call.
+
+    /// Build a `PathfinderServer` with an injected `MockLawyer` and a
+    /// `MockSurgeon` that has one `resolve_full_range` result ready.
+    ///
+    /// The caller writes the source file; the surgeon is pre-configured to
+    /// return `full_range` covering the full file so `replace_full_impl` reaches
+    /// `run_lsp_validation`.
+    fn make_server_with_lawyer(
+        ws_dir: &tempfile::TempDir,
+        mock_surgeon: MockSurgeon,
+        mock_lawyer: pathfinder_lsp::MockLawyer,
+    ) -> PathfinderServer {
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon),
+            Arc::new(mock_lawyer),
+        )
+    }
+
+    /// Helper: write a tiny Go source file and build a `MockSurgeon` whose
+    /// `resolve_full_range` returns a range covering the whole file.
+    fn setup_full_replace_fixture(
+        ws_dir: &tempfile::TempDir,
+        filepath: &str,
+        src: &str,
+    ) -> (MockSurgeon, VersionHash) {
+        let abs = ws_dir.path().join(filepath);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, src).unwrap();
+
+        let src_bytes = src.as_bytes();
+        let hash = VersionHash::compute(src_bytes);
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .resolve_full_range_results
+            .lock()
+            .unwrap()
+            .push(Ok((
+                pathfinder_treesitter::surgeon::FullRange {
+                    start_byte: 0,
+                    end_byte: src_bytes.len(),
+                    indent_column: 0,
+                },
+                src_bytes.to_vec(),
+                hash.clone(),
+            )));
+
+        (mock_surgeon, hash)
+    }
+
+    // ── no_lsp: did_open returns NoLspAvailable → validation skipped ────
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_no_lsp() {
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        mock_lawyer.set_did_open_error(pathfinder_lsp::LspError::NoLspAvailable);
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { return }\n".to_owned(),
+            ignore_validation_failures: false,
+        };
+        let result = server
+            .replace_full(Parameters(params))
+            .await
+            .expect("should succeed — no_lsp gracefully degrades");
+        let resp = result.0;
+
+        assert!(resp.success);
+        assert_eq!(resp.validation.status, "skipped");
+        assert_eq!(resp.validation_skipped, Some(true));
+        assert_eq!(resp.validation_skipped_reason.as_deref(), Some("no_lsp"));
+    }
+
+    // ── unsupported: did_open returns UnsupportedCapability → skipped ───
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_unsupported() {
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        mock_lawyer.set_did_open_error(pathfinder_lsp::LspError::UnsupportedCapability {
+            capability: "textDocument/diagnostic".to_owned(),
+        });
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { return }\n".to_owned(),
+            ignore_validation_failures: false,
+        };
+        let result = server
+            .replace_full(Parameters(params))
+            .await
+            .expect("should succeed — unsupported gracefully degrades");
+        let resp = result.0;
+
+        assert!(resp.success);
+        assert_eq!(resp.validation.status, "skipped");
+        assert_eq!(resp.validation_skipped, Some(true));
+        assert_eq!(
+            resp.validation_skipped_reason.as_deref(),
+            Some("unsupported")
+        );
+    }
+
+    // ── pre_diag_timeout: first pull_diagnostics errors → skipped ───────
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_pre_diag_timeout() {
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        // did_open succeeds (default); first pull_diagnostics returns a protocol
+        // error — any error that is not UnsupportedCapability maps to
+        // "diagnostic_timeout" in run_lsp_validation.
+        mock_lawyer.push_pull_diagnostics_result(Err("LSP timed out".to_owned()));
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { return }\n".to_owned(),
+            ignore_validation_failures: false,
+        };
+        let result = server
+            .replace_full(Parameters(params))
+            .await
+            .expect("should succeed — pre-diag timeout gracefully degrades");
+        let resp = result.0;
+
+        assert!(resp.success);
+        assert_eq!(resp.validation.status, "skipped");
+        assert_eq!(resp.validation_skipped, Some(true));
+        assert_eq!(
+            resp.validation_skipped_reason.as_deref(),
+            Some("diagnostic_timeout")
+        );
+    }
+
+    // ── pre_diag_unsupported: first pull_diagnostics → UnsupportedCapability
+    //    → skipped with "pull_diagnostics_unsupported" reason ────────────────
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_pull_diagnostics_unsupported() {
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        // `mock_surgeon` is used in the first call but we need a fresh surgeon
+        // for the second server construction; discard the first fixture result.
+        let (_mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        // UnsupportedDiagLawyer always returns UnsupportedCapability from
+        // pull_diagnostics, exercising the "pull_diagnostics_unsupported" branch.
+        let (mock_surgeon_2, _) = setup_full_replace_fixture(&ws_dir, filepath, src);
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon_2),
+            Arc::new(UnsupportedDiagLawyer),
+        );
+
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { return }\n".to_owned(),
+            ignore_validation_failures: false,
+        };
+        let result = server
+            .replace_full(Parameters(params))
+            .await
+            .expect("should succeed — pull_diagnostics_unsupported degrades");
+        let resp = result.0;
+
+        assert_eq!(resp.validation.status, "skipped");
+        assert_eq!(
+            resp.validation_skipped_reason.as_deref(),
+            Some("pull_diagnostics_unsupported")
+        );
+    }
+
+    // ── post_diag_timeout: second pull_diagnostics errors → skipped ──────
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_post_diag_timeout() {
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        // Pre-edit pull_diagnostics succeeds with empty diags.
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+        // Post-edit pull_diagnostics errors (e.g. timeout).
+        mock_lawyer.push_pull_diagnostics_result(Err("timeout after 10s".to_owned()));
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { return }\n".to_owned(),
+            ignore_validation_failures: false,
+        };
+        let result = server
+            .replace_full(Parameters(params))
+            .await
+            .expect("should succeed — post-diag timeout gracefully degrades");
+        let resp = result.0;
+
+        assert!(resp.success);
+        assert_eq!(resp.validation.status, "skipped");
+        assert_eq!(resp.validation_skipped, Some(true));
+        assert_eq!(
+            resp.validation_skipped_reason.as_deref(),
+            Some("diagnostic_timeout")
+        );
+    }
+
+    // ── blocking: new errors introduced + ignore_validation_failures=false ─
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_blocking() {
+        use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
+
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        // Pre-edit: no errors.
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+        // Post-edit: one new error introduced.
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![LspDiagnostic {
+            severity: LspDiagnosticSeverity::Error,
+            code: Some("E001".into()),
+            message: "undefined: Foo".into(),
+            file: filepath.to_owned(),
+            start_line: 1,
+            end_line: 1,
+        }]));
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        // ignore_validation_failures = false → should block
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { Foo() }\n".to_owned(),
+            ignore_validation_failures: false,
+        };
+        let result = server.replace_full(Parameters(params)).await;
+
+        let Err(err) = result else {
+            panic!("expected VALIDATION_FAILED error when new errors are introduced");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "VALIDATION_FAILED", "got: {err:?}");
+        // Confirm the introduced error is surfaced (nested under details.introduced_errors
+        // because pathfinder_to_error_data serializes ErrorResponse which has a `details` field)
+        let introduced = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("details"))
+            .and_then(|d| d.get("introduced_errors"))
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len);
+        assert_eq!(
+            introduced, 1,
+            "one new error should appear in introduced_errors"
+        );
+    }
+
+    // ── blocking_ignored: new errors + ignore_validation_failures=true → passes
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_blocking_ignored() {
+        use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
+
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![LspDiagnostic {
+            severity: LspDiagnosticSeverity::Error,
+            code: Some("E001".into()),
+            message: "undefined: Foo".into(),
+            file: filepath.to_owned(),
+            start_line: 1,
+            end_line: 1,
+        }]));
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        // ignore_validation_failures = true → should NOT block, file is written
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { Foo() }\n".to_owned(),
+            ignore_validation_failures: true,
+        };
+        let result = server
+            .replace_full(Parameters(params))
+            .await
+            .expect("should succeed when ignore_validation_failures=true");
+        let resp = result.0;
+
+        assert!(resp.success);
+        assert_eq!(resp.validation.status, "passed");
+        // The introduced error should still be reported (for informational purposes)
+        assert_eq!(resp.validation.introduced_errors.len(), 1);
+        assert_eq!(
+            resp.validation.introduced_errors[0].message,
+            "undefined: Foo"
+        );
+    }
+
+    // ── happy_path: no new errors → status="passed", should_block=false ───
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_happy_path() {
+        use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
+
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        // One pre-existing warning (non-error) in both pre and post.
+        let existing_warning = LspDiagnostic {
+            severity: LspDiagnosticSeverity::Warning,
+            code: Some("W001".into()),
+            message: "unused import".into(),
+            file: filepath.to_owned(),
+            start_line: 1,
+            end_line: 1,
+        };
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![existing_warning.clone()]));
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![existing_warning]));
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login() { return }\n".to_owned(),
+            ignore_validation_failures: false,
+        };
+        let result = server
+            .replace_full(Parameters(params))
+            .await
+            .expect("should succeed — no new errors");
+        let resp = result.0;
+
+        assert!(resp.success);
+        assert_eq!(resp.validation.status, "passed");
+        assert_eq!(resp.validation_skipped, None);
+        assert!(resp.validation.introduced_errors.is_empty());
+        assert!(resp.validation.resolved_errors.is_empty());
     }
 }

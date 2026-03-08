@@ -38,6 +38,9 @@ type PullDiagnosticsQueue = Arc<Mutex<Vec<Result<Vec<LspDiagnostic>, String>>>>;
 /// Configured result for `range_formatting`.
 type RangeFormattingFixture = Arc<Mutex<Option<Result<Option<String>, String>>>>;
 
+/// Configured error for `did_open`. `None` = return `Ok(())`.
+type DidOpenErrorFixture = Arc<Mutex<Option<LspError>>>;
+
 /// A configurable fake `Lawyer` for unit testing.
 #[derive(Clone, Default)]
 pub struct MockLawyer {
@@ -50,6 +53,8 @@ pub struct MockLawyer {
     // ── did_open ──────────────────────────────────────────────────────────────
     /// Number of `did_open` notifications received.
     pub did_open_calls: Arc<Mutex<Vec<(String, String)>>>,
+    /// Configurable error to return from `did_open`. `None` = return `Ok(())`.
+    pub did_open_error: DidOpenErrorFixture,
 
     // ── did_change ────────────────────────────────────────────────────────────
     /// All `(file_path, content, version)` tuples passed to `did_change`.
@@ -104,6 +109,19 @@ impl MockLawyer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Force `did_open` to return the given `LspError` (once).
+    ///
+    /// Use this to test the `no_lsp` / `unsupported` early-exit branches of
+    /// `run_lsp_validation` without needing a separate `Lawyer` implementation.
+    /// After the error is consumed by one `did_open` call it reverts to `Ok(())`.
+    pub fn set_did_open_error(&self, error: LspError) {
+        let mut guard = self
+            .did_open_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(error);
     }
 
     // ── pull_diagnostics ──────────────────────────────────────────────────────
@@ -210,6 +228,18 @@ impl Lawyer for MockLawyer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((file_path.to_string_lossy().into_owned(), content.to_owned()));
+
+        // If a failure has been configured, consume and return it.
+        let maybe_error = {
+            let mut guard = self
+                .did_open_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        if let Some(e) = maybe_error {
+            return Err(e);
+        }
         Ok(())
     }
 
