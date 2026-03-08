@@ -408,3 +408,61 @@ impl PathfinderServer {
         }))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::server::types::Replacement;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_apply_replacements_success() {
+        let content = "hello world\nthis is a test\nend".to_string();
+        let replacements = vec![
+            Replacement {
+                old_text: "world".to_string(),
+                new_text: "universe".to_string(),
+            },
+            Replacement {
+                old_text: "is a test".to_string(),
+                new_text: "was a success".to_string(),
+            },
+        ];
+        let path = PathBuf::from("test.txt");
+
+        let result = apply_replacements(content, &replacements, &path).expect("should succeed");
+        assert_eq!(result, "hello universe\nthis was a success\nend");
+    }
+
+    #[test]
+    fn test_apply_replacements_match_not_found() {
+        let content = "hello world".to_string();
+        let replacements = vec![Replacement {
+            old_text: "missing".to_string(),
+            new_text: "found".to_string(),
+        }];
+        let path = PathBuf::from("test.txt");
+
+        let result = apply_replacements(content, &replacements, &path);
+        assert!(matches!(result, Err(PathfinderError::MatchNotFound { .. })));
+    }
+
+    #[test]
+    fn test_apply_replacements_ambiguous_match() {
+        let content = "hello value and another value".to_string();
+        let replacements = vec![Replacement {
+            old_text: "value".to_string(),
+            new_text: "item".to_string(),
+        }];
+        let path = PathBuf::from("test.txt");
+
+        let result = apply_replacements(content, &replacements, &path);
+        match result {
+            Err(PathfinderError::AmbiguousMatch { occurrences, .. }) => {
+                assert_eq!(occurrences, 2);
+            }
+            _ => panic!("expected AmbiguousMatch error"),
+        }
+    }
+}

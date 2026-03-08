@@ -74,6 +74,16 @@ pub trait Lawyer: Send + Sync {
         version: i32,
     ) -> Result<(), LspError>;
 
+    /// Notify the LSP that a document has been closed.
+    ///
+    /// Sends `textDocument/didClose`. This allows the LSP to clear its internal
+    /// state for the file (preventing memory leaks for short-lived validations).
+    ///
+    /// # Errors
+    /// - `LspError::NoLspAvailable` — no language server for this file type
+    /// - `LspError::ConnectionLost` — LSP process crashed
+    async fn did_close(&self, workspace_root: &Path, file_path: &Path) -> Result<(), LspError>;
+
     /// Request Pull Diagnostics for a file (LSP 3.17 `textDocument/diagnostic`).
     ///
     /// Intended for use in the edit validation pipeline: called before and
@@ -85,6 +95,22 @@ pub trait Lawyer: Send + Sync {
     /// - `LspError::Timeout` — LSP did not respond within the timeout
     /// - `LspError::Protocol` — LSP returned malformed diagnostics
     async fn pull_diagnostics(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+    ) -> Result<Vec<LspDiagnostic>, LspError>;
+
+    /// Request Pull Diagnostics for the entire workspace (LSP 3.17 `workspace/diagnostic`).
+    ///
+    /// Intended for use in the edit validation pipeline: called after an in-memory
+    /// edit to catch cross-file breakages.
+    ///
+    /// # Errors
+    /// - `LspError::NoLspAvailable` — no language server for this file type
+    /// - `LspError::UnsupportedCapability` — LSP does not support Workspace Diagnostics
+    /// - `LspError::Timeout` — LSP did not respond within the timeout
+    /// - `LspError::Protocol` — LSP returned malformed diagnostics
+    async fn pull_workspace_diagnostics(
         &self,
         workspace_root: &Path,
         file_path: &Path,

@@ -377,6 +377,26 @@ impl Lawyer for LspClient {
         Ok(())
     }
 
+    async fn did_close(&self, workspace_root: &Path, file_path: &Path) -> Result<(), LspError> {
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        let params = json!({
+            "textDocument": {
+                "uri": file_uri.as_str()
+            }
+        });
+
+        self.notify(language_id, "textDocument/didClose", params)
+            .await?;
+        // Not touching `last_used` on close since this is a cleanup action.
+        Ok(())
+    }
+
     async fn pull_diagnostics(
         &self,
         workspace_root: &Path,
@@ -421,6 +441,47 @@ impl Lawyer for LspClient {
         );
 
         parse_diagnostic_response(&response, file_path)
+    }
+
+    async fn pull_workspace_diagnostics(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+    ) -> Result<Vec<LspDiagnostic>, LspError> {
+        let start = Instant::now();
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let caps = self.capabilities_for(language_id).await?;
+        if !caps.workspace_diagnostic_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "workspaceDiagnosticProvider".to_owned(),
+            });
+        }
+
+        // The params for workspace diagnostics are typically quite minimal
+        let params = json!({});
+
+        let response = self
+            .request(
+                language_id,
+                "workspace/diagnostic",
+                params,
+                Duration::from_secs(60), // Workspace diagnostics might take longer
+            )
+            .await?;
+
+        self.touch(language_id).await;
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::debug!(
+            language = language_id,
+            elapsed_ms = elapsed,
+            "workspace/diagnostic complete"
+        );
+
+        parse_workspace_diagnostic_response(&response, workspace_root)
     }
 
     async fn range_formatting(
@@ -507,6 +568,54 @@ fn parse_diagnostic_response(
     };
 
     Ok(parse_diagnostic_items(items, file_path))
+}
+
+/// Parse the `workspace/diagnostic` response into a flat `Vec<LspDiagnostic>`.
+///
+/// Response shape: `{ "items": [ { "uri": "...", "kind": "full", "items": [Diagnostic, ...] } ] }`
+fn parse_workspace_diagnostic_response(
+    response: &serde_json::Value,
+    workspace_root: &Path,
+) -> Result<Vec<LspDiagnostic>, LspError> {
+    let mut all_diags = Vec::new();
+
+    let items = response
+        .get("items")
+        .and_then(|i| i.as_array())
+        .ok_or_else(|| {
+            LspError::Protocol("workspace.diagnostic 'items' is missing or not an array".to_owned())
+        })?;
+
+    for doc_report in items {
+        if doc_report.get("kind").and_then(|k| k.as_str()) == Some("unchanged") {
+            continue;
+        }
+
+        let Some(uri_str) = doc_report.get("uri").and_then(|u| u.as_str()) else {
+            continue;
+        };
+
+        // Convert URI to relative file path using workspace_root
+        let file_path = match Url::parse(uri_str) {
+            Ok(url) => {
+                if let Ok(path) = url.to_file_path() {
+                    match path.strip_prefix(workspace_root) {
+                        Ok(rel) => rel.to_path_buf(),
+                        Err(_) => path, // Fallback to absolute if not in workspace
+                    }
+                } else {
+                    continue;
+                }
+            }
+            Err(_) => continue,
+        };
+
+        if let Some(doc_items) = doc_report.get("items").and_then(|i| i.as_array()) {
+            all_diags.extend(parse_diagnostic_items(doc_items, &file_path));
+        }
+    }
+
+    Ok(all_diags)
 }
 
 /// Parse an array of LSP `Diagnostic` objects.

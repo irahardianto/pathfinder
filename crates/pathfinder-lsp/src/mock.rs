@@ -55,11 +55,19 @@ pub struct MockLawyer {
     /// All `(file_path, content, version)` tuples passed to `did_change`.
     pub did_change_calls: Arc<Mutex<Vec<(String, String, i32)>>>,
 
+    // ── did_close ─────────────────────────────────────────────────────────────
+    /// Number of `did_close` notifications received.
+    pub did_close_calls: Arc<Mutex<Vec<String>>>,
+
     // ── pull_diagnostics ──────────────────────────────────────────────────────
     /// Queue of results for successive `pull_diagnostics` calls.
     ///
     /// Each call pops the front. When empty, returns `Ok(vec![])`.
     pub pull_diagnostics_results: PullDiagnosticsQueue,
+
+    // ── pull_workspace_diagnostics ────────────────────────────────────────────
+    /// Queue of results for successive `pull_workspace_diagnostics` calls.
+    pub pull_workspace_diagnostics_results: PullDiagnosticsQueue,
 
     // ── range_formatting ──────────────────────────────────────────────────────
     /// Configured result for `range_formatting`.
@@ -110,6 +118,17 @@ impl MockLawyer {
             .push(result);
     }
 
+    /// Push a result onto the `pull_workspace_diagnostics` queue.
+    pub fn push_pull_workspace_diagnostics_result(
+        &self,
+        result: Result<Vec<LspDiagnostic>, String>,
+    ) {
+        self.pull_workspace_diagnostics_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(result);
+    }
+
     /// Returns the number of `did_open` calls recorded.
     #[must_use]
     pub fn did_open_call_count(&self) -> usize {
@@ -123,6 +142,15 @@ impl MockLawyer {
     #[must_use]
     pub fn did_change_call_count(&self) -> usize {
         self.did_change_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Returns the number of `did_close` calls recorded.
+    #[must_use]
+    pub fn did_close_call_count(&self) -> usize {
+        self.did_close_calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
@@ -203,6 +231,14 @@ impl Lawyer for MockLawyer {
         Ok(())
     }
 
+    async fn did_close(&self, _workspace_root: &Path, file_path: &Path) -> Result<(), LspError> {
+        self.did_close_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(file_path.to_string_lossy().into_owned());
+        Ok(())
+    }
+
     async fn pull_diagnostics(
         &self,
         _workspace_root: &Path,
@@ -211,6 +247,30 @@ impl Lawyer for MockLawyer {
         let next = {
             let mut guard = self
                 .pull_diagnostics_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if guard.is_empty() {
+                None
+            } else {
+                Some(guard.remove(0))
+            }
+        };
+
+        match next {
+            Some(Ok(diags)) => Ok(diags),
+            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            None => Ok(vec![]),
+        }
+    }
+
+    async fn pull_workspace_diagnostics(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+    ) -> Result<Vec<LspDiagnostic>, LspError> {
+        let next = {
+            let mut guard = self
+                .pull_workspace_diagnostics_results
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if guard.is_empty() {
@@ -330,6 +390,17 @@ mod tests {
         assert_eq!(mock.did_change_call_count(), 1);
         let calls = mock.did_change_calls.lock().expect("lock");
         assert_eq!(calls[0].2, 2); // version
+    }
+
+    #[tokio::test]
+    async fn test_mock_did_close_records_calls() {
+        let mock = MockLawyer::default();
+        mock.did_close(&workspace(), &file())
+            .await
+            .expect("should succeed");
+        assert_eq!(mock.did_close_call_count(), 1);
+        let calls = mock.did_close_calls.lock().expect("lock");
+        assert_eq!(calls[0], "src/main.rs");
     }
 
     #[tokio::test]
