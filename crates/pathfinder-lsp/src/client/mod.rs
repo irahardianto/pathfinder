@@ -83,8 +83,8 @@ impl LspClient {
     ///
     /// # Errors
     /// Returns `Err` if the workspace root directory cannot be read.
-    pub fn new(workspace_root: &Path) -> std::io::Result<Self> {
-        let descriptors = detect_languages(workspace_root)?;
+    pub async fn new(workspace_root: &Path) -> std::io::Result<Self> {
+        let descriptors = detect_languages(workspace_root).await?;
 
         tracing::info!(
             workspace = %workspace_root.display(),
@@ -137,11 +137,7 @@ impl LspClient {
     }
 
     /// Spawn a new LSP process, retrying on failure with exponential backoff.
-    async fn start_process(
-        &self,
-        descriptor: LspDescriptor,
-        attempt: u32,
-    ) -> Result<(), LspError> {
+    async fn start_process(&self, descriptor: LspDescriptor, attempt: u32) -> Result<(), LspError> {
         let language_id = descriptor.language_id.clone();
 
         if attempt >= MAX_RESTART_ATTEMPTS {
@@ -254,19 +250,15 @@ impl Lawyer for LspClient {
         let start = Instant::now();
 
         // Determine language from file extension
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
 
         // Ensure the LSP process is running
         self.ensure_process(language_id).await?;
 
         // Build the textDocument/definition request (LSP positions are 0-indexed)
-        let file_uri = Url::from_file_path(workspace_root.join(file_path)).map_err(|()| {
-            LspError::Protocol("cannot convert file path to URI".to_owned())
-        })?;
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
         let params = json!({
             "textDocument": { "uri": file_uri.as_str() },
@@ -277,7 +269,12 @@ impl Lawyer for LspClient {
         });
 
         let response = self
-            .request(language_id, "textDocument/definition", params, Duration::from_secs(10))
+            .request(
+                language_id,
+                "textDocument/definition",
+                params,
+                Duration::from_secs(10),
+            )
             .await?;
 
         self.touch(language_id).await;
@@ -297,7 +294,9 @@ impl Lawyer for LspClient {
 /// Parse the `textDocument/definition` response into a `DefinitionLocation`.
 ///
 /// Returns `Ok(None)` for JSON `null` (no definition found).
-fn parse_definition_response(response: serde_json::Value) -> Result<Option<DefinitionLocation>, LspError> {
+fn parse_definition_response(
+    response: serde_json::Value,
+) -> Result<Option<DefinitionLocation>, LspError> {
     if response.is_null() {
         return Ok(None);
     }

@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| "Failed to load configuration")?;
 
     // Create MCP server
-    let server = PathfinderServer::new(workspace_root, config);
+    let server = PathfinderServer::new(workspace_root, config).await;
 
     // If LSP tracing is requested, we could inject that config later when LSP is implemented.
     if cli.lsp_trace {

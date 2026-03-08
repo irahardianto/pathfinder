@@ -16,11 +16,7 @@
 //! let server = PathfinderServer::with_engines(.., Arc::new(mock));
 //! ```
 
-use crate::{
-    error::LspError,
-    lawyer::Lawyer,
-    types::DefinitionLocation,
-};
+use crate::{error::LspError, lawyer::Lawyer, types::DefinitionLocation};
 use async_trait::async_trait;
 use std::{
     path::Path,
@@ -49,10 +45,7 @@ impl MockLawyer {
     ///
     /// Pass `Ok(Some(...))` for a found definition, `Ok(None)` for no definition,
     /// or `Err("reason")` to simulate an LSP error.
-    pub fn set_goto_definition_result(
-        &self,
-        result: Result<Option<DefinitionLocation>, String>,
-    ) {
+    pub fn set_goto_definition_result(&self, result: Result<Option<DefinitionLocation>, String>) {
         let mut guard = self
             .goto_definition_result
             .lock()
@@ -93,11 +86,7 @@ impl Lawyer for MockLawyer {
                 .goto_definition_calls
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.push((
-                file_path.to_string_lossy().into_owned(),
-                line,
-                column,
-            ));
+            guard.push((file_path.to_string_lossy().into_owned(), line, column));
         }
 
         let next = {

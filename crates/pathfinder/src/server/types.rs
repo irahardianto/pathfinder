@@ -452,7 +452,6 @@ pub struct AnalyzeImpactResponse {
     pub degraded_reason: Option<String>,
 }
 
-
 // ── Default Value Functions ─────────────────────────────────────────
 
 pub(crate) fn default_path_glob() -> String {

@@ -61,10 +61,10 @@ impl PathfinderServer {
     /// falls back to `NoOpLawyer` and logs a warning. All tools remain functional in
     /// degraded mode.
     #[must_use]
-    pub fn new(workspace_root: WorkspaceRoot, config: PathfinderConfig) -> Self {
+    pub async fn new(workspace_root: WorkspaceRoot, config: PathfinderConfig) -> Self {
         let sandbox = Sandbox::new(workspace_root.path(), &config.sandbox);
 
-        let lawyer: Arc<dyn Lawyer> = match LspClient::new(workspace_root.path()) {
+        let lawyer: Arc<dyn Lawyer> = match LspClient::new(workspace_root.path()).await {
             Ok(client) => {
                 tracing::info!(
                     workspace = %workspace_root.path().display(),

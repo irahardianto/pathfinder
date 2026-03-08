@@ -77,11 +77,7 @@ impl RequestDispatcher {
             return;
         };
 
-        let tx = self
-            .pending
-            .lock()
-            .expect("dispatcher lock")
-            .remove(&id);
+        let tx = self.pending.lock().expect("dispatcher lock").remove(&id);
 
         if let Some(sender) = tx {
             let result = if message.get("error").is_some() {
@@ -114,7 +110,6 @@ impl RequestDispatcher {
         }
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]

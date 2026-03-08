@@ -25,4 +25,3 @@ pub use lawyer::Lawyer;
 pub use mock::MockLawyer;
 pub use no_op::NoOpLawyer;
 pub use types::{DefinitionLocation, LspDiagnostic, LspDiagnosticSeverity};
-

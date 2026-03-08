@@ -40,7 +40,12 @@ mod tests {
     async fn test_no_op_lawyer_goto_definition_returns_no_lsp() {
         let lawyer = NoOpLawyer;
         let result = lawyer
-            .goto_definition(&PathBuf::from("/workspace"), &PathBuf::from("src/main.rs"), 1, 1)
+            .goto_definition(
+                &PathBuf::from("/workspace"),
+                &PathBuf::from("src/main.rs"),
+                1,
+                1,
+            )
             .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }

@@ -11,7 +11,9 @@
 //! - `analyze_impact` — returns empty caller/callee lists with `degraded: true`
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
-use crate::server::helpers::{io_error_data, pathfinder_to_error_data, treesitter_error_to_error_data};
+use crate::server::helpers::{
+    io_error_data, pathfinder_to_error_data, treesitter_error_to_error_data,
+};
 use crate::server::types::{
     AnalyzeImpactParams, AnalyzeImpactResponse, GetDefinitionParams, GetDefinitionResponse,
     ImpactReference, ReadWithDeepContextParams, ReadWithDeepContextResponse,
@@ -317,7 +319,9 @@ fn build_impact_reference(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::server::types::{GetDefinitionParams, AnalyzeImpactParams, ReadWithDeepContextParams};
+    use crate::server::types::{
+        AnalyzeImpactParams, GetDefinitionParams, ReadWithDeepContextParams,
+    };
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{SymbolScope, VersionHash, WorkspaceRoot};
@@ -465,7 +469,6 @@ mod tests {
             .unwrap_or("");
         assert_eq!(code, "ACCESS_DENIED");
     }
-
 
     // ── read_with_deep_context ────────────────────────────────────────
 

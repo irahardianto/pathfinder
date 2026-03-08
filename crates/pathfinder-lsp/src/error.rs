@@ -43,4 +43,3 @@ pub enum LspError {
     #[error("LSP I/O error: {0}")]
     Io(#[source] std::io::Error),
 }
-

@@ -128,5 +128,3 @@ mod tests {
         assert!(!detected.call_hierarchy_provider);
     }
 }
-
-

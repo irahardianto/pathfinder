@@ -54,9 +54,7 @@ where
             .or_else(|| trimmed.strip_prefix("content-length: "))
         {
             content_length = Some(value.parse::<usize>().map_err(|_| {
-                LspError::Protocol(format!(
-                    "invalid Content-Length value: {value}"
-                ))
+                LspError::Protocol(format!("invalid Content-Length value: {value}"))
             })?);
         }
         // Ignore other headers (Content-Type etc.)
@@ -67,10 +65,12 @@ where
     })?;
 
     let mut body = vec![0u8; length];
-    reader
-        .read_exact(&mut body)
-        .await
-        .map_err(|e| LspError::Io(std::io::Error::new(e.kind(), format!("reading LSP body: {e}"))))?;
+    reader.read_exact(&mut body).await.map_err(|e| {
+        LspError::Io(std::io::Error::new(
+            e.kind(),
+            format!("reading LSP body: {e}"),
+        ))
+    })?;
 
     serde_json::from_slice(&body)
         .map_err(|e| LspError::Protocol(format!("invalid JSON in LSP message: {e}")))
@@ -83,30 +83,33 @@ where
 ///
 /// # Errors
 /// Returns `LspError::Io` if serialisation or the underlying write fails.
-pub(super) async fn write_message<W>(
-    writer: &mut W,
-    message: &Value,
-) -> Result<(), LspError>
+pub(super) async fn write_message<W>(writer: &mut W, message: &Value) -> Result<(), LspError>
 where
     W: AsyncWriteExt + Unpin,
 {
-    let body =
-        serde_json::to_vec(message).map_err(|e| LspError::Protocol(format!("serialising JSON-RPC message: {e}")))?;
+    let body = serde_json::to_vec(message)
+        .map_err(|e| LspError::Protocol(format!("serialising JSON-RPC message: {e}")))?;
 
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
 
-    writer
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|e| LspError::Io(std::io::Error::new(e.kind(), format!("writing LSP header: {e}"))))?;
-    writer
-        .write_all(&body)
-        .await
-        .map_err(|e| LspError::Io(std::io::Error::new(e.kind(), format!("writing LSP body: {e}"))))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| LspError::Io(std::io::Error::new(e.kind(), format!("flushing LSP writer: {e}"))))?;
+    writer.write_all(header.as_bytes()).await.map_err(|e| {
+        LspError::Io(std::io::Error::new(
+            e.kind(),
+            format!("writing LSP header: {e}"),
+        ))
+    })?;
+    writer.write_all(&body).await.map_err(|e| {
+        LspError::Io(std::io::Error::new(
+            e.kind(),
+            format!("writing LSP body: {e}"),
+        ))
+    })?;
+    writer.flush().await.map_err(|e| {
+        LspError::Io(std::io::Error::new(
+            e.kind(),
+            format!("flushing LSP writer: {e}"),
+        ))
+    })?;
 
     Ok(())
 }

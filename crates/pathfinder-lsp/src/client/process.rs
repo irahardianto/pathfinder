@@ -83,7 +83,7 @@ pub(super) async fn spawn_and_initialize(
     let mut writer = tokio::io::BufWriter::new(stdin);
 
     // Build workspace URI string (file:///path/to/workspace/)
-    let workspace_uri = path_to_file_uri(workspace_root)?;
+    let workspace_uri = path_to_file_uri(workspace_root).await?;
     let workspace_name = workspace_root
         .file_name()
         .and_then(|n| n.to_str())
@@ -114,16 +114,13 @@ pub(super) async fn spawn_and_initialize(
     write_message(&mut writer, &init_request).await?;
 
     // Await the `initialize` response with hard 30s timeout
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(INIT_TIMEOUT_SECS),
-        rx,
-    )
-    .await
-    .map_err(|_| LspError::Timeout {
-        operation: "initialize".to_owned(),
-        timeout_ms: INIT_TIMEOUT_SECS * 1000,
-    })?
-    .map_err(|_| LspError::ConnectionLost)??;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(INIT_TIMEOUT_SECS), rx)
+        .await
+        .map_err(|_| LspError::Timeout {
+            operation: "initialize".to_owned(),
+            timeout_ms: INIT_TIMEOUT_SECS * 1000,
+        })?
+        .map_err(|_| LspError::ConnectionLost)??;
 
     // Parse capabilities from the initialize result
     let capabilities = DetectedCapabilities::from_response_json(&response);
@@ -192,11 +189,8 @@ pub(super) fn start_reader_task(
 pub(super) async fn shutdown(process: &mut ManagedProcess, dispatcher: &RequestDispatcher) {
     let (id, rx) = dispatcher.register();
     let shutdown_req = RequestDispatcher::make_request(id, "shutdown", &Value::Null);
-    if let Ok(mut stdin) = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        process.stdin.lock(),
-    )
-    .await
+    if let Ok(mut stdin) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), process.stdin.lock()).await
     {
         let _ = write_message(&mut *stdin, &shutdown_req).await;
         // Await shutdown response (ignore error — server may be dead)
@@ -213,19 +207,47 @@ pub(super) async fn shutdown(process: &mut ManagedProcess, dispatcher: &RequestD
 }
 
 /// Convert a filesystem path to a `file://` URI string.
-fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| LspError::Protocol(format!("non-UTF-8 workspace path: {}", path.display())))?;
+async fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
+    let is_dir = tokio::fs::metadata(path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
 
-    // Ensure directory paths end with /
-    let uri = if path.is_dir() {
-        format!("file://{path_str}/")
+    let uri = if is_dir {
+        url::Url::from_directory_path(path)
     } else {
-        format!("file://{path_str}")
-    };
+        url::Url::from_file_path(path)
+    }
+    .map_err(|()| LspError::Protocol(format!("cannot convert path to URI: {}", path.display())))?;
 
-    Ok(uri)
+    Ok(uri.to_string())
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod process_tests {
+    use super::*;
+    use tempfile::tempdir;
 
+    #[tokio::test]
+    async fn test_path_to_file_uri_file() {
+        let dir = tempdir().expect("temp dir");
+        let file_path = dir.path().join("test file.txt");
+        std::fs::write(&file_path, "content").expect("write");
+
+        let uri = path_to_file_uri(&file_path).await.expect("ok");
+        assert!(uri.starts_with("file://"));
+        assert!(
+            uri.ends_with("test%20file.txt"),
+            "Should percent-encode spaces"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_path_to_file_uri_dir() {
+        let dir = tempdir().expect("temp dir");
+        let uri = path_to_file_uri(dir.path()).await.expect("ok");
+        assert!(uri.starts_with("file://"));
+        assert!(uri.ends_with('/'), "Should end with slash for directories");
+    }
+}
