@@ -3,11 +3,19 @@
 use crate::server::helpers::io_error_data;
 use crate::server::types::{SearchCodebaseParams, SearchCodebaseResponse};
 use crate::server::PathfinderServer;
+use futures::StreamExt as _;
 use pathfinder_common::types::FilterMode;
 use pathfinder_search::{SearchMatch, SearchParams};
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
 use std::path::Path;
+
+/// Maximum number of concurrent Tree-sitter enrichment futures per search call.
+/// Prevents unbounded memory growth when `max_results` is set to a large value.
+const ENRICHMENT_CONCURRENCY: usize = 32;
+
+/// Per-match enrichment output: `(enclosing_symbol_path, node_type)`.
+type EnrichResult = (Option<String>, String);
 
 impl PathfinderServer {
     /// Core logic for the `search_codebase` tool.
@@ -45,36 +53,8 @@ impl PathfinderServer {
         match self.scout.search(&search_params).await {
             Ok(result) => {
                 let mut enriched_matches = result.matches;
+                let node_types = self.enrich_matches(&mut enriched_matches).await;
 
-                // Enrich each match concurrently with:
-                // - enclosing_semantic_path (from Tree-sitter symbol walk)
-                // - node_type (code / comment / string) for filter_mode
-                let futures = enriched_matches.iter_mut().map(|m| async {
-                    let file_path = Path::new(&m.file);
-                    let line = usize::try_from(m.line).unwrap_or(usize::MAX);
-                    let column = usize::try_from(m.column).unwrap_or(0);
-
-                    // Populate enclosing_semantic_path
-                    if let Ok(Some(symbol)) = self
-                        .surgeon
-                        .enclosing_symbol(self.workspace_root.path(), file_path, line)
-                        .await
-                    {
-                        m.enclosing_semantic_path = Some(format!("{}::{}", m.file, symbol));
-                    }
-
-                    // Classify node type for filter_mode
-                    let node_type = self
-                        .surgeon
-                        .node_type_at_position(self.workspace_root.path(), file_path, line, column)
-                        .await
-                        .unwrap_or_else(|_| "code".to_owned()); // degrade gracefully on unsupported files
-
-                    node_type
-                });
-                let node_types: Vec<String> = futures::future::join_all(futures).await;
-
-                // Apply filter_mode — filter based on node type classification
                 let filtered_matches =
                     apply_filter_mode(enriched_matches, &node_types, params.filter_mode);
 
@@ -116,6 +96,63 @@ impl PathfinderServer {
                 Err(io_error_data(err.to_string()))
             }
         }
+    }
+
+    /// Enrich a slice of search matches with Tree-sitter metadata.
+    ///
+    /// - Populates `enclosing_semantic_path` on each match.
+    /// - Returns a parallel `Vec<String>` of node-type classifications (`"code"`,
+    ///   `"comment"`, or `"string"`).
+    ///
+    /// Enrichment runs concurrently, capped at [`ENRICHMENT_CONCURRENCY`] to bound
+    /// memory and thread contention when the match list is large.
+    ///
+    /// # Design note
+    /// Uses a three-phase snapshot approach to avoid holding `&mut SearchMatch`
+    /// across an async boundary (which violates Rust's higher-ranked lifetime rules):
+    /// Phase 1 — snapshot owned file/line/column per match.
+    /// Phase 2 — enrich concurrently with `buffer_unordered`.
+    /// Phase 3 — zip results back and mutate matches.
+    async fn enrich_matches(&self, matches: &mut [SearchMatch]) -> Vec<String> {
+        let snapshots: Vec<(String, u64, u64)> = matches
+            .iter()
+            .map(|m| (m.file.clone(), m.line, m.column))
+            .collect();
+
+        let enrichment: Vec<EnrichResult> = futures::stream::iter(snapshots.into_iter())
+            .map(|(file, line_u64, column_u64)| async move {
+                let file_path = Path::new(&file);
+                let line = usize::try_from(line_u64).unwrap_or(usize::MAX);
+                let column = usize::try_from(column_u64).unwrap_or(0);
+
+                let symbol = self
+                    .surgeon
+                    .enclosing_symbol(self.workspace_root.path(), file_path, line)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|s| format!("{file}::{s}"));
+
+                let node_type = self
+                    .surgeon
+                    .node_type_at_position(self.workspace_root.path(), file_path, line, column)
+                    .await
+                    .unwrap_or_else(|_| "code".to_owned()); // degrade gracefully on unsupported files
+
+                (symbol, node_type)
+            })
+            .buffer_unordered(ENRICHMENT_CONCURRENCY)
+            .collect()
+            .await;
+
+        enrichment
+            .into_iter()
+            .zip(matches.iter_mut())
+            .map(|((symbol, node_type), m)| {
+                m.enclosing_semantic_path = symbol;
+                node_type
+            })
+            .collect()
     }
 }
 

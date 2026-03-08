@@ -6,7 +6,32 @@
 //! This prevents double-indentation bugs (e.g., LLM outputs 4-space indent,
 //! Pathfinder adds 4-space indent → 8-space indent in Python).
 
+/// Expand tabs to spaces using 4-column tab stops.
+///
+/// Each `\t` is replaced with spaces to advance to the next multiple of 4.
+/// This normalises mixed whitespace before measuring byte-based indentation.
+fn expand_tabs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let spaces = 4 - (col % 4);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
+}
+
 /// Compute the minimum leading whitespace count across all non-empty lines.
+///
+/// Tabs are expanded to 4-column boundaries before measuring so that
+/// tab-indented and space-indented code are compared consistently.
 ///
 /// Empty lines (whitespace-only or empty) are ignored because they do not
 /// contribute to meaningful indentation.
@@ -14,12 +39,18 @@
 fn min_indent(code: &str) -> usize {
     code.lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start().len())
+        .map(|line| {
+            let expanded = expand_tabs(line);
+            expanded.len() - expanded.trim_start().len()
+        })
         .min()
         .unwrap_or(0)
 }
 
 /// Dedent code to column 0 by stripping the minimum common indentation.
+///
+/// Tabs are expanded to 4-column boundaries before computing the strip width,
+/// ensuring tab-indented input is correctly normalised to all-space indentation.
 ///
 /// Empty lines are preserved (they remain empty strings after stripping
 /// leading whitespace equal to or less than the common indent).
@@ -32,14 +63,15 @@ pub fn dedent(code: &str) -> String {
 
     code.lines()
         .map(|line| {
-            if line.len() >= strip {
-                &line[strip..]
+            let expanded = expand_tabs(line);
+            if expanded.len() >= strip {
+                expanded[strip..].to_owned()
             } else {
                 // Shorter line (e.g., blank line with fewer spaces)
-                line.trim_start()
+                expanded.trim_start().to_owned()
             }
         })
-        .collect::<Vec<&str>>()
+        .collect::<Vec<String>>()
         .join("\n")
 }
 
@@ -115,6 +147,14 @@ mod tests {
     fn test_dedent_already_at_column_zero() {
         let code = "x := 1\nreturn x";
         assert_eq!(dedent(code), code);
+    }
+
+    #[test]
+    fn test_dedent_tab_indented_normalises_to_spaces() {
+        // Two tabs at tab-stop 4 = 8 spaces; min_indent should see 8 and strip them.
+        let code = "\t\tx := 1\n\t\treturn x";
+        let result = dedent(code);
+        assert_eq!(result, "x := 1\nreturn x");
     }
 
     #[test]
