@@ -333,7 +333,7 @@ impl ServerHandler for PathfinderServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use pathfinder_common::types::VersionHash;
+    use pathfinder_common::types::{FilterMode, VersionHash};
     use pathfinder_search::{MockScout, SearchMatch, SearchResult};
     use pathfinder_treesitter::mock::MockSurgeon;
     use rmcp::model::ErrorCode;
@@ -627,6 +627,185 @@ mod tests {
             .expect("search_codebase should return error on scout failure");
         assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
         assert_eq!(err.message, "search engine error: simulated engine error");
+    }
+
+    // ── filter_mode unit tests ────────────────────────────────────────
+
+    fn make_search_match(file: &str, line: u64, content: &str) -> SearchMatch {
+        SearchMatch {
+            file: file.to_owned(),
+            line,
+            column: 0,
+            content: content.to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            version_hash: "sha256:abc".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_codebase_filter_mode_code_only_drops_comments() {
+        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_scout = MockScout::default();
+        mock_scout.set_result(Ok(SearchResult {
+            matches: vec![
+                make_search_match("src/a.go", 1, "code line"),
+                make_search_match("src/a.go", 2, "// comment line"),
+                make_search_match("src/a.go", 3, "another code line"),
+            ],
+            total_matches: 3,
+            truncated: false,
+        }));
+
+        let mock_surgeon = Arc::new(MockSurgeon::new());
+        // 3 matches → 3 calls: code, comment, code
+        // enclosing_symbol called 3 times → return None each (default "code" below)
+        // node_type_at_position called 3 times → pre-configure results
+        mock_surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+        mock_surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .extend([
+                Ok("code".to_owned()),
+                Ok("comment".to_owned()),
+                Ok("code".to_owned()),
+            ]);
+
+        let server =
+            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
+
+        let params = SearchCodebaseParams {
+            query: "line".to_owned(),
+            filter_mode: FilterMode::CodeOnly,
+            ..Default::default()
+        };
+
+        let result = server
+            .search_codebase(Parameters(params))
+            .await
+            .expect("should succeed")
+            .0;
+
+        // Only the 2 code matches should survive
+        assert_eq!(result.matches.len(), 2, "code_only should drop comments");
+        assert_eq!(result.matches[0].content, "code line");
+        assert_eq!(result.matches[1].content, "another code line");
+        // total_matches reflects the ORIGINAL ripgrep count, not filtered count
+        assert_eq!(result.total_matches, 3);
+        // No degraded flag — filtering was real
+        assert!(result.degraded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_codebase_filter_mode_comments_only_keeps_comments() {
+        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_scout = MockScout::default();
+        mock_scout.set_result(Ok(SearchResult {
+            matches: vec![
+                make_search_match("src/b.go", 1, "func HelloWorld() {}"),
+                make_search_match("src/b.go", 2, "// HelloWorld says hello"),
+                make_search_match("src/b.go", 3, r#"msg := "Hello World""#),
+            ],
+            total_matches: 3,
+            truncated: false,
+        }));
+
+        let mock_surgeon = Arc::new(MockSurgeon::new());
+        mock_surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+        mock_surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .extend([
+                Ok("code".to_owned()),
+                Ok("comment".to_owned()),
+                Ok("string".to_owned()),
+            ]);
+
+        let server =
+            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
+
+        let params = SearchCodebaseParams {
+            query: "Hello".to_owned(),
+            filter_mode: FilterMode::CommentsOnly,
+            ..Default::default()
+        };
+
+        let result = server
+            .search_codebase(Parameters(params))
+            .await
+            .expect("should succeed")
+            .0;
+
+        // Comment and string matches should survive; code match should be dropped
+        assert_eq!(result.matches.len(), 2, "comments_only should drop code");
+        assert_eq!(result.matches[0].content, "// HelloWorld says hello");
+        assert_eq!(result.matches[1].content, r#"msg := "Hello World""#);
+        assert!(result.degraded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_codebase_filter_mode_all_returns_everything() {
+        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_scout = MockScout::default();
+        mock_scout.set_result(Ok(SearchResult {
+            matches: vec![
+                make_search_match("src/c.go", 1, "code"),
+                make_search_match("src/c.go", 2, "// comment"),
+                make_search_match("src/c.go", 3, r#""string""#),
+            ],
+            total_matches: 3,
+            truncated: false,
+        }));
+
+        let mock_surgeon = Arc::new(MockSurgeon::new());
+        // enclosing_symbol: all return None
+        mock_surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+        // node_type_at_position: will use default "code" since queue is empty
+        // (FilterMode::All skips classification entirely — but mock still gets called;
+        // the default return value is "code" so no pre-configuration needed)
+
+        let server =
+            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
+
+        let params = SearchCodebaseParams {
+            query: String::new(),
+            filter_mode: FilterMode::All,
+            ..Default::default()
+        };
+
+        let result = server
+            .search_codebase(Parameters(params))
+            .await
+            .expect("should succeed")
+            .0;
+
+        // All 3 matches returned, no filtering
+        assert_eq!(result.matches.len(), 3);
+        assert!(result.degraded.is_none());
     }
 
     // ── delete_file tests ────────────────────────────────────────────

@@ -42,10 +42,10 @@ _None found._
 
 ## Minor Issues
 
-- [ ] **[PAT]** `RipgrepScout::search()` reads every traversed file into memory to compute the SHA-256 hash, even files that may not contain any matches (line 325). For large workspaces this is expensive. The hash should be computed lazily — only for files that contain at least one match. — [ripgrep.rs:319-332](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/src/ripgrep.rs#L319-L332)
+- [x] **[PAT]** `RipgrepScout::search()` reads every traversed file into memory to compute the SHA-256 hash, even files that may not contain any matches (line 325). For large workspaces this is expensive. The hash should be computed lazily — only for files that contain at least one match. — [ripgrep.rs:319-332](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/src/ripgrep.rs#L319-L332)
   > **Resolved (already implemented):** The module doc string explicitly states lazy hashing. `MatchCollector` stores an empty `version_hash` and `backfill_hash()` is only called when `matches_after > matches_before`. No file is read for hashing unless it produced at least one match.
 
-- [ ] **[PAT]** `pathfinder-search` depends on `pathfinder-common` in Cargo.toml (line 11) but never uses it — no import from `pathfinder_common` exists in any of the crate's source files. This creates an unnecessary compile-time dependency. — [Cargo.toml:11](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/Cargo.toml#L11)
+- [x] **[PAT]** `pathfinder-search` depends on `pathfinder-common` in Cargo.toml (line 11) but never uses it — no import from `pathfinder_common` exists in any of the crate's source files. This creates an unnecessary compile-time dependency. — [Cargo.toml:11](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/Cargo.toml#L11)
   > **Resolved:** `pathfinder-common` is no longer listed in `pathfinder-search/Cargo.toml`.
 
 - [x] **[PAT]** Duplicate SHA-256 hashing logic: `compute_hash()` in `ripgrep.rs` and `VersionHash::compute()` in `types.rs` and `hash_file()` in `file_watcher.rs` all implement the exact same `sha256:{hex}` format. Consolidate to `VersionHash::compute()` as the single source of truth. — [ripgrep.rs:20-23](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-search/src/ripgrep.rs#L20-L23), [file_watcher.rs:129-133](file:///home/irahardianto/works/projects/pathfinder/crates/pathfinder-common/src/file_watcher.rs#L129-L133)

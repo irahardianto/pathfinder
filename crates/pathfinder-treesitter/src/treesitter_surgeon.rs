@@ -227,6 +227,45 @@ impl Surgeon for TreeSitterSurgeon {
     }
 
     #[instrument(skip(self, workspace_root))]
+    async fn node_type_at_position(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: usize,
+        column: usize,
+    ) -> Result<String, SurgeonError> {
+        let (_, tree, _, _, _) = self.cached_parse(workspace_root, file_path).await?;
+
+        // Convert 1-indexed line to 0-indexed row for Tree-sitter
+        let row = line.saturating_sub(1);
+        let point = tree_sitter::Point { row, column };
+
+        // Find the deepest AST node at this position
+        let root = tree.root_node();
+        let Some(mut node) = root.descendant_for_point_range(point, point) else {
+            // No node found — treat as code (safe default)
+            return Ok("code".to_owned());
+        };
+
+        // Walk up the ancestor chain classifying by node kind
+        loop {
+            let kind = node.kind();
+            if is_comment_node(kind) {
+                return Ok("comment".to_owned());
+            }
+            if is_string_node(kind) {
+                return Ok("string".to_owned());
+            }
+            match node.parent() {
+                Some(parent) => node = parent,
+                None => break,
+            }
+        }
+
+        Ok("code".to_owned())
+    }
+
+    #[instrument(skip(self, workspace_root))]
     async fn generate_skeleton(
         &self,
         workspace_root: &Path,
@@ -395,6 +434,48 @@ impl Surgeon for TreeSitterSurgeon {
     }
 }
 
+// ── Node-type classification helpers ───────────────────────────────────────
+
+/// Returns `true` if the tree-sitter node kind is a comment variant.
+///
+/// Covers all Tier 1 languages (Go, TypeScript, Python, Rust) plus common patterns
+/// from Tier 2 (Rust, Java, C/C++). Node kind names come from the respective
+/// tree-sitter grammars bundled with each language crate.
+fn is_comment_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        // All Tier 1 + Tier 2 comment node kinds (unique per tree-sitter grammar)
+        "comment"         // Go, TypeScript, Python, JavaScript
+        | "line_comment"  // Rust, Java, C, C++
+        | "block_comment" // Rust, Java, C, C++
+        | "doc_comment"   // Rust
+        | "html_comment" // JSX
+    )
+}
+
+/// Returns `true` if the tree-sitter node kind is a string literal variant.
+///
+/// Covers all Tier 1 languages. Template literals (JS/TS backtick strings)
+/// are included because they count as string context for `filter_mode`.
+fn is_string_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        // All Tier 1 + Tier 2 string node kinds (unique per tree-sitter grammar)
+        "string"                      // Python, Go
+        | "string_literal"            // Rust, Java, C, C++
+        | "raw_string_literal"        // Go, Rust
+        | "interpreted_string_literal" // Go
+        | "template_string"           // TypeScript
+        | "template_literal"          // JavaScript
+        | "string_fragment"           // TypeScript/JavaScript
+        | "template_substitution"     // ${...} inside template literals
+        | "jsx_text"                  // JSX inline text
+        | "string_content"            // Python multi-line strings
+        | "concatenated_string"       // Python implicit string concat
+        | "char_literal" // C/C++/Java
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -450,5 +531,72 @@ mod tests {
             }
             _ => panic!("Expected SymbolNotFound"),
         }
+    }
+
+    // ── node_type_at_position integration tests ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_node_type_at_position_code_line() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+        // Line 1: package main (1-indexed) — code
+        writeln!(file, "package main\n\nfunc Hello() {{}}\n").unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        let node_type = surgeon
+            .node_type_at_position(&workspace_root, relative, 1, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(node_type, "code", "package declaration should be code");
+    }
+
+    #[tokio::test]
+    async fn test_node_type_at_position_comment_line() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+        // Line 1: // This is a comment
+        writeln!(file, "// This is a comment\npackage main\n").unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        let node_type = surgeon
+            .node_type_at_position(&workspace_root, relative, 1, 3)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            node_type, "comment",
+            "// comment line should be classified as comment"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_node_type_at_position_string_literal() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+        // Line 3: msg := "hello world"
+        writeln!(
+            file,
+            "package main\n\nfunc main() {{\n\tmsg := \"hello world\"\n\t_ = msg\n}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        // Line 4 (1-indexed), column 9 is inside "hello world"
+        let node_type = surgeon
+            .node_type_at_position(&workspace_root, relative, 4, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            node_type, "string",
+            "text inside string literal should be classified as string"
+        );
     }
 }

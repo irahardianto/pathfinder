@@ -22,8 +22,8 @@ pub struct SearchCodebaseParams {
     pub path_glob: String,
     /// Filter mode: `code_only`, `comments_only`, or `all`.
     ///
-    /// Note: `code_only` / `comments_only` require Tree-sitter (Epic 3).
-    /// In Epic 2 these modes return unfiltered results with `degraded: true`.
+    /// Uses Tree-sitter node classification to filter matches by context.
+    /// Defaults to `code_only` (exclude comments and string literals).
     #[serde(default)]
     pub filter_mode: pathfinder_common::types::FilterMode,
     /// Maximum matches returned.

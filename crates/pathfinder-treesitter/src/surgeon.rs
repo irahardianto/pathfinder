@@ -106,6 +106,31 @@ pub trait Surgeon: Send + Sync {
         line: usize,
     ) -> Result<Option<String>, SurgeonError>;
 
+    /// Classify the AST node at a given source position.
+    ///
+    /// Walks the AST from the leaf node at `(line, column)` upward, returning
+    /// the first meaningful category:
+    /// - `"comment"` — the position is inside a comment node
+    /// - `"string"` — the position is inside a string literal
+    /// - `"code"` — all other positions (identifiers, operators, blocks, etc.)
+    ///
+    /// Used by `search_codebase` to implement `filter_mode`:
+    /// - `code_only` → keep matches where this returns `"code"`
+    /// - `comments_only` → keep matches where this returns `"comment"` or `"string"`
+    ///
+    /// Falls back to `"code"` for unsupported languages (no Tree-sitter grammar).
+    ///
+    /// # Arguments
+    /// - `line` — 1-indexed line number (matches the `line` field of search results)
+    /// - `column` — 0-indexed byte column
+    async fn node_type_at_position(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: usize,
+        column: usize,
+    ) -> Result<String, SurgeonError>;
+
     /// Generate an AST-based skeleton of a directory tree.
     async fn generate_skeleton(
         &self,

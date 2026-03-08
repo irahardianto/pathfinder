@@ -25,6 +25,10 @@ pub struct MockSurgeon {
     pub resolve_symbol_range_results:
         Mutex<Vec<Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError>>>,
 
+    /// Pre-configured return values for `node_type_at_position`.
+    /// Each call pops the next value (FIFO). Defaults to returning `"code"` when empty.
+    pub node_type_at_position_results: Mutex<Vec<Result<String, SurgeonError>>>,
+
     // Call history
     pub read_symbol_scope_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     pub extract_symbols_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
@@ -34,6 +38,7 @@ pub struct MockSurgeon {
     pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     pub resolve_full_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     pub resolve_symbol_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    pub node_type_at_position_calls: Mutex<Vec<(PathBuf, PathBuf, usize, usize)>>,
 }
 
 impl MockSurgeon {
@@ -189,5 +194,35 @@ impl Surgeon for MockSurgeon {
             "MockSurgeon: Unexpected call to resolve_symbol_range"
         );
         results.remove(0)
+    }
+
+    async fn node_type_at_position(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: usize,
+        column: usize,
+    ) -> Result<String, SurgeonError> {
+        self.node_type_at_position_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((
+                workspace_root.to_path_buf(),
+                file_path.to_path_buf(),
+                line,
+                column,
+            ));
+
+        let mut results = self
+            .node_type_at_position_results
+            .lock()
+            .expect("mutex poisoned");
+
+        if results.is_empty() {
+            // Default: treat as code (transparent for tests that don't configure this)
+            Ok("code".to_owned())
+        } else {
+            results.remove(0)
+        }
     }
 }
