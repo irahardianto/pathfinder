@@ -28,6 +28,7 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        let ts_start = std::time::Instant::now();
         let result = match self
             .surgeon
             .generate_skeleton(
@@ -47,10 +48,12 @@ impl PathfinderServer {
                 return Err(crate::server::helpers::treesitter_error_to_error_data(e));
             }
         };
+        let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         tracing::info!(
             tool = "get_repo_map",
             path = %params.path,
+            tree_sitter_ms,
             duration_ms = start.elapsed().as_millis(),
             files_scanned = result.files_scanned,
             files_truncated = result.files_truncated,

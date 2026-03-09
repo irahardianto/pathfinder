@@ -256,6 +256,12 @@ impl PathfinderServer {
         };
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            tracing::warn!(
+                tool = "insert_before",
+                semantic_path = %params.semantic_path,
+                error = %e,
+                "insert_before: access denied"
+            );
             return Err(pathfinder_to_error_data(&e));
         }
 
@@ -354,6 +360,12 @@ impl PathfinderServer {
         };
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            tracing::warn!(
+                tool = "insert_after",
+                semantic_path = %params.semantic_path,
+                error = %e,
+                "insert_after: access denied"
+            );
             return Err(pathfinder_to_error_data(&e));
         }
 
@@ -438,6 +450,12 @@ impl PathfinderServer {
         params: DeleteSymbolParams,
     ) -> Result<Json<EditResponse>, ErrorData> {
         let start = std::time::Instant::now();
+        tracing::info!(
+            tool = "delete_symbol",
+            semantic_path = %params.semantic_path,
+            "delete_symbol: start"
+        );
+
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
             return Err(io_error_data("invalid semantic path"));
         };
@@ -452,6 +470,12 @@ impl PathfinderServer {
         }
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            tracing::warn!(
+                tool = "delete_symbol",
+                semantic_path = %params.semantic_path,
+                error = %e,
+                "delete_symbol: access denied"
+            );
             return Err(pathfinder_to_error_data(&e));
         }
 
@@ -544,6 +568,12 @@ impl PathfinderServer {
         };
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            tracing::warn!(
+                tool = "validate_only",
+                semantic_path = %params.semantic_path,
+                error = %e,
+                "validate_only: access denied"
+            );
             return Err(pathfinder_to_error_data(&e));
         }
 

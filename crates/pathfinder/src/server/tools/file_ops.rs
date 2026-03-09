@@ -84,6 +84,7 @@ impl PathfinderServer {
         }
 
         // 3. Atomically create file via tokio::fs::OpenOptions
+        let io_start = std::time::Instant::now();
         let open_result = tfs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -115,6 +116,7 @@ impl PathfinderServer {
                 return Err(io_error_data(format!("failed to create file: {e}")));
             }
         }
+        let io_ms = io_start.elapsed().as_millis();
 
         let version_hash = VersionHash::compute(params.content.as_bytes());
         let duration_ms = start.elapsed().as_millis();
@@ -122,6 +124,7 @@ impl PathfinderServer {
         tracing::info!(
             tool = "create_file",
             version_hash = %version_hash.as_str(),
+            io_ms,
             duration_ms,
             engines_used = ?(&[] as &[&str]),
             "create_file: complete"
@@ -165,6 +168,7 @@ impl PathfinderServer {
 
         // 2. Read current content (also proves the file exists — no separate exists() check
         //    to avoid a TOCTOU race between the precheck and the deletion).
+        let io_start = std::time::Instant::now();
         let current_content = match tfs::read(&absolute_path).await {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -196,11 +200,13 @@ impl PathfinderServer {
             tracing::warn!(tool = "delete_file", error = %e, "failed to delete file");
             return Err(io_error_data(format!("failed to delete file: {e}")));
         }
+        let io_ms = io_start.elapsed().as_millis();
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
             tool = "delete_file",
             filepath = %params.filepath,
+            io_ms,
             duration_ms,
             engines_used = ?(&[] as &[&str]),
             "delete_file: complete"
@@ -236,6 +242,7 @@ impl PathfinderServer {
         }
 
         // 2. Read file
+        let io_start = std::time::Instant::now();
         let raw_content = match tfs::read_to_string(&absolute_path).await {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -250,6 +257,7 @@ impl PathfinderServer {
                 return Err(io_error_data(format!("failed to read file: {e}")));
             }
         };
+        let io_ms = io_start.elapsed().as_millis();
 
         let version_hash = VersionHash::compute(raw_content.as_bytes());
 
@@ -273,6 +281,7 @@ impl PathfinderServer {
             total_lines,
             lines_returned,
             truncated,
+            io_ms,
             duration_ms,
             engines_used = ?(&[] as &[&str]),
             "read_file: complete"
@@ -387,16 +396,19 @@ impl PathfinderServer {
         }
 
         // 7. Write to disk (in-place: preserves inode for HMR/watchers)
+        let io_start = std::time::Instant::now();
         if let Err(e) = tfs::write(&absolute_path, new_content.as_bytes()).await {
             tracing::warn!(tool = "write_file", error = %e, "failed to write file");
             return Err(io_error_data(format!("failed to write file: {e}")));
         }
+        let io_ms = io_start.elapsed().as_millis();
 
         let new_hash = VersionHash::compute(new_content.as_bytes());
         let duration_ms = start.elapsed().as_millis();
 
         tracing::info!(
             tool = "write_file",
+            io_ms,
             duration_ms,
             engines_used = ?(&[] as &[&str]),
             "write_file: complete"

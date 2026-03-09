@@ -32,6 +32,10 @@ impl PathfinderServer {
     /// definition location, and returns the result.
     ///
     /// **Degraded mode:** Returns a `LSP_REQUIRED` error when no LSP is configured.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline (parse→sandbox→tree-sitter→LSP→match 4 result variants) plus per-engine timing."
+    )]
     pub(crate) async fn get_definition_impl(
         &self,
         params: GetDefinitionParams,
@@ -69,13 +73,16 @@ impl PathfinderServer {
         }
 
         // Resolve the symbol position via Tree-sitter to get line/column
+        let ts_start = std::time::Instant::now();
         let symbol_scope = self
             .surgeon
             .read_symbol_scope(self.workspace_root.path(), &semantic_path)
             .await
             .map_err(treesitter_error_to_error_data)?;
+        let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         // Query LSP for the definition location at the symbol's start line
+        let lsp_start = std::time::Instant::now();
         let lsp_result = self
             .lawyer
             .goto_definition(
@@ -86,6 +93,7 @@ impl PathfinderServer {
                 1, // Column 1 — start of the identifier line
             )
             .await;
+        let lsp_ms = lsp_start.elapsed().as_millis();
 
         let duration_ms = start.elapsed().as_millis();
 
@@ -95,8 +103,10 @@ impl PathfinderServer {
                     tool = "get_definition",
                     file = %def.file,
                     definition_line = def.line,
+                    tree_sitter_ms,
+                    lsp_ms,
                     duration_ms,
-                    engines_used = ?["lsp"],
+                    engines_used = ?["tree-sitter", "lsp"],
                     "get_definition: complete"
                 );
                 Ok(Json(GetDefinitionResponse {
@@ -113,6 +123,8 @@ impl PathfinderServer {
                 tracing::info!(
                     tool = "get_definition",
                     semantic_path = %params.semantic_path,
+                    tree_sitter_ms,
+                    lsp_ms,
                     duration_ms,
                     "get_definition: no definition found (built-in or external)"
                 );
@@ -125,6 +137,8 @@ impl PathfinderServer {
                 // Degraded mode — LSP not configured
                 tracing::info!(
                     tool = "get_definition",
+                    tree_sitter_ms,
+                    lsp_ms,
                     duration_ms,
                     degraded = true,
                     degraded_reason = "no_lsp",
@@ -139,6 +153,8 @@ impl PathfinderServer {
                 tracing::warn!(
                     tool = "get_definition",
                     error = %e,
+                    tree_sitter_ms,
+                    lsp_ms,
                     duration_ms,
                     engines_used = ?["lsp"],
                     "get_definition: LSP error"
@@ -192,11 +208,13 @@ impl PathfinderServer {
         }
 
         // Fetch the symbol scope (Tree-sitter)
+        let ts_start = std::time::Instant::now();
         let scope = self
             .surgeon
             .read_symbol_scope(self.workspace_root.path(), &semantic_path)
             .await
             .map_err(treesitter_error_to_error_data)?;
+        let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         let duration_ms = start.elapsed().as_millis();
 
@@ -205,6 +223,7 @@ impl PathfinderServer {
         tracing::info!(
             tool = "read_with_deep_context",
             semantic_path = %params.semantic_path,
+            tree_sitter_ms,
             duration_ms,
             degraded = true,
             degraded_reason = "no_lsp",
@@ -233,7 +252,10 @@ impl PathfinderServer {
     /// will wire the LSP call hierarchy query.
     // Intentionally `async`: Milestone 2 will add `await` when the LSP call hierarchy
     // is wired. Keeping `async` now avoids a breaking change to the call site in server.rs.
-    #[allow(clippy::unused_async)]
+    #[expect(
+        clippy::unused_async,
+        reason = "Milestone 2 will add `await` when the LSP call hierarchy is wired."
+    )]
     pub(crate) async fn analyze_impact_impl(
         &self,
         params: AnalyzeImpactParams,
@@ -298,7 +320,10 @@ impl PathfinderServer {
 
 // ── Helper: build an ImpactReference (used when LSP is available in future) ─
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Will be used when LSP call hierarchy is wired in Milestone 2."
+)]
 fn build_impact_reference(
     semantic_path: String,
     file: String,

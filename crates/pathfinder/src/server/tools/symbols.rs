@@ -33,16 +33,19 @@ impl PathfinderServer {
         }
 
         // Delegate to surgeon
+        let ts_start = std::time::Instant::now();
         match self
             .surgeon
             .read_symbol_scope(self.workspace_root.path(), &semantic_path)
             .await
         {
             Ok(scope) => {
+                let tree_sitter_ms = ts_start.elapsed().as_millis();
                 let duration_ms = start.elapsed().as_millis();
                 tracing::info!(
                     tool = "read_symbol_scope",
                     lines = (scope.end_line - scope.start_line + 1),
+                    tree_sitter_ms,
                     duration_ms,
                     engines_used = ?["tree-sitter"],
                     "read_symbol_scope: complete"
@@ -57,10 +60,12 @@ impl PathfinderServer {
                 }))
             }
             Err(e) => {
+                let tree_sitter_ms = ts_start.elapsed().as_millis();
                 let duration_ms = start.elapsed().as_millis();
                 tracing::warn!(
                     tool = "read_symbol_scope",
                     error = %e,
+                    tree_sitter_ms,
                     duration_ms,
                     engines_used = ?["tree-sitter"],
                     "read_symbol_scope: failed"
