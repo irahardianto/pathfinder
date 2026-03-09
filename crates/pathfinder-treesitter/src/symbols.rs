@@ -28,6 +28,8 @@ fn extract_symbols_recursive(
     out: &mut Vec<ExtractedSymbol>,
 ) {
     let mut cursor = node.walk();
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     // Check all children
     for child in node.named_children(&mut cursor) {
@@ -60,10 +62,20 @@ fn extract_symbols_recursive(
             {
                 if let Ok(name) = std::str::from_utf8(&source[name_node.byte_range()]) {
                     let name = name.trim().to_string();
-                    let path = if parent_path.is_empty() {
-                        name.clone()
+
+                    let count = name_counts.entry(name.clone()).or_insert(0);
+                    *count += 1;
+
+                    let suffix = if *count > 1 {
+                        format!("#{count}")
                     } else {
-                        format!("{parent_path}.{name}")
+                        String::new()
+                    };
+
+                    let path = if parent_path.is_empty() {
+                        format!("{name}{suffix}")
+                    } else {
+                        format!("{parent_path}.{name}{suffix}")
                     };
 
                     let mut symbol = ExtractedSymbol {
@@ -140,6 +152,8 @@ fn extract_impl_block(
 
     // Collect all child function_items from the impl body as Method symbols.
     let mut methods: Vec<ExtractedSymbol> = Vec::new();
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     if let Some(body) = node.child_by_field_name("body") {
         let mut body_cursor = body.walk();
         for item in body.named_children(&mut body_cursor) {
@@ -153,7 +167,16 @@ fn extract_impl_block(
                 continue;
             };
             let method_name = method_name.trim().to_string();
-            let method_path = format!("{impl_path}.{method_name}");
+
+            let count = name_counts.entry(method_name.clone()).or_insert(0);
+            *count += 1;
+            let suffix = if *count > 1 {
+                format!("#{count}")
+            } else {
+                String::new()
+            };
+
+            let method_path = format!("{impl_path}.{method_name}{suffix}");
             methods.push(ExtractedSymbol {
                 name: method_name,
                 semantic_path: method_path,
@@ -189,23 +212,30 @@ pub fn resolve_symbol_chain<'a>(
         return None;
     }
 
-    let first_target = &chain.segments[0];
+    let mut current_symbols = symbols;
+    let mut result = None;
 
-    // Find the matching root symbol
-    // TODO: handle overloads properly. For now we just take the first match.
-    let root_match = symbols.iter().find(|s| s.name == first_target.name)?;
+    for segment in &chain.segments {
+        let target_idx = segment.overload_index.unwrap_or(1).saturating_sub(1) as usize;
+        let mut match_count = 0;
+        let mut found = None;
 
-    if chain.segments.len() == 1 {
-        return Some(root_match);
+        for s in current_symbols {
+            if s.name == segment.name {
+                if match_count == target_idx {
+                    found = Some(s);
+                    break;
+                }
+                match_count += 1;
+            }
+        }
+
+        let match_symbol = found?;
+        result = Some(match_symbol);
+        current_symbols = &match_symbol.children;
     }
 
-    // Recursively resolve the rest of the chain
-    let mut current = root_match;
-    for segment in &chain.segments[1..] {
-        current = current.children.iter().find(|s| s.name == segment.name)?;
-    }
-
-    Some(current)
+    result
 }
 
 /// Computes string similarity to offer did-you-mean suggestions.
@@ -400,5 +430,77 @@ mod tests {
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].name, "compute");
         assert_eq!(syms[0].kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn test_extract_overloads() {
+        let source = b"class AuthService {\n  login() {}\n  login(user) {}\n}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        assert_eq!(syms.len(), 1);
+        let class = &syms[0];
+        assert_eq!(class.name, "AuthService");
+        assert_eq!(class.children.len(), 2);
+
+        assert_eq!(class.children[0].name, "login");
+        assert_eq!(class.children[0].semantic_path, "AuthService.login");
+
+        assert_eq!(class.children[1].name, "login");
+        assert_eq!(class.children[1].semantic_path, "AuthService.login#2");
+    }
+
+    #[test]
+    fn test_resolve_overloads() {
+        let class = ExtractedSymbol {
+            name: "AuthService".to_string(),
+            semantic_path: "AuthService".to_string(),
+            kind: SymbolKind::Class,
+            byte_range: 0..20,
+            start_line: 0,
+            end_line: 1,
+            children: vec![
+                ExtractedSymbol {
+                    name: "login".to_string(),
+                    semantic_path: "AuthService.login".to_string(),
+                    kind: SymbolKind::Method,
+                    byte_range: 0..10,
+                    start_line: 0,
+                    end_line: 0,
+                    children: vec![],
+                },
+                ExtractedSymbol {
+                    name: "login".to_string(),
+                    semantic_path: "AuthService.login#2".to_string(),
+                    kind: SymbolKind::Method,
+                    byte_range: 10..20,
+                    start_line: 1,
+                    end_line: 1,
+                    children: vec![],
+                },
+            ],
+        };
+
+        let symbols = vec![class];
+
+        // test #1
+        let chain1 = SymbolChain::parse("AuthService.login").unwrap();
+        let res1 = resolve_symbol_chain(&symbols, &chain1).unwrap();
+        assert_eq!(res1.semantic_path, "AuthService.login");
+
+        // test #2
+        let chain2 = SymbolChain::parse("AuthService.login#2").unwrap();
+        let res2 = resolve_symbol_chain(&symbols, &chain2).unwrap();
+        assert_eq!(res2.semantic_path, "AuthService.login#2");
+
+        // test out of bounds
+        let chain3 = SymbolChain::parse("AuthService.login#3").unwrap();
+        let res3 = resolve_symbol_chain(&symbols, &chain3);
+        assert!(res3.is_none());
     }
 }
