@@ -1,8 +1,11 @@
 //! Tool parameter and response types for Pathfinder MCP tools.
 //!
 //! These structs are deserialized by the rmcp framework from MCP tool call
-//! payloads. The `dead_code` lint fires for stub tools whose fields aren't
-//! accessed yet; the allow will be removed as tools are implemented.
+//! payloads. The `dead_code` lint fires for param struct fields that are read
+//! by serde (via `Deserialize`) but never accessed by name in production code.
+//! A module-level `#![allow]` is used here so that each newly implemented tool
+//! can remove its struct's allow without touching unrelated items.
+#![allow(dead_code)] // Fields are read by serde deserialization, not by name
 
 use rmcp::schemars;
 use rmcp::serde::{self, Serialize};
@@ -51,13 +54,11 @@ pub struct GetRepoMapParams {
     pub visibility: pathfinder_common::types::Visibility,
     /// Import inclusion: `none`, `third_party`, or `all`.
     #[serde(default)]
-    #[allow(dead_code)]
     pub include_imports: pathfinder_common::types::IncludeImports,
 }
 
 /// Parameters for `read_symbol_scope`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct ReadSymbolScopeParams {
     /// Semantic path (e.g., `src/auth.ts::AuthService.login`).
     pub semantic_path: String,
@@ -65,7 +66,6 @@ pub struct ReadSymbolScopeParams {
 
 /// Parameters for `read_with_deep_context`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct ReadWithDeepContextParams {
     /// Semantic path.
     pub semantic_path: String,
@@ -73,7 +73,6 @@ pub struct ReadWithDeepContextParams {
 
 /// Parameters for `get_definition`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct GetDefinitionParams {
     /// Semantic path to the reference.
     pub semantic_path: String,
@@ -81,7 +80,6 @@ pub struct GetDefinitionParams {
 
 /// Parameters for `analyze_impact`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct AnalyzeImpactParams {
     /// Semantic path to the target.
     pub semantic_path: String,
@@ -92,7 +90,6 @@ pub struct AnalyzeImpactParams {
 
 /// Parameters for `replace_body`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct ReplaceBodyParams {
     /// Full semantic path to the target.
     pub semantic_path: String,
@@ -107,7 +104,6 @@ pub struct ReplaceBodyParams {
 
 /// Parameters for `replace_full`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct ReplaceFullParams {
     /// Full semantic path to the target.
     pub semantic_path: String,
@@ -122,7 +118,6 @@ pub struct ReplaceFullParams {
 
 /// Parameters for `insert_before`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct InsertBeforeParams {
     /// Full semantic path or bare file path (for BOF).
     pub semantic_path: String,
@@ -137,7 +132,6 @@ pub struct InsertBeforeParams {
 
 /// Parameters for `insert_after`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct InsertAfterParams {
     /// Full semantic path or bare file path (for EOF).
     pub semantic_path: String,
@@ -152,7 +146,6 @@ pub struct InsertAfterParams {
 
 /// Parameters for `delete_symbol`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct DeleteSymbolParams {
     /// Full semantic path to the target.
     pub semantic_path: String,
@@ -165,7 +158,6 @@ pub struct DeleteSymbolParams {
 
 /// Parameters for `validate_only`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct ValidateOnlyParams {
     /// Full semantic path to the target.
     pub semantic_path: String,
@@ -179,7 +171,6 @@ pub struct ValidateOnlyParams {
 
 /// Parameters for `create_file`.
 #[derive(Debug, Default, Clone, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct CreateFileParams {
     /// Relative file path.
     pub filepath: String,
@@ -189,7 +180,6 @@ pub struct CreateFileParams {
 
 /// Parameters for `delete_file`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct DeleteFileParams {
     /// Relative file path.
     pub filepath: String,
@@ -199,7 +189,6 @@ pub struct DeleteFileParams {
 
 /// Parameters for `read_file`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct ReadFileParams {
     /// Relative file path.
     pub filepath: String,
@@ -213,7 +202,6 @@ pub struct ReadFileParams {
 
 /// Parameters for `write_file`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct WriteFileParams {
     /// Relative file path.
     pub filepath: String,
@@ -227,7 +215,6 @@ pub struct WriteFileParams {
 
 /// A search-and-replace operation for `write_file`.
 #[derive(Debug, Default, Clone, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 pub struct Replacement {
     /// Exact text to find.
     pub old_text: String,

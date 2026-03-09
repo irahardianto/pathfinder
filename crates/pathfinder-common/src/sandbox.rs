@@ -213,14 +213,32 @@ impl Sandbox {
 
     fn is_additional_denied(&self, path_str: &str) -> bool {
         for pattern in &self.additional_deny {
-            // Simple glob matching for additional patterns
             if pattern.starts_with("*.") {
+                // Extension glob: "*.generated.ts" — match by file extension suffix
                 let ext = pattern.trim_start_matches("*.");
                 if path_str.ends_with(&format!(".{ext}")) {
                     return true;
                 }
-            } else if path_str.contains(pattern.as_str()) {
-                return true;
+            } else if pattern.ends_with('/') {
+                // Directory pattern: "secrets/" — match any path component boundary
+                let dir = pattern.trim_end_matches('/');
+                // Match at start or after a path separator so "temp/" does not deny "src/template/"
+                if path_str == dir
+                    || path_str.starts_with(&format!("{dir}/"))
+                    || path_str.contains(&format!("/{dir}/"))
+                    || path_str.ends_with(&format!("/{dir}"))
+                {
+                    return true;
+                }
+            } else {
+                // Bare-word pattern: match only against the filename component, not the full path
+                // so that "secret" does not deny "src/secretariat/utils.rs"
+                let basename = std::path::Path::new(path_str)
+                    .file_name()
+                    .map_or(path_str, |f| f.to_str().unwrap_or(path_str));
+                if basename == pattern || path_str == pattern.as_str() {
+                    return true;
+                }
             }
         }
         false
@@ -323,6 +341,49 @@ mod tests {
         assert!(sandbox.check(Path::new("src/schema.generated.ts")).is_err());
         // Normal TS files should be fine
         assert!(sandbox.check(Path::new("src/auth.ts")).is_ok());
+    }
+
+    /// Regression test for F1 (audit 2026-03-09-1007):
+    /// A bare-word `additional_deny` pattern must NOT use substring matching,
+    /// which would cause `"secret"` to deny `src/secretariat/utils.rs`.
+    #[test]
+    fn test_additional_deny_bare_word_does_not_substring_match() {
+        let config = SandboxConfig {
+            additional_deny: vec!["secret".to_owned()],
+            allow_override: vec![],
+        };
+        let sandbox = Sandbox::with_user_rules(std::env::temp_dir().as_path(), &config, None);
+
+        // A file whose path contains "secret" as a substring but not as a whole
+        // filename component must NOT be denied — this was the pre-fix behaviour.
+        assert!(
+            sandbox.check(Path::new("src/secretariat/utils.rs")).is_ok(),
+            "bare-word pattern must not substring-match across path segments"
+        );
+        // But an exact filename match must still be denied.
+        assert!(
+            sandbox.check(Path::new("src/secret")).is_err(),
+            "bare-word pattern must deny an exact filename match"
+        );
+    }
+
+    #[test]
+    fn test_additional_deny_directory_pattern_no_prefix_leak() {
+        // "temp/" should deny "temp/file.txt" but NOT "src/template/file.txt"
+        let config = SandboxConfig {
+            additional_deny: vec!["temp/".to_owned()],
+            allow_override: vec![],
+        };
+        let sandbox = Sandbox::with_user_rules(std::env::temp_dir().as_path(), &config, None);
+
+        assert!(
+            sandbox.check(Path::new("temp/scratch.txt")).is_err(),
+            "temp/ pattern must deny paths starting with temp/"
+        );
+        assert!(
+            sandbox.check(Path::new("src/template/index.ts")).is_ok(),
+            "temp/ pattern must not deny src/template/ (prefix leak)"
+        );
     }
 
     #[test]

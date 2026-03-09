@@ -173,6 +173,10 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
 ///
 /// # Errors
 /// Returns `SurgeonError` if an operation on the AST fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Sequential directory-walk pipeline; splitting into sub-functions would obscure the linear data flow without improving readability"
+)]
 pub async fn generate_skeleton_text(
     surgeon: &impl crate::surgeon::Surgeon,
     workspace_root: &Path,
@@ -242,9 +246,17 @@ pub async fn generate_skeleton_text(
 
         version_hashes.insert(rel_path.display().to_string(), hash.to_string());
 
-        // AST extraction
-        let Ok(raw_symbols) = surgeon.extract_symbols(workspace_root, rel_path).await else {
-            continue;
+        // AST extraction — log failures so operators can diagnose missing files in the repo map
+        let raw_symbols = match surgeon.extract_symbols(workspace_root, rel_path).await {
+            Ok(syms) => syms,
+            Err(e) => {
+                tracing::debug!(
+                    path = %rel_path.display(),
+                    error = %e,
+                    "get_repo_map: skipping file (symbol extraction failed)"
+                );
+                continue;
+            }
         };
 
         // Apply visibility filtering heuristic

@@ -243,19 +243,12 @@ pub fn resolve_symbol_chain<'a>(
 /// Borrows semantic paths directly from the symbol tree to avoid allocating
 /// intermediate `String` values. Only the final `max_suggestions` results are
 /// converted to owned `String`s.
-#[allow(clippy::items_after_statements)]
 #[must_use]
 pub fn did_you_mean(
     symbols: &[ExtractedSymbol],
     chain: &SymbolChain,
     max_suggestions: usize,
 ) -> Vec<String> {
-    if chain.segments.is_empty() {
-        return Vec::new();
-    }
-
-    let target = chain.to_string();
-
     // Collect &str references — no cloning here.
     fn collect_paths<'a>(syms: &'a [ExtractedSymbol], out: &mut Vec<&'a str>) {
         for s in syms {
@@ -263,6 +256,12 @@ pub fn did_you_mean(
             collect_paths(&s.children, out);
         }
     }
+
+    if chain.segments.is_empty() {
+        return Vec::new();
+    }
+
+    let target = chain.to_string();
 
     let mut all_paths: Vec<&str> = Vec::new();
     collect_paths(symbols, &mut all_paths);
@@ -287,7 +286,6 @@ pub fn did_you_mean(
 }
 
 /// Find the innermost symbol enclosing a given 0-indexed row.
-#[allow(clippy::items_after_statements)]
 #[must_use]
 pub fn find_enclosing_symbol(symbols: &[ExtractedSymbol], row: usize) -> Option<String> {
     fn search<'a>(syms: &'a [ExtractedSymbol], row: usize, best: &mut Option<&'a ExtractedSymbol>) {
