@@ -204,6 +204,7 @@ impl PathfinderServer {
         let new_bytes = new_content.as_bytes();
 
         // ── Steps 8–11: Validate → TOCTOU → Write → Respond ────────────
+        let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(
             "replace_body",
             &semantic_path,
@@ -213,6 +214,7 @@ impl PathfinderServer {
             &current_hash,
             params.ignore_validation_failures,
             start,
+            resolve_ms,
         )
         .await
     }
@@ -222,10 +224,6 @@ impl PathfinderServer {
     /// Replaces the entire declaration of a symbol (including decorators/docs)
     /// in place on disk, using OCC `base_version` to guard against races.
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Linear 10-step edit pipeline, same structure as replace_body_impl. Splitting into sub-functions would add indirection without reducing cognitive load."
-    )]
     pub(crate) async fn replace_full_impl(
         &self,
         params: ReplaceFullParams,
@@ -290,67 +288,23 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(indented.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let original_str = std::str::from_utf8(&source)
-            .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")));
-        let new_content_str = std::str::from_utf8(&new_bytes)
-            .map_err(|e| io_error_data(format!("new content is not valid UTF-8: {e}")));
-        let validation_outcome = match (original_str, new_content_str) {
-            (Ok(orig), Ok(new)) => {
-                self.run_lsp_validation(
-                    &semantic_path.file_path,
-                    orig,
-                    new,
-                    params.ignore_validation_failures,
-                )
-                .await
-            }
-            _ => ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: Some(true),
-                skipped_reason: Some("utf8_error".to_owned()),
-                should_block: false,
-            },
-        };
-
-        if validation_outcome.should_block {
-            let introduced = validation_outcome.validation.introduced_errors.clone();
-            let err = PathfinderError::ValidationFailed {
-                count: introduced.len(),
-                introduced_errors: introduced,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        let new_hash = self
-            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
-            .await?;
-
-        let duration_ms = start.elapsed().as_millis();
-        tracing::info!(
-            tool = "replace_full",
-            semantic_path = %params.semantic_path,
-            duration_ms,
-            new_version_hash = new_hash.as_str(),
-            engines_used = ?["tree-sitter"],
-            "replace_full: complete"
-        );
-
-        Ok(Json(EditResponse {
-            success: true,
-            new_version_hash: Some(new_hash.as_str().to_owned()),
-            formatted: false,
-            validation: validation_outcome.validation,
-            validation_skipped: validation_outcome.skipped,
-            validation_skipped_reason: validation_outcome.skipped_reason,
-        }))
+        let resolve_ms = start.elapsed().as_millis();
+        self.finalize_edit(
+            "replace_full",
+            &semantic_path,
+            &params.semantic_path,
+            &source,
+            &new_bytes,
+            &current_hash,
+            params.ignore_validation_failures,
+            start,
+            resolve_ms,
+        )
+        .await
     }
 
     /// Core logic for the `insert_before` tool (PRD Epic 5, Story 5.5).
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Edit pipeline with BOF/symbol branch at the resolution step, followed by normalization, validation and write. Structurally identical to replace_body; splitting further would obscure the symmetric design."
-    )]
     pub(crate) async fn insert_before_impl(
         &self,
         params: InsertBeforeParams,
@@ -427,67 +381,23 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(sep.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let original_str = std::str::from_utf8(&source)
-            .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")));
-        let new_str = std::str::from_utf8(&new_bytes)
-            .map_err(|e| io_error_data(format!("new content is not valid UTF-8: {e}")));
-        let validation_outcome = match (original_str, new_str) {
-            (Ok(orig), Ok(new)) => {
-                self.run_lsp_validation(
-                    &semantic_path.file_path,
-                    orig,
-                    new,
-                    params.ignore_validation_failures,
-                )
-                .await
-            }
-            _ => ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: Some(true),
-                skipped_reason: Some("utf8_error".to_owned()),
-                should_block: false,
-            },
-        };
-
-        if validation_outcome.should_block {
-            let introduced = validation_outcome.validation.introduced_errors.clone();
-            let err = PathfinderError::ValidationFailed {
-                count: introduced.len(),
-                introduced_errors: introduced,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        let new_hash = self
-            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
-            .await?;
-
-        let duration_ms = start.elapsed().as_millis();
-        tracing::info!(
-            tool = "insert_before",
-            semantic_path = %params.semantic_path,
-            duration_ms,
-            new_version_hash = new_hash.as_str(),
-            engines_used = ?["tree-sitter"],
-            "insert_before: complete"
-        );
-
-        Ok(Json(EditResponse {
-            success: true,
-            new_version_hash: Some(new_hash.as_str().to_owned()),
-            formatted: false,
-            validation: validation_outcome.validation,
-            validation_skipped: validation_outcome.skipped,
-            validation_skipped_reason: validation_outcome.skipped_reason,
-        }))
+        let resolve_ms = start.elapsed().as_millis();
+        self.finalize_edit(
+            "insert_before",
+            &semantic_path,
+            &params.semantic_path,
+            &source,
+            &new_bytes,
+            &current_hash,
+            params.ignore_validation_failures,
+            start,
+            resolve_ms,
+        )
+        .await
     }
 
     /// Core logic for the `insert_after` tool (PRD Epic 5, Story 5.5).
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "EOF/symbol branch at resolution step, mirroring insert_before_impl. Linear pipeline with equivalent structure; splitting would duplicate boilerplate without clarity gain."
-    )]
     pub(crate) async fn insert_after_impl(
         &self,
         params: InsertAfterParams,
@@ -560,67 +470,23 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(after_sep.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        let original_str = std::str::from_utf8(&source)
-            .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")));
-        let new_str = std::str::from_utf8(&new_bytes)
-            .map_err(|e| io_error_data(format!("new content is not valid UTF-8: {e}")));
-        let validation_outcome = match (original_str, new_str) {
-            (Ok(orig), Ok(new)) => {
-                self.run_lsp_validation(
-                    &semantic_path.file_path,
-                    orig,
-                    new,
-                    params.ignore_validation_failures,
-                )
-                .await
-            }
-            _ => ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: Some(true),
-                skipped_reason: Some("utf8_error".to_owned()),
-                should_block: false,
-            },
-        };
-
-        if validation_outcome.should_block {
-            let introduced = validation_outcome.validation.introduced_errors.clone();
-            let err = PathfinderError::ValidationFailed {
-                count: introduced.len(),
-                introduced_errors: introduced,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        let new_hash = self
-            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
-            .await?;
-
-        let duration_ms = start.elapsed().as_millis();
-        tracing::info!(
-            tool = "insert_after",
-            semantic_path = %params.semantic_path,
-            duration_ms,
-            new_version_hash = new_hash.as_str(),
-            engines_used = ?["tree-sitter"],
-            "insert_after: complete"
-        );
-
-        Ok(Json(EditResponse {
-            success: true,
-            new_version_hash: Some(new_hash.as_str().to_owned()),
-            formatted: false,
-            validation: validation_outcome.validation,
-            validation_skipped: validation_outcome.skipped,
-            validation_skipped_reason: validation_outcome.skipped_reason,
-        }))
+        let resolve_ms = start.elapsed().as_millis();
+        self.finalize_edit(
+            "insert_after",
+            &semantic_path,
+            &params.semantic_path,
+            &source,
+            &new_bytes,
+            &current_hash,
+            params.ignore_validation_failures,
+            start,
+            resolve_ms,
+        )
+        .await
     }
 
     /// Core logic for the `delete_symbol` tool (PRD Epic 5, Story 5.6).
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Deletion pipeline: symbol-only guard, resolve, OCC, blank-line collapse, validation, TOCTOU, write. Each of the 8 steps is distinct; no repeated structure to extract."
-    )]
     pub(crate) async fn delete_symbol_impl(
         &self,
         params: DeleteSymbolParams,
@@ -694,59 +560,19 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(sep);
         new_bytes.extend_from_slice(after);
 
-        let original_str = std::str::from_utf8(&source)
-            .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")));
-        let new_str = std::str::from_utf8(&new_bytes)
-            .map_err(|e| io_error_data(format!("new content is not valid UTF-8: {e}")));
-        let validation_outcome = match (original_str, new_str) {
-            (Ok(orig), Ok(new)) => {
-                self.run_lsp_validation(
-                    &semantic_path.file_path,
-                    orig,
-                    new,
-                    params.ignore_validation_failures,
-                )
-                .await
-            }
-            _ => ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: Some(true),
-                skipped_reason: Some("utf8_error".to_owned()),
-                should_block: false,
-            },
-        };
-
-        if validation_outcome.should_block {
-            let introduced = validation_outcome.validation.introduced_errors.clone();
-            let err = PathfinderError::ValidationFailed {
-                count: introduced.len(),
-                introduced_errors: introduced,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        let new_hash = self
-            .flush_edit_with_toctou(&semantic_path, &current_hash, &new_bytes)
-            .await?;
-
-        let duration_ms = start.elapsed().as_millis();
-        tracing::info!(
-            tool = "delete_symbol",
-            semantic_path = %params.semantic_path,
-            duration_ms,
-            new_version_hash = new_hash.as_str(),
-            engines_used = ?["tree-sitter"],
-            "delete_symbol: complete"
-        );
-
-        Ok(Json(EditResponse {
-            success: true,
-            new_version_hash: Some(new_hash.as_str().to_owned()),
-            formatted: false,
-            validation: validation_outcome.validation,
-            validation_skipped: validation_outcome.skipped,
-            validation_skipped_reason: validation_outcome.skipped_reason,
-        }))
+        let resolve_ms = start.elapsed().as_millis();
+        self.finalize_edit(
+            "delete_symbol",
+            &semantic_path,
+            &params.semantic_path,
+            &source,
+            &new_bytes,
+            &current_hash,
+            params.ignore_validation_failures,
+            start,
+            resolve_ms,
+        )
+        .await
     }
 
     /// Core logic for the `validate_only` tool (PRD Epic 5, Story 5.7).
@@ -945,7 +771,7 @@ impl PathfinderServer {
         }
 
         // ── pre-edit diagnostics ──
-        let pre_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
+        let mut pre_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
             Ok(d) => d,
             Err(LspError::UnsupportedCapability { .. }) => {
                 // LSP running but doesn't support Pull Diagnostics
@@ -967,6 +793,24 @@ impl PathfinderServer {
             }
         };
 
+        // Attempt to augment with workspace diagnostics
+        match self
+            .lawyer
+            .pull_workspace_diagnostics(workspace, relative)
+            .await
+        {
+            Ok(workspace_diags) => pre_diags.extend(workspace_diags),
+            Err(LspError::UnsupportedCapability { .. } | LspError::NoLspAvailable) => {
+                // Ignore unsupported capabilities or no LSP and just proceed
+            }
+            Err(e) => {
+                // Timeout or protocol error pulling workspace diagnostics.
+                // It shouldn't block validation entirely if single-file passed,
+                // but we'll log it for observability.
+                tracing::warn!(error = %e, "validation: pre-edit pull_workspace_diagnostics failed, continuing with single-file diags");
+            }
+        }
+
         // ── did_change (new content, version 2) ──
         if let Err(e) = self
             .lawyer
@@ -983,7 +827,7 @@ impl PathfinderServer {
         }
 
         // ── post-edit diagnostics ──
-        let post_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
+        let mut post_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(error = %e, "validation: post-edit pull_diagnostics failed");
@@ -995,6 +839,18 @@ impl PathfinderServer {
                 };
             }
         };
+
+        match self
+            .lawyer
+            .pull_workspace_diagnostics(workspace, relative)
+            .await
+        {
+            Ok(workspace_diags) => post_diags.extend(workspace_diags),
+            Err(LspError::UnsupportedCapability { .. } | LspError::NoLspAvailable) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "validation: post-edit pull_workspace_diagnostics failed, continuing with single-file diags");
+            }
+        }
 
         // ── revert LSP state to original (fire-and-forget) ──
         let _ = self
@@ -1102,7 +958,9 @@ impl PathfinderServer {
         current_hash: &VersionHash,
         ignore_validation_failures: bool,
         start_time: std::time::Instant,
+        resolve_ms: u128,
     ) -> Result<Json<EditResponse>, ErrorData> {
+        let validate_start = std::time::Instant::now();
         let original_str = std::str::from_utf8(source);
         let new_str = std::str::from_utf8(new_bytes);
         let validation_outcome = match (original_str, new_str) {
@@ -1122,6 +980,7 @@ impl PathfinderServer {
                 should_block: false,
             },
         };
+        let validate_ms = validate_start.elapsed().as_millis();
 
         if validation_outcome.should_block {
             let introduced = validation_outcome.validation.introduced_errors.clone();
@@ -1132,15 +991,20 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&err));
         }
 
+        let flush_start = std::time::Instant::now();
         let new_hash = self
             .flush_edit_with_toctou(semantic_path, current_hash, new_bytes)
             .await?;
+        let flush_ms = flush_start.elapsed().as_millis();
 
         let duration_ms = start_time.elapsed().as_millis();
         tracing::info!(
             tool = tool_name,
             semantic_path = %raw_semantic_path_str,
             duration_ms,
+            resolve_ms,
+            validate_ms,
+            flush_ms,
             new_version_hash = new_hash.as_str(),
             engines_used = ?["tree-sitter"],
             "{tool_name}: complete"
@@ -2253,6 +2117,75 @@ mod tests {
         assert_eq!(
             introduced, 1,
             "one new error should appear in introduced_errors"
+        );
+    }
+
+    // ── workspace blocking: new errors in other files block the edit ────────
+
+    #[tokio::test]
+    async fn test_run_lsp_validation_workspace_blocking() {
+        use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
+
+        let ws_dir = tempdir().expect("temp dir");
+        let filepath = "src/auth.go";
+        let src = "func Login() {}";
+        let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+        let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+        // Pre-edit diagnostics (file + workspace)
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+        mock_lawyer.push_pull_workspace_diagnostics_result(Ok(vec![]));
+
+        // Post-edit diagnostics (no errors in single file, but 1 error in workspace)
+        mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+        mock_lawyer.push_pull_workspace_diagnostics_result(Ok(vec![LspDiagnostic {
+            severity: LspDiagnosticSeverity::Error,
+            code: Some("E002".into()),
+            message: "cannot call Login with 1 argument".into(),
+            file: "src/main.go".to_owned(), // Different file!
+            start_line: 5,
+            end_line: 5,
+        }]));
+
+        let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+        // ignore_validation_failures = false → should block
+        let params = ReplaceFullParams {
+            semantic_path: format!("{filepath}::Login"),
+            base_version: hash.as_str().to_owned(),
+            new_code: "func Login(a string) { }\n".to_owned(), // changed signature
+            ignore_validation_failures: false,
+        };
+        let result = server.replace_full(Parameters(params)).await;
+
+        let Err(err) = result else {
+            panic!("expected VALIDATION_FAILED error when workspace errors are introduced");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "VALIDATION_FAILED", "got: {err:?}");
+
+        // Confirm the workspace error is reported
+        let introduced = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("details"))
+            .and_then(|d| d.get("introduced_errors"))
+            .and_then(|v| v.as_array())
+            .expect("should have introduced_errors");
+        assert_eq!(
+            introduced.len(),
+            1,
+            "one workspace error should appear in introduced_errors"
+        );
+        let first_err_file = introduced[0].get("file").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            first_err_file, "src/main.go",
+            "error should be in src/main.go"
         );
     }
 

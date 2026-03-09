@@ -465,6 +465,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mock_pull_workspace_diagnostics_empty_queue_returns_empty() {
+        let mock = MockLawyer::default();
+        let result = mock
+            .pull_workspace_diagnostics(&workspace(), &file())
+            .await
+            .expect("should succeed");
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_pull_workspace_diagnostics_returns_configured() {
+        use crate::types::LspDiagnosticSeverity;
+        let mock = MockLawyer::default();
+        let diag = LspDiagnostic {
+            severity: LspDiagnosticSeverity::Error,
+            code: Some("W002".into()),
+            message: "workspace error".into(),
+            file: "src/other.rs".into(),
+            start_line: 1,
+            end_line: 1,
+        };
+        mock.push_pull_workspace_diagnostics_result(Ok(vec![diag.clone()]));
+        let result = mock
+            .pull_workspace_diagnostics(&workspace(), &file())
+            .await
+            .expect("should succeed");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].message, "workspace error");
+    }
+
+    #[tokio::test]
     async fn test_mock_range_formatting_defaults_to_none() {
         let mock = MockLawyer::default();
         let result = mock
