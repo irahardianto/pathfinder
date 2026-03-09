@@ -183,6 +183,12 @@ impl PathfinderServer {
         }
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            tracing::warn!(
+                tool = "replace_full",
+                semantic_path = %params.semantic_path,
+                error = %e,
+                "replace_full: access denied"
+            );
             return Err(pathfinder_to_error_data(&e));
         }
 
@@ -240,6 +246,11 @@ impl PathfinderServer {
         params: InsertBeforeParams,
     ) -> Result<Json<EditResponse>, ErrorData> {
         let start = std::time::Instant::now();
+        tracing::info!(
+            tool = "insert_before",
+            semantic_path = %params.semantic_path,
+            "insert_before: start"
+        );
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
             return Err(io_error_data("invalid semantic path"));
         };
@@ -333,6 +344,11 @@ impl PathfinderServer {
         params: InsertAfterParams,
     ) -> Result<Json<EditResponse>, ErrorData> {
         let start = std::time::Instant::now();
+        tracing::info!(
+            tool = "insert_after",
+            semantic_path = %params.semantic_path,
+            "insert_after: start"
+        );
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
             return Err(io_error_data("invalid semantic path"));
         };
@@ -663,6 +679,12 @@ impl PathfinderServer {
     /// `ValidationOutcome` even if new errors are introduced.
     ///
     /// Gracefully degrades to `validation_skipped` on all LSP errors.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The LSP validation pipeline is intentionally a single sequential flow: \
+                  open → pre-diags → change → post-diags → close → diff. \
+                  Splitting it would obscure the linear state machine and scatter did_close call sites."
+    )]
     async fn run_lsp_validation(
         &self,
         file_path: &Path,
@@ -700,7 +722,8 @@ impl PathfinderServer {
         let mut pre_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
             Ok(d) => d,
             Err(LspError::UnsupportedCapability { .. }) => {
-                // LSP running but doesn't support Pull Diagnostics
+                // LSP running but doesn't support Pull Diagnostics — close the document
+                let _ = self.lawyer.did_close(workspace, relative).await;
                 return ValidationOutcome {
                     validation: EditValidation::skipped(),
                     skipped: Some(true),
@@ -710,6 +733,7 @@ impl PathfinderServer {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "validation: pre-edit pull_diagnostics failed");
+                let _ = self.lawyer.did_close(workspace, relative).await;
                 return ValidationOutcome {
                     validation: EditValidation::skipped(),
                     skipped: Some(true),
@@ -744,6 +768,7 @@ impl PathfinderServer {
             .await
         {
             tracing::warn!(error = %e, "validation: did_change failed");
+            let _ = self.lawyer.did_close(workspace, relative).await;
             return ValidationOutcome {
                 validation: EditValidation::skipped(),
                 skipped: Some(true),
@@ -757,6 +782,7 @@ impl PathfinderServer {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(error = %e, "validation: post-edit pull_diagnostics failed");
+                let _ = self.lawyer.did_close(workspace, relative).await;
                 return ValidationOutcome {
                     validation: EditValidation::skipped(),
                     skipped: Some(true),
@@ -783,6 +809,9 @@ impl PathfinderServer {
             .lawyer
             .did_change(workspace, relative, original_content, 3)
             .await;
+
+        // ── close document to free LSP memory ──
+        let _ = self.lawyer.did_close(workspace, relative).await;
 
         // ── diff diagnostics ──────────────────────
         build_validation_outcome(&pre_diags, &post_diags, ignore_validation_failures)
