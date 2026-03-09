@@ -384,14 +384,14 @@ mod tests {
         assert_eq!(response.skeleton, "class Mock {}");
         assert_eq!(response.files_scanned, 1);
         assert_eq!(response.coverage_percent, 100);
-        // Visibility filtering is not implemented; always degraded
-        assert_eq!(response.visibility_degraded, Some(true));
+        // Visibility filtering is now implemented via name-convention heuristics.
+        assert_eq!(response.visibility_degraded, None);
     }
 
     #[tokio::test]
-    async fn test_get_repo_map_visibility_degraded() {
-        // Even when visibility = All, the response should always be visibility_degraded: Some(true)
-        // because the feature is not yet implemented.
+    async fn test_get_repo_map_visibility_not_degraded() {
+        // Both visibility modes should return visibility_degraded: None
+        // because visibility filtering is now implemented via name-convention heuristics.
         let ws_dir = tempdir().expect("temp dir");
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
@@ -429,9 +429,8 @@ mod tests {
             .await
             .expect("should succeed");
         assert_eq!(
-            result.0.visibility_degraded,
-            Some(true),
-            "visibility_degraded must be Some(true) regardless of requested visibility"
+            result.0.visibility_degraded, None,
+            "visibility filtering is implemented; visibility_degraded must be None"
         );
     }
 

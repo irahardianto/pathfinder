@@ -69,9 +69,9 @@ impl PathfinderServer {
             files_in_scope: result.files_in_scope,
             coverage_percent: result.coverage_percent,
             version_hashes: result.version_hashes,
-            // Visibility filtering is not yet implemented; all symbols are returned.
-            // Always signal degraded so agents know the param has no effect.
-            visibility_degraded: Some(true),
+            // Visibility filtering is implemented via name-convention heuristics
+            // (_-prefix = private, lowercase-first = Go package-private). Not degraded.
+            visibility_degraded: None,
         }))
     }
 }

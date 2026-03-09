@@ -27,9 +27,72 @@ pub fn estimate_tokens(text: &str) -> u32 {
     (chars as f32 / 4.0).ceil() as u32
 }
 
-use crate::surgeon::ExtractedSymbol;
+use crate::surgeon::{ExtractedSymbol, SymbolKind};
 
 const MAX_TOKENS_PER_FILE: u32 = 512;
+
+/// Determine whether a symbol should be included when `visibility = "public"`.
+///
+/// Uses **name-convention heuristics** because the extracted AST symbols do not
+/// carry visibility metadata (the Tree-sitter `.scm` queries extract names only):
+///
+/// | Convention          | Considered private                                    |
+/// |---------------------|-------------------------------------------------------|
+/// | `_`-prefixed name   | Python private, JS/TS private-by-convention, Rust     |
+/// | Lowercase first char| Go package-private (exported identifiers are `Upper`) |
+///
+/// Methods (children of a class/impl) always mirror their parent's visibility —
+/// a private class is fully excluded; a public class keeps all its methods so
+/// agents see the full public API surface.
+///
+/// TypeScript/JavaScript and Rust `pub`-ness is not analysed at the AST level;
+/// only the `_` prefix strips symbols in those languages.
+#[must_use]
+fn is_symbol_public(sym: &ExtractedSymbol, lang_is_go: bool) -> bool {
+    let name = sym.name.as_str();
+    // _-prefixed names are private across all supported languages
+    if name.starts_with('_') {
+        return false;
+    }
+    // Go: package-level functions/structs/constants are public iff first char is uppercase
+    if lang_is_go
+        && matches!(
+            sym.kind,
+            SymbolKind::Function
+                | SymbolKind::Struct
+                | SymbolKind::Interface
+                | SymbolKind::Constant
+                | SymbolKind::Enum
+        )
+    {
+        return name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    }
+    true
+}
+
+/// Recursively filter `symbols` keeping only those visible under `visibility`.
+///
+/// - `"all"` — no filtering, returns the slice unchanged in a cloned `Vec`.
+/// - `"public"` — drops private symbols (see [`is_symbol_public`]) and recursively
+///   filters children; if a class/impl becomes empty after filtering it is also dropped.
+#[must_use]
+fn filter_by_visibility(
+    symbols: Vec<ExtractedSymbol>,
+    visibility: &str,
+    lang_is_go: bool,
+) -> Vec<ExtractedSymbol> {
+    if visibility != "public" {
+        return symbols;
+    }
+    symbols
+        .into_iter()
+        .filter(|sym| is_symbol_public(sym, lang_is_go))
+        .map(|mut sym| {
+            sym.children = filter_by_visibility(sym.children, visibility, lang_is_go);
+            sym
+        })
+        .collect()
+}
 
 /// Render a single file's skeleton into an indented string.
 #[must_use]
@@ -104,6 +167,10 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
 
 /// Generate an AST-based skeleton of a directory.
 ///
+/// # Arguments
+/// - `visibility` — `"public"` to filter out private-by-convention symbols;
+///   `"all"` to include every extracted symbol.
+///
 /// # Errors
 /// Returns `SurgeonError` if an operation on the AST fails.
 pub async fn generate_skeleton_text(
@@ -112,7 +179,7 @@ pub async fn generate_skeleton_text(
     target_path: &Path,
     max_tokens: u32,
     depth: u32,
-    _visibility: &str, // Not yet implemented; all symbols are included regardless of visibility.
+    visibility: &str,
 ) -> Result<RepoMapResult, SurgeonError> {
     use ignore::WalkBuilder;
     use pathfinder_common::types::VersionHash;
@@ -176,9 +243,13 @@ pub async fn generate_skeleton_text(
         version_hashes.insert(rel_path.display().to_string(), hash.to_string());
 
         // AST extraction
-        let Ok(symbols) = surgeon.extract_symbols(workspace_root, rel_path).await else {
+        let Ok(raw_symbols) = surgeon.extract_symbols(workspace_root, rel_path).await else {
             continue;
         };
+
+        // Apply visibility filtering heuristic
+        let lang_is_go = matches!(lang, crate::language::SupportedLanguage::Go);
+        let symbols = filter_by_visibility(raw_symbols, visibility, lang_is_go);
 
         if symbols.is_empty() {
             continue;
@@ -240,6 +311,66 @@ pub async fn generate_skeleton_text(
 mod tests {
     use super::*;
     use crate::surgeon::{ExtractedSymbol, SymbolKind};
+
+    fn make_sym(name: &str, kind: SymbolKind) -> ExtractedSymbol {
+        ExtractedSymbol {
+            name: name.to_string(),
+            semantic_path: name.to_string(),
+            kind,
+            byte_range: 0..1,
+            start_line: 0,
+            end_line: 1,
+            children: vec![],
+        }
+    }
+
+    #[test]
+    fn test_filter_all_keeps_everything() {
+        let syms = vec![
+            make_sym("_private", SymbolKind::Function),
+            make_sym("Public", SymbolKind::Function),
+        ];
+        let filtered = filter_by_visibility(syms, "all", false);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_public_removes_underscore_prefix() {
+        let syms = vec![
+            make_sym("_helper", SymbolKind::Function),
+            make_sym("compute", SymbolKind::Function),
+        ];
+        let filtered = filter_by_visibility(syms, "public", false);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "compute");
+    }
+
+    #[test]
+    fn test_filter_public_go_removes_lowercase_top_level_functions() {
+        let syms = vec![
+            make_sym("internal", SymbolKind::Function),
+            make_sym("Export", SymbolKind::Function),
+            make_sym("_hidden", SymbolKind::Struct),
+            make_sym("PublicStruct", SymbolKind::Struct),
+        ];
+        let filtered = filter_by_visibility(syms, "public", true /* lang_is_go */);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].name, "Export");
+        assert_eq!(filtered[1].name, "PublicStruct");
+    }
+
+    #[test]
+    fn test_filter_public_recursively_prunes_children() {
+        let mut parent = make_sym("Parent", SymbolKind::Class);
+        parent.children = vec![
+            make_sym("_private_method", SymbolKind::Method),
+            make_sym("public_method", SymbolKind::Method),
+        ];
+        let filtered = filter_by_visibility(vec![parent], "public", false);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].children.len(), 1);
+        assert_eq!(filtered[0].children[0].name, "public_method");
+    }
 
     #[test]
     fn test_estimate_tokens() {

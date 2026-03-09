@@ -6,6 +6,7 @@ use crate::server::PathfinderServer;
 use futures::StreamExt as _;
 use pathfinder_common::types::FilterMode;
 use pathfinder_search::{SearchMatch, SearchParams};
+use pathfinder_treesitter::language::SupportedLanguage;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
 use std::path::Path;
@@ -61,6 +62,17 @@ impl PathfinderServer {
                 let node_types = self.enrich_matches(&mut enriched_matches).await;
                 let tree_sitter_parse_ms = ts_start.elapsed().as_millis();
 
+                // Detect degradation: any matched file with no Tree-sitter grammar
+                // means enrichment fell back to "code" for all its matches.
+                let degraded = enriched_matches
+                    .iter()
+                    .any(|m| SupportedLanguage::detect(Path::new(&m.file)).is_none());
+                let (degraded_flag, degraded_reason) = if degraded {
+                    (Some(true), Some("unsupported_language".to_owned()))
+                } else {
+                    (None, None)
+                };
+
                 let filtered_matches =
                     apply_filter_mode(enriched_matches, &node_types, params.filter_mode);
 
@@ -79,15 +91,12 @@ impl PathfinderServer {
                     "search_codebase: complete"
                 );
 
-                // TODO: track per-file degradation when node_type_at_position
-                // falls back to "code" on unsupported languages.
-
                 Ok(Json(SearchCodebaseResponse {
                     matches: filtered_matches,
                     total_matches: result.total_matches,
                     truncated: result.truncated,
-                    degraded: None,
-                    degraded_reason: None,
+                    degraded: degraded_flag,
+                    degraded_reason,
                 }))
             }
             Err(err) => {
