@@ -16,7 +16,7 @@ use crate::server::helpers::{
 };
 use crate::server::types::{
     AnalyzeImpactParams, AnalyzeImpactResponse, GetDefinitionParams, GetDefinitionResponse,
-    ImpactReference, ReadWithDeepContextParams, ReadWithDeepContextResponse,
+    ReadWithDeepContextParams, ReadWithDeepContextResponse,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
@@ -525,28 +525,6 @@ impl PathfinderServer {
             degraded: if degraded { Some(true) } else { None },
             degraded_reason,
         }))
-    }
-}
-
-// ── Helper: build an ImpactReference (used when LSP is available in future) ─
-
-#[expect(
-    dead_code,
-    reason = "Will be used when LSP call hierarchy is wired in Milestone 2."
-)]
-fn build_impact_reference(
-    semantic_path: String,
-    file: String,
-    line: usize,
-    snippet: String,
-    version_hash: String,
-) -> ImpactReference {
-    ImpactReference {
-        semantic_path,
-        file,
-        line,
-        snippet,
-        version_hash,
     }
 }
 
