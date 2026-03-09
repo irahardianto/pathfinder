@@ -45,9 +45,7 @@ struct LanguageState {
     /// Background reader task handle.
     _reader: tokio::task::JoinHandle<()>,
     /// Number of times we have restarted this LSP (used in M3 crash recovery UI).
-    _restart_count: u32,
-    /// When this entry was last actively used.
-    last_used: Instant,
+    restart_count: u32,
 }
 
 /// Marks a language as permanently unavailable after repeated crashes.
@@ -187,8 +185,7 @@ impl LspClient {
             ProcessEntry::Running(Box::new(LanguageState {
                 process,
                 _reader: reader_handle,
-                _restart_count: attempt,
-                last_used: Instant::now(),
+                restart_count: attempt,
             })),
         );
 
@@ -199,7 +196,6 @@ impl LspClient {
     async fn touch(&self, language_id: &str) {
         let mut guard = self.processes.write().await;
         if let Some(ProcessEntry::Running(state)) = guard.get_mut(language_id) {
-            state.last_used = Instant::now();
             state.process.last_used = Instant::now();
         }
     }
@@ -531,6 +527,14 @@ impl Lawyer for LspClient {
             return Ok(None);
         }
 
+        if let Some(edits) = response.as_array() {
+            tracing::debug!(
+                language = language_id,
+                edit_count = edits.len(),
+                "LSP returned range formatting edits (currently ignored)"
+            );
+        }
+
         // response is an array of TextEdit objects; we currently don't apply them
         // (we just signal availability). The Tree-sitter indentation pre-pass
         // is sufficient. Return None to indicate "no formatted text substitution".
@@ -745,7 +749,7 @@ async fn idle_timeout_task(
             .iter()
             .filter_map(|(lang, entry)| {
                 if let ProcessEntry::Running(state) = entry {
-                    if state.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT {
+                    if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT {
                         Some(lang.clone())
                     } else {
                         None
@@ -758,7 +762,11 @@ async fn idle_timeout_task(
 
         for lang in languages_to_remove {
             if let Some(ProcessEntry::Running(mut state)) = guard.remove(&lang) {
-                tracing::info!(language = %lang, "LSP: idle timeout — terminating");
+                tracing::info!(
+                    language = %lang,
+                    restarts = state.restart_count,
+                    "LSP: idle timeout — terminating"
+                );
                 shutdown(&mut state.process, &dispatcher).await;
             }
         }
