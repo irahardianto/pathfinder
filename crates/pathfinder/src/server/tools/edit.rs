@@ -59,10 +59,6 @@ impl PathfinderServer {
     /// 9. Write to disk
     /// 10. Return new version hash
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Linear 10-step edit pipeline: parse → sandbox → resolve → normalize → indent → splice → validate → TOCTOU → write → respond. Each step is distinct and cannot be collapsed further without obscuring intent."
-    )]
     pub(crate) async fn replace_body_impl(
         &self,
         params: ReplaceBodyParams,
@@ -132,75 +128,9 @@ impl PathfinderServer {
         // ── Step 5: Normalize new_code ────────────────────────────────
         let normalized = normalize_for_body_replace(&params.new_code);
 
-        // ── Step 6: Indentation pre-pass ──────────────────────────────
-        // The body content (between braces) should be indented relative to
-        // the measured body_indent_column, avoiding hardcoded 4-space delta.
-        let body_indent_column = body_range.body_indent_column;
-        let indented = dedent_then_reindent(&normalized, body_indent_column);
-
-        // ── Step 7: Splice into body byte range ───────────────────────
-        // We know the source bytes. We check if the body is wrapped in braces.
-        // For Go/Rust/TS, Tree-sitter includes `{` and `}` in the block range.
-        let is_brace_block = if body_range.end_byte > body_range.start_byte {
-            source.get(body_range.start_byte) == Some(&b'{')
-                && source.get(body_range.end_byte.saturating_sub(1)) == Some(&b'}')
-        } else {
-            false
-        };
-
-        let (before, after) = if is_brace_block {
-            // Include `{` in before and `}` in after
-            (
-                &source[..=body_range.start_byte],
-                &source[body_range.end_byte.saturating_sub(1)..],
-            )
-        } else {
-            // E.g., Python: replace exactly the byte range
-            // We trim trailing whitespace from `before` to avoid double indentation
-            let mut before_slice = &source[..body_range.start_byte];
-            while before_slice.last() == Some(&b' ') || before_slice.last() == Some(&b'\t') {
-                before_slice = &before_slice[..before_slice.len() - 1];
-            }
-            (before_slice, &source[body_range.end_byte..])
-        };
-
-        // Build the new file content
-        let new_content = if is_brace_block {
-            if indented.trim().is_empty() {
-                // Empty body: `{}`
-                [
-                    std::str::from_utf8(before)
-                        .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")))?,
-                    std::str::from_utf8(after)
-                        .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")))?,
-                ]
-                .concat()
-            } else {
-                let closing_indent = " ".repeat(body_range.indent_column);
-                [
-                    std::str::from_utf8(before)
-                        .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")))?,
-                    "\n",
-                    &indented,
-                    "\n",
-                    &closing_indent,
-                    std::str::from_utf8(after)
-                        .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")))?,
-                ]
-                .concat()
-            }
-        } else {
-            // Python
-            [
-                std::str::from_utf8(before)
-                    .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")))?,
-                &indented,
-                std::str::from_utf8(after)
-                    .map_err(|e| io_error_data(format!("source is not valid UTF-8: {e}")))?,
-            ]
-            .concat()
-        };
-
+        // ── Steps 6–7: Indent + splice ──────────────────────────────────
+        let indented = dedent_then_reindent(&normalized, body_range.body_indent_column);
+        let new_content = build_body_replacement(&source, &body_range, &indented)?;
         let new_bytes = new_content.as_bytes();
 
         // ── Steps 8–11: Validate → TOCTOU → Write → Respond ────────────
@@ -733,10 +663,6 @@ impl PathfinderServer {
     /// `ValidationOutcome` even if new errors are introduced.
     ///
     /// Gracefully degrades to `validation_skipped` on all LSP errors.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequential LSP validation pipeline with 5 distinct failure modes (no_lsp, unsupported, pre-diag timeout, post-diag timeout, blocking failure), each requiring its own ValidationOutcome. No repeated structure to extract without obscuring the error taxonomy."
-    )]
     async fn run_lsp_validation(
         &self,
         file_path: &Path,
@@ -859,54 +785,7 @@ impl PathfinderServer {
             .await;
 
         // ── diff diagnostics ──────────────────────
-        let diff = diff_diagnostics(&pre_diags, &post_diags);
-        let has_new_errors = diff.has_new_errors();
-
-        let introduced: Vec<DiagnosticError> = diff
-            .introduced
-            .iter()
-            .map(|d| DiagnosticError {
-                severity: d.severity as u8,
-                code: d.code.clone().unwrap_or_default(),
-                message: d.message.clone(),
-                file: d.file.clone(),
-            })
-            .collect();
-
-        let resolved: Vec<DiagnosticError> = diff
-            .resolved
-            .iter()
-            .map(|d| DiagnosticError {
-                severity: d.severity as u8,
-                code: d.code.clone().unwrap_or_default(),
-                message: d.message.clone(),
-                file: d.file.clone(),
-            })
-            .collect();
-
-        if has_new_errors && !ignore_validation_failures {
-            ValidationOutcome {
-                validation: EditValidation {
-                    status: "failed".to_owned(),
-                    introduced_errors: introduced,
-                    resolved_errors: resolved,
-                },
-                skipped: None,
-                skipped_reason: None,
-                should_block: true,
-            }
-        } else {
-            ValidationOutcome {
-                validation: EditValidation {
-                    status: "passed".to_owned(),
-                    introduced_errors: introduced,
-                    resolved_errors: resolved,
-                },
-                skipped: None,
-                skipped_reason: None,
-                should_block: false,
-            }
-        }
+        build_validation_outcome(&pre_diags, &post_diags, ignore_validation_failures)
     }
 
     /// Helper to perform the final TOCTOU check and write the modified file to disk.
@@ -1018,6 +897,90 @@ impl PathfinderServer {
             validation_skipped: validation_outcome.skipped,
             validation_skipped_reason: validation_outcome.skipped_reason,
         }))
+    }
+}
+
+// ── Extracted helpers ──────────────────────────────────────────────────────────
+
+/// Splice `indented` code into `source` at the given `body_range`.
+///
+/// Handles two cases:
+/// - **Brace-enclosed blocks** (Go/Rust/TS): keeps `{` and `}`, inserts body
+///   between them with proper indentation for the closing brace.
+/// - **Non-brace blocks** (Python): replaces only the byte range, trimming
+///   trailing whitespace before the insertion point to avoid double indentation.
+fn build_body_replacement(
+    source: &[u8],
+    body_range: &pathfinder_treesitter::surgeon::BodyRange,
+    indented: &str,
+) -> Result<String, ErrorData> {
+    let is_brace_block = if body_range.end_byte > body_range.start_byte {
+        source.get(body_range.start_byte) == Some(&b'{')
+            && source.get(body_range.end_byte.saturating_sub(1)) == Some(&b'}')
+    } else {
+        false
+    };
+
+    let utf8_err =
+        |e: std::str::Utf8Error| io_error_data(format!("source is not valid UTF-8: {e}"));
+
+    if is_brace_block {
+        let before = std::str::from_utf8(&source[..=body_range.start_byte]).map_err(utf8_err)?;
+        let after = std::str::from_utf8(&source[body_range.end_byte.saturating_sub(1)..])
+            .map_err(utf8_err)?;
+
+        if indented.trim().is_empty() {
+            Ok([before, after].concat())
+        } else {
+            let closing_indent = " ".repeat(body_range.indent_column);
+            Ok([before, "\n", indented, "\n", &closing_indent, after].concat())
+        }
+    } else {
+        // Non-brace block (e.g., Python): trim trailing whitespace from `before`.
+        let mut end = body_range.start_byte;
+        while end > 0 && (source[end - 1] == b' ' || source[end - 1] == b'\t') {
+            end -= 1;
+        }
+        let before = std::str::from_utf8(&source[..end]).map_err(utf8_err)?;
+        let after = std::str::from_utf8(&source[body_range.end_byte..]).map_err(utf8_err)?;
+        Ok([before, indented, after].concat())
+    }
+}
+
+/// Convert pre/post diagnostic lists into a `ValidationOutcome`.
+///
+/// Pure function: diffs the diagnostics, maps them to `DiagnosticError`,
+/// and decides whether the edit should be blocked.
+fn build_validation_outcome(
+    pre_diags: &[pathfinder_lsp::types::LspDiagnostic],
+    post_diags: &[pathfinder_lsp::types::LspDiagnostic],
+    ignore_validation_failures: bool,
+) -> ValidationOutcome {
+    let diff = diff_diagnostics(pre_diags, post_diags);
+    let has_new_errors = diff.has_new_errors();
+
+    let to_diag_error = |d: &pathfinder_lsp::types::LspDiagnostic| DiagnosticError {
+        severity: d.severity as u8,
+        code: d.code.clone().unwrap_or_default(),
+        message: d.message.clone(),
+        file: d.file.clone(),
+    };
+
+    let introduced: Vec<DiagnosticError> = diff.introduced.iter().map(to_diag_error).collect();
+    let resolved: Vec<DiagnosticError> = diff.resolved.iter().map(to_diag_error).collect();
+
+    let should_block = has_new_errors && !ignore_validation_failures;
+    let status = if should_block { "failed" } else { "passed" };
+
+    ValidationOutcome {
+        validation: EditValidation {
+            status: status.to_owned(),
+            introduced_errors: introduced,
+            resolved_errors: resolved,
+        },
+        skipped: None,
+        skipped_reason: None,
+        should_block,
     }
 }
 
