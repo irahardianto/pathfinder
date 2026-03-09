@@ -358,7 +358,7 @@ impl Lawyer for LspClient {
         self.touch(language_id).await;
 
         let elapsed = start.elapsed().as_millis();
-        tracing::debug!(
+        tracing::info!(
             language = language_id,
             elapsed_ms = elapsed,
             "textDocument/prepareCallHierarchy complete"
@@ -398,7 +398,7 @@ impl Lawyer for LspClient {
         self.touch(language_id).await;
 
         let elapsed = start.elapsed().as_millis();
-        tracing::debug!(
+        tracing::info!(
             language = language_id,
             elapsed_ms = elapsed,
             "callHierarchy/incomingCalls complete"
@@ -438,7 +438,7 @@ impl Lawyer for LspClient {
         self.touch(language_id).await;
 
         let elapsed = start.elapsed().as_millis();
-        tracing::debug!(
+        tracing::info!(
             language = language_id,
             elapsed_ms = elapsed,
             "callHierarchy/outgoingCalls complete"

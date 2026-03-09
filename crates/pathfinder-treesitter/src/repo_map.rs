@@ -213,8 +213,6 @@ pub async fn generate_skeleton_text(
             continue;
         }
 
-        files_in_scope += 1;
-
         // Strip prefix carefully
         let rel_path = path.strip_prefix(workspace_root).unwrap_or(path);
 
@@ -222,6 +220,9 @@ pub async fn generate_skeleton_text(
         let Some(lang) = crate::language::SupportedLanguage::detect(path) else {
             continue;
         };
+
+        // Count only after language detection: coverage_percent = "source files mapped / source files found"
+        files_in_scope += 1;
 
         if !tech_stack.contains(&lang) {
             tech_stack.push(lang);

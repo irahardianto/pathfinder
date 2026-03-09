@@ -421,28 +421,42 @@ impl PathfinderServer {
                         continue;
                     }
 
-                    if let Ok(calls) = self
+                    match self
                         .lawyer
                         .call_hierarchy_incoming(self.workspace_root.path(), &item)
                         .await
                     {
-                        for call in calls {
-                            let caller = call.item;
-                            files_referenced.insert(caller.file.clone());
+                        Ok(calls) => {
+                            for call in calls {
+                                let caller = call.item;
+                                files_referenced.insert(caller.file.clone());
 
-                            let key = (caller.file.clone(), caller.line);
-                            if !seen.contains(&key) {
-                                seen.insert(key);
-                                queue.push_back((caller.clone(), current_depth + 1));
+                                let key = (caller.file.clone(), caller.line);
+                                if !seen.contains(&key) {
+                                    seen.insert(key);
+                                    queue.push_back((caller.clone(), current_depth + 1));
 
-                                incoming.push(crate::server::types::ImpactReference {
-                                    semantic_path: format!("{}::{}", caller.file, caller.name),
-                                    file: caller.file.clone(),
-                                    line: caller.line as usize,
-                                    snippet: caller.detail.unwrap_or_else(|| caller.name.clone()),
-                                    version_hash: String::new(), // Populated at higher layer if needed
-                                });
+                                    incoming.push(crate::server::types::ImpactReference {
+                                        semantic_path: format!("{}::{}", caller.file, caller.name),
+                                        file: caller.file.clone(),
+                                        line: caller.line as usize,
+                                        snippet: caller
+                                            .detail
+                                            .unwrap_or_else(|| caller.name.clone()),
+                                        version_hash: String::new(), // Populated at higher layer if needed
+                                    });
+                                }
                             }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = "analyze_impact",
+                                error = %e,
+                                file = %item.file,
+                                line = item.line,
+                                depth = current_depth,
+                                "call_hierarchy_incoming failed during BFS (partial impact graph)"
+                            );
                         }
                     }
                 }
@@ -459,28 +473,42 @@ impl PathfinderServer {
                         continue;
                     }
 
-                    if let Ok(calls) = self
+                    match self
                         .lawyer
                         .call_hierarchy_outgoing(self.workspace_root.path(), &item)
                         .await
                     {
-                        for call in calls {
-                            let callee = call.item;
-                            files_referenced.insert(callee.file.clone());
+                        Ok(calls) => {
+                            for call in calls {
+                                let callee = call.item;
+                                files_referenced.insert(callee.file.clone());
 
-                            let key = (callee.file.clone(), callee.line);
-                            if !seen_out.contains(&key) {
-                                seen_out.insert(key);
-                                queue_out.push_back((callee.clone(), current_depth + 1));
+                                let key = (callee.file.clone(), callee.line);
+                                if !seen_out.contains(&key) {
+                                    seen_out.insert(key);
+                                    queue_out.push_back((callee.clone(), current_depth + 1));
 
-                                outgoing.push(crate::server::types::ImpactReference {
-                                    semantic_path: format!("{}::{}", callee.file, callee.name),
-                                    file: callee.file.clone(),
-                                    line: callee.line as usize,
-                                    snippet: callee.detail.unwrap_or_else(|| callee.name.clone()),
-                                    version_hash: String::new(), // Populated at higher layer if needed
-                                });
+                                    outgoing.push(crate::server::types::ImpactReference {
+                                        semantic_path: format!("{}::{}", callee.file, callee.name),
+                                        file: callee.file.clone(),
+                                        line: callee.line as usize,
+                                        snippet: callee
+                                            .detail
+                                            .unwrap_or_else(|| callee.name.clone()),
+                                        version_hash: String::new(), // Populated at higher layer if needed
+                                    });
+                                }
                             }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = "analyze_impact",
+                                error = %e,
+                                file = %item.file,
+                                line = item.line,
+                                depth = current_depth,
+                                "call_hierarchy_outgoing failed during BFS (partial impact graph)"
+                            );
                         }
                     }
                 }

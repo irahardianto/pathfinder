@@ -47,6 +47,8 @@ const DEFAULT_DENY_PATTERNS: &[&str] = &[
 
 /// The sandbox enforcer. Checks file paths against the three-tier deny model.
 pub struct Sandbox {
+    // KEEP: reserved for future use in resolving .pathfinderignore paths relative to workspace,
+    // and for potential audit logging that annotates denied paths with the workspace context.
     _workspace_root: PathBuf,
     /// Compiled default deny patterns with overrides applied.
     effective_default_deny: Vec<String>,

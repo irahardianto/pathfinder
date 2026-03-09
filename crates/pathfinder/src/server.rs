@@ -28,7 +28,7 @@ use pathfinder_treesitter::{Surgeon, TreeSitterSurgeon};
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ErrorData, Implementation, ServerInfo};
+use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use std::sync::Arc;
@@ -322,7 +322,7 @@ impl PathfinderServer {
 #[tool_handler]
 impl ServerHandler for PathfinderServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::default()
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("pathfinder", env!("CARGO_PKG_VERSION")))
     }
 }
