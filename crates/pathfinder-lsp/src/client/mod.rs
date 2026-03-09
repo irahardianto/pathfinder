@@ -18,7 +18,7 @@ mod transport;
 pub use capabilities::DetectedCapabilities;
 pub use detect::{detect_languages, language_id_for_extension, LanguageLsp};
 
-use crate::types::{LspDiagnostic, LspDiagnosticSeverity};
+use crate::types::{CallHierarchyCall, CallHierarchyItem, LspDiagnostic, LspDiagnosticSeverity};
 use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use detect::LanguageLsp as LspDescriptor;
@@ -314,6 +314,137 @@ impl Lawyer for LspClient {
         );
 
         parse_definition_response(response)
+    }
+
+    async fn call_hierarchy_prepare(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+        let start = Instant::now();
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let caps = self.capabilities_for(language_id).await?;
+        if !caps.call_hierarchy_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "callHierarchyProvider".to_owned(),
+            });
+        }
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        let params = json!({
+            "textDocument": { "uri": file_uri.as_str() },
+            "position": {
+                "line": line.saturating_sub(1),
+                "character": column.saturating_sub(1)
+            }
+        });
+
+        let response = self
+            .request(
+                language_id,
+                "textDocument/prepareCallHierarchy",
+                params,
+                Duration::from_secs(10),
+            )
+            .await?;
+
+        self.touch(language_id).await;
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::debug!(
+            language = language_id,
+            elapsed_ms = elapsed,
+            "textDocument/prepareCallHierarchy complete"
+        );
+
+        parse_call_hierarchy_prepare_response(&response, workspace_root)
+    }
+
+    async fn call_hierarchy_incoming(
+        &self,
+        workspace_root: &Path,
+        item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+        let start = Instant::now();
+        let ext = Path::new(&item.file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let lsp_item = item.data.clone().ok_or_else(|| {
+            LspError::Protocol("CallHierarchyItem missing original LSP data".to_owned())
+        })?;
+
+        let params = json!({ "item": lsp_item });
+
+        let response = self
+            .request(
+                language_id,
+                "callHierarchy/incomingCalls",
+                params,
+                Duration::from_secs(30),
+            )
+            .await?;
+
+        self.touch(language_id).await;
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::debug!(
+            language = language_id,
+            elapsed_ms = elapsed,
+            "callHierarchy/incomingCalls complete"
+        );
+
+        parse_call_hierarchy_calls_response(&response, workspace_root, "from", "fromRanges")
+    }
+
+    async fn call_hierarchy_outgoing(
+        &self,
+        workspace_root: &Path,
+        item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+        let start = Instant::now();
+        let ext = Path::new(&item.file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let lsp_item = item.data.clone().ok_or_else(|| {
+            LspError::Protocol("CallHierarchyItem missing original LSP data".to_owned())
+        })?;
+
+        let params = json!({ "item": lsp_item });
+
+        let response = self
+            .request(
+                language_id,
+                "callHierarchy/outgoingCalls",
+                params,
+                Duration::from_secs(30),
+            )
+            .await?;
+
+        self.touch(language_id).await;
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::debug!(
+            language = language_id,
+            elapsed_ms = elapsed,
+            "callHierarchy/outgoingCalls complete"
+        );
+
+        parse_call_hierarchy_calls_response(&response, workspace_root, "to", "fromRanges")
     }
 
     async fn did_open(
@@ -734,6 +865,122 @@ fn parse_definition_response(
         column: u32::try_from(start_char + 1).unwrap_or(1),
         preview: String::new(), // Preview populated in future milestone
     }))
+}
+
+/// Parse the `textDocument/prepareCallHierarchy` response into a `Vec<CallHierarchyItem>`.
+fn parse_call_hierarchy_prepare_response(
+    response: &serde_json::Value,
+    workspace_root: &Path,
+) -> Result<Vec<CallHierarchyItem>, LspError> {
+    if response.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let items = response
+        .as_array()
+        .ok_or_else(|| LspError::Protocol("expected array".to_owned()))?;
+
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        let uri_str = item["uri"].as_str().unwrap_or("");
+        let file = Url::parse(uri_str)
+            .ok()
+            .and_then(|u| u.to_file_path().ok())
+            .and_then(|p| {
+                p.strip_prefix(workspace_root)
+                    .map(std::path::Path::to_path_buf)
+                    .ok()
+            })
+            .map_or_else(|| uri_str.to_owned(), |p| p.to_string_lossy().into_owned());
+
+        let line = u32::try_from(
+            item["selectionRange"]["start"]["line"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+        .unwrap_or(0)
+            + 1;
+        let column = u32::try_from(
+            item["selectionRange"]["start"]["character"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+        .unwrap_or(0)
+            + 1;
+
+        let kind_int = item["kind"].as_u64().unwrap_or(0);
+        let kind = match kind_int {
+            5 => "class",
+            6 => "method",
+            11 => "interface",
+            12 => "function",
+            _ => "symbol",
+        }
+        .to_owned();
+
+        result.push(CallHierarchyItem {
+            name: item["name"].as_str().unwrap_or("").to_owned(),
+            kind,
+            detail: item
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .map(ToOwned::to_owned),
+            file,
+            line,
+            column,
+            data: Some(item.clone()),
+        });
+    }
+
+    Ok(result)
+}
+
+/// Parse the `callHierarchy/incomingCalls` or `outgoingCalls` response.
+fn parse_call_hierarchy_calls_response(
+    response: &serde_json::Value,
+    workspace_root: &Path,
+    item_key: &str,
+    ranges_key: &str,
+) -> Result<Vec<CallHierarchyCall>, LspError> {
+    if response.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let calls = response
+        .as_array()
+        .ok_or_else(|| LspError::Protocol("expected array".to_owned()))?;
+
+    let mut result = Vec::with_capacity(calls.len());
+    for call in calls {
+        let Some(item_val) = call.get(item_key) else {
+            continue;
+        };
+        let mut parsed_items = parse_call_hierarchy_prepare_response(
+            &serde_json::Value::Array(vec![item_val.clone()]),
+            workspace_root,
+        )?;
+        if parsed_items.is_empty() {
+            continue;
+        }
+        let item = parsed_items.remove(0);
+
+        let mut call_sites = Vec::new();
+        if let Some(ranges) = call.get(ranges_key).and_then(|r| r.as_array()) {
+            for range in ranges {
+                if let Some(line) = range
+                    .get("start")
+                    .and_then(|s| s.get("line"))
+                    .and_then(serde_json::Value::as_u64)
+                {
+                    call_sites.push(u32::try_from(line).unwrap_or(0) + 1);
+                }
+            }
+        }
+
+        result.push(CallHierarchyCall { item, call_sites });
+    }
+
+    Ok(result)
 }
 
 /// Background task: check for idle processes and terminate them.

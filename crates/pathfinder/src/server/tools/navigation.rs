@@ -171,6 +171,10 @@ impl PathfinderServer {
     /// Returns the symbol's source code. When LSP is available, appends the
     /// signatures of all called symbols. Degrades gracefully to symbol scope
     /// only when no LSP is configured.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline (parse→sandbox→tree-sitter→LSP→fallback branches)."
+    )]
     pub(crate) async fn read_with_deep_context_impl(
         &self,
         params: ReadWithDeepContextParams,
@@ -216,19 +220,87 @@ impl PathfinderServer {
             .map_err(treesitter_error_to_error_data)?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
+        let lsp_start = std::time::Instant::now();
+        let mut dependencies = Vec::new();
+        let mut degraded = true;
+        let mut degraded_reason = Some("no_lsp".to_owned());
+        let mut engines = vec!["tree-sitter"];
+
+        let lsp_result = self
+            .lawyer
+            .call_hierarchy_prepare(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(scope.start_line + 1).unwrap_or(1),
+                1, // Column 1
+            )
+            .await;
+
+        match lsp_result {
+            Ok(items) if !items.is_empty() => {
+                let item = &items[0];
+                match self
+                    .lawyer
+                    .call_hierarchy_outgoing(self.workspace_root.path(), item)
+                    .await
+                {
+                    Ok(outgoing) => {
+                        engines.push("lsp");
+                        for call in outgoing {
+                            let callee = call.item;
+                            let signature =
+                                callee.detail.clone().unwrap_or_else(|| callee.name.clone());
+                            let sp = format!("{}::{}", callee.file, callee.name);
+                            dependencies.push(crate::server::types::DeepContextDependency {
+                                semantic_path: sp,
+                                signature,
+                                file: callee.file,
+                                line: callee.line as usize,
+                            });
+                        }
+                        degraded = false;
+                        degraded_reason = None;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = "read_with_deep_context",
+                            error = %e,
+                            "call_hierarchy_outgoing failed"
+                        );
+                    }
+                }
+            }
+            Ok(_) => {
+                // Empty prepare result, LSP is available and attempted.
+                engines.push("lsp");
+                degraded = false;
+                degraded_reason = None;
+            }
+            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
+                // Keep degraded default
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tool = "read_with_deep_context",
+                    error = %e,
+                    "call_hierarchy_prepare failed"
+                );
+            }
+        }
+
+        let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
-        // In Milestone 1, dependency resolution via LSP is not yet implemented.
-        // Return the symbol scope with degraded: true.
         tracing::info!(
             tool = "read_with_deep_context",
             semantic_path = %params.semantic_path,
             tree_sitter_ms,
+            lsp_ms,
             duration_ms,
-            degraded = true,
-            degraded_reason = "no_lsp",
-            engines_used = ?["tree-sitter"],
-            "read_with_deep_context: complete (degraded)"
+            degraded,
+            degraded_reason,
+            engines_used = ?engines,
+            "read_with_deep_context: complete"
         );
 
         Ok(Json(ReadWithDeepContextResponse {
@@ -237,9 +309,9 @@ impl PathfinderServer {
             end_line: scope.end_line,
             version_hash: scope.version_hash.to_string(),
             language: scope.language,
-            dependencies: vec![],
-            degraded: Some(true),
-            degraded_reason: Some("no_lsp".to_owned()),
+            dependencies,
+            degraded: if degraded { Some(true) } else { None },
+            degraded_reason,
         }))
     }
 
@@ -247,14 +319,9 @@ impl PathfinderServer {
     ///
     /// Returns callers (incoming) and callees (outgoing) for the target symbol.
     /// Degrades gracefully to empty results when no LSP is configured.
-    ///
-    /// In Milestone 1 this always returns empty degraded results. Future milestones
-    /// will wire the LSP call hierarchy query.
-    // Intentionally `async`: Milestone 2 will add `await` when the LSP call hierarchy
-    // is wired. Keeping `async` now avoids a breaking change to the call site in server.rs.
     #[expect(
-        clippy::unused_async,
-        reason = "Milestone 2 will add `await` when the LSP call hierarchy is wired."
+        clippy::too_many_lines,
+        reason = "Two full BFS loops (incoming/outgoing) make this long but straightforward."
     )]
     pub(crate) async fn analyze_impact_impl(
         &self,
@@ -293,27 +360,170 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        // 1. Fetch the symbol scope (Tree-sitter) to get start line
+        let ts_start = std::time::Instant::now();
+        let scope = match self
+            .surgeon
+            .read_symbol_scope(self.workspace_root.path(), &semantic_path)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis();
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    error = %e,
+                    duration_ms,
+                    "tree-sitter read failed"
+                );
+                return Err(treesitter_error_to_error_data(e));
+            }
+        };
+        let tree_sitter_ms = ts_start.elapsed().as_millis();
+
+        let lsp_start = std::time::Instant::now();
+        let mut incoming = Vec::new();
+        let mut outgoing = Vec::new();
+        let mut degraded = true;
+        let mut degraded_reason = Some("no_lsp".to_owned());
+        let mut engines = vec!["tree-sitter"];
+        let mut files_referenced = std::collections::HashSet::new();
+        let mut max_depth_reached = 0;
+
+        let lsp_result = self
+            .lawyer
+            .call_hierarchy_prepare(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(scope.start_line + 1).unwrap_or(1),
+                1, // Column 1
+            )
+            .await;
+
+        match lsp_result {
+            Ok(items) if !items.is_empty() => {
+                engines.push("lsp");
+                degraded = false;
+                degraded_reason = None;
+
+                let initial_item = &items[0];
+
+                // --- INCOMING BFS ---
+                let mut queue = std::collections::VecDeque::new();
+                queue.push_back((initial_item.clone(), 0));
+                let mut seen = std::collections::HashSet::new();
+                seen.insert((initial_item.file.clone(), initial_item.line));
+                files_referenced.insert(initial_item.file.clone());
+
+                while let Some((item, current_depth)) = queue.pop_front() {
+                    max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
+                    if current_depth >= params.max_depth {
+                        continue;
+                    }
+
+                    if let Ok(calls) = self
+                        .lawyer
+                        .call_hierarchy_incoming(self.workspace_root.path(), &item)
+                        .await
+                    {
+                        for call in calls {
+                            let caller = call.item;
+                            files_referenced.insert(caller.file.clone());
+
+                            let key = (caller.file.clone(), caller.line);
+                            if !seen.contains(&key) {
+                                seen.insert(key);
+                                queue.push_back((caller.clone(), current_depth + 1));
+
+                                incoming.push(crate::server::types::ImpactReference {
+                                    semantic_path: format!("{}::{}", caller.file, caller.name),
+                                    file: caller.file.clone(),
+                                    line: caller.line as usize,
+                                    snippet: caller.detail.unwrap_or_else(|| caller.name.clone()),
+                                    version_hash: String::new(), // Populated at higher layer if needed
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // --- OUTGOING BFS ---
+                let mut queue_out = std::collections::VecDeque::new();
+                queue_out.push_back((initial_item.clone(), 0));
+                let mut seen_out = std::collections::HashSet::new();
+                seen_out.insert((initial_item.file.clone(), initial_item.line));
+
+                while let Some((item, current_depth)) = queue_out.pop_front() {
+                    max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
+                    if current_depth >= params.max_depth {
+                        continue;
+                    }
+
+                    if let Ok(calls) = self
+                        .lawyer
+                        .call_hierarchy_outgoing(self.workspace_root.path(), &item)
+                        .await
+                    {
+                        for call in calls {
+                            let callee = call.item;
+                            files_referenced.insert(callee.file.clone());
+
+                            let key = (callee.file.clone(), callee.line);
+                            if !seen_out.contains(&key) {
+                                seen_out.insert(key);
+                                queue_out.push_back((callee.clone(), current_depth + 1));
+
+                                outgoing.push(crate::server::types::ImpactReference {
+                                    semantic_path: format!("{}::{}", callee.file, callee.name),
+                                    file: callee.file.clone(),
+                                    line: callee.line as usize,
+                                    snippet: callee.detail.unwrap_or_else(|| callee.name.clone()),
+                                    version_hash: String::new(), // Populated at higher layer if needed
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                engines.push("lsp");
+                degraded = false;
+                degraded_reason = None;
+            }
+            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
+                // Keep degraded default
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    error = %e,
+                    "call_hierarchy_prepare failed"
+                );
+            }
+        }
+
+        let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
-        // Milestone 1: LSP call hierarchy not yet implemented.
-        // Return empty degraded results immediately (no I/O needed).
         tracing::info!(
             tool = "analyze_impact",
             semantic_path = %params.semantic_path,
+            tree_sitter_ms,
+            lsp_ms,
             duration_ms,
-            degraded = true,
-            degraded_reason = "no_lsp",
-            engines_used = ?["none"],
-            "analyze_impact: complete (degraded)"
+            degraded,
+            degraded_reason,
+            engines_used = ?engines,
+            "analyze_impact: complete"
         );
 
         Ok(Json(AnalyzeImpactResponse {
-            incoming: vec![],
-            outgoing: vec![],
-            depth_reached: 0,
-            files_referenced: 0,
-            degraded: Some(true),
-            degraded_reason: Some("no_lsp".to_owned()),
+            incoming,
+            outgoing,
+            depth_reached: max_depth_reached,
+            files_referenced: files_referenced.len(),
+            degraded: if degraded { Some(true) } else { None },
+            degraded_reason,
         }))
     }
 }
@@ -350,6 +560,7 @@ mod tests {
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{SymbolScope, VersionHash, WorkspaceRoot};
+    use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem};
     use pathfinder_lsp::{DefinitionLocation, MockLawyer};
     use pathfinder_search::MockScout;
     use pathfinder_treesitter::mock::MockSurgeon;
@@ -498,7 +709,7 @@ mod tests {
     // ── read_with_deep_context ────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_read_with_deep_context_returns_scope_with_degraded() {
+    async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -506,8 +717,19 @@ mod tests {
             .unwrap()
             .push(Ok(make_scope()));
 
-        let lawyer = Arc::new(MockLawyer::default());
-        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            surgeon,
+            lawyer,
+        );
 
         let params = ReadWithDeepContextParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -521,13 +743,86 @@ mod tests {
         assert!(val.dependencies.is_empty());
     }
 
+    #[tokio::test]
+    async fn test_read_with_deep_context_lsp_populates_dependencies() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let val = result.expect("should succeed").0;
+
+        assert_eq!(val.content, "fn login() { }");
+        assert_eq!(val.degraded, None);
+        assert_eq!(val.degraded_reason, None);
+        assert_eq!(val.dependencies.len(), 1);
+        assert_eq!(
+            val.dependencies[0].semantic_path,
+            "src/token.rs::validate_token"
+        );
+        assert_eq!(val.dependencies[0].signature, "fn validate_token() -> bool");
+        assert_eq!(val.dependencies[0].file, "src/token.rs");
+        assert_eq!(val.dependencies[0].line, 15);
+    }
+
     // ── analyze_impact ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_analyze_impact_returns_empty_degraded() {
         let surgeon = Arc::new(MockSurgeon::new());
-        let lawyer = Arc::new(MockLawyer::default());
-        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            surgeon,
+            lawyer,
+        );
 
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -540,5 +835,72 @@ mod tests {
         assert!(val.outgoing.is_empty());
         assert_eq!(val.degraded, Some(true));
         assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_lsp_populates_incoming_and_outgoing() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: Some("fn handle_request()".into()),
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let val = result.expect("should succeed").0;
+
+        assert_eq!(val.degraded, None);
+        assert_eq!(val.degraded_reason, None);
+        assert_eq!(val.depth_reached, 1); // BFS pops level 1, updates max_depth_reached, then continues
+        assert_eq!(val.files_referenced, 3); // initial + caller + callee
+        assert_eq!(val.incoming.len(), 1);
+        assert_eq!(val.incoming[0].file, "src/server.rs");
+        assert_eq!(val.outgoing.len(), 1);
+        assert_eq!(val.outgoing[0].file, "src/token.rs");
     }
 }

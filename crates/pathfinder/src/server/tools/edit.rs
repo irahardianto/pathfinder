@@ -1077,6 +1077,32 @@ mod tests {
         ) -> Result<Option<DefinitionLocation>, LspError> {
             Ok(None)
         }
+        async fn call_hierarchy_prepare(
+            &self,
+            _workspace_root: &std::path::Path,
+            _file_path: &std::path::Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyItem>, LspError> {
+            Err(LspError::NoLspAvailable)
+        }
+
+        async fn call_hierarchy_incoming(
+            &self,
+            _workspace_root: &std::path::Path,
+            _item: &pathfinder_lsp::types::CallHierarchyItem,
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, LspError> {
+            Err(LspError::NoLspAvailable)
+        }
+
+        async fn call_hierarchy_outgoing(
+            &self,
+            _workspace_root: &std::path::Path,
+            _item: &pathfinder_lsp::types::CallHierarchyItem,
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, LspError> {
+            Err(LspError::NoLspAvailable)
+        }
+
         async fn did_open(
             &self,
             _workspace_root: &Path,

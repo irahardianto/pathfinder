@@ -6,7 +6,7 @@
 
 use crate::{
     error::LspError,
-    types::{DefinitionLocation, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, LspDiagnostic},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -39,6 +39,32 @@ pub trait Lawyer: Send + Sync {
         line: u32,
         column: u32,
     ) -> Result<Option<DefinitionLocation>, LspError>;
+
+    /// Prepare a call hierarchy operation at the given position.
+    ///
+    /// The returned `CallHierarchyItem` list represents the symbols at the
+    /// cursor position that can be queried for incoming/outgoing calls.
+    async fn call_hierarchy_prepare(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<CallHierarchyItem>, LspError>;
+
+    /// Resolve incoming calls to a previously prepared `CallHierarchyItem`.
+    async fn call_hierarchy_incoming(
+        &self,
+        workspace_root: &Path,
+        item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError>;
+
+    /// Resolve outgoing calls from a previously prepared `CallHierarchyItem`.
+    async fn call_hierarchy_outgoing(
+        &self,
+        workspace_root: &Path,
+        item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError>;
 
     /// Notify the LSP that a file has been opened with the given content.
     ///

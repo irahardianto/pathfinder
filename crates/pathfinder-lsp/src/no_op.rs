@@ -9,7 +9,7 @@
 use crate::{
     error::LspError,
     lawyer::Lawyer,
-    types::{DefinitionLocation, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, LspDiagnostic},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -31,6 +31,32 @@ impl Lawyer for NoOpLawyer {
         _line: u32,
         _column: u32,
     ) -> Result<Option<DefinitionLocation>, LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
+    async fn call_hierarchy_prepare(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _line: u32,
+        _column: u32,
+    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
+    async fn call_hierarchy_incoming(
+        &self,
+        _workspace_root: &Path,
+        _item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
+    async fn call_hierarchy_outgoing(
+        &self,
+        _workspace_root: &Path,
+        _item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError> {
         Err(LspError::NoLspAvailable)
     }
 
@@ -101,6 +127,47 @@ mod tests {
     async fn test_no_op_lawyer_goto_definition_returns_no_lsp() {
         let lawyer = NoOpLawyer;
         let result = lawyer.goto_definition(&workspace(), &file(), 1, 1).await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_call_hierarchy_prepare_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer
+            .call_hierarchy_prepare(&workspace(), &file(), 1, 1)
+            .await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_call_hierarchy_incoming_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let item = CallHierarchyItem {
+            name: "foo".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/main.rs".into(),
+            line: 1,
+            column: 1,
+            data: None,
+        };
+        let result = lawyer.call_hierarchy_incoming(&workspace(), &item).await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_call_hierarchy_outgoing_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let item = CallHierarchyItem {
+            name: "foo".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/main.rs".into(),
+            line: 1,
+            column: 1,
+            data: None,
+        };
+        let result = lawyer.call_hierarchy_outgoing(&workspace(), &item).await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
 

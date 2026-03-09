@@ -45,6 +45,28 @@ pub struct LspDiagnostic {
     pub end_line: u32,
 }
 
+/// A node in the call hierarchy (e.g. a function or method).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallHierarchyItem {
+    pub name: String,
+    pub kind: String, // "function", "method", etc.
+    pub detail: Option<String>,
+    pub file: String, // Relative path representation
+    pub line: u32,    // 1-indexed
+    pub column: u32,  // 1-indexed
+
+    // Internal generic LSP data needed for incoming/outgoing requests
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+}
+
+/// Represents an incoming or outgoing call in the hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallHierarchyCall {
+    pub item: CallHierarchyItem, // Caller (if incoming) or Callee (if outgoing)
+    pub call_sites: Vec<u32>,    // 1-indexed lines where calls occur
+}
+
 impl LspDiagnostic {
     /// Returns `true` if this diagnostic is a blocking error (severity 1).
     #[must_use]

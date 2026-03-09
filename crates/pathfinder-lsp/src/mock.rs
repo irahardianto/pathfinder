@@ -19,7 +19,7 @@
 use crate::{
     error::LspError,
     lawyer::Lawyer,
-    types::{DefinitionLocation, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, LspDiagnostic},
 };
 use async_trait::async_trait;
 use std::{
@@ -40,6 +40,12 @@ type RangeFormattingFixture = Arc<Mutex<Option<Result<Option<String>, String>>>>
 
 /// Configured error for `did_open`. `None` = return `Ok(())`.
 type DidOpenErrorFixture = Arc<Mutex<Option<LspError>>>;
+
+/// Queue of results for `call_hierarchy_prepare`.
+type PrepareCallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyItem>, String>>>>;
+
+/// Queue of results for `call_hierarchy_incoming` and `call_hierarchy_outgoing`.
+type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, String>>>>;
 
 /// A configurable fake `Lawyer` for unit testing.
 #[derive(Clone, Default)]
@@ -73,6 +79,14 @@ pub struct MockLawyer {
     // ── pull_workspace_diagnostics ────────────────────────────────────────────
     /// Queue of results for successive `pull_workspace_diagnostics` calls.
     pub pull_workspace_diagnostics_results: PullDiagnosticsQueue,
+
+    // ── call_hierarchy ────────────────────────────────────────────────────────
+    /// Queue of results for successive `call_hierarchy_prepare` calls.
+    pub prepare_call_hierarchy_results: PrepareCallHierarchyQueue,
+    /// Queue of results for successive `call_hierarchy_incoming` calls.
+    pub incoming_call_results: CallHierarchyQueue,
+    /// Queue of results for successive `call_hierarchy_outgoing` calls.
+    pub outgoing_call_results: CallHierarchyQueue,
 
     // ── range_formatting ──────────────────────────────────────────────────────
     /// Configured result for `range_formatting`.
@@ -147,6 +161,35 @@ impl MockLawyer {
             .push(result);
     }
 
+    // ── call_hierarchy ────────────────────────────────────────────────────────
+
+    /// Push a result onto the `call_hierarchy_prepare` queue.
+    pub fn push_prepare_call_hierarchy_result(
+        &self,
+        result: Result<Vec<CallHierarchyItem>, String>,
+    ) {
+        self.prepare_call_hierarchy_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(result);
+    }
+
+    /// Push a result onto the `call_hierarchy_incoming` queue.
+    pub fn push_incoming_call_result(&self, result: Result<Vec<CallHierarchyCall>, String>) {
+        self.incoming_call_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(result);
+    }
+
+    /// Push a result onto the `call_hierarchy_outgoing` queue.
+    pub fn push_outgoing_call_result(&self, result: Result<Vec<CallHierarchyCall>, String>) {
+        self.outgoing_call_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(result);
+    }
+
     /// Returns the number of `did_open` calls recorded.
     #[must_use]
     pub fn did_open_call_count(&self) -> usize {
@@ -215,6 +258,80 @@ impl Lawyer for MockLawyer {
             Some(Ok(result)) => Ok(result),
             Some(Err(msg)) => Err(LspError::Protocol(msg)),
             None => Ok(None),
+        }
+    }
+
+    async fn call_hierarchy_prepare(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _line: u32,
+        _column: u32,
+    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+        let next = {
+            let mut guard = self
+                .prepare_call_hierarchy_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if guard.is_empty() {
+                None
+            } else {
+                Some(guard.remove(0))
+            }
+        };
+
+        match next {
+            Some(Ok(items)) => Ok(items),
+            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            None => Ok(vec![]),
+        }
+    }
+
+    async fn call_hierarchy_incoming(
+        &self,
+        _workspace_root: &Path,
+        _item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+        let next = {
+            let mut guard = self
+                .incoming_call_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if guard.is_empty() {
+                None
+            } else {
+                Some(guard.remove(0))
+            }
+        };
+
+        match next {
+            Some(Ok(calls)) => Ok(calls),
+            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            None => Ok(vec![]),
+        }
+    }
+
+    async fn call_hierarchy_outgoing(
+        &self,
+        _workspace_root: &Path,
+        _item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+        let next = {
+            let mut guard = self
+                .outgoing_call_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if guard.is_empty() {
+                None
+            } else {
+                Some(guard.remove(0))
+            }
+        };
+
+        match next {
+            Some(Ok(calls)) => Ok(calls),
+            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            None => Ok(vec![]),
         }
     }
 
