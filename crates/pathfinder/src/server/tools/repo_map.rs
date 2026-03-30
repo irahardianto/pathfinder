@@ -40,6 +40,7 @@ impl PathfinderServer {
                     pathfinder_common::types::Visibility::Public => "public",
                     pathfinder_common::types::Visibility::All => "all",
                 },
+                params.max_tokens_per_file,
             )
             .await
         {

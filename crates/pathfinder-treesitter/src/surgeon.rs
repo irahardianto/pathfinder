@@ -139,6 +139,7 @@ pub trait Surgeon: Send + Sync {
         max_tokens: u32,
         depth: u32,
         visibility: &str,
+        max_tokens_per_file: u32,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError>;
 
     /// Resolve the body byte range and indent column for a symbol.

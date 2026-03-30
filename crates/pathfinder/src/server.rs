@@ -152,7 +152,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_repo_map",
-        description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing."
+        description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing. Two budget knobs control coverage: `max_tokens` is the total token budget (default 16000); `max_tokens_per_file` caps detail per file before collapsing to a stub (default 2000). When `coverage_percent` is low, increase `max_tokens`. When files show `[TRUNCATED DUE TO SIZE]`, increase `max_tokens_per_file`. Use `visibility=all` to include private symbols for auditing."
     )]
     #[allow(clippy::unused_self)]
     async fn get_repo_map(
@@ -376,6 +376,7 @@ mod tests {
             depth: 3,
             visibility: pathfinder_common::types::Visibility::Public,
             include_imports: pathfinder_common::types::IncludeImports::None,
+            max_tokens_per_file: 2_000,
         };
 
         let result = server.get_repo_map(Parameters(params)).await;

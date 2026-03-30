@@ -34,7 +34,7 @@ pub struct MockSurgeon {
     pub extract_symbols_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
     pub enclosing_symbol_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
     #[allow(clippy::type_complexity)]
-    pub generate_skeleton_calls: Mutex<Vec<(PathBuf, PathBuf, u32, u32, String)>>,
+    pub generate_skeleton_calls: Mutex<Vec<(PathBuf, PathBuf, u32, u32, String, u32)>>,
     pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     pub resolve_full_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     pub resolve_symbol_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
@@ -117,6 +117,7 @@ impl Surgeon for MockSurgeon {
         max_tokens: u32,
         depth: u32,
         visibility: &str,
+        max_tokens_per_file: u32,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
         self.generate_skeleton_calls.lock().unwrap().push((
             workspace_root.to_path_buf(),
@@ -124,6 +125,7 @@ impl Surgeon for MockSurgeon {
             max_tokens,
             depth,
             visibility.to_string(),
+            max_tokens_per_file,
         ));
         let mut results = self.generate_skeleton_results.lock().unwrap();
         assert!(

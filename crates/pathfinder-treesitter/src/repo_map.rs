@@ -29,7 +29,11 @@ pub fn estimate_tokens(text: &str) -> u32 {
 
 use crate::surgeon::{ExtractedSymbol, SymbolKind};
 
-const MAX_TOKENS_PER_FILE: u32 = 512;
+/// Default per-file token cap. Used when no per-call override is supplied.
+/// At ~4 chars/token, 2 000 tokens ≈ 8 KB — covers the vast majority of
+/// real source files without falling back to the truncated stub.
+#[allow(dead_code)] // Canonical fallback value; callers receive it via default_max_tokens_per_file()
+const MAX_TOKENS_PER_FILE: u32 = 2_000;
 
 /// Determine whether a symbol should be included when `visibility = "public"`.
 ///
@@ -95,13 +99,18 @@ fn filter_by_visibility(
 }
 
 /// Render a single file's skeleton into an indented string.
+///
+/// If the rendered output exceeds `max_tokens_per_file`, the result is
+/// collapsed to a truncated stub showing only class/struct names and method
+/// counts. Pass [`MAX_TOKENS_PER_FILE`] as the default when no caller override
+/// is available.
 #[must_use]
-pub fn render_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
+pub fn render_file_skeleton(symbols: &[ExtractedSymbol], max_tokens_per_file: u32) -> String {
     let mut out = String::new();
     render_symbols_recursive(symbols, 0, &mut out);
 
     // Check if the file is too large
-    if estimate_tokens(&out) > MAX_TOKENS_PER_FILE {
+    if estimate_tokens(&out) > max_tokens_per_file {
         return render_truncated_file_skeleton(symbols);
     }
 
@@ -184,6 +193,7 @@ pub async fn generate_skeleton_text(
     max_tokens: u32,
     depth: u32,
     visibility: &str,
+    max_tokens_per_file: u32,
 ) -> Result<RepoMapResult, SurgeonError> {
     use ignore::WalkBuilder;
     use pathfinder_common::types::VersionHash;
@@ -270,7 +280,7 @@ pub async fn generate_skeleton_text(
 
         files_scanned += 1;
 
-        let file_skeleton = render_file_skeleton(&symbols);
+        let file_skeleton = render_file_skeleton(&symbols, max_tokens_per_file);
         let file_skeleton_tokens = estimate_tokens(&file_skeleton);
 
         let path_header = format!(
@@ -412,16 +422,18 @@ mod tests {
             }],
         }];
 
-        let output = render_file_skeleton(&symbols);
+        let output = render_file_skeleton(&symbols, MAX_TOKENS_PER_FILE);
         assert!(output.contains("class MyClass // MyClass"));
         assert!(output.contains("  method my_method // MyClass.my_method"));
     }
 
     #[test]
     fn test_render_truncated_file_skeleton_fallback() {
-        // Construct massive nested symbol structure that exceeds token limits
+        // Construct massive nested symbol structure that exceeds token limits.
+        // At the new 2_000-token threshold (~8 KB), we need 200 long method names to
+        // generate ~12 000 chars (~3 000 tokens), which reliably triggers truncation.
         let mut methods = Vec::new();
-        for i in 0..100 {
+        for i in 0..200 {
             methods.push(ExtractedSymbol {
                 name: format!("massive_method_{i}"),
                 semantic_path: format!("MyGiganticClass.massive_method_{i}"),
@@ -433,7 +445,7 @@ mod tests {
             });
         }
 
-        // This class with 100 methods with long names easily exceeds 512 tokens (~2000 chars)
+        // This class with 100 methods with long names easily exceeds 2_000 tokens (~8 KB)
         let symbols = vec![ExtractedSymbol {
             name: "MyGiganticClass".to_string(),
             semantic_path: "MyGiganticClass".to_string(),
@@ -446,10 +458,10 @@ mod tests {
 
         render_symbols_recursive(&symbols, 0, &mut String::new());
         // To properly test, let's call `render_file_skeleton` which calls the truncated version internally
-        let output = render_file_skeleton(&symbols);
+        let output = render_file_skeleton(&symbols, MAX_TOKENS_PER_FILE);
         assert!(output.contains("[TRUNCATED DUE TO SIZE]"));
         assert!(output.contains("class MyGiganticClass // MyGiganticClass"));
-        assert!(output.contains("100 methods omitted"));
+        assert!(output.contains("200 methods omitted"));
         assert!(!output.contains("massive_method_0")); // methods shouldn't be printed
     }
 

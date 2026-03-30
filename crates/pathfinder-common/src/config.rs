@@ -208,7 +208,7 @@ fn default_filter_mode() -> String {
 }
 
 fn default_max_tokens() -> usize {
-    4096
+    16_000
 }
 
 fn default_token_method() -> String {
@@ -230,7 +230,7 @@ mod tests {
         let config = PathfinderConfig::default();
         assert_eq!(config.log_level, "info");
         assert_eq!(config.search.max_results, 50);
-        assert_eq!(config.repo_map.max_tokens, 4096);
+        assert_eq!(config.repo_map.max_tokens, 16_000);
         assert_eq!(config.validation.scope, "workspace_wide");
         assert!(config.lsp.is_empty());
     }
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(config.log_level, "warn");
         // Other fields should be defaults
         assert_eq!(config.search.max_results, 50);
-        assert_eq!(config.repo_map.max_tokens, 4096);
+        assert_eq!(config.repo_map.max_tokens, 16_000);
     }
 
     #[tokio::test]

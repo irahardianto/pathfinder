@@ -43,7 +43,10 @@ pub struct GetRepoMapParams {
     /// Directory to map.
     #[serde(default = "default_repo_map_path")]
     pub path: String,
-    /// Token budget.
+    /// Total token budget for the entire skeleton output. Default: 16000.
+    ///
+    /// When `coverage_percent` in the response is low, increase this value
+    /// to include more files in the map.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
     /// Max directory traversal depth.
@@ -55,6 +58,14 @@ pub struct GetRepoMapParams {
     /// Import inclusion: `none`, `third_party`, or `all`.
     #[serde(default)]
     pub include_imports: pathfinder_common::types::IncludeImports,
+    /// Per-file token cap before a file skeleton is collapsed to a summary stub.
+    ///
+    /// When the rendered skeleton of an individual file exceeds this limit, the
+    /// file is replaced with a truncated stub showing only class/struct names and
+    /// method counts. Increase this value when files show `[TRUNCATED DUE TO SIZE]`
+    /// in the output. Default: 2000.
+    #[serde(default = "default_max_tokens_per_file")]
+    pub max_tokens_per_file: u32,
 }
 
 /// Parameters for `read_symbol_scope`.
@@ -454,7 +465,10 @@ pub(crate) fn default_repo_map_path() -> String {
     ".".to_owned()
 }
 pub(crate) fn default_max_tokens() -> u32 {
-    4096
+    16_000
+}
+pub(crate) fn default_max_tokens_per_file() -> u32 {
+    2_000
 }
 pub(crate) fn default_depth() -> u32 {
     3

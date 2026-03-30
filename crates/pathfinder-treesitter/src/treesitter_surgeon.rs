@@ -273,6 +273,7 @@ impl Surgeon for TreeSitterSurgeon {
         max_tokens: u32,
         depth: u32,
         visibility: &str,
+        max_tokens_per_file: u32,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
         crate::repo_map::generate_skeleton_text(
             self,
@@ -281,6 +282,7 @@ impl Surgeon for TreeSitterSurgeon {
             max_tokens,
             depth,
             visibility,
+            max_tokens_per_file,
         )
         .await
     }
