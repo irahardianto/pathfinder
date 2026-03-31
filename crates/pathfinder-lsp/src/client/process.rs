@@ -51,17 +51,18 @@ const INIT_TIMEOUT_SECS: u64 = 30;
 pub(super) async fn spawn_and_initialize(
     command: &str,
     args: &[String],
-    workspace_root: &Path,
+    project_root: &Path,
     language_id: &str,
     dispatcher: Arc<RequestDispatcher>,
 ) -> Result<(ManagedProcess, ChildStdout), LspError> {
     // Spawn child with piped stdio
-    #[allow(clippy::zombie_processes)] // Kept alive in ManagedProcess
     let mut child = tokio::process::Command::new(command)
         .args(args)
+        .current_dir(project_root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| {
             LspError::Io(std::io::Error::new(
@@ -82,8 +83,8 @@ pub(super) async fn spawn_and_initialize(
     let mut writer = tokio::io::BufWriter::new(stdin);
 
     // Build workspace URI string (file:///path/to/workspace/)
-    let workspace_uri = path_to_file_uri(workspace_root).await?;
-    let workspace_name = workspace_root
+    let workspace_uri = path_to_file_uri(project_root).await?;
+    let workspace_name = project_root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
@@ -115,9 +116,12 @@ pub(super) async fn spawn_and_initialize(
     // Await the `initialize` response with hard 30s timeout
     let response = tokio::time::timeout(std::time::Duration::from_secs(INIT_TIMEOUT_SECS), rx)
         .await
-        .map_err(|_| LspError::Timeout {
-            operation: "initialize".to_owned(),
-            timeout_ms: INIT_TIMEOUT_SECS * 1000,
+        .map_err(|_| {
+            dispatcher.remove(id);
+            LspError::Timeout {
+                operation: "initialize".to_owned(),
+                timeout_ms: INIT_TIMEOUT_SECS * 1000,
+            }
         })?
         .map_err(|_| LspError::ConnectionLost)??;
 
@@ -194,6 +198,7 @@ pub(super) async fn shutdown(process: &mut ManagedProcess, dispatcher: &RequestD
         let _ = write_message(&mut *stdin, &shutdown_req).await;
         // Await shutdown response (ignore error — server may be dead)
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
+        dispatcher.remove(id);
 
         // Send exit notification
         let exit_notif = RequestDispatcher::make_notification("exit", &Value::Null);

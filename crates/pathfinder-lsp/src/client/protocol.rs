@@ -94,6 +94,16 @@ impl RequestDispatcher {
         }
     }
 
+    /// Remove a pending request by ID (e.g. after a timeout).
+    ///
+    /// Prevents request IDs from leaking forever in the dispatcher when
+    /// the caller gives up waiting for a response.
+    #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
+    #[allow(dead_code)]
+    pub(super) fn remove(&self, id: u64) {
+        self.pending.lock().expect("dispatcher lock").remove(&id);
+    }
+
     /// Cancel all pending requests with `LspError::ConnectionLost`.
     ///
     /// Called when the LSP process exits to unblock all waiting callers.

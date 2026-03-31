@@ -26,7 +26,7 @@ use process::{send, shutdown, spawn_and_initialize, start_reader_task, ManagedPr
 use protocol::RequestDispatcher;
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -63,11 +63,12 @@ enum ProcessEntry {
 /// routing for `textDocument/definition` and future capabilities.
 #[derive(Clone)]
 pub struct LspClient {
-    workspace_root: PathBuf,
     /// Known language descriptors (from Zero-Config detection).
     descriptors: Arc<Vec<LspDescriptor>>,
     /// Running processes keyed by language id.
     processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
+    /// Locks for concurrent initialization to prevent duplicate spawns.
+    init_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Shared JSON-RPC request/response dispatcher.
     dispatcher: Arc<RequestDispatcher>,
 }
@@ -82,8 +83,11 @@ impl LspClient {
     ///
     /// # Errors
     /// Returns `Err` if the workspace root directory cannot be read.
-    pub async fn new(workspace_root: &Path) -> std::io::Result<Self> {
-        let descriptors = detect_languages(workspace_root).await?;
+    pub async fn new(
+        workspace_root: &Path,
+        config: std::sync::Arc<pathfinder_common::config::PathfinderConfig>,
+    ) -> std::io::Result<Self> {
+        let descriptors = detect_languages(workspace_root, &config).await?;
 
         tracing::info!(
             workspace = %workspace_root.display(),
@@ -92,9 +96,9 @@ impl LspClient {
         );
 
         let client = Self {
-            workspace_root: workspace_root.to_owned(),
             descriptors: Arc::new(descriptors),
             processes: Arc::new(RwLock::new(HashMap::new())),
+            init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
         };
 
@@ -113,6 +117,27 @@ impl LspClient {
     /// - The language has been marked unavailable after repeated crashes
     async fn ensure_process(&self, language_id: &str) -> Result<(), LspError> {
         // Fast path: already running
+        {
+            let guard = self.processes.read().await;
+            if let Some(entry) = guard.get(language_id) {
+                return match entry {
+                    ProcessEntry::Running(_) => Ok(()),
+                    ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
+                };
+            }
+        }
+
+        // Acquire the init lock for this language to prevent duplicate spawn races
+        let init_lock = {
+            let mut locks = self.init_locks.lock().await;
+            locks
+                .entry(language_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = init_lock.lock().await;
+
+        // Double-check after acquiring lock
         {
             let guard = self.processes.read().await;
             if let Some(entry) = guard.get(language_id) {
@@ -172,7 +197,7 @@ impl LspClient {
         let (process, stdout) = spawn_and_initialize(
             &descriptor.command,
             &descriptor.args,
-            &self.workspace_root,
+            &descriptor.root,
             &language_id,
             Arc::clone(&self.dispatcher),
         )
@@ -227,9 +252,12 @@ impl LspClient {
         // Await response with timeout
         tokio::time::timeout(timeout, rx)
             .await
-            .map_err(|_| LspError::Timeout {
-                operation: method.to_owned(),
-                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            .map_err(|_| {
+                self.dispatcher.remove(id);
+                LspError::Timeout {
+                    operation: method.to_owned(),
+                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                }
             })?
             .map_err(|_| LspError::ConnectionLost)?
     }
