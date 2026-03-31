@@ -233,6 +233,38 @@ pub struct Replacement {
     pub new_text: String,
 }
 
+/// Parameters for `read_source_file`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadSourceFileParams {
+    /// Relative file path.
+    pub filepath: String,
+}
+
+/// A single edit operation for `replace_batch`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct BatchEdit {
+    /// Full semantic path to the target.
+    pub semantic_path: String,
+    /// Edit type: `replace_body`, `replace_full`, `insert_before`, `insert_after`, or `delete`.
+    pub edit_type: String,
+    /// Replacement code (required for all types except `delete`).
+    pub new_code: Option<String>,
+}
+
+/// Parameters for `replace_batch`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReplaceBatchParams {
+    /// Relative file path.
+    pub filepath: String,
+    /// SHA-256 hash from previous read (OCC) for the entire file.
+    pub base_version: String,
+    /// List of edits to apply atomically.
+    pub edits: Vec<BatchEdit>,
+    /// Write to disk even if validation fails.
+    #[serde(default)]
+    pub ignore_validation_failures: bool,
+}
+
 // ── Response Types ──────────────────────────────────────────────────
 
 /// The response for `search_codebase`.
@@ -271,6 +303,28 @@ pub struct ReadSymbolScopeResponse {
     pub end_line: usize,
     pub version_hash: String,
     pub language: String,
+}
+
+/// A symbol output for `read_source_file`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SourceSymbol {
+    pub name: String,
+    pub semantic_path: String,
+    pub kind: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<SourceSymbol>,
+}
+
+/// The response for `read_source_file`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ReadSourceFileResponse {
+    pub content: String,
+    pub version_hash: String,
+    pub language: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<SourceSymbol>,
 }
 
 /// The response for all AST-aware edit tools:

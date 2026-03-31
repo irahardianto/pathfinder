@@ -10,4 +10,5 @@ pub(super) mod file_ops;
 pub(super) mod navigation;
 pub(super) mod repo_map;
 pub(super) mod search;
+pub(super) mod source_file;
 pub(super) mod symbols;

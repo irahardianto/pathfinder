@@ -618,6 +618,260 @@ impl PathfinderServer {
         }))
     }
 
+    /// Core logic for the `replace_batch` tool (PRD Epic 5).
+    ///
+    /// Executes multiple edits on the same file atomically. Edits are resolved,
+    /// sorted backwards by byte offset, and spliced together. This avoids OCC
+    /// mismatches from chains of edits.
+    #[instrument(skip(self, params), fields(filepath = %params.filepath))]
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn replace_batch_impl(
+        &self,
+        params: crate::server::types::ReplaceBatchParams,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        let start = std::time::Instant::now();
+        tracing::info!(
+            tool = "replace_batch",
+            filepath = %params.filepath,
+            "replace_batch: start"
+        );
+
+        let file_path = Path::new(&params.filepath);
+        if let Err(e) = self.sandbox.check(file_path) {
+            return Err(pathfinder_to_error_data(&e));
+        }
+
+        let absolute_path = self.workspace_root.resolve(file_path);
+        let source = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+        let current_hash = VersionHash::compute(&source);
+
+        let claimed = VersionHash::from_raw(params.base_version.clone());
+        if claimed != current_hash {
+            let err = PathfinderError::VersionMismatch {
+                path: std::path::PathBuf::from(&params.filepath),
+                current_version_hash: current_hash.as_str().to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        struct ResolvedEdit {
+            start_byte: usize,
+            end_byte: usize,
+            replacement: Vec<u8>,
+        }
+        let mut resolved_edits = Vec::new();
+
+        for edit in &params.edits {
+            let Some(semantic_path) = SemanticPath::parse(&edit.semantic_path) else {
+                return Err(io_error_data(format!(
+                    "invalid semantic path: {}",
+                    edit.semantic_path
+                )));
+            };
+
+            match edit.edit_type.as_str() {
+                "replace_body" => {
+                    let (body_range, _, _hash) = self
+                        .surgeon
+                        .resolve_body_range(self.workspace_root.path(), &semantic_path)
+                        .await
+                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                    let new_code = edit.new_code.as_deref().unwrap_or_default();
+                    let normalized = normalize_for_body_replace(new_code);
+                    let indented = dedent_then_reindent(&normalized, body_range.body_indent_column);
+
+                    let is_brace_block = if body_range.end_byte > body_range.start_byte {
+                        source.get(body_range.start_byte) == Some(&b'{')
+                            && source.get(body_range.end_byte.saturating_sub(1)) == Some(&b'}')
+                    } else {
+                        false
+                    };
+
+                    if is_brace_block {
+                        let inner_start = body_range.start_byte + 1;
+                        let inner_end = body_range.end_byte.saturating_sub(1);
+                        let replacement = if indented.trim().is_empty() {
+                            Vec::new()
+                        } else {
+                            let closing_indent = " ".repeat(body_range.indent_column);
+                            format!("\n{indented}\n{closing_indent}").into_bytes()
+                        };
+                        resolved_edits.push(ResolvedEdit {
+                            start_byte: inner_start,
+                            end_byte: inner_end,
+                            replacement,
+                        });
+                    } else {
+                        let mut end = body_range.start_byte;
+                        while end > 0 && (source[end - 1] == b' ' || source[end - 1] == b'\t') {
+                            end -= 1;
+                        }
+                        resolved_edits.push(ResolvedEdit {
+                            start_byte: end,
+                            end_byte: body_range.end_byte,
+                            replacement: format!("\n{indented}").into_bytes(),
+                        });
+                    }
+                }
+                "replace_full" => {
+                    let (full_range, _, _) = self
+                        .surgeon
+                        .resolve_full_range(self.workspace_root.path(), &semantic_path)
+                        .await
+                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                    let new_code = edit.new_code.as_deref().unwrap_or_default();
+                    let normalized = normalize_for_full_replace(new_code);
+                    let indented = dedent_then_reindent(&normalized, full_range.indent_column);
+
+                    resolved_edits.push(ResolvedEdit {
+                        start_byte: full_range.start_byte,
+                        end_byte: full_range.end_byte,
+                        replacement: indented.into_bytes(),
+                    });
+                }
+                "insert_before" => {
+                    let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
+                        (0, 0)
+                    } else {
+                        let (symbol_range, _, _) = self
+                            .surgeon
+                            .resolve_symbol_range(self.workspace_root.path(), &semantic_path)
+                            .await
+                            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+                        (symbol_range.start_byte, symbol_range.indent_column)
+                    };
+
+                    let new_code = edit.new_code.as_deref().unwrap_or_default();
+                    let normalized = normalize_for_full_replace(new_code);
+                    let indented = dedent_then_reindent(&normalized, indent_column);
+
+                    let trailing = if indented.ends_with('\n') { "" } else { "\n" };
+                    let after = &source[insert_byte..];
+                    let sep = if after.starts_with(b"\n\n") {
+                        ""
+                    } else if after.starts_with(b"\n") {
+                        "\n"
+                    } else {
+                        "\n\n"
+                    };
+
+                    resolved_edits.push(ResolvedEdit {
+                        start_byte: insert_byte,
+                        end_byte: insert_byte,
+                        replacement: format!("{indented}{trailing}{sep}").into_bytes(),
+                    });
+                }
+                "insert_after" => {
+                    let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
+                        (source.len(), 0)
+                    } else {
+                        let (symbol_range, _, _) = self
+                            .surgeon
+                            .resolve_symbol_range(self.workspace_root.path(), &semantic_path)
+                            .await
+                            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+                        (symbol_range.end_byte, symbol_range.indent_column)
+                    };
+
+                    let new_code = edit.new_code.as_deref().unwrap_or_default();
+                    let normalized = normalize_for_full_replace(new_code);
+                    let indented = dedent_then_reindent(&normalized, indent_column);
+
+                    let before = &source[..insert_byte];
+                    let before_sep = if before.ends_with(b"\n\n") {
+                        ""
+                    } else if before.ends_with(b"\n") {
+                        "\n"
+                    } else {
+                        "\n\n"
+                    };
+                    let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
+
+                    resolved_edits.push(ResolvedEdit {
+                        start_byte: insert_byte,
+                        end_byte: insert_byte,
+                        replacement: format!("{before_sep}{indented}{after_sep}").into_bytes(),
+                    });
+                }
+                "delete" => {
+                    let (full_range, _, _) = self
+                        .surgeon
+                        .resolve_full_range(self.workspace_root.path(), &semantic_path)
+                        .await
+                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                    let mut b_end = full_range.start_byte;
+                    while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
+                        b_end -= 1;
+                    }
+
+                    let mut a_start = full_range.end_byte;
+                    while a_start < source.len() && source[a_start].is_ascii_whitespace() {
+                        a_start += 1;
+                    }
+
+                    let sep = if b_end == 0 || a_start == source.len() {
+                        b"\n" as &[u8]
+                    } else {
+                        b"\n\n"
+                    };
+
+                    resolved_edits.push(ResolvedEdit {
+                        start_byte: b_end,
+                        end_byte: a_start,
+                        replacement: sep.to_vec(),
+                    });
+                }
+                _ => {
+                    return Err(io_error_data(format!(
+                        "unsupported edit type: {}",
+                        edit.edit_type
+                    )));
+                }
+            }
+        }
+
+        // Sort edits backwards to prevent shifted byte offsets
+        resolved_edits.sort_by_key(|e| std::cmp::Reverse(e.start_byte));
+
+        // Ensure no overlapping edits
+        for i in 1..resolved_edits.len() {
+            let prev = &resolved_edits[i - 1]; // This is later in the file
+            let curr = &resolved_edits[i]; // This is earlier in the file
+            if curr.end_byte > prev.start_byte {
+                return Err(io_error_data("overlapping edits in replace_batch"));
+            }
+        }
+
+        let mut new_bytes = source.clone();
+        for edit in resolved_edits {
+            new_bytes.splice(edit.start_byte..edit.end_byte, edit.replacement.into_iter());
+        }
+
+        let resolve_ms = start.elapsed().as_millis();
+        let dummy_path = SemanticPath::parse(&params.filepath).unwrap_or_else(|| SemanticPath {
+            file_path: file_path.to_path_buf(),
+            symbol_chain: None,
+        });
+
+        self.finalize_edit(
+            "replace_batch",
+            &dummy_path,
+            &params.filepath,
+            &source,
+            &new_bytes,
+            &current_hash,
+            params.ignore_validation_failures,
+            start,
+            resolve_ms,
+        )
+        .await
+    }
+
     /// Resolve the current on-disk `VersionHash` for the path targeted by a
     /// `validate_only` call.
     ///

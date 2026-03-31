@@ -64,22 +64,23 @@ impl PathfinderServer {
     pub async fn new(workspace_root: WorkspaceRoot, config: PathfinderConfig) -> Self {
         let sandbox = Sandbox::new(workspace_root.path(), &config.sandbox);
 
-        let lawyer: Arc<dyn Lawyer> = match LspClient::new(workspace_root.path()).await {
-            Ok(client) => {
-                tracing::info!(
-                    workspace = %workspace_root.path().display(),
-                    "LspClient initialised (lazy, processes start on first use)"
-                );
-                Arc::new(client)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "LSP Zero-Config detection failed — degraded mode (NoOpLawyer)"
-                );
-                Arc::new(NoOpLawyer)
-            }
-        };
+        let lawyer: Arc<dyn Lawyer> =
+            match LspClient::new(workspace_root.path(), Arc::new(config.clone())).await {
+                Ok(client) => {
+                    tracing::info!(
+                        workspace = %workspace_root.path().display(),
+                        "LspClient initialised (lazy, processes start on first use)"
+                    );
+                    Arc::new(client)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "LSP Zero-Config detection failed — degraded mode (NoOpLawyer)"
+                    );
+                    Arc::new(NoOpLawyer)
+                }
+            };
 
         Self::with_all_engines(
             workspace_root,
@@ -171,6 +172,28 @@ impl PathfinderServer {
         Parameters(params): Parameters<ReadSymbolScopeParams>,
     ) -> Result<Json<ReadSymbolScopeResponse>, ErrorData> {
         self.read_symbol_scope_impl(params).await
+    }
+
+    #[tool(
+        name = "read_source_file",
+        description = "Read an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol."
+    )]
+    async fn read_source_file(
+        &self,
+        Parameters(params): Parameters<ReadSourceFileParams>,
+    ) -> Result<Json<ReadSourceFileResponse>, ErrorData> {
+        self.read_source_file_impl(params).await
+    }
+
+    #[tool(
+        name = "replace_batch",
+        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file."
+    )]
+    async fn replace_batch(
+        &self,
+        Parameters(params): Parameters<crate::server::types::ReplaceBatchParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.replace_batch_impl(params).await
     }
 
     #[tool(
