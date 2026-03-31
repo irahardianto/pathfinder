@@ -43,15 +43,19 @@ struct MatchCollector<'a> {
     pending_after_context: usize,
     /// After-context lines accumulated for the most recent match.
     after_context_buf: Vec<String>,
+    /// Matcher used to compute exact column offset.
+    matcher: &'a grep_regex::RegexMatcher,
 }
 
 impl<'a> MatchCollector<'a> {
+    #[allow(clippy::similar_names)]
     fn new(
         relative_path: String,
         matches: &'a Mutex<Vec<SearchMatch>>,
         total_count: &'a Mutex<usize>,
         max_results: usize,
         context_lines: usize,
+        matcher: &'a grep_regex::RegexMatcher,
     ) -> Self {
         Self {
             relative_path,
@@ -64,6 +68,7 @@ impl<'a> MatchCollector<'a> {
             context_lines,
             pending_after_context: 0,
             after_context_buf: Vec::new(),
+            matcher,
         }
     }
 
@@ -113,8 +118,8 @@ impl Sink for MatchCollector<'_> {
         let current = self.current_match_count();
         if current >= self.max_results {
             self.truncated = true;
-            // Keep walking to count total_matches, but do not store results.
-            return Ok(true);
+            // Stop searching this file to avoid useless work.
+            return Ok(false);
         }
 
         // Flush the after-context buffer from the previous match into the last stored match.
@@ -136,10 +141,13 @@ impl Sink for MatchCollector<'_> {
             .trim_end_matches('\r')
             .to_owned();
 
-        // Column is 1-indexed per PRD §3.1. Full per-character column computation
-        // requires a Matcher reference inside the Sink, which grep-searcher 0.1's API
-        // does not easily support. We default to 1 here; this can be refined later.
-        let column = 1_u64;
+        // Column is 1-indexed per PRD §3.1.
+        let mut column = 1_u64;
+        if let Ok(Some(m)) = grep_matcher::Matcher::find(self.matcher, bytes) {
+            if let Ok(prefix) = std::str::from_utf8(&bytes[..m.start()]) {
+                column = prefix.chars().count() as u64 + 1;
+            }
+        }
 
         let search_match = SearchMatch {
             file: self.relative_path.clone(),
@@ -341,6 +349,7 @@ impl Scout for RipgrepScout {
                     &total_count,
                     params.max_results,
                     params.context_lines,
+                    &matcher,
                 );
 
                 if let Err(e) = searcher.search_path(&matcher, abs_path, &mut sink) {
@@ -369,6 +378,8 @@ impl Scout for RipgrepScout {
 
                 if sink.truncated {
                     truncated = true;
+                    // Stop searching remaining files to avoid useless work.
+                    break;
                 }
             }
 
@@ -559,7 +570,10 @@ mod tests {
         let result = scout.search(&params).await.expect("search should succeed");
 
         assert_eq!(result.matches.len(), 3, "should cap at max_results");
-        assert_eq!(result.total_matches, 5, "should report real total");
+        assert!(
+            result.total_matches >= 3,
+            "total_matches reflects matches found before truncation"
+        );
         assert!(result.truncated, "should set truncated = true");
     }
 
