@@ -12,7 +12,7 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["fs", "sync", "rt"] }
+tokio = { version = "1", features = ["fs", "sync", "rt", "io-util"] }
 notify = "8"
 ignore = "0.4"
 tracing = "0.1"

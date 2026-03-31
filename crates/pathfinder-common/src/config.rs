@@ -103,6 +103,16 @@ pub struct LspConfig {
     /// Additional LSP settings (workspace/didChangeConfiguration).
     #[serde(default)]
     pub settings: serde_json::Value,
+
+    /// Override the root directory used for this language server.
+    ///
+    /// Use this in monorepo layouts where the language marker file (e.g.,
+    /// `go.mod`, `tsconfig.json`) is not at the workspace root. The path
+    /// is relative to the workspace root.
+    ///
+    /// Example: `"apps/backend"` for a Go backend in a monorepo.
+    #[serde(default)]
+    pub root_override: Option<String>,
 }
 
 /// Sandbox configuration overrides.

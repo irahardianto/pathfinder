@@ -4,7 +4,6 @@
 //! - On external file changes: hash + compare, evict cache if mismatch
 //! - On Pathfinder-initiated writes: cache updated synchronously (no watcher needed)
 
-use crate::types::VersionHash;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc as tokio_mpsc;
@@ -118,19 +117,34 @@ impl FileEventSource for InMemoryFileEventSource {
     }
 }
 
-/// Compute the SHA-256 hash of a file's content.
+/// Compute the SHA-256 hash of a file's content incrementally.
 ///
 /// Used for hash-compare cache eviction: when a file watcher event fires,
 /// we hash the current content and compare to the cached hash.
 ///
-/// Delegates to [`VersionHash::compute`] to ensure format consistency
-/// across the codebase (`sha256:<hex>`).
+/// Reads the file in chunks to bound memory usage and formats the result
+/// consistently with `VersionHash`.
 ///
 /// # Errors
 /// Returns an error if the file cannot be read.
 pub async fn hash_file(path: &Path) -> Result<String, std::io::Error> {
-    let content = tokio::fs::read(path).await?;
-    Ok(VersionHash::compute(&content).as_str().to_owned())
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    let hash = hasher.finalize();
+    Ok(format!("sha256:{hash:x}"))
 }
 
 /// File watcher errors.

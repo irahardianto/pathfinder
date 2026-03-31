@@ -110,6 +110,18 @@ impl Sandbox {
     /// # Errors
     /// Returns `PathfinderError::AccessDenied` if the path is blocked.
     pub fn check(&self, relative_path: &Path) -> Result<(), PathfinderError> {
+        // Protect against path traversal and absolute path escapes
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(PathfinderError::AccessDenied {
+                path: relative_path.to_path_buf(),
+                tier: SandboxTier::HardcodedDeny,
+            });
+        }
+
         let path_str = relative_path.to_string_lossy();
 
         // Tier 1: Hardcoded deny (cannot be overridden)

@@ -220,18 +220,32 @@ impl WorkspaceRoot {
     /// ensures internal callers that bypass the Sandbox are also warned.
     #[must_use]
     pub fn resolve(&self, relative: &Path) -> PathBuf {
-        // Defense-in-depth: detect path traversal even without sandbox
+        let is_absolute = relative.is_absolute();
         let has_traversal = relative
             .components()
             .any(|c| c == std::path::Component::ParentDir);
-        if has_traversal {
+
+        // Defense-in-depth: detect path traversal even without sandbox
+        if is_absolute || has_traversal {
             tracing::warn!(
                 relative = %relative.display(),
                 workspace = %self.0.display(),
-                "WorkspaceRoot::resolve: path traversal detected; sandbox will reject"
+                "WorkspaceRoot::resolve: absolute path or traversal detected; sandbox will reject"
             );
         }
-        self.0.join(relative)
+
+        let mut normalized = PathBuf::new();
+        for comp in relative.components() {
+            if matches!(
+                comp,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            ) {
+                continue;
+            }
+            normalized.push(comp);
+        }
+
+        self.0.join(normalized)
     }
 
     /// Get the workspace root path.
