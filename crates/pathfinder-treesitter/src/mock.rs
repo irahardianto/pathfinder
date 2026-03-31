@@ -12,6 +12,9 @@ use std::sync::Mutex;
 #[derive(Debug, Default)]
 pub struct MockSurgeon {
     pub read_symbol_scope_results: Mutex<Vec<Result<SymbolScope, SurgeonError>>>,
+    #[allow(clippy::type_complexity)]
+    pub read_source_file_results:
+        Mutex<Vec<Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError>>>,
     pub extract_symbols_results: Mutex<Vec<Result<Vec<ExtractedSymbol>, SurgeonError>>>,
     pub enclosing_symbol_results: Mutex<Vec<Result<Option<String>, SurgeonError>>>,
     pub generate_skeleton_results: Mutex<Vec<Result<crate::repo_map::RepoMapResult, SurgeonError>>>,
@@ -31,6 +34,7 @@ pub struct MockSurgeon {
 
     // Call history
     pub read_symbol_scope_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    pub read_source_file_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
     pub extract_symbols_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
     pub enclosing_symbol_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
     #[allow(clippy::type_complexity)]
@@ -67,6 +71,27 @@ impl Surgeon for MockSurgeon {
         assert!(
             !results.is_empty(),
             "MockSurgeon: Unexpected call to read_symbol_scope"
+        );
+        results.remove(0)
+    }
+
+    async fn read_source_file(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+    ) -> Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError> {
+        self.read_source_file_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((workspace_root.to_path_buf(), file_path.to_path_buf()));
+
+        let mut results = self
+            .read_source_file_results
+            .lock()
+            .expect("mutex poisoned");
+        assert!(
+            !results.is_empty(),
+            "MockSurgeon: Unexpected call to read_source_file"
         );
         results.remove(0)
     }

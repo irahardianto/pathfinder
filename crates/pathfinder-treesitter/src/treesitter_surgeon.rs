@@ -102,7 +102,9 @@ impl TreeSitterSurgeon {
             Ok((body.start_byte(), body.end_byte()))
         } else {
             // Check if the symbol kind is simply not body-bearing
-            let source_snippet = std::str::from_utf8(&source[symbol_byte_range])
+            let source_snippet = source
+                .get(symbol_byte_range)
+                .and_then(|b| std::str::from_utf8(b).ok())
                 .unwrap_or("<non-utf8>")
                 .chars()
                 .take(80)
@@ -120,7 +122,9 @@ impl TreeSitterSurgeon {
 
     fn expand_to_full_start_byte(source: &[u8], mut start_byte: usize) -> usize {
         loop {
-            let line_start = source[..start_byte]
+            let line_start = source
+                .get(..start_byte)
+                .unwrap_or(b"")
                 .iter()
                 .rposition(|&b| b == b'\n')
                 .map_or(0, |pos| pos + 1);
@@ -132,14 +136,16 @@ impl TreeSitterSurgeon {
                 (0, start_byte)
             } else {
                 let end = line_start - 1; // before \n
-                let start = source[..end]
+                let start = source
+                    .get(..end)
+                    .unwrap_or(b"")
                     .iter()
                     .rposition(|&b| b == b'\n')
                     .map_or(0, |pos| pos + 1);
                 (start, end)
             };
 
-            let prev_line = &source[prev_line_start..prev_line_end];
+            let prev_line = source.get(prev_line_start..prev_line_end).unwrap_or(b"");
             let trimmed = String::from_utf8_lossy(prev_line);
             let trimmed_ref = trimmed.trim();
 
@@ -187,7 +193,14 @@ impl Surgeon for TreeSitterSurgeon {
                 did_you_mean: did_you_mean(&symbols, chain, 3),
             })?;
 
-        let content = std::str::from_utf8(&source[symbol.byte_range.clone()])
+        let symbol_bytes =
+            source
+                .get(symbol.byte_range.clone())
+                .ok_or_else(|| SurgeonError::ParseError {
+                    path: semantic_path.file_path.clone(),
+                    reason: "Symbol byte range out of bounds".into(),
+                })?;
+        let content = std::str::from_utf8(symbol_bytes)
             .map_err(|_| SurgeonError::ParseError {
                 path: semantic_path.file_path.clone(),
                 reason: "Symbol source is not valid UTF-8".into(),
@@ -203,6 +216,25 @@ impl Surgeon for TreeSitterSurgeon {
             version_hash,
             language: language_str.to_string(),
         })
+    }
+
+    #[instrument(skip(self, workspace_root))]
+    async fn read_source_file(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+    ) -> Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError> {
+        let (lang, _tree, source, version_hash, symbols) =
+            self.cached_parse(workspace_root, file_path).await?;
+
+        let content = std::str::from_utf8(&source)
+            .map_err(|_| SurgeonError::ParseError {
+                path: file_path.to_path_buf(),
+                reason: "Symbol source is not valid UTF-8".into(),
+            })?
+            .to_string();
+
+        Ok((content, version_hash, lang.as_str().to_string(), symbols))
     }
 
     #[instrument(skip(self, workspace_root))]
@@ -313,7 +345,9 @@ impl Surgeon for TreeSitterSurgeon {
                 did_you_mean: did_you_mean(&symbols, chain, 3),
             })?;
 
-        let last_newline_pos = source[..symbol.byte_range.start]
+        let last_newline_pos = source
+            .get(..symbol.byte_range.start)
+            .unwrap_or(&[])
             .iter()
             .rposition(|&b| b == b'\n')
             .map_or(0, |pos| pos + 1);
@@ -332,27 +366,33 @@ impl Surgeon for TreeSitterSurgeon {
         let is_brace_block = source.get(start_byte) == Some(&b'{');
 
         if is_brace_block {
-            if let Ok(inner_str) = std::str::from_utf8(&source[(start_byte + 1)..end_byte]) {
-                // Find the first line that is purely inside the block and not on the same line as `{`
-                let mut lines = inner_str.split('\n');
-                let _same_line_as_brace = lines.next();
+            if let Some(block_bytes) = source.get((start_byte + 1)..end_byte) {
+                if let Ok(inner_str) = std::str::from_utf8(block_bytes) {
+                    // Find the first line that is purely inside the block and not on the same line as `{`
+                    let mut lines = inner_str.split('\n');
+                    let _same_line_as_brace = lines.next();
 
-                for line in lines {
-                    if !line.trim().is_empty() {
-                        body_indent_column = line.len() - line.trim_start().len();
-                        break;
+                    for line in lines {
+                        if !line.trim().is_empty() {
+                            body_indent_column = line.len() - line.trim_start().len();
+                            break;
+                        }
                     }
                 }
             }
         } else {
-            let line_start = source[..start_byte]
+            let line_start = source
+                .get(..start_byte)
+                .unwrap_or(b"")
                 .iter()
                 .rposition(|&b| b == b'\n')
                 .map_or(0, |pos| pos + 1);
 
-            if let Ok(full_str) = std::str::from_utf8(&source[line_start..end_byte]) {
-                if let Some(line) = full_str.lines().next() {
-                    body_indent_column = line.len() - line.trim_start().len();
+            if let Some(line_bytes) = source.get(line_start..end_byte) {
+                if let Ok(full_str) = std::str::from_utf8(line_bytes) {
+                    if let Some(line) = full_str.lines().next() {
+                        body_indent_column = line.len() - line.trim_start().len();
+                    }
                 }
             }
         }
@@ -397,7 +437,9 @@ impl Surgeon for TreeSitterSurgeon {
         let start_byte = Self::expand_to_full_start_byte(&source, symbol.byte_range.start);
         let end_byte = symbol.byte_range.end;
 
-        let last_newline_pos = source[..symbol.byte_range.start]
+        let last_newline_pos = source
+            .get(..symbol.byte_range.start)
+            .unwrap_or(b"")
             .iter()
             .rposition(|&b| b == b'\n')
             .map_or(0, |pos| pos + 1);

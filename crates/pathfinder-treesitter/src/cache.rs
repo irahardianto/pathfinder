@@ -1,11 +1,13 @@
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
 use crate::parser::AstParser;
+use lru::LruCache;
 use pathfinder_common::types::VersionHash;
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
+use tracing::instrument;
 use tree_sitter::Tree;
 
 /// Contains the cached parsing result for a file.
@@ -21,8 +23,6 @@ pub struct CacheEntry {
     pub lang: SupportedLanguage,
     /// Last modification time of the file at the time of parsing (fast-path invalidation).
     pub mtime: SystemTime,
-    /// Last access time, used for LRU eviction.
-    pub last_access: Instant,
 }
 
 /// A thread-safe, parse-on-demand cache for ASTs.
@@ -45,17 +45,18 @@ pub struct CacheEntry {
 /// // measurable.
 #[derive(Debug)]
 pub struct AstCache {
-    entries: Mutex<HashMap<PathBuf, CacheEntry>>,
-    max_entries: usize,
+    entries: Mutex<LruCache<PathBuf, CacheEntry>>,
 }
 
 impl AstCache {
-    /// Create a new cache with a maximum capacity.
+    /// # Panics
+    /// Panics if `max_entries.max(1)` is somehow 0 (mathematically impossible).
     #[must_use]
+    #[allow(clippy::missing_panics_doc, clippy::unwrap_used)]
     pub fn new(max_entries: usize) -> Self {
+        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap();
         Self {
-            entries: Mutex::new(HashMap::with_capacity(max_entries)),
-            max_entries,
+            entries: Mutex::new(LruCache::new(cap)),
         }
     }
 
@@ -68,6 +69,7 @@ impl AstCache {
     ///
     /// # Errors
     /// Returns `SurgeonError` if I/O fails or parsing fails.
+    #[instrument(skip(self), fields(cache_hit = false))]
     pub async fn get_or_parse(
         &self,
         path: &Path,
@@ -84,9 +86,9 @@ impl AstCache {
                 reason: "Lock poisoned".into(),
             })?;
 
-            if let Some(entry) = lock.get_mut(path) {
+            if let Some(entry) = lock.get(path) {
                 if entry.mtime == current_mtime && entry.lang == lang {
-                    entry.last_access = Instant::now();
+                    tracing::Span::current().record("cache_hit", true);
                     return Ok((entry.tree.clone(), entry.source.clone()));
                 }
             }
@@ -95,7 +97,11 @@ impl AstCache {
         // --- Slow path: full read + hash + parse ---
         let content = tokio::fs::read(path).await?;
         let current_hash = VersionHash::compute(&content);
-        let tree = AstParser::parse_source(path, lang, &content)?;
+        // For Vue SFCs, preprocess extracts the <script> block before parsing.
+        // The original `content` is kept for version hashing and OCC checks —
+        // only the input to the AST parser uses the processed bytes.
+        let parse_input = lang.preprocess_source(&content);
+        let tree = AstParser::parse_source(path, lang, &parse_input)?;
 
         // Re-acquire the lock to insert/update.
         let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
@@ -103,22 +109,8 @@ impl AstCache {
             reason: "Lock poisoned".into(),
         })?;
 
-        // Free up space if needed (only for brand-new entries).
-        if lock.len() >= self.max_entries && !lock.contains_key(path) {
-            let mut lru_key = None;
-            let mut oldest = Instant::now();
-            for (k, v) in lock.iter() {
-                if v.last_access < oldest {
-                    oldest = v.last_access;
-                    lru_key = Some(k.clone());
-                }
-            }
-            if let Some(key) = lru_key {
-                lock.remove(&key);
-            }
-        }
-
-        lock.insert(
+        // LruCache automatically evicts the least recently used item if capacity is reached
+        lock.put(
             path.to_path_buf(),
             CacheEntry {
                 tree: tree.clone(),
@@ -126,7 +118,6 @@ impl AstCache {
                 content_hash: current_hash,
                 lang,
                 mtime: current_mtime,
-                last_access: Instant::now(),
             },
         );
 
@@ -136,7 +127,7 @@ impl AstCache {
     /// Remove a file from the cache, forcing a re-parse on next access.
     pub fn invalidate(&self, path: &Path) {
         if let Ok(mut lock) = self.entries.lock() {
-            lock.remove(path);
+            lock.pop(path);
         }
     }
 }
@@ -178,7 +169,7 @@ mod tests {
         // Fast path: cached mtime must equal file mtime
         {
             let lock = cache.entries.lock().unwrap();
-            let entry = lock.get(&path).unwrap();
+            let entry = lock.peek(&path).unwrap();
             let meta = std::fs::metadata(&path).unwrap();
             assert_eq!(
                 entry.mtime,
@@ -223,8 +214,8 @@ mod tests {
         {
             let lock = cache.entries.lock().unwrap();
             assert_eq!(lock.len(), 2);
-            assert!(lock.contains_key(f1.path()));
-            assert!(lock.contains_key(f2.path()));
+            assert!(lock.contains(f1.path()));
+            assert!(lock.contains(f2.path()));
         }
 
         // Access F1 again, making F2 the LRU
@@ -243,9 +234,9 @@ mod tests {
         {
             let lock = cache.entries.lock().unwrap();
             assert_eq!(lock.len(), 2);
-            assert!(lock.contains_key(f1.path()));
-            assert!(!lock.contains_key(f2.path())); // F2 evicted
-            assert!(lock.contains_key(f3.path()));
+            assert!(lock.contains(f1.path()));
+            assert!(!lock.contains(f2.path())); // F2 evicted
+            assert!(lock.contains(f3.path()));
         }
     }
 

@@ -158,6 +158,16 @@ pub trait Surgeon: Send + Sync {
         semantic_path: &SemanticPath,
     ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError>;
 
+    /// Read an entire source file and extract its symbols.
+    ///
+    /// Returns the complete file content, its OCC version hash, the detected language,
+    /// and a hierarchical listing of all extracted symbols (functions, classes, etc).
+    async fn read_source_file(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+    ) -> Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError>;
+
     /// Resolve the full byte range for a symbol, including decorators and doc comments.
     ///
     /// Used by `replace_full` and `delete_symbol`.

@@ -20,6 +20,7 @@ pub fn extract_symbols_from_tree(
     symbols
 }
 
+#[allow(clippy::too_many_lines)]
 fn extract_symbols_recursive(
     node: Node,
     source: &[u8],
@@ -38,11 +39,36 @@ fn extract_symbols_recursive(
         let sym_kind = if types.function_kinds.contains(&kind) {
             Some(SymbolKind::Function)
         } else if types.class_kinds.contains(&kind) {
-            Some(SymbolKind::Class)
+            // For Go `type_spec`, inspect the type body to assign a precise kind:
+            // `interface_type` → Interface, `struct_type` → Struct, otherwise Class.
+            let refined =
+                child
+                    .child_by_field_name("type")
+                    .map_or(SymbolKind::Class, |type_node| match type_node.kind() {
+                        "interface_type" => SymbolKind::Interface,
+                        "struct_type" => SymbolKind::Struct,
+                        _ => SymbolKind::Class,
+                    });
+            Some(refined)
         } else if types.method_kinds.contains(&kind) {
             Some(SymbolKind::Method)
         } else if types.constant_kinds.contains(&kind) {
-            Some(SymbolKind::Constant)
+            let mut kind_refine = SymbolKind::Constant;
+            if kind == "lexical_declaration" || kind == "variable_declaration" {
+                let mut d_cursor = child.walk();
+                for decl in child.named_children(&mut d_cursor) {
+                    if decl.kind() == "variable_declarator" {
+                        if let Some(val) = decl.child_by_field_name("value") {
+                            if val.kind() == "arrow_function" || val.kind() == "function_expression"
+                            {
+                                kind_refine = SymbolKind::Function;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Some(kind_refine)
         } else {
             None
         };
@@ -59,60 +85,79 @@ fn extract_symbols_recursive(
             if let Some(name_node) = child
                 .child_by_field_name("name")
                 .or_else(|| child.child_by_field_name("identifier"))
-            {
-                if let Ok(name) = std::str::from_utf8(&source[name_node.byte_range()]) {
-                    let name = name.trim().to_string();
-
-                    let count = name_counts.entry(name.clone()).or_insert(0);
-                    *count += 1;
-
-                    let suffix = if *count > 1 {
-                        format!("#{count}")
-                    } else {
-                        String::new()
-                    };
-
-                    let path = if parent_path.is_empty() {
-                        format!("{name}{suffix}")
-                    } else {
-                        format!("{parent_path}.{name}{suffix}")
-                    };
-
-                    let mut symbol = ExtractedSymbol {
-                        name,
-                        semantic_path: path.clone(),
-                        kind: sk,
-                        byte_range: child.byte_range(),
-                        start_line: child.start_position().row,
-                        end_line: child.end_position().row,
-                        children: Vec::new(),
-                    };
-
-                    // For classes/structs, we want to extract nested methods
-                    if sk == SymbolKind::Class {
-                        // Normally, languages have a `body` block inside the class
-                        if let Some(body) = child.child_by_field_name("body") {
-                            extract_symbols_recursive(
-                                body,
-                                source,
-                                types,
-                                &path,
-                                &mut symbol.children,
-                            );
-                        } else {
-                            // Fallback if no specific body field, just traverse children
-                            extract_symbols_recursive(
-                                child,
-                                source,
-                                types,
-                                &path,
-                                &mut symbol.children,
-                            );
+                .or_else(|| {
+                    let mut wc = child.walk();
+                    for n in child.named_children(&mut wc) {
+                        if n.kind() == "variable_declarator" {
+                            if let Some(name) = n.child_by_field_name("name") {
+                                return Some(name);
+                            }
                         }
                     }
+                    None
+                })
+            {
+                if let Some(name_bytes) = source.get(name_node.byte_range()) {
+                    if let Ok(name) = std::str::from_utf8(name_bytes) {
+                        let name = name.trim().to_string();
 
-                    out.push(symbol);
-                    continue;
+                        let count = name_counts.entry(name.clone()).or_insert(0);
+                        *count += 1;
+
+                        let suffix = if *count > 1 {
+                            format!("#{count}")
+                        } else {
+                            String::new()
+                        };
+
+                        let path = if parent_path.is_empty() {
+                            format!("{name}{suffix}")
+                        } else {
+                            format!("{parent_path}.{name}{suffix}")
+                        };
+
+                        let mut symbol = ExtractedSymbol {
+                            name,
+                            semantic_path: path.clone(),
+                            kind: sk,
+                            byte_range: child.byte_range(),
+                            start_line: child.start_position().row,
+                            end_line: child.end_position().row,
+                            children: Vec::new(),
+                        };
+
+                        // For classes/structs/interfaces, recurse to extract nested methods.
+                        // Try `body` first (TypeScript/Python classes), then `type` (Go type_spec),
+                        // then fall back to traversing all children.
+                        if matches!(
+                            sk,
+                            SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface
+                        ) {
+                            let body_node = child
+                                .child_by_field_name("body")
+                                .or_else(|| child.child_by_field_name("type"));
+                            if let Some(body) = body_node {
+                                extract_symbols_recursive(
+                                    body,
+                                    source,
+                                    types,
+                                    &path,
+                                    &mut symbol.children,
+                                );
+                            } else {
+                                extract_symbols_recursive(
+                                    child,
+                                    source,
+                                    types,
+                                    &path,
+                                    &mut symbol.children,
+                                );
+                            }
+                        }
+
+                        out.push(symbol);
+                        continue;
+                    }
                 }
             }
         }
@@ -140,7 +185,10 @@ fn extract_impl_block(
     let Some(type_node) = node.child_by_field_name("type") else {
         return;
     };
-    let Ok(type_name) = std::str::from_utf8(&source[type_node.byte_range()]) else {
+    let Some(type_name_bytes) = source.get(type_node.byte_range()) else {
+        return;
+    };
+    let Ok(type_name) = std::str::from_utf8(type_name_bytes) else {
         return;
     };
     let type_name = type_name.trim().to_string();
@@ -163,7 +211,10 @@ fn extract_impl_block(
             let Some(name_node) = item.child_by_field_name("name") else {
                 continue;
             };
-            let Ok(method_name) = std::str::from_utf8(&source[name_node.byte_range()]) else {
+            let Some(method_name_bytes) = source.get(name_node.byte_range()) else {
+                continue;
+            };
+            let Ok(method_name) = std::str::from_utf8(method_name_bytes) else {
                 continue;
             };
             let method_name = method_name.trim().to_string();
@@ -338,6 +389,92 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_go_interface() {
+        let source =
+            b"package main\n\ntype Storage interface {\n\tCreate() error\n\tGetByID(id string) (*User, error)\n}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+        assert_eq!(
+            syms.len(),
+            1,
+            "expected exactly one symbol (Storage interface)"
+        );
+        assert_eq!(syms[0].name, "Storage");
+        assert_eq!(syms[0].kind, SymbolKind::Interface);
+        assert_eq!(syms[0].semantic_path, "Storage");
+        assert_eq!(syms[0].children.len(), 2, "methods must be extracted");
+        assert_eq!(syms[0].children[0].name, "Create");
+        assert_eq!(syms[0].children[1].name, "GetByID");
+    }
+
+    #[test]
+    fn test_extract_go_struct() {
+        let source = b"package main\n\ntype Lesson struct {\n\tID string\n\tTitle string\n}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+        assert_eq!(syms.len(), 1, "expected exactly one symbol (Lesson struct)");
+        assert_eq!(syms[0].name, "Lesson");
+        assert_eq!(syms[0].kind, SymbolKind::Struct);
+        assert_eq!(syms[0].semantic_path, "Lesson");
+    }
+
+    #[test]
+    fn test_extract_go_type_alias() {
+        let source = b"package main\n\ntype ID = string\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+        assert_eq!(syms.len(), 1, "expected exactly one symbol (ID type alias)");
+        assert_eq!(syms[0].name, "ID");
+        // Type aliases have no interface_type or struct_type body -> SymbolKind::Class
+        assert_eq!(syms[0].kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn test_extract_go_mixed_file() {
+        let source = b"package main\n\ntype Storage interface {\n\tCreate() error\n}\n\ntype Lesson struct {\n\tID string\n}\n\nfunc NewStorage() Storage { return nil }\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+        assert_eq!(
+            syms.len(),
+            3,
+            "expected Storage interface, Lesson struct, NewStorage func"
+        );
+
+        let iface = syms.iter().find(|s| s.name == "Storage").unwrap();
+        assert_eq!(iface.kind, SymbolKind::Interface);
+
+        let strct = syms.iter().find(|s| s.name == "Lesson").unwrap();
+        assert_eq!(strct.kind, SymbolKind::Struct);
+
+        let func = syms.iter().find(|s| s.name == "NewStorage").unwrap();
+        assert_eq!(func.kind, SymbolKind::Function);
+    }
+
+    #[test]
     fn test_extract_ts_class_with_methods() {
         let source = b"class AuthService {\n  login() {}\n  logout() {}\n}";
         let tree = AstParser::parse_source(
@@ -356,6 +493,24 @@ mod tests {
         assert_eq!(class.children[0].name, "login");
         assert_eq!(class.children[1].name, "logout");
         assert_eq!(class.children[0].semantic_path, "AuthService.login");
+    }
+
+    #[test]
+    fn test_extract_ts_exported_arrow_function() {
+        let source = b"export const completeLesson = async () => {};\nconst someConst = 42;";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        assert_eq!(syms.len(), 2);
+        assert_eq!(syms[0].name, "completeLesson");
+        assert_eq!(syms[0].kind, SymbolKind::Function);
+        assert_eq!(syms[1].name, "someConst");
+        assert_eq!(syms[1].kind, SymbolKind::Constant);
     }
 
     #[test]

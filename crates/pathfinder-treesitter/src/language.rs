@@ -23,6 +23,8 @@ pub enum SupportedLanguage {
     JavaScript,
     Python,
     Rust,
+    /// Vue Single-File Component (Phase 1: <script> block parsed as TypeScript).
+    Vue,
 }
 
 impl SupportedLanguage {
@@ -37,6 +39,7 @@ impl SupportedLanguage {
             "js" | "jsx" => Some(Self::JavaScript),
             "py" => Some(Self::Python),
             "rs" => Some(Self::Rust),
+            "vue" => Some(Self::Vue),
             _ => None,
         }
     }
@@ -46,7 +49,7 @@ impl SupportedLanguage {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Go => "go",
-            Self::TypeScript => "typescript",
+            Self::TypeScript | Self::Vue => "typescript",
             Self::Tsx => "tsx",
             Self::JavaScript => "javascript",
             Self::Python => "python",
@@ -59,7 +62,7 @@ impl SupportedLanguage {
     pub fn grammar(&self) -> Language {
         match self {
             Self::Go => tree_sitter_go::LANGUAGE.into(),
-            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::TypeScript | Self::Vue => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
@@ -73,12 +76,12 @@ impl SupportedLanguage {
         match self {
             Self::Go => &LanguageNodeTypes {
                 function_kinds: &["function_declaration"],
-                class_kinds: &["type_declaration"],
-                method_kinds: &["method_declaration"],
+                class_kinds: &["type_spec", "type_alias"],
+                method_kinds: &["method_declaration", "method_spec", "method_elem"],
                 impl_kinds: &[],
                 constant_kinds: &["const_declaration", "var_declaration"],
             },
-            Self::TypeScript | Self::Tsx | Self::JavaScript => &LanguageNodeTypes {
+            Self::TypeScript | Self::Tsx | Self::JavaScript | Self::Vue => &LanguageNodeTypes {
                 function_kinds: &["function_declaration", "generator_function_declaration"],
                 class_kinds: &["class_declaration", "interface_declaration"],
                 method_kinds: &["method_definition"],
@@ -103,9 +106,89 @@ impl SupportedLanguage {
             },
         }
     }
+
+    /// Pre-process source bytes before parsing.
+    ///
+    /// For most languages this is a no-op (returns a reference to the original slice).
+    /// For Vue SFCs ([`SupportedLanguage::Vue`]) this extracts the `<script>` or
+    /// `<script setup>` block content so the TypeScript grammar can parse it.
+    ///
+    /// Using `Cow` avoids an allocation for the common case (all non-Vue languages).
+    #[must_use]
+    pub fn preprocess_source<'a>(&self, source: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        if *self == Self::Vue {
+            std::borrow::Cow::Owned(extract_vue_script(source))
+        } else {
+            std::borrow::Cow::Borrowed(source)
+        }
+    }
+}
+
+/// Extract the content of the first `<script>` or `<script setup ...>` block from a Vue SFC.
+///
+/// Returns only the content *between* the opening `<script ...>` and closing `</script>` tags,
+/// preserving the line count by inserting blank lines for the lines before the script block.
+/// This ensures that line numbers reported by tree-sitter match the original file.
+///
+/// Returns an empty `Vec` if no script block is found — the parser will create a valid but
+/// empty AST, avoiding a hard error on templateonly Vue files.
+#[must_use]
+pub fn extract_vue_script(source: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(source) else {
+        return Vec::new();
+    };
+
+    // Find the opening <script ...> tag (handles <script> and <script setup lang="ts"> etc.)
+    let script_open_end = {
+        let mut pos = None;
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i + 7 < bytes.len() {
+            // Look for '<script' (case-sensitive per HTML spec for SFCs)
+            if bytes[i..].starts_with(b"<script") {
+                let tag_start = i;
+                // Find the closing '>' of the opening tag
+                if let Some(rel) = bytes[i..].iter().position(|&b| b == b'>') {
+                    let gt_pos = i + rel;
+                    // Make sure this isn't </script>
+                    if bytes[tag_start + 1] != b'/' {
+                        pos = Some(gt_pos + 1); // byte after '>'
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+        match pos {
+            Some(p) => p,
+            None => return Vec::new(), // No <script> tag found
+        }
+    };
+
+    // Find the closing </script> tag
+    let script_close_start = match text[script_open_end..].find("</script>") {
+        Some(rel) => script_open_end + rel,
+        None => return Vec::new(),
+    };
+
+    let script_content = &text[script_open_end..script_close_start];
+
+    // Pad the prefix with spaces and preserve newlines so that both
+    // tree-sitter byte offsets AND line numbers match the original SFC.
+    let mut result = Vec::with_capacity(script_close_start);
+    for &b in &text.as_bytes()[..script_open_end] {
+        if b == b'\n' {
+            result.push(b'\n');
+        } else {
+            result.push(b' ');
+        }
+    }
+    result.extend_from_slice(script_content.as_bytes());
+    result
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -136,6 +219,11 @@ mod tests {
             Some(SupportedLanguage::Rust)
         );
 
+        assert_eq!(
+            SupportedLanguage::detect(Path::new("App.vue")),
+            Some(SupportedLanguage::Vue)
+        );
+
         assert_eq!(SupportedLanguage::detect(Path::new("text.txt")), None);
         assert_eq!(SupportedLanguage::detect(Path::new("Makefile")), None);
         assert_eq!(SupportedLanguage::detect(Path::new(".gitignore")), None);
@@ -147,5 +235,35 @@ mod tests {
         let _go = SupportedLanguage::Go.grammar();
         let _ts = SupportedLanguage::TypeScript.grammar();
         let _py = SupportedLanguage::Python.grammar();
+        let _vue = SupportedLanguage::Vue.grammar();
+    }
+
+    #[test]
+    fn test_extract_vue_script_basic() {
+        let sfc =
+            b"<template><div>Hello</div></template>\n<script>\nexport default {}\n</script>\n";
+        let result = extract_vue_script(sfc);
+        // 2 newlines before script block (one after </template>, one after <script>)
+        assert!(!result.is_empty());
+        let text = std::str::from_utf8(&result).unwrap();
+        assert!(text.contains("export default {}"));
+        // Should start with padded spaces matching bytes in <template> section
+        assert!(text.starts_with(' '));
+    }
+
+    #[test]
+    fn test_extract_vue_script_setup() {
+        let sfc = b"<template><p>Hello</p></template>\n<script setup lang=\"ts\">\nconst count = ref(0)\n</script>\n";
+        let result = extract_vue_script(sfc);
+        let text = std::str::from_utf8(&result).unwrap();
+        assert!(text.contains("const count = ref(0)"));
+    }
+
+    #[test]
+    fn test_extract_vue_script_no_script_block() {
+        let sfc = b"<template><p>Template only</p></template>\n";
+        let result = extract_vue_script(sfc);
+        // No script block -> returns empty (parser creates valid empty AST)
+        assert!(result.is_empty() || std::str::from_utf8(&result).unwrap().trim().is_empty());
     }
 }
