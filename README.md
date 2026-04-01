@@ -42,7 +42,7 @@ Pathfinder solves these problems by providing:
 
 ### Key Features
 
-- 🛠️ **16 MCP Tools** — covering code navigation, semantic editing, file operations, search, and impact analysis.
+- 🛠️ **18 MCP Tools** — covering code navigation, semantic editing, file operations, search, and impact analysis.
 - 🌐 **6 Languages** — native Tree-sitter support for Go, TypeScript, TSX, JavaScript, Python, and Rust.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
 - ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
@@ -131,7 +131,7 @@ Pathfinder communicates over **stdio** using the MCP protocol. Logs are emitted 
 <!-- TOOLS -->
 ## Tools
 
-Pathfinder exposes 16 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
+Pathfinder exposes 18 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
 
 ### 🔍 Search & Navigation
 
@@ -140,6 +140,7 @@ Pathfinder exposes 16 tools organized into three categories. Every tool operates
 | `search_codebase` | Search for text patterns (literal or regex) with AST-aware filtering (`code_only`, `comments_only`, `all`). Returns matching lines with context and enclosing semantic paths. |
 | `get_repo_map` | Generate a structural skeleton of the project — an indented tree of classes, functions, and type signatures with semantic path annotations. Token-budgeted for LLM context windows. |
 | `read_symbol_scope` | Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns code, line range, and version hash. |
+| `read_source_file` | Read an entire source file and extract its complete AST symbol hierarchy. Returns the full file content, detected language, version hash, and a nested tree of symbols with their semantic paths. |
 | `read_with_deep_context` | Read a symbol's source code **plus** the signatures of all functions it calls. Ideal for understanding dependencies before editing. |
 | `get_definition` | Jump to where a symbol is defined. Provide a semantic path to a reference and get the definition's file, line, and a code preview. |
 | `analyze_impact` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius before refactoring. |
@@ -152,6 +153,7 @@ All edit tools use the **Shadow Editor** validation pipeline — edits are valid
 |---|---|
 | `replace_body` | Replace the internal logic of a block-scoped construct (function, method, class body), keeping the signature intact. |
 | `replace_full` | Replace an entire declaration including its signature, body, decorators, and doc comments. |
+| `replace_batch` | Apply multiple AST-aware edits atomically within a single file. Edits are applied back-to-front to avoid offset shifting, with a single OCC guard. |
 | `insert_before` | Insert new code before a target symbol. Use a bare file path (without `::`) to insert at the top of a file. |
 | `insert_after` | Insert new code after a target symbol. Use a bare file path (without `::`) to append to the bottom of a file. |
 | `delete_symbol` | Delete a symbol and all its associated decorators, attributes, and doc comments. |
@@ -187,6 +189,7 @@ pathfinder/
 │   │               ├── navigation.rs
 │   │               ├── file_ops.rs
 │   │               ├── repo_map.rs
+│   │               ├── source_file.rs
 │   │               ├── symbols.rs
 │   │               └── diagnostics.rs
 │   │

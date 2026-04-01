@@ -238,6 +238,15 @@ pub struct Replacement {
 pub struct ReadSourceFileParams {
     /// Relative file path.
     pub filepath: String,
+    /// Detail level: "compact", "symbols", "full".
+    #[serde(default = "default_detail_level")]
+    pub detail_level: String,
+    /// First line to return (1-indexed).
+    #[serde(default = "default_start_line")]
+    pub start_line: u32,
+    /// Last line to return (1-indexed, inclusive).
+    #[serde(default)]
+    pub end_line: Option<u32>,
 }
 
 /// A single edit operation for `replace_batch`.
@@ -320,7 +329,8 @@ pub struct SourceSymbol {
 /// The response for `read_source_file`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ReadSourceFileResponse {
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     pub version_hash: String,
     pub language: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -535,4 +545,7 @@ pub(crate) fn default_start_line() -> u32 {
 }
 pub(crate) fn default_max_lines() -> u32 {
     500
+}
+pub(crate) fn default_detail_level() -> String {
+    "compact".to_string()
 }

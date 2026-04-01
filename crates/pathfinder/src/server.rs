@@ -1,6 +1,6 @@
 //! Pathfinder MCP Server — tool registration and dispatch.
 //!
-//! Implements `rmcp::ServerHandler` with all 16 Pathfinder tools.
+//! Implements `rmcp::ServerHandler` with all 18 Pathfinder tools.
 //!
 //! # Module Layout
 //! - [`helpers`] — error conversion, stub builder, language detection
@@ -136,7 +136,7 @@ impl PathfinderServer {
     }
 }
 
-// ── Tool Router (defines all 16 tools) ──────────────────────────────
+// ── Tool Router (defines all 18 tools) ──────────────────────────────
 
 #[tool_router]
 impl PathfinderServer {
