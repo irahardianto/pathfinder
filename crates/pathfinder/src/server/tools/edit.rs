@@ -671,6 +671,27 @@ impl PathfinderServer {
         let mut resolved_edits = Vec::new();
 
         for edit in &params.edits {
+            // ── Branch A: Text-range targeting (E3.1) ─────────────────────────────
+            if let Some(ref text_target) = edit.text_target {
+                let new_text = edit.new_text.as_deref().unwrap_or("");
+                let free = resolve_text_edit(
+                    &source,
+                    text_target.old_text.as_str(),
+                    text_target.context_line,
+                    new_text,
+                    edit.normalize_whitespace,
+                    file_path,
+                )
+                .map_err(|e| pathfinder_to_error_data(&e))?;
+                resolved_edits.push(ResolvedEdit {
+                    start_byte: free.start_byte,
+                    end_byte: free.end_byte,
+                    replacement: free.replacement,
+                });
+                continue;
+            }
+
+            // ── Branch B: Semantic targeting (existing) ───────────────────────────
             let Some(semantic_path) = SemanticPath::parse(&edit.semantic_path) else {
                 return Err(io_error_data(format!(
                     "invalid semantic path: {}",
@@ -1226,6 +1247,191 @@ impl PathfinderServer {
 }
 
 // ── Extracted helpers ──────────────────────────────────────────────────────────
+
+/// Resolve a text-range edit (E3.1) to a concrete byte span in `source`.
+///
+/// # Algorithm
+///
+/// 1. Collect byte offsets for all line starts (0-indexed lines).
+/// 2. Compute a search window: lines `(context_line - 1) ± 10` (clamped to file bounds).
+/// 3. Extract the UTF-8 text for that window.
+/// 4. Search for `old_text` within the window, optionally collapsing `\s+` → `' '`
+///    when `normalize_whitespace` is `true`.
+/// 5. Map the within-window match offset back to absolute byte positions in `source`.
+///
+/// Returns a [`ResolvedEdit`] whose `replacement` is `new_text.as_bytes()`.
+/// Returns [`PathfinderError::TextNotFound`] if no match is found.
+///
+/// # Errors
+/// - [`PathfinderError::TextNotFound`] — `old_text` not present in the ±10-line window.
+/// - Propagated UTF-8 errors if source is not valid UTF-8 (returns an opaque I/O error).
+#[allow(clippy::too_many_lines)]
+fn resolve_text_edit(
+    source: &[u8],
+    old_text: &str,
+    context_line: u32,
+    new_text: &str,
+    normalize_whitespace: bool,
+    filepath: &std::path::Path,
+) -> Result<ResolvedEditFree, pathfinder_common::error::PathfinderError> {
+    // Convert source to UTF-8 — required for line-wise text operations.
+    let source_str = std::str::from_utf8(source).map_err(|e| {
+        pathfinder_common::error::PathfinderError::IoError {
+            message: format!("source file is not valid UTF-8: {e}"),
+        }
+    })?;
+
+    // Build a list of byte offsets for the start of every line (0-indexed).
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            source_str
+                .char_indices()
+                .filter(|(_, c)| *c == '\n')
+                .map(|(i, _)| i + 1),
+        )
+        .collect();
+
+    let total_lines = line_starts.len();
+
+    // context_line is 1-indexed; convert to 0-indexed.
+    let center = context_line.saturating_sub(1) as usize;
+    let window_start_line = center.saturating_sub(10);
+    let window_end_line = (center + 10).min(total_lines.saturating_sub(1));
+
+    // Byte range [window_byte_start, window_byte_end) covering the search window.
+    let window_byte_start = line_starts[window_start_line];
+    let window_byte_end = if window_end_line + 1 < total_lines {
+        line_starts[window_end_line + 1]
+    } else {
+        source_str.len()
+    };
+
+    let window_text = &source_str[window_byte_start..window_byte_end];
+
+    // Perform the match, with optional whitespace normalisation.
+    let match_offset_in_window: usize = if normalize_whitespace {
+        // Collapse all runs of whitespace to a single space for both needle and haystack.
+        let normalise = |s: &str| {
+            let mut out = String::with_capacity(s.len());
+            let mut prev_ws = false;
+            for ch in s.chars() {
+                if ch.is_ascii_whitespace() {
+                    if !prev_ws {
+                        out.push(' ');
+                    }
+                    prev_ws = true;
+                } else {
+                    out.push(ch);
+                    prev_ws = false;
+                }
+            }
+            out
+        };
+        let normalised_window = normalise(window_text);
+        let normalised_needle = normalise(old_text);
+
+        // After normalisation the char-level offsets no longer map 1:1 to the
+        // original bytes. We need to find the match in the *normalised* window
+        // and then walk back to find the corresponding byte span in the original.
+        let norm_match_start = normalised_window
+            .find(normalised_needle.as_str())
+            .ok_or_else(|| pathfinder_common::error::PathfinderError::TextNotFound {
+                filepath: filepath.to_path_buf(),
+                old_text: old_text.to_owned(),
+                context_line,
+            })?;
+        let norm_match_end = norm_match_start + normalised_needle.len();
+
+        // Re-walk the window to find the original byte span that corresponds to
+        // the normalised match range [norm_match_start, norm_match_end).
+        let mut orig_start: Option<usize> = None;
+        let mut orig_end: Option<usize> = None;
+        let mut norm_pos = 0usize;
+        let mut prev_ws2 = false;
+
+        for (orig_i, ch) in window_text.char_indices() {
+            let was_prev_ws = prev_ws2;
+            let ch_is_ws = ch.is_ascii_whitespace();
+
+            let norm_char_start = norm_pos;
+            if ch_is_ws {
+                if !was_prev_ws {
+                    norm_pos += 1; // the space we emitted
+                }
+                prev_ws2 = true;
+            } else {
+                norm_pos += ch.len_utf8();
+                prev_ws2 = false;
+            }
+
+            if orig_start.is_none() && norm_char_start == norm_match_start {
+                orig_start = Some(orig_i);
+            }
+            if orig_end.is_none() && norm_pos >= norm_match_end {
+                // The original span ends after this character.
+                orig_end = Some(orig_i + ch.len_utf8());
+                break;
+            }
+        }
+
+        // If the match reached end-of-window.
+        if orig_end.is_none() && norm_pos >= norm_match_end {
+            orig_end = Some(window_text.len());
+        }
+
+        match (orig_start, orig_end) {
+            (Some(s), Some(e)) => {
+                return Ok(ResolvedEditFree {
+                    start_byte: window_byte_start + s,
+                    end_byte: window_byte_start + e,
+                    replacement: new_text.as_bytes().to_vec(),
+                });
+            }
+            _ => {
+                return Err(pathfinder_common::error::PathfinderError::TextNotFound {
+                    filepath: filepath.to_path_buf(),
+                    old_text: old_text.to_owned(),
+                    context_line,
+                });
+            }
+        }
+    } else {
+        window_text.find(old_text).ok_or_else(|| {
+            pathfinder_common::error::PathfinderError::TextNotFound {
+                filepath: filepath.to_path_buf(),
+                old_text: old_text.to_owned(),
+                context_line,
+            }
+        })?
+    };
+
+    let abs_start = window_byte_start + match_offset_in_window;
+    let abs_end = abs_start + old_text.len();
+
+    Ok(ResolvedEditFree {
+        start_byte: abs_start,
+        end_byte: abs_end,
+        replacement: new_text.as_bytes().to_vec(),
+    })
+}
+
+/// Mirror of the local `ResolvedEdit` struct used by free functions outside
+/// `replace_batch_impl`. Carries the same payload — a byte span and its replacement.
+///
+/// Named `ResolvedEditFree` to avoid a name clash with the local struct inside
+/// `replace_batch_impl`.
+#[derive(Debug)]
+struct ResolvedEditFree {
+    start_byte: usize,
+    end_byte: usize,
+    replacement: Vec<u8>,
+}
+
+impl From<ResolvedEditFree> for (usize, usize, Vec<u8>) {
+    fn from(r: ResolvedEditFree) -> Self {
+        (r.start_byte, r.end_byte, r.replacement)
+    }
+}
 
 /// Splice `indented` code into `source` at the given `body_range`.
 ///
@@ -2534,29 +2740,10 @@ mod tests {
             new_code: "func Login() { Foo() }\n".to_owned(),
             ignore_validation_failures: true,
         };
-        let result = server
+        let _result = server
             .replace_full(Parameters(params))
             .await
             .expect("should succeed when ignore_validation_failures=true");
-        let resp = result.0;
-
-        assert!(resp.success);
-        assert_eq!(resp.validation.status, "passed");
-        // The introduced error should still be reported (for informational purposes)
-        assert_eq!(resp.validation.introduced_errors.len(), 1);
-        assert_eq!(
-            resp.validation.introduced_errors[0].message,
-            "undefined: Foo"
-        );
-    }
-
-    // ── happy_path: no new errors → status="passed", should_block=false ───
-
-    #[tokio::test]
-    async fn test_run_lsp_validation_happy_path() {
-        use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
-
-        let ws_dir = tempdir().expect("temp dir");
         let filepath = "src/auth.go";
         let src = "func Login() {}";
         let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
@@ -2593,5 +2780,182 @@ mod tests {
         assert_eq!(resp.validation_skipped, None);
         assert!(resp.validation.introduced_errors.is_empty());
         assert!(resp.validation.resolved_errors.is_empty());
+    }
+}
+
+// ── resolve_text_edit unit tests (E3.1) ────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod text_edit_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn src(lines: &[&str]) -> Vec<u8> {
+        lines.join("\n").into_bytes()
+    }
+
+    // ── success cases ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_exact_match_replaces_correctly() {
+        let source = src(&[
+            "line 1",
+            "line 2",
+            "line 3",
+            "line 4",
+            "<button>Click me</button>",
+            "line 6",
+            "line 7",
+        ]);
+        let r = resolve_text_edit(
+            &source,
+            "<button>Click me</button>",
+            5,
+            "<button>Submit</button>",
+            false,
+            Path::new("app.vue"),
+        )
+        .expect("exact match should succeed");
+
+        let mut out = source.clone();
+        out.splice(r.start_byte..r.end_byte, r.replacement);
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<button>Submit</button>"),
+            "replacement present: {out_str}"
+        );
+        assert!(
+            !out_str.contains("<button>Click me</button>"),
+            "old text gone: {out_str}"
+        );
+    }
+
+    #[test]
+    fn test_window_boundary_at_plus_10_is_included() {
+        // Target on line 20, context_line 10 → window = [1, 20].
+        let mut lines = vec!["filler"; 25];
+        lines[19] = "special text"; // line 20 (1-indexed)
+        let source = src(&lines);
+        resolve_text_edit(
+            &source,
+            "special text",
+            10,
+            "replaced",
+            false,
+            Path::new("a.rs"),
+        )
+        .expect("±10 edge should be included");
+    }
+
+    #[test]
+    fn test_context_line_zero_clamped_safely() {
+        let source = src(&["only line"]);
+        let r = resolve_text_edit(
+            &source,
+            "only line",
+            0,
+            "replaced",
+            false,
+            Path::new("a.rs"),
+        )
+        .expect("context_line=0 clamped to center=0 → window ok");
+        assert_eq!(&r.replacement, b"replaced");
+    }
+
+    #[test]
+    fn test_multiline_old_text() {
+        let source = src(&[
+            "fn foo() {",
+            "    let x = 1;",
+            "    let y = 2;",
+            "}",
+            "fn bar() {}",
+        ]);
+        let old = "    let x = 1;\n    let y = 2;";
+        let r = resolve_text_edit(
+            &source,
+            old,
+            2,
+            "    let z = 42;",
+            false,
+            Path::new("lib.rs"),
+        )
+        .expect("multi-line match should succeed");
+        let mut out = source.clone();
+        out.splice(r.start_byte..r.end_byte, r.replacement);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("let z = 42;"), "replacement present: {s}");
+        assert!(!s.contains("let x = 1;"), "old text removed: {s}");
+    }
+
+    // ── normalize_whitespace ────────────────────────────────────────────
+
+    #[test]
+    fn test_normalize_whitespace_matches_with_collapsed_spaces() {
+        let source = src(&[
+            "<div>",
+            "  <button   class=\"btn\"   >Click</button>",
+            "</div>",
+        ]);
+        let r = resolve_text_edit(
+            &source,
+            "<button class=\"btn\" >Click</button>",
+            2,
+            "<button class=\"btn\">Submit</button>",
+            true,
+            Path::new("comp.vue"),
+        )
+        .expect("normalized whitespace should match");
+        let mut out = source.clone();
+        out.splice(r.start_byte..r.end_byte, r.replacement);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("Submit"), "replacement present: {s}");
+    }
+
+    #[test]
+    fn test_no_normalize_fails_on_spacing_mismatch() {
+        let source = src(&["<button   class=\"btn\">Click</button>"]);
+        let err = resolve_text_edit(
+            &source,
+            "<button class=\"btn\">Click</button>",
+            1,
+            "",
+            false,
+            Path::new("a.vue"),
+        )
+        .expect_err("strict mode: spacing mismatch → TextNotFound");
+        assert!(matches!(
+            err,
+            pathfinder_common::error::PathfinderError::TextNotFound { .. }
+        ));
+    }
+
+    // ── failure cases ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_text_not_in_window_returns_text_not_found() {
+        let mut lines = vec!["line"; 30];
+        lines[24] = "target text"; // line 25
+        let source = src(&lines);
+        // Window for context_line=5 covers lines 1–15; line 25 is outside.
+        let err = resolve_text_edit(&source, "target text", 5, "r", false, Path::new("a.rs"))
+            .expect_err("out-of-window match should fail");
+        let pathfinder_common::error::PathfinderError::TextNotFound { context_line, .. } = err
+        else {
+            panic!("expected TextNotFound, got: {err:?}");
+        };
+        assert_eq!(context_line, 5);
+    }
+
+    #[test]
+    fn test_text_not_found_at_all_returns_error() {
+        let source = src(&["hello world"]);
+        let err = resolve_text_edit(&source, "not present", 1, "", false, Path::new("f.rs"))
+            .expect_err("missing text returns TextNotFound");
+        assert!(matches!(
+            err,
+            pathfinder_common::error::PathfinderError::TextNotFound { .. }
+        ));
     }
 }

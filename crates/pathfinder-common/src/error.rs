@@ -8,10 +8,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// All error codes in the Pathfinder error taxonomy (PRD §5).
-///
-/// Each variant carries contextual data relevant to the specific error,
-/// enabling agents to self-correct without additional round-trips.
 #[derive(Debug, thiserror::Error)]
 pub enum PathfinderError {
     /// File path doesn't exist.
@@ -104,6 +100,17 @@ pub enum PathfinderError {
         filepath: PathBuf,
         occurrences: usize,
     },
+
+    /// `replace_batch` text targeting: `old_text` not found within the
+    /// ±10-line context window around `context_line`.
+    ///
+    /// The entire batch is rejected when any edit fails to resolve.
+    #[error("text not found: '{old_text}' not found within ±10 lines of line {context_line} in {filepath}")]
+    TextNotFound {
+        filepath: PathBuf,
+        old_text: String,
+        context_line: u32,
+    },
 }
 
 impl PathfinderError {
@@ -128,6 +135,7 @@ impl PathfinderError {
             Self::TokenBudgetExceeded { .. } => "TOKEN_BUDGET_EXCEEDED",
             Self::MatchNotFound { .. } => "MATCH_NOT_FOUND",
             Self::AmbiguousMatch { .. } => "AMBIGUOUS_MATCH",
+            Self::TextNotFound { .. } => "TEXT_NOT_FOUND",
         }
     }
 
@@ -181,6 +189,10 @@ impl PathfinderError {
             Self::AmbiguousMatch { occurrences, .. } => Some(format!(
                 "old_text matched {occurrences} times. Make it more specific or use \
                  replace_batch with a semantic_path to target a single symbol."
+            )),
+            Self::TextNotFound { context_line, .. } => Some(format!(
+                "The old_text was not found within ±10 lines of line {context_line}. \
+                 Use read_source_file to verify the exact text and adjust context_line."
             )),
             _ => None,
         }
@@ -377,6 +389,11 @@ mod tests {
             PathfinderError::IoError {
                 message: "disk full".into(),
             },
+            PathfinderError::TextNotFound {
+                filepath: "a.vue".into(),
+                old_text: "<button>Check</button>".into(),
+                context_line: 42,
+            },
         ];
 
         for err in &errors {
@@ -551,6 +568,25 @@ mod tests {
         assert!(
             json.get("hint").is_some(),
             "hint must appear in JSON output"
+        );
+    }
+
+    #[test]
+    fn test_text_not_found_hint_mentions_context_line() {
+        let err = PathfinderError::TextNotFound {
+            filepath: "src/component.vue".into(),
+            old_text: "<button>Check</button>".to_owned(),
+            context_line: 42,
+        };
+        assert_eq!(err.error_code(), "TEXT_NOT_FOUND");
+        let hint = err.hint().expect("TEXT_NOT_FOUND should have a hint");
+        assert!(
+            hint.contains("42"),
+            "hint should mention context_line: {hint}"
+        );
+        assert!(
+            hint.contains("read_source_file"),
+            "hint should reference read_source_file: {hint}"
         );
     }
 }

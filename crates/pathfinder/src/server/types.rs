@@ -274,15 +274,56 @@ pub struct ReadSourceFileParams {
     pub end_line: Option<u32>,
 }
 
-/// A single edit operation for `replace_batch`.
+/// Specifies a text-range target for a batch edit.
+///
+/// The `old_text` is searched for within a ±10-line window around `context_line`.
+/// This makes it safe for template/style edits where semantic paths do not apply.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct TextEditTarget {
+    /// Exact text to find and replace (whitespace-sensitive by default).
+    pub old_text: String,
+    /// Line number (1-indexed) to anchor the search window (required).
+    /// The search scans ±10 lines around this line for `old_text`.
+    pub context_line: u32,
+}
+
+/// A single edit in a `replace_batch` call.
+///
+/// Each edit specifies **either** semantic targeting OR text targeting:
+///
+/// **Option A — Semantic targeting (existing):**\
+/// Set `semantic_path`, `edit_type`, and optionally `new_code`.
+///
+/// **Option B — Text targeting (new in E3.1):**\
+/// Set `text_target` and `new_text`. Used for template/style zones where
+/// no AST symbol is available (e.g., Vue `<template>`, `<style>`).
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchEdit {
-    /// Full semantic path to the target.
+    // ── Semantic targeting (Option A) ─────────────────────────────────────
+    /// Full semantic path to the target (e.g., `file.vue::script::check`).
+    /// Required when using semantic targeting.
+    #[serde(default)]
     pub semantic_path: String,
     /// Edit type: `replace_body`, `replace_full`, `insert_before`, `insert_after`, or `delete`.
+    /// Required when using semantic targeting.
+    #[serde(default)]
     pub edit_type: String,
-    /// Replacement code (required for all types except `delete`).
+    /// Replacement code (required for all semantic types except `delete`).
     pub new_code: Option<String>,
+
+    // ── Text targeting (Option B) ──────────────────────────────────────────
+    /// Text-range target. Set this for template/style edits that have no semantic path.
+    /// When set, `semantic_path` and `edit_type` are ignored.
+    pub text_target: Option<TextEditTarget>,
+    /// Replacement text when using text targeting. Required when `text_target` is set.
+    pub new_text: Option<String>,
+
+    // ── Shared options ─────────────────────────────────────────────────────
+    /// When `true`, collapses `\s+` to a single space before matching `old_text`.
+    /// Useful for HTML/template contexts where indentation may be inconsistent.
+    /// Do NOT use for Python, YAML, or other whitespace-significant languages.
+    #[serde(default)]
+    pub normalize_whitespace: bool,
 }
 
 /// Parameters for `replace_batch`.
