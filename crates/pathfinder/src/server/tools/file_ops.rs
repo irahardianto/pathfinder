@@ -6,7 +6,7 @@ use crate::server::types::{
     ReadFileResponse, Replacement, ValidationResult, WriteFileParams, WriteFileResponse,
 };
 use crate::server::PathfinderServer;
-use pathfinder_common::error::PathfinderError;
+use pathfinder_common::error::{compute_lines_changed, PathfinderError};
 use pathfinder_common::types::VersionHash;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
@@ -190,6 +190,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: relative_path.to_path_buf(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             tracing::warn!(tool = "delete_file", error = %err, "OCC version mismatch");
             return Err(pathfinder_to_error_data(&err));
@@ -360,6 +361,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: relative_path.to_path_buf(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             tracing::warn!(tool = "write_file", error = %err, "OCC version mismatch");
             return Err(pathfinder_to_error_data(&err));
@@ -371,13 +373,18 @@ impl PathfinderServer {
         } else {
             // SAFETY: validated above that exactly one of content/replacements is Some.
             let replacements = params.replacements.unwrap_or_default();
-            apply_replacements(current_content, &replacements, relative_path).map_err(|e| {
-                tracing::warn!(tool = "write_file", error = %e, "search_and_replace failed");
-                pathfinder_to_error_data(&e)
-            })?
+            apply_replacements(current_content.clone(), &replacements, relative_path).map_err(
+                |e| {
+                    tracing::warn!(tool = "write_file", error = %e, "search_and_replace failed");
+                    pathfinder_to_error_data(&e)
+                },
+            )?
         };
 
-        // 6. TOCTOU late-check: re-read and re-hash immediately before write
+        // 6. TOCTOU late-check: re-read and re-hash immediately before write.
+        //    At this point we still have the agent's prior content (`current_content`)
+        //    and we read fresh disk content (`late_content`) — making this the only
+        //    site where both versions are available to compute `lines_changed`.
         let late_content = match tfs::read(&absolute_path).await {
             Ok(b) => b,
             Err(e) => {
@@ -387,9 +394,12 @@ impl PathfinderServer {
         };
         let late_hash = VersionHash::compute(&late_content);
         if late_hash.as_str() != params.base_version {
+            let late_str = String::from_utf8_lossy(&late_content);
+            let delta = compute_lines_changed(&current_content, &late_str);
             let err = PathfinderError::VersionMismatch {
                 path: relative_path.to_path_buf(),
                 current_version_hash: late_hash.as_str().to_owned(),
+                lines_changed: Some(delta),
             };
             tracing::warn!(tool = "write_file", error = %err, "TOCTOU version mismatch");
             return Err(pathfinder_to_error_data(&err));

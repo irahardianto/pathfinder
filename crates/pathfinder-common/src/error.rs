@@ -37,10 +37,15 @@ pub enum PathfinderError {
     },
 
     /// File changed since last read. OCC violation.
+    ///
+    /// `lines_changed` is a lightweight `"+N/-M"` summary (O(N) line count comparison).
+    /// It helps agents decide whether to retry without a full re-read.
     #[error("version mismatch for {path}")]
     VersionMismatch {
         path: PathBuf,
         current_version_hash: String,
+        /// Optional `"+N/-M"` delta between the agent's version and the current version.
+        lines_changed: Option<String>,
     },
 
     /// Edit introduced new errors.
@@ -126,6 +131,61 @@ impl PathfinderError {
         }
     }
 
+    /// Returns an actionable hint for the agent to self-correct without additional round-trips.
+    ///
+    /// `SYMBOL_NOT_FOUND` hints are dynamic and built from the `did_you_mean` suggestions.
+    /// All other hints are static strings referencing specific Pathfinder tools.
+    #[must_use]
+    pub fn hint(&self) -> Option<String> {
+        match self {
+            Self::SymbolNotFound { did_you_mean, .. } => {
+                if did_you_mean.is_empty() {
+                    Some("Use read_source_file to see available symbols in this file.".to_owned())
+                } else {
+                    Some(format!(
+                        "Did you mean: {}? Use read_source_file to see available symbols.",
+                        did_you_mean.join(", ")
+                    ))
+                }
+            }
+            Self::InvalidTarget { .. } => Some(
+                "replace_body requires a block-bodied construct. For constants, use replace_full."
+                    .to_owned(),
+            ),
+            Self::VersionMismatch { .. } => Some(
+                "The file was modified. Use the new hash to retry your edit if the changes \
+                 do not overlap with your target."
+                    .to_owned(),
+            ),
+            Self::AccessDenied { .. } => {
+                Some("File is outside workspace sandbox. Check .pathfinderignore rules.".to_owned())
+            }
+            Self::UnsupportedLanguage { .. } => Some(
+                "No tree-sitter grammar for this file type. Use read_file and write_file instead."
+                    .to_owned(),
+            ),
+            Self::FileNotFound { .. } => Some(
+                "Verify the file path is relative to the workspace root and the file exists."
+                    .to_owned(),
+            ),
+            Self::ValidationFailed { .. } => Some(
+                "Set ignore_validation_failures=true to write despite errors, or fix the \
+                 introduced errors before retrying."
+                    .to_owned(),
+            ),
+            Self::MatchNotFound { .. } => Some(
+                "The old_text was not found in the file. Use read_file to verify the exact text \
+                 before retrying."
+                    .to_owned(),
+            ),
+            Self::AmbiguousMatch { occurrences, .. } => Some(format!(
+                "old_text matched {occurrences} times. Make it more specific or use \
+                 replace_batch with a semantic_path to target a single symbol."
+            )),
+            _ => None,
+        }
+    }
+
     /// Serialize to the standard MCP error JSON format.
     #[must_use]
     pub fn to_error_response(&self) -> ErrorResponse {
@@ -133,6 +193,7 @@ impl PathfinderError {
             error: self.error_code().to_owned(),
             message: self.to_string(),
             details: self.to_details(),
+            hint: self.hint(),
         }
     }
 
@@ -146,9 +207,13 @@ impl PathfinderError {
             }
             Self::VersionMismatch {
                 current_version_hash,
+                lines_changed,
                 ..
             } => {
-                serde_json::json!({ "current_version_hash": current_version_hash })
+                serde_json::json!({
+                    "current_version_hash": current_version_hash,
+                    "lines_changed": lines_changed,
+                })
             }
             Self::ValidationFailed {
                 introduced_errors, ..
@@ -175,6 +240,25 @@ pub struct ErrorResponse {
     pub error: String,
     pub message: String,
     pub details: serde_json::Value,
+    /// Actionable recovery hint for the agent. Present on most error variants.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// Compute a lightweight `"+N/-M"` lines-changed summary.
+///
+/// Compares line counts between `old_content` and `new_content` in O(N) time
+/// (no diff algorithm — just counts newlines in each string).
+///
+/// Used by `VERSION_MISMATCH` errors so agents can gauge how much the file
+/// changed and decide whether to retry without a full re-read.
+#[must_use]
+pub fn compute_lines_changed(old_content: &str, new_content: &str) -> String {
+    let old_lines = old_content.lines().count();
+    let new_lines = new_content.lines().count();
+    let added = new_lines.saturating_sub(old_lines);
+    let removed = old_lines.saturating_sub(new_lines);
+    format!("+{added}/-{removed}")
 }
 
 /// A diagnostic error reported by the LSP.
@@ -221,11 +305,17 @@ mod tests {
         let err = PathfinderError::VersionMismatch {
             path: "src/main.rs".into(),
             current_version_hash: "sha256:abc123".into(),
+            lines_changed: Some("+5/-2".into()),
         };
         let response = err.to_error_response();
 
         assert_eq!(response.error, "VERSION_MISMATCH");
         assert_eq!(response.details["current_version_hash"], "sha256:abc123");
+        assert_eq!(response.details["lines_changed"], "+5/-2");
+        assert!(
+            response.hint.is_some(),
+            "VERSION_MISMATCH should carry a hint"
+        );
 
         // Verify it round-trips through JSON
         let json = serde_json::to_string(&response).expect("serialization should succeed");
@@ -250,6 +340,7 @@ mod tests {
             PathfinderError::VersionMismatch {
                 path: "a".into(),
                 current_version_hash: "x".into(),
+                lines_changed: None,
             },
             PathfinderError::ValidationFailed {
                 count: 0,
@@ -308,5 +399,158 @@ mod tests {
             .as_array()
             .expect("did_you_mean should be an array");
         assert_eq!(suggestions.len(), 2);
+    }
+
+    // ── E7.2: compute_lines_changed ─────────────────────────────────
+
+    #[test]
+    fn test_compute_lines_changed_lines_added() {
+        // old: 2 lines, new: 5 lines → +3/-0
+        let old = "line1\nline2";
+        let new = "line1\nline2\nline3\nline4\nline5";
+        assert_eq!(compute_lines_changed(old, new), "+3/-0");
+    }
+
+    #[test]
+    fn test_compute_lines_changed_lines_removed() {
+        // old: 4 lines, new: 2 lines → +0/-2
+        let old = "a\nb\nc\nd";
+        let new = "a\nb";
+        assert_eq!(compute_lines_changed(old, new), "+0/-2");
+    }
+
+    #[test]
+    fn test_compute_lines_changed_mixed() {
+        // old: 3 lines, new: 4 lines → +1/-0
+        let old = "a\nb\nc";
+        let new = "a\nb\nc\nd";
+        assert_eq!(compute_lines_changed(old, new), "+1/-0");
+    }
+
+    #[test]
+    fn test_compute_lines_changed_identical() {
+        let content = "same\ncontent\nhere";
+        assert_eq!(compute_lines_changed(content, content), "+0/-0");
+    }
+
+    #[test]
+    fn test_compute_lines_changed_empty_to_nonempty() {
+        assert_eq!(compute_lines_changed("", "a\nb\nc"), "+3/-0");
+    }
+
+    // ── E7.3: hint() method ─────────────────────────────────────────
+
+    #[test]
+    fn test_version_mismatch_hint_is_present() {
+        let err = PathfinderError::VersionMismatch {
+            path: "src/lib.rs".into(),
+            current_version_hash: "sha256:new".into(),
+            lines_changed: Some("+2/-1".into()),
+        };
+        let hint = err.hint().expect("VERSION_MISMATCH should have a hint");
+        assert!(
+            hint.contains("new hash"),
+            "hint should mention re-reading: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_symbol_not_found_hint_with_suggestions() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/auth.ts::login".into(),
+            did_you_mean: vec!["logout".into(), "logIn".into()],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("logout"),
+            "hint should include suggestions: {hint}"
+        );
+        assert!(
+            hint.contains("logIn"),
+            "hint should include all suggestions: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_symbol_not_found_hint_without_suggestions() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/auth.ts::unknown".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err
+            .hint()
+            .expect("should have hint even without suggestions");
+        assert!(
+            hint.contains("read_source_file"),
+            "hint should point to read_source_file: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_access_denied_hint_mentions_sandbox() {
+        let err = PathfinderError::AccessDenied {
+            path: ".env".into(),
+            tier: SandboxTier::HardcodedDeny,
+        };
+        let hint = err.hint().expect("ACCESS_DENIED should have a hint");
+        assert!(
+            hint.contains("sandbox"),
+            "hint should mention sandbox: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_unsupported_language_hint_mentions_write_file() {
+        let err = PathfinderError::UnsupportedLanguage {
+            path: "data.xyz".into(),
+        };
+        let hint = err.hint().expect("UNSUPPORTED_LANGUAGE should have a hint");
+        assert!(
+            hint.contains("write_file"),
+            "hint should mention write_file: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_validation_failed_hint_mentions_ignore_flag() {
+        let err = PathfinderError::ValidationFailed {
+            count: 2,
+            introduced_errors: vec![],
+        };
+        let hint = err.hint().expect("VALIDATION_FAILED should have a hint");
+        assert!(
+            hint.contains("ignore_validation_failures"),
+            "hint should mention the flag: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_match_not_found_hint_mentions_read_file() {
+        let err = PathfinderError::MatchNotFound {
+            filepath: "config.yaml".into(),
+        };
+        let hint = err.hint().expect("MATCH_NOT_FOUND should have a hint");
+        assert!(
+            hint.contains("read_file"),
+            "hint should mention read_file: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_hint_serialized_in_error_response() {
+        let err = PathfinderError::InvalidTarget {
+            semantic_path: "src/lib.rs::CONST".into(),
+            reason: "not a block construct".into(),
+        };
+        let resp = err.to_error_response();
+        assert!(
+            resp.hint.is_some(),
+            "hint must be serialized in ErrorResponse"
+        );
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert!(
+            json.get("hint").is_some(),
+            "hint must appear in JSON output"
+        );
     }
 }

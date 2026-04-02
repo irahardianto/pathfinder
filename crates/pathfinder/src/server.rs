@@ -142,7 +142,7 @@ impl PathfinderServer {
 impl PathfinderServer {
     #[tool(
         name = "search_codebase",
-        description = "Search the codebase for a text pattern. Returns matching lines with surrounding context. Each match includes an 'enclosing_semantic_path' (the AST symbol containing the match) and 'version_hash' (for immediate editing without a separate read). Use path_glob to narrow the search scope."
+        description = "Search the codebase for a text pattern. Returns matching lines with surrounding context. Each match includes an 'enclosing_semantic_path' (the AST symbol containing the match) and 'version_hash' (for immediate editing without a separate read). The version_hash in each match is immediately usable as base_version for edit tools — no additional read required. Use path_glob to narrow the search scope."
     )]
     async fn search_codebase(
         &self,
@@ -153,7 +153,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_repo_map",
-        description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing. Two budget knobs control coverage: `max_tokens` is the total token budget (default 16000); `max_tokens_per_file` caps detail per file before collapsing to a stub (default 2000). When `coverage_percent` is low, increase `max_tokens`. When files show `[TRUNCATED DUE TO SIZE]`, increase `max_tokens_per_file`. Use `visibility=all` to include private symbols for auditing."
+        description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing. The version_hashes are immediately usable as base_version for edit tools — no additional read required. Two budget knobs control coverage: `max_tokens` is the total token budget (default 16000); `max_tokens_per_file` caps detail per file before collapsing to a stub (default 2000). When `coverage_percent` is low, increase `max_tokens`. When files show `[TRUNCATED DUE TO SIZE]`, increase `max_tokens_per_file`. Use `visibility=all` to include private symbols for auditing."
     )]
     #[allow(clippy::unused_self)]
     async fn get_repo_map(
@@ -165,7 +165,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_symbol_scope",
-        description = "Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns the code, line range, and version_hash for OCC."
+        description = "Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns the code, line range, and version_hash for OCC. The version_hash is immediately usable as base_version for any edit tool — no additional read required."
     )]
     async fn read_symbol_scope(
         &self,
@@ -176,7 +176,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_source_file",
-        description = "Read an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol."
+        description = "Read an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol. The version_hash is immediately usable as base_version for any edit tool — no additional read required."
     )]
     async fn read_source_file(
         &self,
@@ -220,7 +220,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "analyze_impact",
-        description = "Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Use this BEFORE refactoring to understand the blast radius of a change. Returns version_hashes for all referenced files."
+        description = "Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Use this BEFORE refactoring to understand the blast radius of a change. Returns version_hashes for all referenced files. The version_hashes are immediately usable as base_version for edit tools — no additional read required."
     )]
     async fn analyze_impact(
         &self,

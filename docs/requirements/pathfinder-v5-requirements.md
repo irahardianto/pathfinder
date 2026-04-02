@@ -154,8 +154,23 @@ OCC hash chaining creates friction for multi-symbol edits. Error messages are te
 - `lines_changed` format: `+N/-M` (lines added / lines removed)
 
 **Acceptance Criteria:**
-- `lines_changed` and `hint` are always present in `VERSION_MISMATCH` errors
-- Computation is O(N) in file size (line count comparison only)
+- `hint` is **always** present in `VERSION_MISMATCH` errors
+- `lines_changed` is **best-effort**: populated when both old and new content are available (e.g., TOCTOU late-check in `flush_edit_with_toctou`), and `null` otherwise
+- When populated, computation is O(N) in file size (line count comparison only)
+
+> **Design Decision — Stateless OCC (2026-04-02)**
+>
+> The initial acceptance criteria stated `lines_changed` would be "always present." This was revised after implementation analysis revealed a fundamental constraint:
+>
+> Pathfinder's OCC model is **stateless** — the server stores no per-file history. When an agent calls an edit tool, it supplies only a `base_version` SHA-256 hash. The server computes the *current* file hash and compares them. To compute a `+N/-M` delta, the server would need the **prior file content** — which it never stored.
+>
+> **Why git diff cannot solve this:**
+> - OCC hashes track the *filesystem* state, not the *git commit* state. A file is considered "changed" the instant it is saved — no commit required.
+> - The most common cause of `VERSION_MISMATCH` is an unsaved edit by another agent or tool, which has no git record at all.
+> - `git diff` compares against a commit. The OCC model tracks ephemeral, per-session snapshots that are never committed.
+> - Git is not guaranteed to be present in all workspaces Pathfinder serves.
+>
+> **Decision:** Keep Pathfinder stateless. Populate `lines_changed` only at `flush_edit_with_toctou`, where both the pre-write and the just-read-from-disk content are already in scope. All other `VersionMismatch` sites emit `lines_changed: null`. The `hint` field — which IS always present and guides agents to re-read with the new hash — is the primary recovery signal.
 
 #### E7.3 — Actionable Error Hints
 

@@ -21,7 +21,7 @@ use crate::server::types::{
     ReplaceBodyParams, ReplaceFullParams, ValidateOnlyParams,
 };
 use crate::server::PathfinderServer;
-use pathfinder_common::error::{DiagnosticError, PathfinderError};
+use pathfinder_common::error::{compute_lines_changed, DiagnosticError, PathfinderError};
 use pathfinder_common::indent::dedent_then_reindent;
 use pathfinder_common::normalize::{normalize_for_body_replace, normalize_for_full_replace};
 use pathfinder_common::types::{SemanticPath, VersionHash};
@@ -121,6 +121,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: semantic_path.file_path.clone(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -208,6 +209,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: semantic_path.file_path.clone(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -296,6 +298,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: semantic_path.file_path.clone(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -400,6 +403,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: semantic_path.file_path.clone(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -495,6 +499,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: semantic_path.file_path.clone(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -591,6 +596,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: semantic_path.file_path.clone(),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -652,6 +658,7 @@ impl PathfinderServer {
             let err = PathfinderError::VersionMismatch {
                 path: std::path::PathBuf::from(&params.filepath),
                 current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -1108,6 +1115,7 @@ impl PathfinderServer {
         &self,
         semantic_path: &SemanticPath,
         current_hash: &VersionHash,
+        source: &[u8],
         new_bytes: &[u8],
     ) -> Result<VersionHash, ErrorData> {
         let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
@@ -1118,9 +1126,13 @@ impl PathfinderServer {
         let disk_hash = VersionHash::compute(&disk_bytes);
 
         if disk_hash != *current_hash {
+            let prior_str = String::from_utf8_lossy(source);
+            let late_str = String::from_utf8_lossy(&disk_bytes);
+            let delta = compute_lines_changed(&prior_str, &late_str);
             let err = PathfinderError::VersionMismatch {
                 path: semantic_path.file_path.clone(),
                 current_version_hash: disk_hash.as_str().to_owned(),
+                lines_changed: Some(delta),
             };
             return Err(pathfinder_to_error_data(&err));
         }
@@ -1185,7 +1197,7 @@ impl PathfinderServer {
 
         let flush_start = std::time::Instant::now();
         let new_hash = self
-            .flush_edit_with_toctou(semantic_path, current_hash, new_bytes)
+            .flush_edit_with_toctou(semantic_path, current_hash, source, new_bytes)
             .await?;
         let flush_ms = flush_start.elapsed().as_millis();
 
