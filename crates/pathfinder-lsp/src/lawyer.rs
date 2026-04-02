@@ -158,4 +158,9 @@ pub trait Lawyer: Send + Sync {
         start_line: u32,
         end_line: u32,
     ) -> Result<Option<String>, LspError>;
+
+    /// Retrieve the current LSP process status and capabilities per language.
+    async fn capability_status(
+        &self,
+    ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus>;
 }

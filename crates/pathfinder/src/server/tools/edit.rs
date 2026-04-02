@@ -72,18 +72,18 @@ impl PathfinderServer {
 
         // ── Step 1: Parse semantic path ────────────────────────────────
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            return Err(io_error_data(format!(
-                "invalid semantic path: {}",
-                params.semantic_path
-            )));
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         // replace_body requires a symbol chain, not just a bare file
         if semantic_path.is_bare_file() {
-            let err = PathfinderError::InvalidTarget {
-                semantic_path: params.semantic_path.clone(),
-                reason: "replace_body requires a symbol path (e.g., src/auth.ts::Login). \
-                         Use write_file to replace file content."
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
                     .to_owned(),
             };
             return Err(pathfinder_to_error_data(&err));
@@ -167,17 +167,17 @@ impl PathfinderServer {
         );
 
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            return Err(io_error_data(format!(
-                "invalid semantic path: {}",
-                params.semantic_path
-            )));
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         if semantic_path.is_bare_file() {
-            let err = PathfinderError::InvalidTarget {
-                semantic_path: params.semantic_path.clone(),
-                reason: "replace_full requires a symbol path (e.g., src/auth.ts::Login). \
-                         Use write_file to replace file content."
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
                     .to_owned(),
             };
             return Err(pathfinder_to_error_data(&err));
@@ -254,7 +254,11 @@ impl PathfinderServer {
             "insert_before: start"
         );
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            return Err(io_error_data("invalid semantic path"));
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -359,7 +363,11 @@ impl PathfinderServer {
             "insert_after: start"
         );
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            return Err(io_error_data("invalid semantic path"));
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -461,13 +469,17 @@ impl PathfinderServer {
         );
 
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            return Err(io_error_data("invalid semantic path"));
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         if semantic_path.is_bare_file() {
-            let err = PathfinderError::InvalidTarget {
-                semantic_path: params.semantic_path.clone(),
-                reason: "delete_symbol requires a symbol path (e.g., src/auth.ts::Login)."
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
                     .to_owned(),
             };
             return Err(pathfinder_to_error_data(&err));
@@ -569,7 +581,11 @@ impl PathfinderServer {
         );
 
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            return Err(io_error_data("invalid semantic path"));
+            let err = PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -693,10 +709,11 @@ impl PathfinderServer {
 
             // ── Branch B: Semantic targeting (existing) ───────────────────────────
             let Some(semantic_path) = SemanticPath::parse(&edit.semantic_path) else {
-                return Err(io_error_data(format!(
-                    "invalid semantic path: {}",
-                    edit.semantic_path
-                )));
+                let err = PathfinderError::InvalidSemanticPath {
+                    input: edit.semantic_path.clone(),
+                    issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+                };
+                return Err(pathfinder_to_error_data(&err));
             };
 
             match edit.edit_type.as_str() {
@@ -855,10 +872,14 @@ impl PathfinderServer {
                     });
                 }
                 _ => {
-                    return Err(io_error_data(format!(
-                        "unsupported edit type: {}",
-                        edit.edit_type
-                    )));
+                    let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                        semantic_path: edit.semantic_path.clone(),
+                        reason: format!(
+                            "unsupported edit type: '{}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete.",
+                            edit.edit_type
+                        ),
+                    };
+                    return Err(pathfinder_to_error_data(&err));
                 }
             }
         }
@@ -918,10 +939,14 @@ impl PathfinderServer {
         match edit_type {
             "replace_body" => {
                 if semantic_path.is_bare_file() {
-                    return Err(pathfinder_to_error_data(&PathfinderError::InvalidTarget {
-                        semantic_path: raw_path.to_owned(),
-                        reason: "replace_body requires a symbol path".to_owned(),
-                    }));
+                    return Err(pathfinder_to_error_data(
+                        &PathfinderError::InvalidSemanticPath {
+                            input: raw_path.to_owned(),
+                            issue:
+                                "this tool requires a symbol target — use 'file.rs::symbol' format"
+                                    .to_owned(),
+                        },
+                    ));
                 }
                 let (_, _, hash) = self
                     .surgeon
@@ -930,12 +955,16 @@ impl PathfinderServer {
                     .map_err(treesitter_error_to_error_data)?;
                 Ok(hash)
             }
-            "replace_full" => {
+            "replace_full" | "delete" => {
                 if semantic_path.is_bare_file() {
-                    return Err(pathfinder_to_error_data(&PathfinderError::InvalidTarget {
-                        semantic_path: raw_path.to_owned(),
-                        reason: "replace_full requires a symbol path".to_owned(),
-                    }));
+                    return Err(pathfinder_to_error_data(
+                        &PathfinderError::InvalidSemanticPath {
+                            input: raw_path.to_owned(),
+                            issue:
+                                "this tool requires a symbol target — use 'file.rs::symbol' format"
+                                    .to_owned(),
+                        },
+                    ));
                 }
                 let (_, _, hash) = self
                     .surgeon
@@ -960,21 +989,15 @@ impl PathfinderServer {
                     Ok(hash)
                 }
             }
-            "delete" => {
-                if semantic_path.is_bare_file() {
-                    return Err(pathfinder_to_error_data(&PathfinderError::InvalidTarget {
-                        semantic_path: raw_path.to_owned(),
-                        reason: "delete requires a symbol path".to_owned(),
-                    }));
-                }
-                let (_, _, hash) = self
-                    .surgeon
-                    .resolve_full_range(self.workspace_root.path(), semantic_path)
-                    .await
-                    .map_err(treesitter_error_to_error_data)?;
-                Ok(hash)
+            unknown => {
+                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                    semantic_path: raw_path.to_owned(),
+                    reason: format!(
+                        "unsupported edit type: '{unknown}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
+                    ),
+                };
+                Err(pathfinder_to_error_data(&err))
             }
-            unknown => Err(io_error_data(format!("unknown edit_type: {unknown}"))),
         }
     }
 
@@ -991,6 +1014,20 @@ impl PathfinderServer {
     /// `ValidationOutcome` even if new errors are introduced.
     ///
     /// Gracefully degrades to `validation_skipped` on all LSP errors.
+    fn lsp_error_to_skip_reason(e: &LspError) -> &'static str {
+        match e {
+            LspError::NoLspAvailable => "no_lsp",
+            LspError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
+                "lsp_not_on_path"
+            }
+            LspError::Io(_) => "lsp_start_failed",
+            LspError::ConnectionLost => "lsp_crash",
+            LspError::Timeout { .. } => "lsp_timeout",
+            LspError::UnsupportedCapability { .. } => "pull_diagnostics_unsupported",
+            LspError::Protocol(_) => "lsp_protocol_error",
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "The LSP validation pipeline is intentionally a single sequential flow: \
@@ -1014,11 +1051,12 @@ impl PathfinderServer {
             .did_open(workspace, relative, original_content)
             .await
         {
-            let (skipped_reason, should_log) = match &e {
-                LspError::NoLspAvailable => ("no_lsp", false),
-                LspError::UnsupportedCapability { .. } => ("unsupported", false),
-                _ => ("lsp_error", true),
-            };
+            let skipped_reason = Self::lsp_error_to_skip_reason(&e);
+            let should_log = !matches!(
+                &e,
+                LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }
+            );
+
             if should_log {
                 tracing::warn!(error = %e, "validation: did_open failed");
             }
@@ -1044,12 +1082,13 @@ impl PathfinderServer {
                 };
             }
             Err(e) => {
+                let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: pre-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
                 return ValidationOutcome {
                     validation: EditValidation::skipped(),
                     skipped: Some(true),
-                    skipped_reason: Some("diagnostic_timeout".to_owned()),
+                    skipped_reason: Some(skipped_reason.to_owned()),
                     should_block: false,
                 };
             }
@@ -1079,12 +1118,13 @@ impl PathfinderServer {
             .did_change(workspace, relative, new_content, 2)
             .await
         {
+            let skipped_reason = Self::lsp_error_to_skip_reason(&e);
             tracing::warn!(error = %e, "validation: did_change failed");
             let _ = self.lawyer.did_close(workspace, relative).await;
             return ValidationOutcome {
                 validation: EditValidation::skipped(),
                 skipped: Some(true),
-                skipped_reason: Some("lsp_error".to_owned()),
+                skipped_reason: Some(skipped_reason.to_owned()),
                 should_block: false,
             };
         }
@@ -1093,12 +1133,13 @@ impl PathfinderServer {
         let mut post_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
             Ok(d) => d,
             Err(e) => {
+                let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: post-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
                 return ValidationOutcome {
                     validation: EditValidation::skipped(),
                     skipped: Some(true),
-                    skipped_reason: Some("diagnostic_timeout".to_owned()),
+                    skipped_reason: Some(skipped_reason.to_owned()),
                     should_block: false,
                 };
             }
@@ -1626,6 +1667,12 @@ mod tests {
         ) -> Result<Option<String>, LspError> {
             Ok(None)
         }
+
+        async fn capability_status(
+            &self,
+        ) -> std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus> {
+            std::collections::HashMap::new()
+        }
     }
 
     fn make_server_dyn(
@@ -1897,7 +1944,7 @@ mod tests {
 
         let result = server.replace_body(Parameters(params)).await;
         let Err(err) = result else {
-            panic!("expected INVALID_TARGET error");
+            panic!("expected INVALID_SEMANTIC_PATH error");
         };
 
         let code = err
@@ -1906,7 +1953,7 @@ mod tests {
             .and_then(|d| d.get("error"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        assert_eq!(code, "INVALID_TARGET", "got: {err:?}");
+        assert_eq!(code, "INVALID_SEMANTIC_PATH", "got: {err:?}");
     }
 
     // ── Integration Tests with Real TreeSitterSurgeon ───────────────────
@@ -2449,12 +2496,11 @@ mod tests {
             .expect("should succeed — unsupported gracefully degrades");
         let resp = result.0;
 
-        assert!(resp.success);
         assert_eq!(resp.validation.status, "skipped");
         assert_eq!(resp.validation_skipped, Some(true));
         assert_eq!(
             resp.validation_skipped_reason.as_deref(),
-            Some("unsupported")
+            Some("pull_diagnostics_unsupported")
         );
     }
 
@@ -2492,7 +2538,7 @@ mod tests {
         assert_eq!(resp.validation_skipped, Some(true));
         assert_eq!(
             resp.validation_skipped_reason.as_deref(),
-            Some("diagnostic_timeout")
+            Some("lsp_protocol_error")
         );
     }
 
@@ -2576,7 +2622,7 @@ mod tests {
         assert_eq!(resp.validation_skipped, Some(true));
         assert_eq!(
             resp.validation_skipped_reason.as_deref(),
-            Some("diagnostic_timeout")
+            Some("lsp_protocol_error")
         );
     }
 

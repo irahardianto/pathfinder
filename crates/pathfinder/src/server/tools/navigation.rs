@@ -11,9 +11,7 @@
 //! - `analyze_impact` — returns empty caller/callee lists with `degraded: true`
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
-use crate::server::helpers::{
-    io_error_data, pathfinder_to_error_data, treesitter_error_to_error_data,
-};
+use crate::server::helpers::{pathfinder_to_error_data, treesitter_error_to_error_data};
 use crate::server::types::{
     AnalyzeImpactParams, AnalyzeImpactResponse, GetDefinitionParams, GetDefinitionResponse,
     ReadWithDeepContextParams, ReadWithDeepContextResponse,
@@ -53,11 +51,15 @@ impl PathfinderServer {
             let duration_ms = start.elapsed().as_millis();
             tracing::warn!(
                 tool = "get_definition",
-                error_code = "INVALID_TARGET",
+                error_code = "INVALID_SEMANTIC_PATH",
                 duration_ms,
-                "invalid semantic path"
+                "invalid semantic path format"
             );
-            return Err(io_error_data("invalid semantic path format".to_string()));
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         // Sandbox check
@@ -192,11 +194,15 @@ impl PathfinderServer {
             let duration_ms = start.elapsed().as_millis();
             tracing::warn!(
                 tool = "read_with_deep_context",
-                error_code = "INVALID_TARGET",
+                error_code = "INVALID_SEMANTIC_PATH",
                 duration_ms,
-                "invalid semantic path"
+                "invalid semantic path format"
             );
-            return Err(io_error_data("invalid semantic path format".to_string()));
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         // Sandbox check
@@ -341,11 +347,15 @@ impl PathfinderServer {
             let duration_ms = start.elapsed().as_millis();
             tracing::warn!(
                 tool = "analyze_impact",
-                error_code = "INVALID_TARGET",
+                error_code = "INVALID_SEMANTIC_PATH",
                 duration_ms,
-                "invalid semantic path"
+                "invalid semantic path format"
             );
-            return Err(io_error_data("invalid semantic path format".to_string()));
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
 
         // Sandbox check

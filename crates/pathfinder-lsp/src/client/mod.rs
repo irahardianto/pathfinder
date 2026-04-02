@@ -794,6 +794,42 @@ impl Lawyer for LspClient {
         // is sufficient. Return None to indicate "no formatted text substitution".
         Ok(None)
     }
+
+    async fn capability_status(&self) -> HashMap<String, crate::types::LspLanguageStatus> {
+        let mut status = HashMap::new();
+        for desc in self.descriptors.iter() {
+            let guard = self.processes.read().await;
+            let lang_status = match guard.get(&desc.language_id) {
+                Some(ProcessEntry::Running(state)) => {
+                    if state.process.capabilities.diagnostic_provider {
+                        crate::types::LspLanguageStatus {
+                            validation: true,
+                            reason: "LSP connected and supports validation".to_owned(),
+                        }
+                    } else {
+                        crate::types::LspLanguageStatus {
+                            validation: false,
+                            reason: "LSP connected but does not support textDocument/diagnostic"
+                                .to_owned(),
+                        }
+                    }
+                }
+                Some(ProcessEntry::Unavailable(_)) => crate::types::LspLanguageStatus {
+                    validation: false,
+                    reason: format!("{} failed to start or crashed repeatedly", desc.command),
+                },
+                None => {
+                    // Lazy start: it hasn't crashed, and it was detected in the workspace
+                    crate::types::LspLanguageStatus {
+                        validation: true,
+                        reason: format!("{} available (lazy start)", desc.command),
+                    }
+                }
+            };
+            status.insert(desc.language_id.clone(), lang_status);
+        }
+        status
+    }
 }
 
 /// Parse the `textDocument/diagnostic` response into a `Vec<LspDiagnostic>`.

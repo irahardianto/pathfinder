@@ -25,6 +25,10 @@ pub enum PathfinderError {
         did_you_mean: Vec<String>,
     },
 
+    /// Semantic path is malformed or missing required '::' separator.
+    #[error("invalid semantic path: {input}")]
+    InvalidSemanticPath { input: String, issue: String },
+
     /// Multiple matches for a semantic path.
     #[error("ambiguous symbol: {semantic_path}")]
     AmbiguousSymbol {
@@ -136,6 +140,7 @@ impl PathfinderError {
             Self::MatchNotFound { .. } => "MATCH_NOT_FOUND",
             Self::AmbiguousMatch { .. } => "AMBIGUOUS_MATCH",
             Self::TextNotFound { .. } => "TEXT_NOT_FOUND",
+            Self::InvalidSemanticPath { .. } => "INVALID_SEMANTIC_PATH",
         }
     }
 
@@ -194,6 +199,10 @@ impl PathfinderError {
                 "The old_text was not found within ±10 lines of line {context_line}. \
                  Use read_source_file to verify the exact text and adjust context_line."
             )),
+            Self::InvalidSemanticPath { input, .. } => Some(format!(
+                "'{input}' is missing the file path — did you mean 'crates/.../file.rs::{input}'? \
+                 Semantic paths must include the file path and '::' separator (e.g., 'src/auth.ts::AuthService.login')."
+            )),
             _ => None,
         }
     }
@@ -240,6 +249,9 @@ impl PathfinderError {
             }
             Self::TokenBudgetExceeded { used, budget } => {
                 serde_json::json!({ "used": used, "budget": budget })
+            }
+            Self::InvalidSemanticPath { issue, .. } => {
+                serde_json::json!({ "issue": issue })
             }
             _ => serde_json::Value::Object(serde_json::Map::new()),
         }
@@ -393,6 +405,10 @@ mod tests {
                 filepath: "a.vue".into(),
                 old_text: "<button>Check</button>".into(),
                 context_line: 42,
+            },
+            PathfinderError::InvalidSemanticPath {
+                input: "send".into(),
+                issue: "missing ::".into(),
             },
         ];
 

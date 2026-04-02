@@ -455,6 +455,12 @@ impl Lawyer for MockLawyer {
             None => Ok(None),
         }
     }
+
+    async fn capability_status(
+        &self,
+    ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
+        std::collections::HashMap::new()
+    }
 }
 
 #[cfg(test)]

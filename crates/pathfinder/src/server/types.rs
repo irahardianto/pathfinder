@@ -434,6 +434,28 @@ pub struct GetRepoMapResponse {
     /// Agents should treat all symbols as public regardless of `visibility` param.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility_degraded: Option<bool>,
+    /// System capabilities available for this repository.
+    pub capabilities: RepoCapabilities,
+}
+
+/// The overall capabilities of the Pathfinder system.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RepoCapabilities {
+    /// Whether AST-aware edit tools are supported.
+    pub edit: bool,
+    /// Whether the search engine is supported.
+    pub search: bool,
+    /// LSP-specific capabilities and status.
+    pub lsp: LspCapabilities,
+}
+
+/// LSP status and capabilities.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct LspCapabilities {
+    /// `true` if LSP is generally supported by the system.
+    pub supported: bool,
+    /// Map of language ID to its specific LSP process status.
+    pub per_language: std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus>,
 }
 
 /// The response for `read_symbol_scope`.

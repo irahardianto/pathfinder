@@ -176,7 +176,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_source_file",
-        description = "Read an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol. The version_hash is immediately usable as base_version for any edit tool — no additional read required.\n\n**Supported languages:** Go (.go), TypeScript (.ts), TSX (.tsx), JavaScript (.js/.jsx), Python (.py), Rust (.rs), Vue (.vue).\n\n**NOT for config/doc files.** For TOML, YAML, JSON, Markdown, .env, Dockerfile, XML, or any non-source file, use `read_file` instead — `read_source_file` will return UNSUPPORTED_LANGUAGE."
+        description = "**AST-only.** Only call this on source code files (.rs, .ts, .tsx, .go, .py, .vue, .jsx, .js). For configuration or documentation files (YAML, TOML, JSON, Markdown, Dockerfile, .env, XML), use `read_file` instead — calling this tool on those file types returns UNSUPPORTED_LANGUAGE.\n\nRead an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol. The version_hash is immediately usable as base_version for any edit tool — no additional read required.\n\n**detail_level parameter:** `compact` (default) — full source + flat symbol list; `symbols` — symbol tree only, no source; `full` — full source + complete nested AST (v4 behaviour). Use `start_line`/`end_line` to restrict output to a region of interest."
     )]
     async fn read_source_file(
         &self,
@@ -187,7 +187,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_batch",
-        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file. IMPORTANT: For each edit, semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**Two targeting modes per edit (E3.1 — Hybrid Batch):**\n\n**Option A — Semantic targeting (existing):** Set `semantic_path`, `edit_type`, and optionally `new_code`. Use for source-code constructs that have a parseable AST symbol.\n\n**Option B — Text targeting (new):** Set `text_target` (with `old_text` + `context_line`) and `new_text`. Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path. The search scans ±10 lines around `context_line` (1-indexed) for an exact match of `old_text`. Set `normalize_whitespace: true` to collapse `\\s+` → single space before matching (useful for HTML where indentation may vary; do NOT use for Python or YAML).\n\nBoth targeting modes can appear in the same batch — the batch is fully atomic (all-or-nothing). If any edit fails (e.g., `TEXT_NOT_FOUND`), the entire batch is rolled back."
+        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file. IMPORTANT: For each edit, semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**Two targeting modes per edit (E3.1 — Hybrid Batch):**\n\n**Option A — Semantic targeting (existing):** Set `semantic_path`, `edit_type`, and optionally `new_code`. Use for source-code constructs that have a parseable AST symbol.\n\n**Option B — Text targeting (new):** Set `text_target` (with `old_text` + `context_line`) and `new_text`. Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path. The search scans ±10 lines around `context_line` (1-indexed) for an exact match of `old_text`. Set `normalize_whitespace: true` to collapse `\\s+` → single space before matching (useful for HTML where indentation may vary; do NOT use for Python or YAML).\n\nBoth targeting modes can appear in the same batch — the batch is fully atomic (all-or-nothing). If any edit fails (e.g., `TEXT_NOT_FOUND`), the entire batch is rolled back.\n\n**Schema quick-reference:**\n  Option A: { \"semantic_path\": \"src/file.rs::MyStruct.my_fn\", \"edit_type\": \"replace_body\", \"new_code\": \"...\" }\n  edit_type values: replace_body | replace_full | insert_before | insert_after | delete\n  Option B: { \"text_target\": { \"old_text\": \"<old html>\", \"context_line\": 42 }, \"new_text\": \"<new html>\" }\n  Both modes may be mixed in one batch. `context_line` is required for text targeting."
     )]
     async fn replace_batch(
         &self,
@@ -231,7 +231,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_body",
-        description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func')."
+        description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`."
     )]
     async fn replace_body(
         &self,
@@ -242,7 +242,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_full",
-        description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func')."
+        description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`."
     )]
     async fn replace_full(
         &self,
@@ -253,7 +253,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "insert_before",
-        description = "Insert new code BEFORE a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between your code and the target."
+        description = "Insert new code BEFORE a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between your code and the target.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
     )]
     async fn insert_before(
         &self,
@@ -264,7 +264,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "insert_after",
-        description = "Insert new code AFTER a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between the target and your code."
+        description = "Insert new code AFTER a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between the target and your code.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
     )]
     async fn insert_after(
         &self,
@@ -275,7 +275,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "delete_symbol",
-        description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method, only that method is deleted. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login')."
+        description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method, only that method is deleted. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
     )]
     async fn delete_symbol(
         &self,
@@ -286,7 +286,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "validate_only",
-        description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit."
+        description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit.\n\n**LSP validation:** If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
     )]
     async fn validate_only(
         &self,

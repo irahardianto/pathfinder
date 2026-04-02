@@ -1,6 +1,6 @@
 //! `read_symbol_scope` tool — AST-based symbol extraction via Tree-sitter.
 
-use crate::server::helpers::{io_error_data, pathfinder_to_error_data};
+use crate::server::helpers::pathfinder_to_error_data;
 use crate::server::types::{ReadSymbolScopeParams, ReadSymbolScopeResponse};
 use crate::server::PathfinderServer;
 use pathfinder_common::types::SemanticPath;
@@ -22,9 +22,22 @@ impl PathfinderServer {
         tracing::info!(tool = "read_symbol_scope", "read_symbol_scope: start");
 
         let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            tracing::warn!(tool = "read_symbol_scope", "invalid semantic path format");
-            return Err(io_error_data("invalid semantic path format"));
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
         };
+
+        // read_symbol_scope requires a symbol chain, not just a bare file
+        if semantic_path.is_bare_file() {
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
+                    .to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
 
         // Sandbox check on the file path
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {

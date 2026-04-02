@@ -2,6 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Status of a specific language server (for diagnostics/capabilities).
+///
+/// **Note:** This is a point-in-time snapshot taken when `get_repo_map` was called.
+/// If the LSP process crashes or is restarted after this call, the `per_language`
+/// map may be stale. Always treat `validation_skipped_reason` in edit responses
+/// as the authoritative signal for the current edit operation's actual LSP status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LspLanguageStatus {
+    pub validation: bool,
+    pub reason: String,
+}
+
 /// The location of a symbol's definition in the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinitionLocation {

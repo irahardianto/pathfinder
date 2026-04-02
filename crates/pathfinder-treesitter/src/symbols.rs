@@ -76,7 +76,7 @@ fn extract_symbols_recursive(
         // Handle impl blocks (Rust-style): extract the implementing type name and
         // list all associated functions as Method children under that type.
         if types.impl_kinds.contains(&kind) {
-            extract_impl_block(child, source, types, parent_path, out);
+            extract_impl_block(child, source, types, parent_path, out, &mut name_counts);
             continue;
         }
 
@@ -180,6 +180,7 @@ fn extract_impl_block(
     types: &crate::language::LanguageNodeTypes,
     parent_path: &str,
     out: &mut Vec<ExtractedSymbol>,
+    name_counts: &mut std::collections::HashMap<String, usize>,
 ) {
     // The `type` field holds the type being implemented (e.g., `MyStruct`).
     let Some(type_node) = node.child_by_field_name("type") else {
@@ -192,10 +193,19 @@ fn extract_impl_block(
         return;
     };
     let type_name = type_name.trim().to_string();
-    let impl_path = if parent_path.is_empty() {
-        type_name.clone()
+
+    let count = name_counts.entry(type_name.clone()).or_insert(0);
+    *count += 1;
+    let suffix = if *count > 1 {
+        format!("#{count}")
     } else {
-        format!("{parent_path}.{type_name}")
+        String::new()
+    };
+
+    let impl_path = if parent_path.is_empty() {
+        format!("{type_name}{suffix}")
+    } else {
+        format!("{parent_path}.{type_name}{suffix}")
     };
 
     // Collect all child function_items from the impl body as Method symbols.
@@ -254,6 +264,26 @@ fn extract_impl_block(
 }
 
 /// Resolve a `SymbolChain` against a list of extracted symbols.
+///
+/// ## Rust `impl` block fallback
+///
+/// For Rust files, `extract_impl_block` produces two distinct top-level symbols
+/// for the same type name: a `Struct` / `Enum` node (no suffix) and an `Impl`
+/// node (with a `#N` suffix, e.g. `MyStruct#2`).  When an agent writes a path
+/// like `MyStruct.my_method`, the chain resolver must first navigate to `MyStruct`
+/// (the struct symbol), then descend into `.my_method`.  But the struct symbol's
+/// `children` list contains only fields / variants — the methods live under the
+/// sibling `Impl` symbol.
+///
+/// To fix this without changing the extraction shape (the repo-map still renders
+/// both the struct *and* the impl block), resolution applies an **impl-sibling
+/// fallback**: when the next segment fails to resolve in the current symbol's
+/// children, we gather every sibling `Impl` symbol with the same base name (i.e.
+/// name matches ignoring the `#N` overload suffix) and search their children as
+/// well.  The first match wins.
+///
+/// This is purely additive — it does not affect paths that already resolved
+/// correctly, and it is only consulted when the normal traversal finds nothing.
 #[must_use]
 pub fn resolve_symbol_chain<'a>(
     symbols: &'a [ExtractedSymbol],
@@ -289,6 +319,55 @@ pub fn resolve_symbol_chain<'a>(
     result
 }
 
+/// Fallback resolution that also searches `Impl` sibling symbols.
+///
+/// Use this when [`resolve_symbol_chain`] returns `None`.  Given the top-level
+/// `symbols` slice (not a nested children slice) and a `chain` of at least two
+/// segments, this function:
+///
+/// 1. Resolves the first segment to find the base type symbol (e.g. `MyStruct`).
+/// 2. Collects **all** sibling `Impl` symbols whose name matches the base type
+///    name (ignoring `#N` suffixes, since they are the same type's impl blocks).
+/// 3. Repeats the rest of the chain resolution within each impl symbol's children.
+///
+/// Returns the first successful match, or `None` if nothing is found.
+#[must_use]
+pub fn resolve_symbol_chain_with_impl_fallback<'a>(
+    symbols: &'a [ExtractedSymbol],
+    chain: &SymbolChain,
+) -> Option<&'a ExtractedSymbol> {
+    // Fast path: try normal resolution first.
+    if let Some(hit) = resolve_symbol_chain(symbols, chain) {
+        return Some(hit);
+    }
+
+    // We need at least two segments to do impl-sibling lookup.
+    if chain.segments.len() < 2 {
+        return None;
+    }
+
+    // Resolve the first segment to identify the base type name.
+    let base_type_name = &chain.segments[0].name;
+
+    // Build a reduced chain for the remaining segments.
+    let tail_chain = SymbolChain {
+        segments: chain.segments[1..].to_vec(),
+    };
+
+    // Search all top-level Impl symbols whose name matches the base type.
+    // The name check intentionally ignores the `#N` suffix used by overload
+    // tracking, because all `impl MyStruct { }` blocks share the same base name.
+    for sym in symbols {
+        if sym.kind == SymbolKind::Impl && sym.name == *base_type_name {
+            if let Some(hit) = resolve_symbol_chain(&sym.children, &tail_chain) {
+                return Some(hit);
+            }
+        }
+    }
+
+    None
+}
+
 /// Computes string similarity to offer did-you-mean suggestions.
 ///
 /// Borrows semantic paths directly from the symbol tree to avoid allocating
@@ -317,12 +396,24 @@ pub fn did_you_mean(
     let mut all_paths: Vec<&str> = Vec::new();
     collect_paths(symbols, &mut all_paths);
 
-    // Compute Levenshtein distance for each candidate path.
+    // Dynamic threshold: allow more typos for longer symbol names
+    let threshold = 5.max(target.len() / 4);
+
     let mut distances: Vec<(usize, &str)> = all_paths
         .into_iter()
-        .map(|path| (levenshtein(&target, path), path))
-        // Only keep sensible distances
-        .filter(|(dist, _)| *dist <= 5)
+        .filter_map(|path| {
+            let dist = if path.contains(&target) || target.contains(path) {
+                path.len().abs_diff(target.len())
+            } else {
+                levenshtein(&target, path)
+            };
+
+            if dist <= threshold || path.contains(&target) {
+                Some((dist, path))
+            } else {
+                None
+            }
+        })
         .collect();
 
     // Sort by smallest distance
@@ -896,7 +987,7 @@ function doThing() { count.value++ }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::language::SupportedLanguage;
@@ -1088,14 +1179,14 @@ mod tests {
         // Expect: one Struct + one Impl (with 2 Method children)
         let impl_sym = syms.iter().find(|s| s.kind == SymbolKind::Impl).unwrap();
         assert_eq!(impl_sym.name, "MyStruct");
-        assert_eq!(impl_sym.semantic_path, "MyStruct");
+        assert_eq!(impl_sym.semantic_path, "MyStruct#2");
         assert_eq!(impl_sym.children.len(), 2);
         assert_eq!(impl_sym.children[0].name, "foo");
         assert_eq!(impl_sym.children[0].kind, SymbolKind::Method);
-        assert_eq!(impl_sym.children[0].semantic_path, "MyStruct.foo");
+        assert_eq!(impl_sym.children[0].semantic_path, "MyStruct#2.foo");
         assert_eq!(impl_sym.children[1].name, "bar");
         assert_eq!(impl_sym.children[1].kind, SymbolKind::Method);
-        assert_eq!(impl_sym.children[1].semantic_path, "MyStruct.bar");
+        assert_eq!(impl_sym.children[1].semantic_path, "MyStruct#2.bar");
     }
 
     #[test]
@@ -1113,6 +1204,98 @@ mod tests {
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].name, "compute");
         assert_eq!(syms[0].kind, SymbolKind::Function);
+    }
+
+    /// Regression test for F-6a: `StructName.method` paths must resolve even
+    /// when the method lives in a separate `impl StructName { }` block rather
+    /// than being nested inside the struct definition itself.
+    ///
+    /// Previously, `resolve_symbol_chain` would find the `Struct` symbol
+    /// (`MyStruct`, no suffix) and descend into its (empty) children list,
+    /// returning `None`.  The `Impl` symbol (`MyStruct#2`) held the methods but
+    /// was never consulted.  `resolve_symbol_chain_with_impl_fallback` fixes this.
+    #[test]
+    fn test_resolve_rust_impl_method_via_struct_path() {
+        let source = b"struct MyStruct;\nimpl MyStruct {\n    fn foo(&self) {}\n    fn bar(&mut self) {}\n}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        // Normal resolve: `MyStruct.foo` should NOT find anything because the
+        // Struct symbol has no children (fields only).
+        let chain = SymbolChain::parse("MyStruct.foo").unwrap();
+        let normal = resolve_symbol_chain(&syms, &chain);
+        assert!(
+            normal.is_none(),
+            "normal resolve should miss impl method (struct has no children)"
+        );
+
+        // Fallback resolve MUST find the method via the sibling Impl symbol.
+        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain)
+            .expect("impl fallback must resolve MyStruct.foo");
+        assert_eq!(hit.name, "foo");
+        assert_eq!(hit.kind, SymbolKind::Method);
+        assert_eq!(hit.semantic_path, "MyStruct#2.foo");
+    }
+
+    /// Confirm that the impl-fallback also resolves `bar` (the second method).
+    #[test]
+    fn test_resolve_rust_impl_second_method_via_struct_path() {
+        let source = b"struct MyStruct;\nimpl MyStruct {\n    fn foo(&self) {}\n    fn bar(&mut self) {}\n}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        let chain = SymbolChain::parse("MyStruct.bar").unwrap();
+        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain)
+            .expect("impl fallback must resolve MyStruct.bar");
+        assert_eq!(hit.name, "bar");
+        assert_eq!(hit.kind, SymbolKind::Method);
+    }
+
+    /// Confirm that the fallback still does NOT resolve a non-existent method.
+    #[test]
+    fn test_resolve_rust_impl_nonexistent_method_returns_none() {
+        let source = b"struct MyStruct;\nimpl MyStruct {\n    fn foo(&self) {}\n}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        let chain = SymbolChain::parse("MyStruct.nonexistent").unwrap();
+        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain);
+        assert!(hit.is_none(), "non-existent method must return None");
+    }
+
+    /// PathfinderError.hint was the exact failing path from the incident report.
+    /// It uses an `enum` + separate `impl` pattern (same as struct + impl).
+    #[test]
+    fn test_resolve_enum_impl_method_via_enum_path() {
+        let source = b"enum PathfinderError { Foo }\nimpl PathfinderError {\n    fn hint(&self) -> Option<String> { None }\n}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        let chain = SymbolChain::parse("PathfinderError.hint").unwrap();
+        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain)
+            .expect("impl fallback must resolve PathfinderError.hint");
+        assert_eq!(hit.name, "hint");
+        assert_eq!(hit.kind, SymbolKind::Method);
     }
 
     #[test]

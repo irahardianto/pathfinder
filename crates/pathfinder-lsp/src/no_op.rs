@@ -108,6 +108,12 @@ impl Lawyer for NoOpLawyer {
     ) -> Result<Option<String>, LspError> {
         Err(LspError::NoLspAvailable)
     }
+
+    async fn capability_status(
+        &self,
+    ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
+        std::collections::HashMap::new()
+    }
 }
 
 #[cfg(test)]

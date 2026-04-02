@@ -1,7 +1,9 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
 use crate::server::helpers::pathfinder_to_error_data;
-use crate::server::types::{GetRepoMapParams, GetRepoMapResponse};
+use crate::server::types::{
+    GetRepoMapParams, GetRepoMapResponse, LspCapabilities, RepoCapabilities,
+};
 use crate::server::PathfinderServer;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
@@ -62,6 +64,8 @@ impl PathfinderServer {
             "get_repo_map: complete"
         );
 
+        let capability_status = self.lawyer.capability_status().await;
+
         Ok(Json(GetRepoMapResponse {
             skeleton: result.skeleton,
             tech_stack: result.tech_stack,
@@ -73,6 +77,14 @@ impl PathfinderServer {
             // Visibility filtering is implemented via name-convention heuristics
             // (_-prefix = private, lowercase-first = Go package-private). Not degraded.
             visibility_degraded: None,
+            capabilities: RepoCapabilities {
+                edit: true,
+                search: true,
+                lsp: LspCapabilities {
+                    supported: true,
+                    per_language: capability_status,
+                },
+            },
         }))
     }
 }
