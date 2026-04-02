@@ -480,4 +480,105 @@ mod tests {
         render_symbols_recursive(&symbols, 0, &mut out);
         assert_eq!(out, "func Foo // Foo\n");
     }
+
+    /// Regression test: default depth of 3 was too shallow for Rust workspace layouts.
+    ///
+    /// The standard layout `crates/X/src/file.rs` places files at depth 4 from the repo
+    /// root, which `max_depth(3)` cannot reach. This test verifies that `generate_skeleton_text`
+    /// with depth=4 discovers files nested inside a `src/` subdirectory (depth 4), while
+    /// depth=3 would miss them — ensuring the fix (default=5) covers real-world layouts.
+    #[tokio::test]
+    async fn test_generate_skeleton_text_depth_reaches_nested_src_files() {
+        use crate::mock::MockSurgeon;
+        use crate::surgeon::{ExtractedSymbol, SymbolKind};
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        // Create a temp workspace mimicking a Rust workspace:
+        //   root/
+        //     crates/
+        //       my-crate/
+        //         src/
+        //           lib.rs   ← depth 4 from root
+        let ws_dir = tempdir().expect("temp dir");
+        let nested_src = ws_dir.path().join("crates").join("my-crate").join("src");
+        tokio::fs::create_dir_all(&nested_src)
+            .await
+            .expect("create dirs");
+        tokio::fs::write(nested_src.join("lib.rs"), b"pub fn answer() -> u32 { 42 }")
+            .await
+            .expect("write file");
+
+        let mock = MockSurgeon::new();
+        // The surgeon is called once per discovered file; return a symbol so the file
+        // is included in the skeleton (files with empty symbols are skipped).
+        mock.extract_symbols_results
+            .lock()
+            .expect("lock")
+            .push(Ok(vec![ExtractedSymbol {
+                name: "answer".to_string(),
+                semantic_path: "answer".to_string(),
+                kind: SymbolKind::Function,
+                byte_range: 0..29,
+                start_line: 0,
+                end_line: 0,
+                children: vec![],
+            }]));
+
+        let surgeon = Arc::new(mock);
+        let ws_root = ws_dir.path();
+        let target = std::path::Path::new(".");
+
+        // depth=4 must find the file at crates/my-crate/src/lib.rs
+        let result = generate_skeleton_text(&*surgeon, ws_root, target, 50_000, 4, "all", 2_000)
+            .await
+            .expect("skeleton generation succeeds");
+
+        assert_eq!(
+            result.files_in_scope, 1,
+            "depth=4 should discover 1 source file at crates/my-crate/src/lib.rs"
+        );
+        assert!(
+            result.skeleton.contains("lib.rs"),
+            "skeleton must reference the nested file"
+        );
+    }
+
+    /// Validates that depth=3 misses files at depth 4, confirming the bug that the default
+    /// of 3 caused (and that the new default of 5 fixes).
+    #[tokio::test]
+    async fn test_generate_skeleton_text_depth_3_misses_nested_src_files() {
+        use crate::mock::MockSurgeon;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().expect("temp dir");
+        let nested_src = ws_dir.path().join("crates").join("my-crate").join("src");
+        tokio::fs::create_dir_all(&nested_src)
+            .await
+            .expect("create dirs");
+        tokio::fs::write(nested_src.join("lib.rs"), b"pub fn answer() -> u32 { 42 }")
+            .await
+            .expect("write file");
+
+        let surgeon = Arc::new(MockSurgeon::new());
+        // No extract_symbols_results configured — the file should never be reached.
+
+        let result = generate_skeleton_text(
+            &*surgeon,
+            ws_dir.path(),
+            std::path::Path::new("."),
+            50_000,
+            3, // OLD default — deliberately too shallow
+            "all",
+            2_000,
+        )
+        .await
+        .expect("skeleton generation succeeds");
+
+        assert_eq!(
+            result.files_in_scope, 0,
+            "depth=3 must NOT reach files at crates/my-crate/src/lib.rs (depth 4)"
+        );
+    }
 }

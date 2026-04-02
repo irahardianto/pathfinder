@@ -49,7 +49,12 @@ pub struct GetRepoMapParams {
     /// to include more files in the map.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
-    /// Max directory traversal depth.
+    /// Max directory traversal depth (default: 5).
+    ///
+    /// Increase this value when `coverage_percent` in the response is low
+    /// or when your project has deeply-nested source files (e.g. a depth 6+
+    /// monorepo). The walker stops early on shallow repos, so over-provisioning
+    /// is safe and nearly free.
     #[serde(default = "default_depth")]
     pub depth: u32,
     /// Visibility filter: `public` or `all`.
@@ -535,7 +540,7 @@ pub(crate) fn default_max_tokens_per_file() -> u32 {
     2_000
 }
 pub(crate) fn default_depth() -> u32 {
-    3
+    5
 }
 pub(crate) fn default_max_depth() -> u32 {
     2
