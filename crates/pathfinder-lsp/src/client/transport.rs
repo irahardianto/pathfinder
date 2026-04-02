@@ -188,4 +188,19 @@ mod tests {
         let result = read_message(&mut reader).await;
         assert!(matches!(result, Err(LspError::ConnectionLost)));
     }
+
+    #[tokio::test]
+    async fn test_oversized_content_length_is_rejected() {
+        // 50MB + 1 byte — just over the limit
+        let oversized = b"Content-Length: 52428801\r\n\r\n";
+        let mut reader = BufReader::new(oversized.as_slice());
+        let result = read_message(&mut reader).await;
+        match result {
+            Err(LspError::Protocol(msg)) => assert!(
+                msg.contains("exceeds"),
+                "expected 'exceeds' in error message, got: {msg}"
+            ),
+            other => panic!("expected Protocol error, got: {other:?}"),
+        }
+    }
 }

@@ -209,14 +209,12 @@ impl LspClient {
                 tracing::error!(
                     language = %language_id,
                     error = %e,
-                    "LSP: initialization failed"
+                    attempt,
+                    "LSP: initialization failed — retrying"
                 );
-                // Mark unavailable so we don't spam doomed spawns for this language
-                self.processes.write().await.insert(
-                    language_id.clone(),
-                    ProcessEntry::Unavailable(UnavailableState),
-                );
-                return Err(e);
+                // Recurse with attempt+1; the guard at the top of this function handles
+                // exhaustion (attempt >= MAX_RESTART_ATTEMPTS) by inserting Unavailable.
+                return Box::pin(self.start_process(descriptor, attempt + 1)).await;
             }
         };
 
@@ -772,6 +770,12 @@ impl Lawyer for LspClient {
         };
 
         self.touch(language_id).await;
+
+        tracing::info!(
+            tool = "range_formatting",
+            language = language_id,
+            "textDocument/rangeFormatting complete"
+        );
 
         if response.is_null() {
             return Ok(None);
