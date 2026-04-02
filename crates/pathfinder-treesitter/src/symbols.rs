@@ -365,6 +365,536 @@ pub fn find_enclosing_symbol(symbols: &[ExtractedSymbol], row: usize) -> Option<
     best_match.map(|s| s.semantic_path.clone())
 }
 
+// ─── Vue multi-zone symbol extraction ─────────────────────────────────────────
+
+/// Extract symbols from all zones of a parsed Vue SFC.
+///
+/// Returns a flat list that includes:
+/// - Script zone symbols at the **top level** (backward-compatible, no zone prefix needed).
+/// - A `Zone` symbol named `"template"` with HTML component/element children.
+/// - A `Zone` symbol named `"style"` with CSS selector children.
+///
+/// Agents targeting script symbols use `file.vue::FunctionName` (existing).
+/// Agents targeting template / style symbols use `file.vue::template.ComponentName`
+/// or `file.vue::style..className` via dot-separated chain segments.
+#[must_use]
+pub fn extract_symbols_from_multizone(
+    multi: &crate::vue_zones::MultiZoneTree,
+) -> Vec<ExtractedSymbol> {
+    let mut output: Vec<ExtractedSymbol> = Vec::new();
+
+    // ── Script zone (top-level, backward-compatible) ──────────────────────────
+    if let Some(ref tree) = multi.script_tree {
+        let ts_syms = extract_symbols_from_tree(tree, &multi.source, SupportedLanguage::Vue);
+        output.extend(ts_syms);
+    }
+
+    // ── Template zone ─────────────────────────────────────────────────────────
+    if let Some(ref tree) = multi.template_tree {
+        let children = extract_template_symbols(tree, &multi.source);
+        if !children.is_empty() {
+            let zone_range = multi
+                .zones
+                .template
+                .as_ref()
+                .map_or(0..0, |z| z.start_byte..z.end_byte);
+            let start_line = multi
+                .zones
+                .template
+                .as_ref()
+                .map_or(0, |z| z.start_point.row);
+            let end_line = multi.zones.template.as_ref().map_or(0, |z| z.end_point.row);
+            output.push(ExtractedSymbol {
+                name: "template".to_string(),
+                semantic_path: "template".to_string(),
+                kind: crate::surgeon::SymbolKind::Zone,
+                byte_range: zone_range,
+                start_line,
+                end_line,
+                children,
+            });
+        }
+    }
+
+    // ── Style zone ────────────────────────────────────────────────────────────
+    if let Some(ref tree) = multi.style_tree {
+        let children = extract_style_symbols(tree, &multi.source);
+        if !children.is_empty() {
+            let zone_range = multi
+                .zones
+                .style
+                .as_ref()
+                .map_or(0..0, |z| z.start_byte..z.end_byte);
+            let start_line = multi.zones.style.as_ref().map_or(0, |z| z.start_point.row);
+            let end_line = multi.zones.style.as_ref().map_or(0, |z| z.end_point.row);
+            output.push(ExtractedSymbol {
+                name: "style".to_string(),
+                semantic_path: "style".to_string(),
+                kind: crate::surgeon::SymbolKind::Zone,
+                byte_range: zone_range,
+                start_line,
+                end_line,
+                children,
+            });
+        }
+    }
+
+    output
+}
+
+/// Extract component/element symbols from an HTML parse tree (`<template>` zone).
+///
+/// Promotion rule: **Vue Components** (tags starting with an uppercase letter, e.g.
+/// `<MyButton>`) are always emitted as **direct children** of the template zone,
+/// regardless of how deeply they are nested in the DOM. This makes them addressable
+/// as `template.MyButton` in semantic paths without requiring agents to know the DOM
+/// nesting depth.
+///
+/// Native HTML elements (`<div>`, `<p>`, …) are collected at the root level of the
+/// template only. Nested HTML elements are not promoted.
+#[must_use]
+pub fn extract_template_symbols(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let mut symbols: Vec<ExtractedSymbol> = Vec::new();
+    let mut tag_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    walk_html_elements_flat(
+        tree.root_node(),
+        source,
+        "template",
+        &mut symbols,
+        &mut tag_counts,
+    );
+
+    symbols
+}
+
+/// Recursive HTML element walker that flattens elements into a single list.
+fn walk_html_elements_flat(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    parent_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+    tag_counts: &mut std::collections::HashMap<String, usize>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let kind = child.kind();
+        let tag_name_opt = resolve_tag_name(kind, child, source);
+
+        if let Some(ref name) = tag_name_opt {
+            let is_component = name.chars().next().is_some_and(char::is_uppercase);
+            let sym_kind = if is_component {
+                crate::surgeon::SymbolKind::Component
+            } else {
+                crate::surgeon::SymbolKind::HtmlElement
+            };
+
+            let count = tag_counts.entry(name.clone()).or_insert(0);
+            *count += 1;
+            let nth = *count;
+            let sym_name = if nth == 1 {
+                name.clone()
+            } else {
+                format!("{name}[{nth}]")
+            };
+
+            // Components are promoted to top-level paths (template.MyButton).
+            // HTML elements retain hierarchical paths (template.div.span).
+            let sym_path = if is_component {
+                format!("template.{sym_name}")
+            } else {
+                format!("{parent_path}.{sym_name}")
+            };
+
+            out.push(ExtractedSymbol {
+                name: sym_name,
+                semantic_path: sym_path.clone(),
+                kind: sym_kind,
+                byte_range: child.byte_range(),
+                start_line: child.start_position().row,
+                end_line: child.end_position().row,
+                children: Vec::new(), // Always flat
+            });
+
+            // Recurse into children
+            walk_html_elements_flat(child, source, &sym_path, out, tag_counts);
+        } else {
+            walk_html_elements_flat(child, source, parent_path, out, tag_counts);
+        }
+    }
+}
+
+/// Resolves the actual tag name string from an HTML AST node.
+fn resolve_tag_name(kind: &str, child: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    if kind == "element" {
+        // start_tag child → tag_name grandchild
+        let start_tag = child.child_by_field_name("start_tag").or_else(|| {
+            let mut c = child.walk();
+            let found = child
+                .named_children(&mut c)
+                .find(|n| n.kind() == "start_tag");
+            // Materialize range before cursor drops
+            found.map(|n| {
+                // Re-lookup by byte range to avoid keeping the borrow alive
+                child.child_by_field_name("start_tag").unwrap_or(n)
+            })
+        });
+        let tag_name_range = start_tag.and_then(|tag| {
+            let mut c = tag.walk();
+            let found = tag.named_children(&mut c).find(|n| n.kind() == "tag_name");
+            found.map(|n| n.byte_range())
+        });
+        tag_name_range
+            .and_then(|r| source.get(r))
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .map(str::trim)
+            .map(str::to_owned)
+    } else if kind == "self_closing_element" {
+        // self_closing_element → tag_name child
+        let mut c = child.walk();
+        let found = child
+            .named_children(&mut c)
+            .find(|n| n.kind() == "tag_name");
+        let range = found.map(|n| n.byte_range());
+        range
+            .and_then(|r| source.get(r))
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .map(str::trim)
+            .map(str::to_owned)
+    } else {
+        None
+    }
+}
+
+/// Extract CSS selector symbols from a CSS parse tree (`<style>` zone).
+///
+/// Emits:
+/// - [`SymbolKind::CssSelector`] for class selectors (`.name`), id selectors (`#name`),
+///   and bare element type selectors (`p`, `div`).
+/// - [`SymbolKind::CssAtRule`] for `@media` and `@keyframes` rules.
+///
+/// Multiple `@media` rules are disambiguated with `[N]` suffixes.
+#[must_use]
+pub fn extract_style_symbols(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let mut symbols: Vec<ExtractedSymbol> = Vec::new();
+    let mut at_rule_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    walk_css_rules(
+        tree.root_node(),
+        source,
+        "style",
+        &mut symbols,
+        &mut at_rule_counts,
+    );
+    symbols
+}
+
+/// Recursive CSS rule walker for style symbol extraction.
+fn walk_css_rules(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    parent_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+    at_counts: &mut std::collections::HashMap<String, usize>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            // Standard `selector { ... }` rule
+            "rule_set" => {
+                extract_css_rule_set(child, source, parent_path, out);
+            }
+            // @media, @keyframes, @supports …
+            "media_statement" | "keyframes_statement" | "at_rule" => {
+                let at_name = extract_at_rule_name(child, source);
+                let count = at_counts.entry(at_name.clone()).or_insert(0);
+                *count += 1;
+                let nth = *count;
+                let sym_name = if nth == 1 {
+                    format!("@{at_name}")
+                } else {
+                    format!("@{at_name}[{nth}]")
+                };
+                let sym_path = format!("{parent_path}.{sym_name}");
+                out.push(ExtractedSymbol {
+                    name: sym_name,
+                    semantic_path: sym_path,
+                    kind: crate::surgeon::SymbolKind::CssAtRule,
+                    byte_range: child.byte_range(),
+                    start_line: child.start_position().row,
+                    end_line: child.end_position().row,
+                    children: Vec::new(),
+                });
+            }
+            _ => {
+                // Recurse into stylesheet or other container nodes
+                walk_css_rules(child, source, parent_path, out, at_counts);
+            }
+        }
+    }
+}
+
+/// Extract the at-rule keyword (e.g. "media", "keyframes") from an at-rule node.
+fn extract_at_rule_name(node: tree_sitter::Node<'_>, source: &[u8]) -> String {
+    // tree-sitter-css at-rule-keyword / keyword node
+    let mut c = node.walk();
+    for child in node.named_children(&mut c) {
+        if matches!(child.kind(), "at_keyword" | "keyword") {
+            if let Some(bytes) = source.get(child.byte_range()) {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    // Strip leading `@` if present
+                    return s.trim_start_matches('@').trim().to_owned();
+                }
+            }
+        }
+    }
+    // Fallback: derive from node kind
+    match node.kind() {
+        "media_statement" => "media".to_owned(),
+        "keyframes_statement" => "keyframes".to_owned(),
+        _ => "rule".to_owned(),
+    }
+}
+
+/// Extract selector symbols from a single `rule_set` node.
+fn extract_css_rule_set(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    parent_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+) {
+    // The `selectors` child contains one or more selector nodes.
+    let mut c = node.walk();
+    let selectors_node = node
+        .named_children(&mut c)
+        .find(|n| n.kind() == "selectors");
+
+    let Some(sel_node) = selectors_node else {
+        return;
+    };
+
+    let mut sel_cursor = sel_node.walk();
+    for selector in sel_node.named_children(&mut sel_cursor) {
+        let name_opt = match selector.kind() {
+            "class_selector" => {
+                // class_selector → `.` + class_name
+                let mut cc = selector.walk();
+                let found = selector
+                    .named_children(&mut cc)
+                    .find(|n| n.kind() == "class_name");
+                let range = found.map(|n| n.byte_range());
+                range
+                    .and_then(|r| source.get(r))
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .map(|s| format!(".{}", s.trim()))
+            }
+            "id_selector" => {
+                // id_selector → `#` + id_name
+                let mut cc = selector.walk();
+                let found = selector
+                    .named_children(&mut cc)
+                    .find(|n| n.kind() == "id_name");
+                let range = found.map(|n| n.byte_range());
+                range
+                    .and_then(|r| source.get(r))
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .map(|s| format!("#{}", s.trim()))
+            }
+            "tag_name" => {
+                // Bare element type selector
+                source
+                    .get(selector.byte_range())
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .map(|s| s.trim().to_owned())
+            }
+            _ => None,
+        };
+
+        if let Some(sel_name) = name_opt {
+            if sel_name.is_empty() {
+                continue;
+            }
+            let sym_path = format!("{parent_path}.{sel_name}");
+            out.push(ExtractedSymbol {
+                name: sel_name,
+                semantic_path: sym_path,
+                kind: crate::surgeon::SymbolKind::CssSelector,
+                byte_range: node.byte_range(), // whole rule_set for read_symbol_scope
+                start_line: node.start_position().row,
+                end_line: node.end_position().row,
+                children: Vec::new(),
+            });
+        }
+    }
+}
+
+// ─── Multi-zone tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod vue_multizone_tests {
+    use super::*;
+    use crate::vue_zones::parse_vue_multizone;
+
+    const BASIC_SFC: &[u8] = br#"<template>
+  <div class="app">
+    <MyButton @click="doThing">Click me</MyButton>
+    <router-view />
+  </div>
+</template>
+<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function doThing() { count.value++ }
+</script>
+<style scoped>
+.app { color: red; }
+#main { font-size: 16px; }
+@media (max-width: 768px) { .app { display: none; } }
+</style>"#;
+
+    #[test]
+    fn test_extract_multizone_script_symbols_at_top_level() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        // Script symbols should be at top level (backward compat — no zone prefix)
+        let func = syms.iter().find(|s| s.name == "doThing");
+        assert!(
+            func.is_some(),
+            "doThing function should be a top-level symbol"
+        );
+        assert_eq!(func.unwrap().semantic_path, "doThing");
+    }
+
+    #[test]
+    fn test_extract_multizone_template_zone_container() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        let template_sym = syms.iter().find(|s| s.name == "template");
+        assert!(
+            template_sym.is_some(),
+            "template zone container should exist"
+        );
+        assert_eq!(template_sym.unwrap().kind, crate::surgeon::SymbolKind::Zone);
+    }
+
+    #[test]
+    fn test_extract_multizone_template_component_child() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        let template_sym = syms.iter().find(|s| s.name == "template").unwrap();
+        let my_button = template_sym.children.iter().find(|c| c.name == "MyButton");
+        assert!(
+            my_button.is_some(),
+            "MyButton component should be extracted"
+        );
+        assert_eq!(
+            my_button.unwrap().kind,
+            crate::surgeon::SymbolKind::Component
+        );
+        assert_eq!(my_button.unwrap().semantic_path, "template.MyButton");
+    }
+
+    #[test]
+    fn test_extract_multizone_template_html_element() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        let template_sym = syms.iter().find(|s| s.name == "template").unwrap();
+        let div = template_sym.children.iter().find(|c| c.name == "div");
+        assert!(div.is_some(), "div element should be extracted");
+        assert_eq!(div.unwrap().kind, crate::surgeon::SymbolKind::HtmlElement);
+    }
+
+    #[test]
+    fn test_extract_multizone_style_zone_container() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        let style_sym = syms.iter().find(|s| s.name == "style");
+        assert!(style_sym.is_some(), "style zone container should exist");
+        assert_eq!(style_sym.unwrap().kind, crate::surgeon::SymbolKind::Zone);
+    }
+
+    #[test]
+    fn test_extract_multizone_style_class_selector() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        let style_sym = syms.iter().find(|s| s.name == "style").unwrap();
+        let class_sel = style_sym.children.iter().find(|c| c.name == ".app");
+        assert!(class_sel.is_some(), ".app CSS class should be extracted");
+        assert_eq!(
+            class_sel.unwrap().kind,
+            crate::surgeon::SymbolKind::CssSelector
+        );
+        assert_eq!(class_sel.unwrap().semantic_path, "style..app");
+    }
+
+    #[test]
+    fn test_extract_multizone_style_id_selector() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        let style_sym = syms.iter().find(|s| s.name == "style").unwrap();
+        let id_sel = style_sym.children.iter().find(|c| c.name == "#main");
+        assert!(id_sel.is_some(), "#main CSS id should be extracted");
+        assert_eq!(id_sel.unwrap().semantic_path, "style.#main");
+    }
+
+    #[test]
+    fn test_extract_multizone_style_at_rule() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        let style_sym = syms.iter().find(|s| s.name == "style").unwrap();
+        let media = style_sym.children.iter().find(|c| c.name == "@media");
+        assert!(media.is_some(), "@media rule should be extracted");
+        assert_eq!(media.unwrap().kind, crate::surgeon::SymbolKind::CssAtRule);
+    }
+
+    #[test]
+    fn test_extract_multizone_template_only_sfc() {
+        let sfc = b"<template><div>Hello</div></template>\n";
+        let multi = parse_vue_multizone(sfc).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        // No script symbols
+        assert!(
+            !syms
+                .iter()
+                .any(|s| s.kind == crate::surgeon::SymbolKind::Function),
+            "no function symbols in template-only SFC"
+        );
+        // Template zone container should be present
+        assert!(syms.iter().any(|s| s.name == "template"));
+    }
+
+    #[test]
+    fn test_find_enclosing_symbol_in_template_zone() {
+        let multi = parse_vue_multizone(BASIC_SFC).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+
+        // Find the template zone
+        let template_sym = syms.iter().find(|s| s.name == "template").unwrap();
+        // The template zone spans certain lines; the enclosing symbol for a line
+        // inside it should return the template zone (or a child).
+        let result = find_enclosing_symbol(&syms, template_sym.start_line + 1);
+        assert!(
+            result.is_some(),
+            "should find an enclosing symbol inside template zone"
+        );
+        assert!(
+            result.unwrap().starts_with("template"),
+            "enclosing symbol path should start with 'template'"
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

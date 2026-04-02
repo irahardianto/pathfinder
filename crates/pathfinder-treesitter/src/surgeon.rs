@@ -32,6 +32,19 @@ pub enum SymbolKind {
     Constant,
     Interface,
     Enum,
+    /// A Vue SFC zone container (`template` or `style`).
+    ///
+    /// Acts as a parent grouping all child symbols extracted from that zone.
+    /// Read-only — not a target for edit operations.
+    Zone,
+    /// A capitalised HTML element used as a Vue component (e.g. `<MyButton>`).
+    Component,
+    /// A lowercase HTML element (e.g. `<div>`, `<router-view>`).
+    HtmlElement,
+    /// A CSS selector within a `<style>` block (class `.foo`, id `#bar`, or tag `p`).
+    CssSelector,
+    /// A CSS at-rule within a `<style>` block (`@media`, `@keyframes`).
+    CssAtRule,
 }
 
 /// The byte range and context needed to splice a new body into a symbol.

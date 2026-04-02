@@ -103,21 +103,21 @@ pub struct ReadSymbolScopeParams {
 /// Parameters for `read_with_deep_context`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadWithDeepContextParams {
-    /// Semantic path.
+    /// Semantic path (e.g., `src/auth.ts::AuthService.login`). MUST include file path and '::'.
     pub semantic_path: String,
 }
 
 /// Parameters for `get_definition`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetDefinitionParams {
-    /// Semantic path to the reference.
+    /// Semantic path to the reference (e.g., `src/auth.ts::AuthService.login`).
     pub semantic_path: String,
 }
 
 /// Parameters for `analyze_impact`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactParams {
-    /// Semantic path to the target.
+    /// Semantic path to the target (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
     /// Traversal depth (max: 5).
     #[serde(default = "default_max_depth")]
@@ -127,7 +127,7 @@ pub struct AnalyzeImpactParams {
 /// Parameters for `replace_body`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReplaceBodyParams {
-    /// Full semantic path to the target.
+    /// Full semantic path to the target (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
     /// SHA-256 hash from previous read (OCC).
     pub base_version: String,
@@ -141,7 +141,7 @@ pub struct ReplaceBodyParams {
 /// Parameters for `replace_full`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReplaceFullParams {
-    /// Full semantic path to the target.
+    /// Full semantic path to the target (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
     /// SHA-256 hash from previous read (OCC).
     pub base_version: String,
@@ -155,7 +155,7 @@ pub struct ReplaceFullParams {
 /// Parameters for `insert_before`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct InsertBeforeParams {
-    /// Full semantic path or bare file path (for BOF).
+    /// Full semantic path or bare file path for BOF (e.g., `src/mod.rs::func` or `src/mod.rs`).
     pub semantic_path: String,
     /// SHA-256 hash from previous read (OCC).
     pub base_version: String,
@@ -169,7 +169,7 @@ pub struct InsertBeforeParams {
 /// Parameters for `insert_after`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct InsertAfterParams {
-    /// Full semantic path or bare file path (for EOF).
+    /// Full semantic path or bare file path for EOF (e.g., `src/mod.rs::func` or `src/mod.rs`).
     pub semantic_path: String,
     /// SHA-256 hash from previous read (OCC).
     pub base_version: String,
@@ -183,7 +183,7 @@ pub struct InsertAfterParams {
 /// Parameters for `delete_symbol`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeleteSymbolParams {
-    /// Full semantic path to the target.
+    /// Full semantic path to the target (e.g., `src/auth.ts::AuthService.login`).
     pub semantic_path: String,
     /// SHA-256 hash from previous read (OCC).
     pub base_version: String,
@@ -195,7 +195,7 @@ pub struct DeleteSymbolParams {
 /// Parameters for `validate_only`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ValidateOnlyParams {
-    /// Full semantic path to the target.
+    /// Full semantic path to the target (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
     /// Edit type: `replace_body`, `replace_full`, `insert_before`, `insert_after`, or `delete`.
     pub edit_type: String,

@@ -1,6 +1,7 @@
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
 use crate::parser::AstParser;
+use crate::vue_zones::{parse_vue_multizone, MultiZoneTree};
 use lru::LruCache;
 use pathfinder_common::types::VersionHash;
 use std::num::NonZeroUsize;
@@ -25,6 +26,20 @@ pub struct CacheEntry {
     pub mtime: SystemTime,
 }
 
+/// Cached parse result for a Vue SFC across all three zones.
+///
+/// Keyed by `PathBuf` in a separate LRU cache from non-Vue files so that
+/// multi-zone trees don't pollute the single-zone eviction budget.
+#[derive(Debug)]
+pub struct MultiZoneEntry {
+    /// Multi-zone trees (script + template + style).
+    pub multi: MultiZoneTree,
+    /// SHA-256 hash of the *original* SFC content (for OCC).
+    pub content_hash: VersionHash,
+    /// Mtime at parse time (fast-path guard).
+    pub mtime: SystemTime,
+}
+
 /// A thread-safe, parse-on-demand cache for ASTs.
 ///
 /// Keeps parsed ASTs in memory up to a capacity limit. Evicts the
@@ -46,6 +61,8 @@ pub struct CacheEntry {
 #[derive(Debug)]
 pub struct AstCache {
     entries: Mutex<LruCache<PathBuf, CacheEntry>>,
+    /// Separate LRU cache for Vue SFC multi-zone parse results.
+    vue_entries: Mutex<LruCache<PathBuf, MultiZoneEntry>>,
 }
 
 impl AstCache {
@@ -57,6 +74,7 @@ impl AstCache {
         let cap = NonZeroUsize::new(max_entries.max(1)).unwrap();
         Self {
             entries: Mutex::new(LruCache::new(cap)),
+            vue_entries: Mutex::new(LruCache::new(cap)),
         }
     }
 
@@ -124,9 +142,95 @@ impl AstCache {
         Ok((tree, content))
     }
 
+    /// Retrieve the multi-zone parse result for a Vue SFC.
+    ///
+    /// Uses file mtime as a fast-path guard identical to [`get_or_parse`].
+    /// On a cache miss, reads the SFC from disk and calls `parse_vue_multizone`.
+    ///
+    /// # Errors
+    /// Returns `SurgeonError` if I/O fails or the script zone fails to parse.
+    /// Template/style parse failures set `MultiZoneTree::degraded = true` but
+    /// are non-fatal.
+    #[instrument(skip(self), fields(cache_hit = false))]
+    pub async fn get_or_parse_vue(
+        &self,
+        path: &Path,
+    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
+        // --- Fast-path guard ---
+        let meta = tokio::fs::metadata(path).await?;
+        let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        {
+            let mut lock = self
+                .vue_entries
+                .lock()
+                .map_err(|_| SurgeonError::ParseError {
+                    path: path.to_path_buf(),
+                    reason: "Vue cache lock poisoned".into(),
+                })?;
+
+            if let Some(entry) = lock.get(path) {
+                if entry.mtime == current_mtime {
+                    tracing::Span::current().record("cache_hit", true);
+                    let multi = MultiZoneTree {
+                        script_tree: entry.multi.script_tree.clone(),
+                        template_tree: entry.multi.template_tree.clone(),
+                        style_tree: entry.multi.style_tree.clone(),
+                        zones: entry.multi.zones.clone(),
+                        source: entry.multi.source.clone(),
+                        degraded: entry.multi.degraded,
+                    };
+                    return Ok((multi, entry.content_hash.clone()));
+                }
+            }
+        } // lock released
+
+        // --- Slow path ---
+        let content = tokio::fs::read(path).await?;
+        let content_hash = VersionHash::compute(&content);
+        let multi = parse_vue_multizone(&content).map_err(|e| SurgeonError::ParseError {
+            path: path.to_path_buf(),
+            reason: format!("Vue multi-zone parse failed: {e}"),
+        })?;
+
+        let mut lock = self
+            .vue_entries
+            .lock()
+            .map_err(|_| SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: "Vue cache lock poisoned".into(),
+            })?;
+
+        let cached_multi = MultiZoneTree {
+            script_tree: multi.script_tree.clone(),
+            template_tree: multi.template_tree.clone(),
+            style_tree: multi.style_tree.clone(),
+            zones: multi.zones.clone(),
+            source: multi.source.clone(),
+            degraded: multi.degraded,
+        };
+
+        lock.put(
+            path.to_path_buf(),
+            MultiZoneEntry {
+                multi: cached_multi,
+                content_hash: content_hash.clone(),
+                mtime: current_mtime,
+            },
+        );
+
+        Ok((multi, content_hash))
+    }
+
     /// Remove a file from the cache, forcing a re-parse on next access.
+    ///
+    /// Flushes the file from *both* single-zone and Vue multi-zone caches so
+    /// that all paths are invalidated simultaneously.
     pub fn invalidate(&self, path: &Path) {
         if let Ok(mut lock) = self.entries.lock() {
+            lock.pop(path);
+        }
+        if let Ok(mut lock) = self.vue_entries.lock() {
             lock.pop(path);
         }
     }
@@ -254,5 +358,63 @@ mod tests {
 
         cache.invalidate(f1.path());
         assert_eq!(cache.entries.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_vue_cache_hits_and_misses() {
+        let cache = AstCache::new(2);
+
+        let sfc = b"<template>\n<div>Hello</div>\n</template>\n<script setup lang=\"ts\">\nconst x = 1\n</script>\n";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(sfc).unwrap();
+
+        // First call — cache miss → full parse
+        let (multi1, hash1) = cache.get_or_parse_vue(file.path()).await.unwrap();
+        assert!(multi1.script_tree.is_some());
+        assert!(multi1.template_tree.is_some());
+        assert!(!multi1.degraded);
+
+        // Second call — cache hit (mtime unchanged)
+        let (_multi2, hash2) = cache.get_or_parse_vue(file.path()).await.unwrap();
+        assert_eq!(hash1, hash2, "hash must be stable across cache hits");
+
+        {
+            let lock = cache.vue_entries.lock().unwrap();
+            assert_eq!(lock.len(), 1, "exactly one Vue entry cached");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vue_cache_invalidation_clears_both_caches() {
+        let cache = AstCache::new(2);
+
+        // Populate single-zone cache via Go parse
+        let mut go_file = NamedTempFile::new().unwrap();
+        writeln!(go_file, "func A() {{}}").unwrap();
+        cache
+            .get_or_parse(go_file.path(), SupportedLanguage::Go)
+            .await
+            .unwrap();
+
+        // Populate Vue cache
+        let sfc = b"<template><div/></template>\n";
+        let mut vue_file = NamedTempFile::new().unwrap();
+        vue_file.write_all(sfc).unwrap();
+        cache.get_or_parse_vue(vue_file.path()).await.unwrap();
+
+        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+        assert_eq!(cache.vue_entries.lock().unwrap().len(), 1);
+
+        // Invalidate the Vue file — should clear from vue_entries
+        // (and defensively from entries too, even though it's not there)
+        cache.invalidate(vue_file.path());
+
+        assert_eq!(
+            cache.vue_entries.lock().unwrap().len(),
+            0,
+            "Vue entry cleared"
+        );
+        // Non-Vue entry must not be disturbed
+        assert_eq!(cache.entries.lock().unwrap().len(), 1, "Go entry untouched");
     }
 }

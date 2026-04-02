@@ -176,7 +176,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_source_file",
-        description = "Read an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol. The version_hash is immediately usable as base_version for any edit tool — no additional read required."
+        description = "Read an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol. The version_hash is immediately usable as base_version for any edit tool — no additional read required.\n\n**Supported languages:** Go (.go), TypeScript (.ts), TSX (.tsx), JavaScript (.js/.jsx), Python (.py), Rust (.rs), Vue (.vue).\n\n**NOT for config/doc files.** For TOML, YAML, JSON, Markdown, .env, Dockerfile, XML, or any non-source file, use `read_file` instead — `read_source_file` will return UNSUPPORTED_LANGUAGE."
     )]
     async fn read_source_file(
         &self,
@@ -198,7 +198,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_with_deep_context",
-        description = "Extract a symbol's source code PLUS the signatures of all functions it calls. Use this when you need to understand a function's dependencies before editing it."
+        description = "Extract a symbol's source code PLUS the signatures of all functions it calls. Use this when you need to understand a function's dependencies before editing it. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login')."
     )]
     async fn read_with_deep_context(
         &self,
@@ -209,7 +209,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_definition",
-        description = "Jump to where a symbol is defined. Provide a semantic path to a reference and get back the definition's file, line, and a code preview."
+        description = "Jump to where a symbol is defined. Provide a semantic path to a reference and get back the definition's file, line, and a code preview. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login')."
     )]
     async fn get_definition(
         &self,

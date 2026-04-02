@@ -130,6 +130,12 @@ fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut
             SymbolKind::Constant => "const ",
             SymbolKind::Interface => "interface ",
             SymbolKind::Enum => "enum ",
+            // Vue SFC zone symbols
+            SymbolKind::Zone => "zone ",
+            SymbolKind::Component => "component ",
+            SymbolKind::HtmlElement => "element ",
+            SymbolKind::CssSelector => "selector ",
+            SymbolKind::CssAtRule => "at-rule ",
         };
 
         let declaration = format!("{}{}", prefix, sym.name);

@@ -3,7 +3,8 @@ use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
 use crate::surgeon::{BodyRange, ExtractedSymbol, FullRange, Surgeon, SymbolRange};
 use crate::symbols::{
-    did_you_mean, extract_symbols_from_tree, find_enclosing_symbol, resolve_symbol_chain,
+    did_you_mean, extract_symbols_from_multizone, extract_symbols_from_tree, find_enclosing_symbol,
+    resolve_symbol_chain,
 };
 use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
 use std::path::Path;
@@ -25,6 +26,10 @@ impl TreeSitterSurgeon {
     }
 
     /// Read the file and parse it into symbols, returning the full cached data.
+    ///
+    /// For Vue SFCs this delegates to the multi-zone path (`get_or_parse_vue`)
+    /// and returns flattened multi-zone symbols. For all other languages the
+    /// existing single-zone path is used unchanged.
     async fn cached_parse(
         &self,
         workspace_root: &Path,
@@ -44,14 +49,29 @@ impl TreeSitterSurgeon {
 
         let abs_path = workspace_root.join(file_path);
 
-        // This handles reading from disk and caching the parsed Tree + source bytes
+        // ── Vue SFC: multi-zone parse path ────────────────────────────────────
+        if lang == SupportedLanguage::Vue {
+            let (multi, content_hash) = self.cache.get_or_parse_vue(&abs_path).await?;
+            let symbols = extract_symbols_from_multizone(&multi);
+            // Return the script tree as the representative tree (used only for
+            // body-range / full-range ops, which are only valid on script symbols).
+            // If no script tree, synthesize a minimal fallback: Vue SFCs without
+            // a <script> block can still be read for template/style symbols.
+            let (tree, source) = if let Some(script_tree) = multi.script_tree {
+                (script_tree, multi.source)
+            } else {
+                // Template-only SFC: parse the source as TypeScript to get an
+                // empty-but-valid Tree (the caller only reads symbols, not the tree).
+                let (t, s) = self.cache.get_or_parse(&abs_path, lang).await?;
+                (t, s)
+            };
+            return Ok((lang, tree, source, content_hash, symbols));
+        }
+
+        // ── All other languages: single-zone path (unchanged) ─────────────────
         let (tree, source) = self.cache.get_or_parse(&abs_path, lang).await?;
-
-        // Extract symbols via TreeCursor
         let symbols = extract_symbols_from_tree(&tree, &source, lang);
-
         let hash = pathfinder_common::types::VersionHash::compute(&source);
-
         Ok((lang, tree, source, hash, symbols))
     }
 
@@ -255,6 +275,7 @@ impl Surgeon for TreeSitterSurgeon {
         line: usize,
     ) -> Result<Option<String>, SurgeonError> {
         let (_, _, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
+        // `find_enclosing_symbol` uses 0-indexed lines; `line` is 1-indexed.
         Ok(find_enclosing_symbol(&symbols, line.saturating_sub(1)))
     }
 
@@ -641,6 +662,84 @@ mod tests {
         assert_eq!(
             node_type, "string",
             "text inside string literal should be classified as string"
+        );
+    }
+
+    // ── Vue SFC multi-zone integration tests ─────────────────────────────────
+
+    const BASIC_VUE_SFC: &[u8] = br#"<template>
+  <div class="app">
+    <MyButton @click="doThing">Click me</MyButton>
+  </div>
+</template>
+<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function doThing() { count.value++ }
+</script>
+<style scoped>
+.app { color: red; }
+#main { font-size: 16px; }
+</style>"#;
+
+    #[tokio::test]
+    async fn test_read_source_file_vue_returns_all_zones() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".vue").tempfile().unwrap();
+        file.write_all(BASIC_VUE_SFC).unwrap();
+        let workspace_root = PathBuf::from("/");
+        let relative = file.path().strip_prefix("/").unwrap();
+
+        let (content, _hash, lang, symbols) = surgeon
+            .read_source_file(&workspace_root, relative)
+            .await
+            .unwrap();
+
+        assert_eq!(lang, "vue");
+        assert!(!content.is_empty(), "should return original SFC content");
+
+        // Script symbols at top level
+        let func_sym = symbols.iter().find(|s| s.name == "doThing");
+        assert!(func_sym.is_some(), "script function should be at top level");
+
+        // Template zone container
+        let template_sym = symbols.iter().find(|s| s.name == "template");
+        assert!(template_sym.is_some(), "template zone container must exist");
+        let template_children = &template_sym.unwrap().children;
+        assert!(
+            template_children.iter().any(|c| c.name == "MyButton"),
+            "MyButton component must be a template child"
+        );
+
+        // Style zone container
+        let style_sym = symbols.iter().find(|s| s.name == "style");
+        assert!(style_sym.is_some(), "style zone container must exist");
+        let style_children = &style_sym.unwrap().children;
+        assert!(
+            style_children.iter().any(|c| c.name == ".app"),
+            ".app CSS class must be a style child"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_enclosing_symbol_inside_template_zone() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".vue").tempfile().unwrap();
+        file.write_all(BASIC_VUE_SFC).unwrap();
+        let workspace_root = PathBuf::from("/");
+        let relative = file.path().strip_prefix("/").unwrap();
+
+        // Line 3 is inside the <template> zone (MyButton line)
+        let enc = surgeon
+            .enclosing_symbol(&workspace_root, relative, 3)
+            .await
+            .unwrap();
+
+        assert!(enc.is_some(), "should find an enclosing symbol on line 3");
+        let path = enc.unwrap();
+        assert!(
+            path.starts_with("template"),
+            "enclosing symbol should be prefixed with 'template', got: '{path}'"
         );
     }
 }

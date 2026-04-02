@@ -14,6 +14,7 @@ pub mod repo_map;
 pub mod surgeon;
 pub mod symbols;
 pub mod treesitter_surgeon;
+pub mod vue_zones;
 
 pub use error::SurgeonError;
 pub use surgeon::Surgeon;
