@@ -347,11 +347,38 @@ pub struct SearchResultGroup {
     /// SHA-256 hash of the file (shared by all matches in this group).
     pub version_hash: String,
     /// Full matches (for files NOT in `known_files`).
+    ///
+    /// Per-match objects contain only `{ line, column, content, context_before,
+    /// context_after, enclosing_semantic_path }` — `file` and `version_hash` are
+    /// deduplicated at group level to avoid repeating them for every match.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub matches: Vec<pathfinder_search::SearchMatch>,
+    pub matches: Vec<GroupedMatch>,
     /// Minimal matches (for files in `known_files`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub known_matches: Vec<KnownFileMatch>,
+}
+
+/// A single match within a `SearchResultGroup`.
+///
+/// Omits `file` and `version_hash` (deduplicated at group level) to reduce
+/// token usage when many matches belong to the same file.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct GroupedMatch {
+    /// 1-indexed line number of the match.
+    pub line: u64,
+    /// 1-indexed column number of the match start.
+    pub column: u64,
+    /// The full content of the matching line.
+    pub content: String,
+    /// Lines immediately before the match.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_before: Vec<String>,
+    /// Lines immediately after the match.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_after: Vec<String>,
+    /// AST symbol enclosing this match (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enclosing_semantic_path: Option<String>,
 }
 
 /// The response for `get_repo_map`.

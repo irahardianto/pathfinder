@@ -575,6 +575,7 @@ mod tests {
                 context_after: vec![],
                 enclosing_semantic_path: None,
                 version_hash: "sha256:123".to_owned(),
+                known: None,
             }],
             total_matches: 1,
             truncated: false,
@@ -664,6 +665,7 @@ mod tests {
             context_after: vec![],
             enclosing_semantic_path: None,
             version_hash: "sha256:abc".to_owned(),
+            known: None,
         }
     }
 
@@ -1266,6 +1268,7 @@ mod tests {
                     context_after: vec!["after".to_owned()],
                     enclosing_semantic_path: None,
                     version_hash: "sha256:abc".to_owned(),
+                    known: None,
                 },
                 SearchMatch {
                     file: "src/main.ts".to_owned(),
@@ -1276,6 +1279,7 @@ mod tests {
                     context_after: vec!["ctx_after".to_owned()],
                     enclosing_semantic_path: None,
                     version_hash: "sha256:xyz".to_owned(),
+                    known: None,
                 },
             ],
             total_matches: 2,
@@ -1307,7 +1311,7 @@ mod tests {
 
         assert_eq!(result.matches.len(), 2);
 
-        // Known file match — content + context stripped
+        // Known file match — content + context stripped, known=true
         let known_match = result
             .matches
             .iter()
@@ -1325,8 +1329,13 @@ mod tests {
             known_match.context_after.is_empty(),
             "context_after should be empty"
         );
+        assert_eq!(
+            known_match.known,
+            Some(true),
+            "known flag must be set for known-file matches"
+        );
 
-        // Unknown file match — content retained
+        // Unknown file match — content retained, no known flag
         let normal_match = result
             .matches
             .iter()
@@ -1335,6 +1344,10 @@ mod tests {
         assert_eq!(normal_match.content, "visible content");
         assert_eq!(normal_match.context_before, vec!["ctx_before"]);
         assert_eq!(normal_match.context_after, vec!["ctx_after"]);
+        assert_eq!(
+            normal_match.known, None,
+            "unknown-file matches must not have known flag"
+        );
     }
 
     /// E4.1: `known_files` path normalisation — `./src/auth.ts` must match `src/auth.ts`.
@@ -1355,6 +1368,7 @@ mod tests {
                 context_after: vec![],
                 enclosing_semantic_path: None,
                 version_hash: "sha256:abc".to_owned(),
+                known: None,
             }],
             total_matches: 1,
             truncated: false,
@@ -1389,6 +1403,7 @@ mod tests {
             "content should be suppressed despite ./ prefix"
         );
         assert!(m.context_before.is_empty());
+        assert_eq!(m.known, Some(true), "known flag must be set");
     }
 
     /// E4.2: `group_by_file=true` groups matches by file with shared `version_hash`;
@@ -1412,6 +1427,7 @@ mod tests {
                     context_after: vec![],
                     enclosing_semantic_path: None,
                     version_hash: "sha256:auth".to_owned(),
+                    known: None,
                 },
                 SearchMatch {
                     file: "src/auth.ts".to_owned(),
@@ -1422,6 +1438,7 @@ mod tests {
                     context_after: vec![],
                     enclosing_semantic_path: None,
                     version_hash: "sha256:auth".to_owned(),
+                    known: None,
                 },
                 // One match in a normal file
                 SearchMatch {
@@ -1433,6 +1450,7 @@ mod tests {
                     context_after: vec![],
                     enclosing_semantic_path: None,
                     version_hash: "sha256:main".to_owned(),
+                    known: None,
                 },
             ],
             total_matches: 3,
@@ -1484,7 +1502,9 @@ mod tests {
         let main_group = groups.iter().find(|g| g.file == "src/main.ts").unwrap();
         assert_eq!(main_group.version_hash, "sha256:main");
         assert_eq!(main_group.matches.len(), 1);
+        // GroupedMatch has no file/version_hash — those are at group level only
         assert_eq!(main_group.matches[0].content, "main content");
+        assert_eq!(main_group.matches[0].line, 5);
         assert!(main_group.known_matches.is_empty());
     }
 

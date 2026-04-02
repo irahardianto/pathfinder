@@ -50,10 +50,16 @@ pub struct SearchMatch {
     /// 1-indexed column number of the match start.
     pub column: u64,
     /// The full content of the matching line (without newline).
+    ///
+    /// Empty string when the file is listed in `known_files` (content suppressed).
     pub content: String,
     /// Lines immediately before the match (up to `context_lines`).
+    ///
+    /// Empty when the file is listed in `known_files`.
     pub context_before: Vec<String>,
     /// Lines immediately after the match (up to `context_lines`).
+    ///
+    /// Empty when the file is listed in `known_files`.
     pub context_after: Vec<String>,
     /// AST-derived semantic path enclosing this match.
     ///
@@ -61,6 +67,12 @@ pub struct SearchMatch {
     pub enclosing_semantic_path: Option<String>,
     /// SHA-256 hash of the matched file, for OCC chaining.
     pub version_hash: String,
+    /// `true` when this file was listed in `known_files`.
+    ///
+    /// When set, `content`, `context_before`, and `context_after` are empty.
+    /// Omitted from the serialised output for normal (unknown) matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known: Option<bool>,
 }
 
 /// The result of a `search_codebase` call.

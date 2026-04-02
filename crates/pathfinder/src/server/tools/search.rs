@@ -2,7 +2,7 @@
 
 use crate::server::helpers::io_error_data;
 use crate::server::types::{
-    KnownFileMatch, SearchCodebaseParams, SearchCodebaseResponse, SearchResultGroup,
+    GroupedMatch, KnownFileMatch, SearchCodebaseParams, SearchCodebaseResponse, SearchResultGroup,
 };
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
@@ -112,6 +112,7 @@ impl PathfinderServer {
                             m.content = String::new();
                             m.context_before = vec![];
                             m.context_after = vec![];
+                            m.known = Some(true);
                         }
                         m
                     })
@@ -288,7 +289,14 @@ fn build_file_groups(
                     known: true,
                 });
             } else {
-                group.matches.push(m.clone());
+                group.matches.push(GroupedMatch {
+                    line: m.line,
+                    column: m.column,
+                    content: m.content.clone(),
+                    context_before: m.context_before.clone(),
+                    context_after: m.context_after.clone(),
+                    enclosing_semantic_path: m.enclosing_semantic_path.clone(),
+                });
             }
         }
     }

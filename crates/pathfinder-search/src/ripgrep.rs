@@ -158,6 +158,7 @@ impl Sink for MatchCollector<'_> {
             context_after: Vec::new(), // filled later by `context()`
             enclosing_semantic_path: None,
             version_hash: self.version_hash.clone(),
+            known: None, // set to Some(true) by search_codebase_impl for known_files
         };
 
         {
