@@ -1212,9 +1212,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rmcp"
-version = "1.1.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2cb14cb9278a12eae884c9f3c0cfeca2cc28f361211206424a1d7abed95f090"
+checksum = "e39e7a8c9f133eaa22922abf6f33d44535b46a39937a14fcdfee878e7b0d2043"
 dependencies = [
  "async-trait",
  "base64",
