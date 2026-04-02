@@ -165,7 +165,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_symbol_scope",
-        description = "Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns the code, line range, and version_hash for OCC. The version_hash is immediately usable as base_version for any edit tool — no additional read required."
+        description = "Extract the exact source code of a single symbol (function, class, method) by its semantic path. IMPORTANT: semantic_path must ALWAYS include the file path and '::', e.g., 'src/client/process.rs::send'. Returns the code, line range, and version_hash for OCC. The version_hash is immediately usable as base_version for any edit tool — no additional read required."
     )]
     async fn read_symbol_scope(
         &self,
@@ -187,7 +187,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_batch",
-        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file."
+        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file. IMPORTANT: For each edit, semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func')."
     )]
     async fn replace_batch(
         &self,
@@ -220,7 +220,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "analyze_impact",
-        description = "Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Use this BEFORE refactoring to understand the blast radius of a change. Returns version_hashes for all referenced files. The version_hashes are immediately usable as base_version for edit tools — no additional read required."
+        description = "Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Use this BEFORE refactoring to understand the blast radius of a change. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). Returns version_hashes for all referenced files. The version_hashes are immediately usable as base_version for edit tools — no additional read required."
     )]
     async fn analyze_impact(
         &self,
@@ -231,7 +231,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_body",
-        description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks."
+        description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func')."
     )]
     async fn replace_body(
         &self,
@@ -242,7 +242,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_full",
-        description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks."
+        description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func')."
     )]
     async fn replace_full(
         &self,
@@ -253,7 +253,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "insert_before",
-        description = "Insert new code BEFORE a target symbol. To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::'. Pathfinder automatically adds one blank line between your code and the target."
+        description = "Insert new code BEFORE a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between your code and the target."
     )]
     async fn insert_before(
         &self,
@@ -264,7 +264,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "insert_after",
-        description = "Insert new code AFTER a target symbol. To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::'. Pathfinder automatically adds one blank line between the target and your code."
+        description = "Insert new code AFTER a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between the target and your code."
     )]
     async fn insert_after(
         &self,
@@ -275,7 +275,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "delete_symbol",
-        description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method (e.g., 'AuthService.login'), only that method is deleted."
+        description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method, only that method is deleted. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login')."
     )]
     async fn delete_symbol(
         &self,
@@ -286,7 +286,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "validate_only",
-        description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit."
+        description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit."
     )]
     async fn validate_only(
         &self,
