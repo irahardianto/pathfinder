@@ -802,3 +802,20 @@ Multi-file refactors (renaming a function signature and updating all callers, mo
 
 #### Estimated Complexity
 High — primarily due to the cross-file LSP validation and crash-safe write orchestration.
+
+## 12. Architectural Constraints and Dependencies
+
+### RMCP Tooling & MCP SDK Strict Schema Formatting (`v1.0.0` Lock)
+
+**Description:**
+Pathfinder's MCP communication framework utilizes the `rmcp` library (`version = "=1.0.0"`). Upgrading `rmcp` to version `1.1.0` or higher must be strictly vetted due to JSON Schema validation bugs present in the Node.js `@modelcontextprotocol/sdk` validation bridge (`zod-compat.js`).
+
+**Background / Incident Context:**
+`rmcp 1.1.0` introduced support for rendering tool outputs as `CallToolResult.structuredContent` and automatically exposing JSON Schema as their `Tool.outputSchema` structure whenever `Json<T>` wrap is used from the `#[tool_router]` macro framework.
+The `@modelcontextprotocol/sdk` version `1.6` crashes violently (`TypeError: v3Schema.safeParse is not a function`) when evaluating that injected `outputSchema` format. Since this occurs inside the Agent's MCP process client during stream-read, the Agent catches the exception and returns an opaque `INTERNAL_ERROR (-32603)`. This masks identically as a failure in *every* Pathfinder tool returning JSON (like `read_source_file`), fundamentally breaking agent integrations.
+
+**Policy:**
+The `rmcp` dependency is locked specifically to `=1.0.0` in `crates/pathfinder/Cargo.toml`. 
+If an upgrade is desired later:
+1. It MUST be proven that the consuming MCP clients (particularly Antigravity via Node.js `@modelcontextprotocol/sdk`) have fully remedied their `zod-compat.js` evaluation bugs regarding `outputSchema`.
+2. OR, `rmcp` must be forked/modified to offer a feature flag preventing the injection of `outputSchema` generation inside `tools/list` schema exposure.
