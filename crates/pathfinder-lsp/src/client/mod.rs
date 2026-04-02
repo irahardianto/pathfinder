@@ -347,7 +347,7 @@ impl Lawyer for LspClient {
                 params,
                 Duration::from_secs(10),
             )
-            .await 
+            .await
         {
             Ok(res) => res,
             Err(e) => {
@@ -547,7 +547,10 @@ impl Lawyer for LspClient {
             }
         });
 
-        if let Err(e) = self.notify(language_id, "textDocument/didOpen", params).await {
+        if let Err(e) = self
+            .notify(language_id, "textDocument/didOpen", params)
+            .await
+        {
             tracing::error!(tool = "did_open", language = language_id, error = %e, "textDocument/didOpen failed");
             return Err(e);
         }
@@ -579,7 +582,10 @@ impl Lawyer for LspClient {
             "contentChanges": [{ "text": content }]
         });
 
-        if let Err(e) = self.notify(language_id, "textDocument/didChange", params).await {
+        if let Err(e) = self
+            .notify(language_id, "textDocument/didChange", params)
+            .await
+        {
             tracing::error!(tool = "did_change", language = language_id, error = %e, "textDocument/didChange failed");
             return Err(e);
         }
@@ -602,7 +608,10 @@ impl Lawyer for LspClient {
             }
         });
 
-        if let Err(e) = self.notify(language_id, "textDocument/didClose", params).await {
+        if let Err(e) = self
+            .notify(language_id, "textDocument/didClose", params)
+            .await
+        {
             tracing::error!(tool = "did_close", language = language_id, error = %e, "textDocument/didClose failed");
             return Err(e);
         }

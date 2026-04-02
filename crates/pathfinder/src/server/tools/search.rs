@@ -2,7 +2,8 @@
 
 use crate::server::helpers::io_error_data;
 use crate::server::types::{
-    GroupedMatch, KnownFileMatch, SearchCodebaseParams, SearchCodebaseResponse, SearchResultGroup,
+    GroupedKnownMatch, GroupedMatch, SearchCodebaseParams, SearchCodebaseResponse,
+    SearchResultGroup,
 };
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
@@ -280,12 +281,10 @@ fn build_file_groups(
         }
         if let Some(group) = groups.get_mut(&key) {
             if known_set.contains(&key) {
-                group.known_matches.push(KnownFileMatch {
-                    file: m.file.clone(),
+                group.known_matches.push(GroupedKnownMatch {
                     line: m.line,
                     column: m.column,
                     enclosing_semantic_path: m.enclosing_semantic_path.clone(),
-                    version_hash: m.version_hash.clone(),
                     known: true,
                 });
             } else {

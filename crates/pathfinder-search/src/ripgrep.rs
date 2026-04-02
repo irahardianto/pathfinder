@@ -258,7 +258,7 @@ impl RipgrepScout {
     /// before searching — so excluded files are never read at all.
     ///
     /// Returns tuples of `(absolute_path, relative_path_string)`.
-    fn walk_files(params: &SearchParams) -> Vec<(PathBuf, String)> {
+    fn walk_files(params: &SearchParams) -> Result<Vec<(PathBuf, String)>, SearchError> {
         let glob = &params.path_glob;
         let exclude_glob = &params.exclude_glob;
 
@@ -267,17 +267,21 @@ impl RipgrepScout {
             .literal_separator(false)
             .build()
             .and_then(|g| globset::GlobSet::builder().add(g).build())
-            .ok();
+            .map_err(|e| SearchError::InvalidPattern(format!("invalid path_glob: {e}")))?;
 
         // Build a globset for the exclude_glob pattern (optional).
         let exclude_matcher = if exclude_glob.is_empty() {
             None
         } else {
-            globset::GlobBuilder::new(exclude_glob)
-                .literal_separator(false)
-                .build()
-                .and_then(|g| globset::GlobSet::builder().add(g).build())
-                .ok()
+            Some(
+                globset::GlobBuilder::new(exclude_glob)
+                    .literal_separator(false)
+                    .build()
+                    .and_then(|g| globset::GlobSet::builder().add(g).build())
+                    .map_err(|e| {
+                        SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
+                    })?,
+            )
         };
 
         let walker = WalkBuilder::new(&params.workspace_root)
@@ -302,11 +306,9 @@ impl RipgrepScout {
             };
 
             // Apply path_glob filter if one was specified.
-            if let Some(ref glob_set) = glob_matcher {
-                let matches: bool = glob_set.is_match(&relative);
-                if !matches && glob != "**/*" {
-                    continue;
-                }
+            let matches: bool = glob_matcher.is_match(&relative);
+            if !matches && glob != "**/*" {
+                continue;
             }
 
             // Apply exclude_glob filter — skip files matching the exclusion pattern.
@@ -321,7 +323,7 @@ impl RipgrepScout {
         }
 
         files.sort_by(|a, b| a.1.cmp(&b.1));
-        files
+        Ok(files)
     }
 }
 
@@ -346,7 +348,7 @@ impl Scout for RipgrepScout {
             );
 
             let matcher = Self::build_matcher(params)?;
-            let files = Self::walk_files(params);
+            let files = Self::walk_files(params)?;
 
             let match_buf: Mutex<Vec<SearchMatch>> = Mutex::new(Vec::new());
             let total_count: Mutex<usize> = Mutex::new(0);
@@ -706,5 +708,30 @@ mod tests {
         assert_eq!(result.total_matches, 2);
         assert_eq!(result.matches[0].line, 1);
         assert_eq!(result.matches[1].line, 3);
+    }
+
+    #[tokio::test]
+    async fn test_search_invalid_glob_returns_error() {
+        let ws = make_workspace(&[("src/main.rs", "fn main() {}\n")]);
+        let scout = RipgrepScout::new();
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "main".to_owned(),
+            path_glob: "[invalid glob".to_owned(),
+            ..Default::default()
+        };
+        let err = scout.search(&params).await;
+        assert!(err.is_err());
+        assert!(matches!(err, Err(SearchError::InvalidPattern(_))));
+
+        let params2 = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "main".to_owned(),
+            exclude_glob: "[invalid glob".to_owned(),
+            ..Default::default()
+        };
+        let err2 = scout.search(&params2).await;
+        assert!(err2.is_err());
+        assert!(matches!(err2, Err(SearchError::InvalidPattern(_))));
     }
 }

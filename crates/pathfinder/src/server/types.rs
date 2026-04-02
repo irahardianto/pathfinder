@@ -319,13 +319,13 @@ pub struct SearchCodebaseResponse {
     pub degraded_reason: Option<String>,
 }
 
-/// A minimal match entry for files already in the agent's context (`known_files`).
+/// A minimal match entry for files already in the agent's context (`known_files`)
+/// when grouped by file.
 ///
-/// Omits `content`, `context_before`, and `context_after` to save tokens.
+/// Omits `file`, `version_hash` (deduplicated at group level), and `content`,
+/// `context_before`, and `context_after` to save tokens.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct KnownFileMatch {
-    /// File path relative to workspace root.
-    pub file: String,
+pub struct GroupedKnownMatch {
     /// 1-indexed line number.
     pub line: u64,
     /// 1-indexed column number.
@@ -333,8 +333,6 @@ pub struct KnownFileMatch {
     /// AST symbol enclosing this match (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enclosing_semantic_path: Option<String>,
-    /// SHA-256 hash of the file (usable as `base_version` for edits).
-    pub version_hash: String,
     /// Always `true` — signals this match was suppressed because the file is known.
     pub known: bool,
 }
@@ -355,7 +353,7 @@ pub struct SearchResultGroup {
     pub matches: Vec<GroupedMatch>,
     /// Minimal matches (for files in `known_files`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub known_matches: Vec<KnownFileMatch>,
+    pub known_matches: Vec<GroupedKnownMatch>,
 }
 
 /// A single match within a `SearchResultGroup`.
