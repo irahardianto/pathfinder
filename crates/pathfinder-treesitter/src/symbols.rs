@@ -16,7 +16,7 @@ pub fn extract_symbols_from_tree(
     let types = lang.node_types();
 
     // We start traversal at the root level without a parent path
-    extract_symbols_recursive(root, source, types, "", &mut symbols);
+    extract_symbols_recursive(root, source, types, lang, "", &mut symbols);
     symbols
 }
 
@@ -25,6 +25,7 @@ fn extract_symbols_recursive(
     node: Node,
     source: &[u8],
     types: &crate::language::LanguageNodeTypes,
+    lang: SupportedLanguage,
     parent_path: &str,
     out: &mut Vec<ExtractedSymbol>,
 ) {
@@ -141,6 +142,7 @@ fn extract_symbols_recursive(
                                     body,
                                     source,
                                     types,
+                                    lang,
                                     &path,
                                     &mut symbol.children,
                                 );
@@ -149,10 +151,22 @@ fn extract_symbols_recursive(
                                     child,
                                     source,
                                     types,
+                                    lang,
                                     &path,
                                     &mut symbol.children,
                                 );
                             }
+                        }
+
+                        // E1-J: For TSX/JSX functions, extract JSX elements from
+                        // return statements as child symbols.
+                        if matches!(sk, SymbolKind::Function)
+                            && matches!(
+                                lang,
+                                SupportedLanguage::Tsx | SupportedLanguage::JavaScript
+                            )
+                        {
+                            extract_jsx_children(child, source, &path, &mut symbol.children);
                         }
 
                         out.push(symbol);
@@ -164,7 +178,7 @@ fn extract_symbols_recursive(
 
         // If not a recognized symbol, or we failed to extract a name, still recurse down
         // to find nested symbols (like functions inside export blocks)
-        extract_symbols_recursive(child, source, types, parent_path, out);
+        extract_symbols_recursive(child, source, types, lang, parent_path, out);
     }
 }
 
@@ -592,9 +606,9 @@ fn walk_html_elements_flat(
             // Components are promoted to top-level paths (template.MyButton).
             // HTML elements retain hierarchical paths (template.div.span).
             let sym_path = if is_component {
-                format!("template.{sym_name}")
+                format!("template::{sym_name}")
             } else {
-                format!("{parent_path}.{sym_name}")
+                format!("{parent_path}::{sym_name}")
             };
 
             out.push(ExtractedSymbol {
@@ -612,6 +626,212 @@ fn walk_html_elements_flat(
         } else {
             walk_html_elements_flat(child, source, parent_path, out, tag_counts);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E1-J: JSX/TSX symbol extraction
+// ---------------------------------------------------------------------------
+
+/// Resolve the tag name from a `jsx_element` or `jsx_self_closing_element` node.
+///
+/// For `jsx_element`, the structure is:
+///   `jsx_element` → `jsx_opening_element` → `identifier` (tag name)
+///
+/// For `jsx_self_closing_element`, the structure is:
+///   `jsx_self_closing_element` → `identifier` (`member_expression` for `Foo.Bar`)
+fn resolve_jsx_tag_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let kind = node.kind();
+
+    if kind == "jsx_element" {
+        // jsx_element → jsx_opening_element child → first identifier child
+        let mut c = node.walk();
+        let open_tag = node
+            .named_children(&mut c)
+            .find(|n| n.kind() == "jsx_opening_element")?;
+
+        // The first named child of jsx_opening_element is the tag name
+        // (identifier, member_expression, or jsx_namespace_name)
+        let mut oc = open_tag.walk();
+        let name_node = open_tag.named_children(&mut oc).find(|n| {
+            matches!(
+                n.kind(),
+                "identifier" | "member_expression" | "jsx_namespace_name"
+            )
+        })?;
+        let name_bytes = source.get(name_node.byte_range())?;
+        std::str::from_utf8(name_bytes)
+            .ok()
+            .map(|s| s.trim().to_owned())
+    } else if kind == "jsx_self_closing_element" {
+        // jsx_self_closing_element → identifier child directly
+        let mut c = node.walk();
+        let name_node = node.named_children(&mut c).find(|n| {
+            matches!(
+                n.kind(),
+                "identifier" | "member_expression" | "jsx_namespace_name"
+            )
+        })?;
+        let name_bytes = source.get(name_node.byte_range())?;
+        std::str::from_utf8(name_bytes)
+            .ok()
+            .map(|s| s.trim().to_owned())
+    } else {
+        None
+    }
+}
+
+/// Walk into a `lexical_declaration`/`variable_declaration` to find the inner
+/// `arrow_function` or `function_expression` node.
+///
+/// For `const Foo = () => <jsx/>`, the node structure is:
+///   `lexical_declaration` → `variable_declarator` → `arrow_function`
+///
+/// Returns `None` if the node is already a function/arrow or has no inner function.
+fn find_inner_function(node: Node<'_>) -> Option<Node<'_>> {
+    let kind = node.kind();
+    if kind == "arrow_function" || kind == "function_declaration" || kind == "function_expression" {
+        return Some(node);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = find_inner_function(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Extract JSX elements from a function's body as child symbols.
+///
+/// Walks the function AST node looking for JSX elements in:
+/// - `return_statement` → `jsx_element` / `jsx_self_closing_element`
+/// - Arrow function implicit returns (body is a JSX expression directly)
+///
+/// JSX children are flattened (top-level + one level of nesting) and
+/// placed under `{function_path}.return.{TagName}` semantic paths.
+fn extract_jsx_children(
+    fn_node: Node<'_>,
+    source: &[u8],
+    fn_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+) {
+    let return_path = format!("{fn_path}::return");
+    let mut tag_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // For `const Foo = () => <jsx/>` patterns, fn_node is a `lexical_declaration`;
+    // we need to locate the inner `arrow_function` or `function_expression` node.
+    let target = find_inner_function(fn_node).unwrap_or(fn_node);
+
+    walk_jsx_return_sites(target, source, &return_path, out, &mut tag_counts);
+}
+
+/// Recursively descend into a function node to find JSX return sites.
+///
+/// Handles two patterns:
+///   1. Explicit return: `return (<jsx/>)` — looks for `return_statement`
+///   2. Arrow implicit return: `() => <jsx/>` — looks for `jsx_element` /
+///      `jsx_self_closing_element` as direct body of `arrow_function`
+fn walk_jsx_return_sites(
+    node: Node<'_>,
+    source: &[u8],
+    return_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+    tag_counts: &mut std::collections::HashMap<String, usize>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let kind = child.kind();
+
+        match kind {
+            // Explicit return: descend into the return statement to find JSX.
+            "return_statement" => {
+                collect_jsx_elements(child, source, return_path, out, tag_counts);
+            }
+            // Arrow function body that IS a JSX element (implicit return).
+            "jsx_element" | "jsx_self_closing_element" if node.kind() == "arrow_function" => {
+                emit_jsx_symbol(child, source, return_path, out, tag_counts);
+                // Also collect nested JSX children (one level deep)
+                collect_jsx_elements(child, source, return_path, out, tag_counts);
+            }
+            // Skip into nested scopes that might contain return statements,
+            // but avoid descending into inner function declarations.
+            "statement_block"
+            | "parenthesized_expression"
+            | "if_statement"
+            | "switch_body"
+            | "switch_case" => {
+                walk_jsx_return_sites(child, source, return_path, out, tag_counts);
+            }
+            _ => {
+                // For arrow_function nodes, continue searching for JSX in body
+                if node.kind() == "arrow_function" {
+                    walk_jsx_return_sites(child, source, return_path, out, tag_counts);
+                }
+            }
+        }
+    }
+}
+
+/// Collect all JSX elements recursively from under a given node.
+fn collect_jsx_elements(
+    node: Node<'_>,
+    source: &[u8],
+    parent_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+    tag_counts: &mut std::collections::HashMap<String, usize>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "jsx_element" || kind == "jsx_self_closing_element" {
+            emit_jsx_symbol(child, source, parent_path, out, tag_counts);
+            // Recurse into children of this JSX element to find nested elements
+            collect_jsx_elements(child, source, parent_path, out, tag_counts);
+        } else {
+            // Recurse through non-JSX nodes (parenthesized_expression, etc.)
+            collect_jsx_elements(child, source, parent_path, out, tag_counts);
+        }
+    }
+}
+
+/// Emit a single JSX symbol from a `jsx_element` or `jsx_self_closing_element` node.
+fn emit_jsx_symbol(
+    node: Node<'_>,
+    source: &[u8],
+    parent_path: &str,
+    out: &mut Vec<ExtractedSymbol>,
+    tag_counts: &mut std::collections::HashMap<String, usize>,
+) {
+    if let Some(ref name) = resolve_jsx_tag_name(node, source) {
+        let is_component = name.chars().next().is_some_and(char::is_uppercase);
+        let sym_kind = if is_component {
+            SymbolKind::Component
+        } else {
+            SymbolKind::HtmlElement
+        };
+
+        let count = tag_counts.entry(name.clone()).or_insert(0);
+        *count += 1;
+        let nth = *count;
+        let sym_name = if nth == 1 {
+            name.clone()
+        } else {
+            format!("{name}[{nth}]")
+        };
+
+        let sym_path = format!("{parent_path}::{sym_name}");
+
+        out.push(ExtractedSymbol {
+            name: sym_name,
+            semantic_path: sym_path,
+            kind: sym_kind,
+            byte_range: node.byte_range(),
+            start_line: node.start_position().row,
+            end_line: node.end_position().row,
+            children: Vec::new(), // JSX children are flat, not nested
+        });
     }
 }
 
@@ -707,7 +927,7 @@ fn walk_css_rules(
                 } else {
                     format!("@{at_name}[{nth}]")
                 };
-                let sym_path = format!("{parent_path}.{sym_name}");
+                let sym_path = format!("{parent_path}::{sym_name}");
                 out.push(ExtractedSymbol {
                     name: sym_name,
                     semantic_path: sym_path,
@@ -806,7 +1026,7 @@ fn extract_css_rule_set(
             if sel_name.is_empty() {
                 continue;
             }
-            let sym_path = format!("{parent_path}.{sel_name}");
+            let sym_path = format!("{parent_path}::{sel_name}");
             out.push(ExtractedSymbol {
                 name: sel_name,
                 semantic_path: sym_path,
@@ -887,7 +1107,7 @@ function doThing() { count.value++ }
             my_button.unwrap().kind,
             crate::surgeon::SymbolKind::Component
         );
-        assert_eq!(my_button.unwrap().semantic_path, "template.MyButton");
+        assert_eq!(my_button.unwrap().semantic_path, "template::MyButton");
     }
 
     #[test]
@@ -923,7 +1143,7 @@ function doThing() { count.value++ }
             class_sel.unwrap().kind,
             crate::surgeon::SymbolKind::CssSelector
         );
-        assert_eq!(class_sel.unwrap().semantic_path, "style..app");
+        assert_eq!(class_sel.unwrap().semantic_path, "style::.app");
     }
 
     #[test]
@@ -934,7 +1154,7 @@ function doThing() { count.value++ }
         let style_sym = syms.iter().find(|s| s.name == "style").unwrap();
         let id_sel = style_sym.children.iter().find(|c| c.name == "#main");
         assert!(id_sel.is_some(), "#main CSS id should be extracted");
-        assert_eq!(id_sel.unwrap().semantic_path, "style.#main");
+        assert_eq!(id_sel.unwrap().semantic_path, "style::#main");
     }
 
     #[test]
@@ -1368,5 +1588,244 @@ mod tests {
         let chain3 = SymbolChain::parse("AuthService.login#3").unwrap();
         let res3 = resolve_symbol_chain(&symbols, &chain3);
         assert!(res3.is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // E1-J: JSX/TSX Symbol Extraction tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_extract_tsx_jsx_elements_in_return() {
+        let source = br#"
+    export function Greeting({ name }: { name: string }) {
+      return (
+        <div className="greeting">
+          <h1>Hello {name}</h1>
+          <Button onClick={() => alert('hi')}>Click</Button>
+          <img src="test.png" />
+        </div>
+      );
+    }
+    "#;
+        let tree = AstParser::parse_source(
+            std::path::Path::new("component.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+
+        // Should have one function: Greeting
+        assert_eq!(syms.len(), 1);
+        let greeting = &syms[0];
+        assert_eq!(greeting.name, "Greeting");
+        assert_eq!(greeting.kind, SymbolKind::Function);
+
+        // Greeting should have JSX children under a "return" container
+        assert!(
+            !greeting.children.is_empty(),
+            "Greeting should have JSX children, got none"
+        );
+
+        // Find the root JSX element (div)
+        let div = greeting
+            .children
+            .iter()
+            .find(|c| c.name == "div")
+            .expect("should find <div> JSX element");
+        assert_eq!(div.kind, SymbolKind::HtmlElement);
+        assert_eq!(div.semantic_path, "Greeting::return::div");
+    }
+
+    #[test]
+    fn test_extract_tsx_jsx_self_closing_element() {
+        let source = br#"
+    export function Avatar() {
+      return <img src="test.png" />;
+    }
+    "#;
+        let tree = AstParser::parse_source(
+            std::path::Path::new("avatar.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+        assert_eq!(syms.len(), 1);
+        let avatar = &syms[0];
+        assert_eq!(avatar.name, "Avatar");
+
+        let img = avatar
+            .children
+            .iter()
+            .find(|c| c.name == "img")
+            .expect("should find <img /> self-closing JSX");
+        assert_eq!(img.kind, SymbolKind::HtmlElement);
+        assert_eq!(img.semantic_path, "Avatar::return::img");
+    }
+
+    #[test]
+    fn test_extract_tsx_jsx_component_capitalized() {
+        let source = br#"
+    function App() {
+      return (
+        <div>
+          <Header />
+          <Button type="primary">Save</Button>
+        </div>
+      );
+    }
+    "#;
+        let tree = AstParser::parse_source(
+            std::path::Path::new("app.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+        let app = &syms[0];
+
+        // Components (capitalized) should be SymbolKind::Component
+        let header = app
+            .children
+            .iter()
+            .find(|c| c.name == "Header")
+            .expect("should find <Header /> component");
+        assert_eq!(header.kind, SymbolKind::Component);
+        assert_eq!(header.semantic_path, "App::return::Header");
+
+        let button = app
+            .children
+            .iter()
+            .find(|c| c.name == "Button")
+            .expect("should find <Button> component");
+        assert_eq!(button.kind, SymbolKind::Component);
+        assert_eq!(button.semantic_path, "App::return::Button");
+    }
+
+    #[test]
+    fn test_extract_tsx_arrow_function_returning_jsx() {
+        let source = br"const Arrow = () => <span>Hi</span>;";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("arrow.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+        assert_eq!(syms.len(), 1);
+        let arrow = &syms[0];
+        assert_eq!(arrow.name, "Arrow");
+        assert_eq!(arrow.kind, SymbolKind::Function);
+
+        let span = arrow
+            .children
+            .iter()
+            .find(|c| c.name == "span")
+            .expect("arrow function returning JSX should have span child");
+        assert_eq!(span.kind, SymbolKind::HtmlElement);
+        assert_eq!(span.semantic_path, "Arrow::return::span");
+    }
+
+    #[test]
+    fn test_extract_tsx_jsx_duplicate_tags_get_nth_suffix() {
+        let source = br"
+    function List() {
+      return (
+        <ul>
+          <li>First</li>
+          <li>Second</li>
+          <li>Third</li>
+        </ul>
+      );
+    }
+    ";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("list.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+        let list_fn = &syms[0];
+
+        // Collect all "li" children
+        let lis: Vec<&ExtractedSymbol> = list_fn
+            .children
+            .iter()
+            .filter(|c| c.name.starts_with("li"))
+            .collect();
+        assert_eq!(lis.len(), 3, "should find 3 <li> elements");
+        assert_eq!(lis[0].name, "li");
+        assert_eq!(lis[0].semantic_path, "List::return::li");
+        assert_eq!(lis[1].name, "li[2]");
+        assert_eq!(lis[1].semantic_path, "List::return::li[2]");
+        assert_eq!(lis[2].name, "li[3]");
+        assert_eq!(lis[2].semantic_path, "List::return::li[3]");
+    }
+
+    #[test]
+    fn test_extract_tsx_enclosing_symbol_inside_jsx() {
+        // JSX elements should be findable via find_enclosing_symbol
+        let source = br"
+    function App() {
+      return (
+        <div>
+          <Button>Click</Button>
+        </div>
+      );
+    }
+    ";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("app.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+
+        // Line 4 is inside <Button>Click</Button>
+        let enclosing = find_enclosing_symbol(&syms, 4);
+        assert!(
+            enclosing.is_some(),
+            "should find enclosing symbol for line inside JSX"
+        );
+        let path = enclosing.unwrap();
+        // Should resolve to either Button itself or App (the function)
+        assert!(
+            path.contains("App"),
+            "enclosing path should include the function name, got: {path}"
+        );
+    }
+
+    #[test]
+    fn test_extract_tsx_non_jsx_function_unchanged() {
+        // Regular TS functions (no JSX) should behave identically to before
+        let source = br"
+    export function add(a: number, b: number): number {
+      return a + b;
+    }
+    ";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("utils.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "add");
+        assert_eq!(syms[0].kind, SymbolKind::Function);
+        assert!(
+            syms[0].children.is_empty(),
+            "non-JSX function should have no JSX children"
+        );
     }
 }
