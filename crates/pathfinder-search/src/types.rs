@@ -15,6 +15,9 @@ pub struct SearchParams {
     /// Glob pattern restricting which files are searched (e.g. `src/**/*.ts`).
     /// Matches against paths relative to the workspace root.
     pub path_glob: String,
+    /// Glob pattern for files to *exclude* from search (e.g. `**/*.test.*`).
+    /// Applied before search — not as a post-filter. Empty string = no exclusion.
+    pub exclude_glob: String,
     /// Maximum number of matches to return.
     pub max_results: usize,
     /// Lines of surrounding context to include above and below each match.
@@ -28,6 +31,7 @@ impl Default for SearchParams {
             query: String::new(),
             is_regex: false,
             path_glob: "**/*".to_owned(),
+            exclude_glob: String::new(),
             max_results: 50,
             context_lines: 2,
         }

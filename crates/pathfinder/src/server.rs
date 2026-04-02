@@ -142,7 +142,7 @@ impl PathfinderServer {
 impl PathfinderServer {
     #[tool(
         name = "search_codebase",
-        description = "Search the codebase for a text pattern. Returns matching lines with surrounding context. Each match includes an 'enclosing_semantic_path' (the AST symbol containing the match) and 'version_hash' (for immediate editing without a separate read). The version_hash in each match is immediately usable as base_version for edit tools — no additional read required. Use path_glob to narrow the search scope."
+        description = "Search the codebase for a text pattern. Returns matching lines with surrounding context. Each match includes an 'enclosing_semantic_path' (the AST symbol containing the match) and 'version_hash' (for immediate editing without a separate read). The version_hash in each match is immediately usable as base_version for edit tools — no additional read required. Use path_glob to narrow the search scope.\n\n**E4 parameters (token efficiency):**\n- `exclude_glob` — Glob pattern for files to exclude before search (e.g. `**/*.test.*`). Applied at the file-walk level so excluded files are never read.\n- `known_files` — List of file paths already in agent context. Matches in these files are returned with minimal metadata only (`file`, `line`, `column`, `enclosing_semantic_path`, `version_hash`) — `content` and context lines are omitted.\n- `group_by_file` — When `true`, results are returned in `file_groups` (one group per file with a single shared `version_hash`). Known-file matches appear in `known_matches`; others in `matches` inside each group."
     )]
     async fn search_codebase(
         &self,
@@ -1242,5 +1242,290 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert_eq!(code, "AMBIGUOUS_MATCH", "got: {err:?}");
+    }
+
+    // ── E4 tests ─────────────────────────────────────────────────────
+
+    /// E4.1: Matches in `known_files` must have content + context stripped,
+    /// while matches in other files must retain full content.
+    #[tokio::test]
+    async fn test_search_codebase_known_files_suppresses_context() {
+        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_scout = MockScout::default();
+        mock_scout.set_result(Ok(SearchResult {
+            matches: vec![
+                SearchMatch {
+                    file: "src/auth.ts".to_owned(),
+                    line: 10,
+                    column: 1,
+                    content: "secret content".to_owned(),
+                    context_before: vec!["before".to_owned()],
+                    context_after: vec!["after".to_owned()],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:abc".to_owned(),
+                },
+                SearchMatch {
+                    file: "src/main.ts".to_owned(),
+                    line: 5,
+                    column: 1,
+                    content: "visible content".to_owned(),
+                    context_before: vec!["ctx_before".to_owned()],
+                    context_after: vec!["ctx_after".to_owned()],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:xyz".to_owned(),
+                },
+            ],
+            total_matches: 2,
+            truncated: false,
+        }));
+
+        let mock_surgeon = Arc::new(MockSurgeon::new());
+        // Two matches → two enrichment calls
+        mock_surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None)]);
+
+        let server =
+            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
+
+        let params = SearchCodebaseParams {
+            query: "content".to_owned(),
+            known_files: vec!["src/auth.ts".to_owned()],
+            ..Default::default()
+        };
+
+        let result = server
+            .search_codebase(Parameters(params))
+            .await
+            .expect("should succeed")
+            .0;
+
+        assert_eq!(result.matches.len(), 2);
+
+        // Known file match — content + context stripped
+        let known_match = result
+            .matches
+            .iter()
+            .find(|m| m.file == "src/auth.ts")
+            .unwrap();
+        assert!(
+            known_match.content.is_empty(),
+            "content should be suppressed for known file"
+        );
+        assert!(
+            known_match.context_before.is_empty(),
+            "context_before should be empty"
+        );
+        assert!(
+            known_match.context_after.is_empty(),
+            "context_after should be empty"
+        );
+
+        // Unknown file match — content retained
+        let normal_match = result
+            .matches
+            .iter()
+            .find(|m| m.file == "src/main.ts")
+            .unwrap();
+        assert_eq!(normal_match.content, "visible content");
+        assert_eq!(normal_match.context_before, vec!["ctx_before"]);
+        assert_eq!(normal_match.context_after, vec!["ctx_after"]);
+    }
+
+    /// E4.1: `known_files` path normalisation — `./src/auth.ts` must match `src/auth.ts`.
+    #[tokio::test]
+    async fn test_search_codebase_known_files_path_normalisation() {
+        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_scout = MockScout::default();
+        mock_scout.set_result(Ok(SearchResult {
+            matches: vec![SearchMatch {
+                file: "src/auth.ts".to_owned(),
+                line: 1,
+                column: 1,
+                content: "should be stripped".to_owned(),
+                context_before: vec!["before".to_owned()],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                version_hash: "sha256:abc".to_owned(),
+            }],
+            total_matches: 1,
+            truncated: false,
+        }));
+
+        let mock_surgeon = Arc::new(MockSurgeon::new());
+        mock_surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let server =
+            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
+
+        // Pass with leading "./" — should still match "src/auth.ts"
+        let params = SearchCodebaseParams {
+            query: "stripped".to_owned(),
+            known_files: vec!["./src/auth.ts".to_owned()],
+            ..Default::default()
+        };
+
+        let result = server
+            .search_codebase(Parameters(params))
+            .await
+            .expect("should succeed")
+            .0;
+
+        let m = &result.matches[0];
+        assert!(
+            m.content.is_empty(),
+            "content should be suppressed despite ./ prefix"
+        );
+        assert!(m.context_before.is_empty());
+    }
+
+    /// E4.2: `group_by_file=true` groups matches by file with shared `version_hash`;
+    /// known files go into `known_matches` with minimal info.
+    #[tokio::test]
+    async fn test_search_codebase_group_by_file() {
+        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_scout = MockScout::default();
+        mock_scout.set_result(Ok(SearchResult {
+            matches: vec![
+                // Two matches in the same known file
+                SearchMatch {
+                    file: "src/auth.ts".to_owned(),
+                    line: 1,
+                    column: 1,
+                    content: "known line 1".to_owned(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:auth".to_owned(),
+                },
+                SearchMatch {
+                    file: "src/auth.ts".to_owned(),
+                    line: 2,
+                    column: 1,
+                    content: "known line 2".to_owned(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:auth".to_owned(),
+                },
+                // One match in a normal file
+                SearchMatch {
+                    file: "src/main.ts".to_owned(),
+                    line: 5,
+                    column: 1,
+                    content: "main content".to_owned(),
+                    context_before: vec!["prev".to_owned()],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:main".to_owned(),
+                },
+            ],
+            total_matches: 3,
+            truncated: false,
+        }));
+
+        let mock_surgeon = Arc::new(MockSurgeon::new());
+        // 3 enrichments
+        mock_surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+
+        let server =
+            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
+
+        let params = SearchCodebaseParams {
+            query: "line".to_owned(),
+            known_files: vec!["src/auth.ts".to_owned()],
+            group_by_file: true,
+            ..Default::default()
+        };
+
+        let result = server
+            .search_codebase(Parameters(params))
+            .await
+            .expect("should succeed")
+            .0;
+
+        let groups = result
+            .file_groups
+            .expect("file_groups should be Some when group_by_file=true");
+        assert_eq!(groups.len(), 2);
+
+        let auth_group = groups.iter().find(|g| g.file == "src/auth.ts").unwrap();
+        assert_eq!(auth_group.version_hash, "sha256:auth");
+        assert!(
+            auth_group.matches.is_empty(),
+            "known file should have no full matches"
+        );
+        assert_eq!(
+            auth_group.known_matches.len(),
+            2,
+            "known file should have 2 known_matches"
+        );
+        assert!(auth_group.known_matches[0].known);
+
+        let main_group = groups.iter().find(|g| g.file == "src/main.ts").unwrap();
+        assert_eq!(main_group.version_hash, "sha256:main");
+        assert_eq!(main_group.matches.len(), 1);
+        assert_eq!(main_group.matches[0].content, "main content");
+        assert!(main_group.known_matches.is_empty());
+    }
+
+    /// E4.3: `exclude_glob` is forwarded to the scout as part of `SearchParams`.
+    #[tokio::test]
+    async fn test_search_codebase_exclude_glob_forwarded_to_scout() {
+        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let mock_scout = MockScout::default();
+        mock_scout.set_result(Ok(SearchResult {
+            matches: vec![],
+            total_matches: 0,
+            truncated: false,
+        }));
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(mock_scout.clone()),
+            Arc::new(MockSurgeon::new()),
+        );
+
+        let params = SearchCodebaseParams {
+            query: "anything".to_owned(),
+            exclude_glob: "**/*.test.*".to_owned(),
+            ..Default::default()
+        };
+
+        server
+            .search_codebase(Parameters(params))
+            .await
+            .expect("should succeed");
+
+        let calls = mock_scout.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].exclude_glob, "**/*.test.*",
+            "exclude_glob must be forwarded to the scout"
+        );
     }
 }

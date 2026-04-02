@@ -35,6 +35,26 @@ pub struct SearchCodebaseParams {
     /// Lines of context above/below each match.
     #[serde(default = "default_context_lines")]
     pub context_lines: u32,
+    /// File paths already in the agent's context.
+    ///
+    /// For matches in these files, only minimal metadata is returned
+    /// (`file`, `line`, `column`, `enclosing_semantic_path`, `version_hash`).
+    /// The full `content` and context lines are omitted to save tokens.
+    #[serde(default)]
+    pub known_files: Vec<String>,
+    /// Group matches by file in the response.
+    ///
+    /// When `true`, the response includes `file_groups` instead of (or in addition to)
+    /// the flat `matches` list. Each group contains all matches for one file with a
+    /// single `version_hash` at group level.
+    #[serde(default)]
+    pub group_by_file: bool,
+    /// Glob pattern for files to exclude from search (e.g., `**/*.test.*`).
+    ///
+    /// Applied before search — not as a post-filter — so excluded files are
+    /// never read. Can be combined with `path_glob` include patterns.
+    #[serde(default)]
+    pub exclude_glob: String,
 }
 
 /// Parameters for `get_repo_map`.
@@ -287,10 +307,51 @@ pub struct SearchCodebaseResponse {
     pub matches: Vec<pathfinder_search::SearchMatch>,
     pub total_matches: usize,
     pub truncated: bool,
+    /// Grouped output — populated when `group_by_file: true`.
+    ///
+    /// Each group represents one file and contains either full matches (for
+    /// unknown files) or minimal matches (for files in `known_files`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_groups: Option<Vec<SearchResultGroup>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
+}
+
+/// A minimal match entry for files already in the agent's context (`known_files`).
+///
+/// Omits `content`, `context_before`, and `context_after` to save tokens.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct KnownFileMatch {
+    /// File path relative to workspace root.
+    pub file: String,
+    /// 1-indexed line number.
+    pub line: u64,
+    /// 1-indexed column number.
+    pub column: u64,
+    /// AST symbol enclosing this match (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enclosing_semantic_path: Option<String>,
+    /// SHA-256 hash of the file (usable as `base_version` for edits).
+    pub version_hash: String,
+    /// Always `true` — signals this match was suppressed because the file is known.
+    pub known: bool,
+}
+
+/// A group of matches belonging to one file, returned when `group_by_file: true`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SearchResultGroup {
+    /// File path relative to workspace root.
+    pub file: String,
+    /// SHA-256 hash of the file (shared by all matches in this group).
+    pub version_hash: String,
+    /// Full matches (for files NOT in `known_files`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<pathfinder_search::SearchMatch>,
+    /// Minimal matches (for files in `known_files`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub known_matches: Vec<KnownFileMatch>,
 }
 
 /// The response for `get_repo_map`.

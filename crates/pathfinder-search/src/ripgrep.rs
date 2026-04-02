@@ -251,18 +251,33 @@ impl RipgrepScout {
             .map_err(|e| SearchError::InvalidPattern(e.to_string()))
     }
 
-    /// Walk workspace files filtered by the glob in `params.path_glob`.
+    /// Walk workspace files filtered by the globs in `params`.
+    ///
+    /// Applies `path_glob` (include filter) and `exclude_glob` (exclude filter)
+    /// before searching — so excluded files are never read at all.
     ///
     /// Returns tuples of `(absolute_path, relative_path_string)`.
     fn walk_files(params: &SearchParams) -> Vec<(PathBuf, String)> {
         let glob = &params.path_glob;
+        let exclude_glob = &params.exclude_glob;
 
-        // Build a globset for the user's path_glob pattern.
+        // Build a globset for the user's path_glob (include) pattern.
         let glob_matcher = globset::GlobBuilder::new(glob)
             .literal_separator(false)
             .build()
             .and_then(|g| globset::GlobSet::builder().add(g).build())
             .ok();
+
+        // Build a globset for the exclude_glob pattern (optional).
+        let exclude_matcher = if exclude_glob.is_empty() {
+            None
+        } else {
+            globset::GlobBuilder::new(exclude_glob)
+                .literal_separator(false)
+                .build()
+                .and_then(|g| globset::GlobSet::builder().add(g).build())
+                .ok()
+        };
 
         let walker = WalkBuilder::new(&params.workspace_root)
             .hidden(false) // include dot-files unless .gitignore excludes them
@@ -289,6 +304,14 @@ impl RipgrepScout {
             if let Some(ref glob_set) = glob_matcher {
                 let matches: bool = glob_set.is_match(&relative);
                 if !matches && glob != "**/*" {
+                    continue;
+                }
+            }
+
+            // Apply exclude_glob filter — skip files matching the exclusion pattern.
+            // This runs before any file I/O so excluded files are never read.
+            if let Some(ref excl_set) = exclude_matcher {
+                if excl_set.is_match(&relative) {
                     continue;
                 }
             }
@@ -637,6 +660,35 @@ mod tests {
             result.matches[0].enclosing_semantic_path.is_none(),
             "should be None until Tree-sitter is implemented in Epic 3"
         );
+    }
+
+    // ── Red-Green: exclude_glob ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_exclude_glob_skips_matching_files() {
+        let ws = make_workspace(&[
+            ("src/main.rs", "needle\n"),
+            ("src/main.test.rs", "needle\n"),
+            ("src/auth.rs", "needle\n"),
+        ]);
+        let scout = RipgrepScout::new();
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "needle".to_owned(),
+            exclude_glob: "**/*.test.*".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        // The .test.rs file should be excluded — only 2 matches should remain.
+        assert_eq!(result.total_matches, 2, "test files should be excluded");
+        for m in &result.matches {
+            assert!(
+                !m.file.contains(".test."),
+                "excluded file showed up: {}",
+                m.file
+            );
+        }
     }
 
     // ── Red-Green: multiple matches per file ──────────────────────

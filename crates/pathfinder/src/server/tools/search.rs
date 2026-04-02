@@ -1,7 +1,9 @@
 //! `search_codebase` tool — Ripgrep-backed text search with Tree-sitter enrichment.
 
 use crate::server::helpers::io_error_data;
-use crate::server::types::{SearchCodebaseParams, SearchCodebaseResponse};
+use crate::server::types::{
+    KnownFileMatch, SearchCodebaseParams, SearchCodebaseResponse, SearchResultGroup,
+};
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
 use pathfinder_common::types::FilterMode;
@@ -9,6 +11,7 @@ use pathfinder_search::{SearchMatch, SearchParams};
 use pathfinder_treesitter::language::SupportedLanguage;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Maximum number of concurrent Tree-sitter enrichment futures per search call.
@@ -27,6 +30,11 @@ impl PathfinderServer {
     ///
     /// After enrichment, matches are filtered by `filter_mode` (`code_only` / `comments_only`).
     /// `degraded: true` is only set when a file uses an unsupported language (no Tree-sitter grammar).
+    ///
+    /// **E4 features:**
+    /// - `exclude_glob` is passed to the scout to exclude files before search.
+    /// - `known_files` suppresses verbose context for files the agent already has.
+    /// - `group_by_file` clusters results into `file_groups` in the response.
     pub(crate) async fn search_codebase_impl(
         &self,
         params: SearchCodebaseParams,
@@ -38,6 +46,9 @@ impl PathfinderServer {
             query = %params.query,
             is_regex = params.is_regex,
             path_glob = %params.path_glob,
+            exclude_glob = %params.exclude_glob,
+            known_files_count = params.known_files.len(),
+            group_by_file = params.group_by_file,
             filter_mode = ?params.filter_mode,
             "search_codebase: start"
         );
@@ -47,6 +58,7 @@ impl PathfinderServer {
             query: params.query.clone(),
             is_regex: params.is_regex,
             path_glob: params.path_glob.clone(),
+            exclude_glob: params.exclude_glob.clone(),
             max_results: params.max_results as usize,
             context_lines: params.context_lines as usize,
         };
@@ -76,7 +88,36 @@ impl PathfinderServer {
                 let filtered_matches =
                     apply_filter_mode(enriched_matches, &node_types, params.filter_mode);
 
-                let returned_count = filtered_matches.len();
+                // Build the normalised known-file set for O(1) lookups.
+                // Strip a leading "./" so that "./src/auth.ts" == "src/auth.ts".
+                let known_set: std::collections::HashSet<String> = params
+                    .known_files
+                    .iter()
+                    .map(|p| normalize_path(p))
+                    .collect();
+
+                // Build grouped output if requested.
+                let file_groups = if params.group_by_file {
+                    Some(build_file_groups(&filtered_matches, &known_set))
+                } else {
+                    None
+                };
+
+                // For the flat `matches` list, strip content/context from known files
+                // so the response is still useful even when grouping is off.
+                let flat_matches: Vec<SearchMatch> = filtered_matches
+                    .into_iter()
+                    .map(|mut m| {
+                        if known_set.contains(&normalize_path(&m.file)) {
+                            m.content = String::new();
+                            m.context_before = vec![];
+                            m.context_after = vec![];
+                        }
+                        m
+                    })
+                    .collect();
+
+                let returned_count = flat_matches.len();
                 let duration_ms = start.elapsed().as_millis();
                 tracing::info!(
                     tool = "search_codebase",
@@ -92,9 +133,10 @@ impl PathfinderServer {
                 );
 
                 Ok(Json(SearchCodebaseResponse {
-                    matches: filtered_matches,
+                    matches: flat_matches,
                     total_matches: result.total_matches,
                     truncated: result.truncated,
+                    file_groups,
                     degraded: degraded_flag,
                     degraded_reason,
                 }))
@@ -198,4 +240,61 @@ fn apply_filter_mode(
             .map(|(m, _)| m)
             .collect(),
     }
+}
+
+/// Strip a leading `./` from a path string for normalised comparison.
+///
+/// Both stored match paths and caller-supplied `known_files` entries may or may
+/// not have a leading `./`. Normalising both sides ensures consistent lookups.
+fn normalize_path(p: &str) -> String {
+    p.strip_prefix("./").unwrap_or(p).to_owned()
+}
+
+/// Build the grouped response for `group_by_file: true`.
+///
+/// Groups matches by their `file` field, deduplicating `version_hash` per group.
+/// Matches for files in `known_set` are rendered as `KnownFileMatch` (minimal);
+/// all others are full `SearchMatch` entries.
+fn build_file_groups(
+    matches: &[SearchMatch],
+    known_set: &std::collections::HashSet<String>,
+) -> Vec<SearchResultGroup> {
+    // Preserve insertion order by tracking the file sequence separately.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, SearchResultGroup> = HashMap::new();
+
+    for m in matches {
+        let key = normalize_path(&m.file);
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+            groups.insert(
+                key.clone(),
+                SearchResultGroup {
+                    file: m.file.clone(),
+                    version_hash: m.version_hash.clone(),
+                    matches: Vec::new(),
+                    known_matches: Vec::new(),
+                },
+            );
+        }
+        if let Some(group) = groups.get_mut(&key) {
+            if known_set.contains(&key) {
+                group.known_matches.push(KnownFileMatch {
+                    file: m.file.clone(),
+                    line: m.line,
+                    column: m.column,
+                    enclosing_semantic_path: m.enclosing_semantic_path.clone(),
+                    version_hash: m.version_hash.clone(),
+                    known: true,
+                });
+            } else {
+                group.matches.push(m.clone());
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|k| groups.remove(&k))
+        .collect()
 }
