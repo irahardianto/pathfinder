@@ -194,14 +194,31 @@ impl LspClient {
             "LSP: spawning process"
         );
 
-        let (process, stdout) = spawn_and_initialize(
+        let spawn_result = spawn_and_initialize(
             &descriptor.command,
             &descriptor.args,
             &descriptor.root,
             &language_id,
             Arc::clone(&self.dispatcher),
         )
-        .await?;
+        .await;
+
+        let (process, stdout) = match spawn_result {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(
+                    language = %language_id,
+                    error = %e,
+                    "LSP: initialization failed"
+                );
+                // Mark unavailable so we don't spam doomed spawns for this language
+                self.processes.write().await.insert(
+                    language_id.clone(),
+                    ProcessEntry::Unavailable(UnavailableState),
+                );
+                return Err(e);
+            }
+        };
 
         let reader_handle = start_reader_task(stdout, Arc::clone(&self.dispatcher));
 
@@ -302,6 +319,7 @@ impl Lawyer for LspClient {
         column: u32,
     ) -> Result<Option<DefinitionLocation>, LspError> {
         let start = Instant::now();
+        tracing::info!(tool = "goto_definition", file = %file_path.display(), "LSP operation started");
 
         // Determine language from file extension
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -322,14 +340,21 @@ impl Lawyer for LspClient {
             }
         });
 
-        let response = self
+        let response = match self
             .request(
                 language_id,
                 "textDocument/definition",
                 params,
                 Duration::from_secs(10),
             )
-            .await?;
+            .await 
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "goto_definition", language = language_id, error = %e, "textDocument/definition failed");
+                return Err(e);
+            }
+        };
 
         self.touch(language_id).await;
 
@@ -352,6 +377,7 @@ impl Lawyer for LspClient {
         column: u32,
     ) -> Result<Vec<CallHierarchyItem>, LspError> {
         let start = Instant::now();
+        tracing::info!(tool = "call_hierarchy_prepare", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
@@ -374,14 +400,21 @@ impl Lawyer for LspClient {
             }
         });
 
-        let response = self
+        let response = match self
             .request(
                 language_id,
                 "textDocument/prepareCallHierarchy",
                 params,
                 Duration::from_secs(10),
             )
-            .await?;
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "call_hierarchy_prepare", language = language_id, error = %e, "textDocument/prepareCallHierarchy failed");
+                return Err(e);
+            }
+        };
 
         self.touch(language_id).await;
 
@@ -401,6 +434,7 @@ impl Lawyer for LspClient {
         item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
         let start = Instant::now();
+        tracing::info!(tool = "call_hierarchy_incoming", file = %item.file, "LSP operation started");
         let ext = Path::new(&item.file)
             .extension()
             .and_then(|e| e.to_str())
@@ -414,14 +448,21 @@ impl Lawyer for LspClient {
 
         let params = json!({ "item": lsp_item });
 
-        let response = self
+        let response = match self
             .request(
                 language_id,
                 "callHierarchy/incomingCalls",
                 params,
                 Duration::from_secs(30),
             )
-            .await?;
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "call_hierarchy_incoming", language = language_id, error = %e, "callHierarchy/incomingCalls failed");
+                return Err(e);
+            }
+        };
 
         self.touch(language_id).await;
 
@@ -441,6 +482,7 @@ impl Lawyer for LspClient {
         item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
         let start = Instant::now();
+        tracing::info!(tool = "call_hierarchy_outgoing", file = %item.file, "LSP operation started");
         let ext = Path::new(&item.file)
             .extension()
             .and_then(|e| e.to_str())
@@ -454,14 +496,21 @@ impl Lawyer for LspClient {
 
         let params = json!({ "item": lsp_item });
 
-        let response = self
+        let response = match self
             .request(
                 language_id,
                 "callHierarchy/outgoingCalls",
                 params,
                 Duration::from_secs(30),
             )
-            .await?;
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "call_hierarchy_outgoing", language = language_id, error = %e, "callHierarchy/outgoingCalls failed");
+                return Err(e);
+            }
+        };
 
         self.touch(language_id).await;
 
@@ -481,6 +530,7 @@ impl Lawyer for LspClient {
         file_path: &Path,
         content: &str,
     ) -> Result<(), LspError> {
+        tracing::info!(tool = "did_open", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
@@ -497,8 +547,10 @@ impl Lawyer for LspClient {
             }
         });
 
-        self.notify(language_id, "textDocument/didOpen", params)
-            .await?;
+        if let Err(e) = self.notify(language_id, "textDocument/didOpen", params).await {
+            tracing::error!(tool = "did_open", language = language_id, error = %e, "textDocument/didOpen failed");
+            return Err(e);
+        }
         self.touch(language_id).await;
         Ok(())
     }
@@ -510,6 +562,7 @@ impl Lawyer for LspClient {
         content: &str,
         version: i32,
     ) -> Result<(), LspError> {
+        tracing::info!(tool = "did_change", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
@@ -526,13 +579,16 @@ impl Lawyer for LspClient {
             "contentChanges": [{ "text": content }]
         });
 
-        self.notify(language_id, "textDocument/didChange", params)
-            .await?;
+        if let Err(e) = self.notify(language_id, "textDocument/didChange", params).await {
+            tracing::error!(tool = "did_change", language = language_id, error = %e, "textDocument/didChange failed");
+            return Err(e);
+        }
         self.touch(language_id).await;
         Ok(())
     }
 
     async fn did_close(&self, workspace_root: &Path, file_path: &Path) -> Result<(), LspError> {
+        tracing::info!(tool = "did_close", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
@@ -546,8 +602,10 @@ impl Lawyer for LspClient {
             }
         });
 
-        self.notify(language_id, "textDocument/didClose", params)
-            .await?;
+        if let Err(e) = self.notify(language_id, "textDocument/didClose", params).await {
+            tracing::error!(tool = "did_close", language = language_id, error = %e, "textDocument/didClose failed");
+            return Err(e);
+        }
         // Not touching `last_used` on close since this is a cleanup action.
         Ok(())
     }
@@ -558,6 +616,7 @@ impl Lawyer for LspClient {
         file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError> {
         let start = Instant::now();
+        tracing::info!(tool = "pull_diagnostics", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
@@ -577,14 +636,21 @@ impl Lawyer for LspClient {
             "textDocument": { "uri": file_uri.as_str() }
         });
 
-        let response = self
+        let response = match self
             .request(
                 language_id,
                 "textDocument/diagnostic",
                 params,
                 Duration::from_secs(30),
             )
-            .await?;
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "pull_diagnostics", language = language_id, error = %e, "textDocument/diagnostic failed");
+                return Err(e);
+            }
+        };
 
         self.touch(language_id).await;
 
@@ -604,6 +670,7 @@ impl Lawyer for LspClient {
         file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError> {
         let start = Instant::now();
+        tracing::info!(tool = "pull_workspace_diagnostics", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
@@ -618,14 +685,21 @@ impl Lawyer for LspClient {
         // The params for workspace diagnostics are typically quite minimal
         let params = json!({});
 
-        let response = self
+        let response = match self
             .request(
                 language_id,
                 "workspace/diagnostic",
                 params,
                 Duration::from_secs(60), // Workspace diagnostics might take longer
             )
-            .await?;
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "pull_workspace_diagnostics", language = language_id, error = %e, "workspace/diagnostic failed");
+                return Err(e);
+            }
+        };
 
         self.touch(language_id).await;
 
@@ -646,6 +720,7 @@ impl Lawyer for LspClient {
         start_line: u32,
         end_line: u32,
     ) -> Result<Option<String>, LspError> {
+        tracing::info!(tool = "range_formatting", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
@@ -671,14 +746,21 @@ impl Lawyer for LspClient {
             "options": { "tabSize": 4, "insertSpaces": true }
         });
 
-        let response = self
+        let response = match self
             .request(
                 language_id,
                 "textDocument/rangeFormatting",
                 params,
                 Duration::from_secs(10),
             )
-            .await?;
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "range_formatting", language = language_id, error = %e, "textDocument/rangeFormatting failed");
+                return Err(e);
+            }
+        };
 
         self.touch(language_id).await;
 

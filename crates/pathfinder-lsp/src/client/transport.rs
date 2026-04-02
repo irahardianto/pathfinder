@@ -28,6 +28,8 @@ pub(super) async fn read_message<R>(reader: &mut BufReader<R>) -> Result<Value, 
 where
     R: AsyncReadExt + Unpin,
 {
+    const MAX_MESSAGE_SIZE: usize = 50 * 1024 * 1024; // 50MB
+
     // Parse headers until blank line
     let mut content_length: Option<usize> = None;
 
@@ -63,6 +65,12 @@ where
     let length = content_length.ok_or_else(|| {
         LspError::Protocol("LSP message missing Content-Length header".to_owned())
     })?;
+
+    if length > MAX_MESSAGE_SIZE {
+        return Err(LspError::Protocol(format!(
+            "LSP message size {length} bytes exceeds maximum allowed size of {MAX_MESSAGE_SIZE} bytes"
+        )));
+    }
 
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body).await.map_err(|e| {

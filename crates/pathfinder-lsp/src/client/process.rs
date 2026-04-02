@@ -153,8 +153,15 @@ pub(super) async fn spawn_and_initialize(
 
 /// Send a JSON-RPC message to the process stdin.
 pub(super) async fn send(process: &ManagedProcess, message: &Value) -> Result<(), LspError> {
-    let mut stdin = process.stdin.lock().await;
-    write_message(&mut *stdin, message).await
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut stdin = process.stdin.lock().await;
+        write_message(&mut *stdin, message).await
+    })
+    .await
+    .map_err(|_| LspError::Timeout {
+        operation: "send".to_owned(),
+        timeout_ms: 10_000,
+    })?
 }
 
 /// Start the background reader task that dispatches incoming messages.
