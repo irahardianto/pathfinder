@@ -167,7 +167,7 @@ impl PathfinderError {
             }
             Self::InvalidTarget { valid_edit_types, .. } => {
                 if valid_edit_types.is_some() {
-                    Some("Set edit_type to one of: 'replace_body', 'replace_full', 'insert_before', 'insert_after', 'delete'. Or use text_target for text-based targeting.".to_owned())
+                    Some("Set edit_type to one of: 'replace_body', 'replace_full', 'insert_before', 'insert_after', 'delete'. Or set old_text + context_line for text-based targeting.".to_owned())
                 } else {
                     Some("replace_body requires a block-bodied construct. For constants, use replace_full.".to_owned())
                 }

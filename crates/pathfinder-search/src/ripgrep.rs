@@ -754,7 +754,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_context_lines_overlap() {
-        let ws = make_workspace(&[("src/main.rs", "line1\nline2\nmatch\nline4\nmatch\nline6\nline7\nmatch\n")]);
+        let ws = make_workspace(&[(
+            "src/main.rs",
+            "line1\nline2\nmatch\nline4\nmatch\nline6\nline7\nmatch\n",
+        )]);
         let scout = RipgrepScout::new();
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
@@ -765,17 +768,17 @@ mod tests {
         let result = scout.search(&params).await.expect("search should succeed");
 
         assert_eq!(result.matches.len(), 3);
-        
+
         // Match 1 at line 3
         assert_eq!(result.matches[0].line, 3);
         assert_eq!(result.matches[0].context_before, vec!["line1", "line2"]);
         assert_eq!(result.matches[0].context_after, vec!["line4"]); // Only line4 before the next match at line 5
-        
+
         // Match 2 at line 5
         assert_eq!(result.matches[1].line, 5);
         assert_eq!(result.matches[1].context_before, vec!["match", "line4"]); // "match" from line 3, "line4" from line 4
         assert_eq!(result.matches[1].context_after, vec!["line6", "line7"]);
-        
+
         // Match 3 at line 8
         assert_eq!(result.matches[2].line, 8);
         assert_eq!(result.matches[2].context_before, vec!["line6", "line7"]);

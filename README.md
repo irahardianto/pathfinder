@@ -1,5 +1,6 @@
 <div align="center">
-  <h1 align="center">🧭 Pathfinder</h1>
+  <img src="banner.jpeg" alt="Pathfinder" width="800" />
+  <h2 align="center">🧭 Pathfinder</h2>
 
   <p align="center">
     The Headless IDE — an MCP server that gives AI coding agents<br />
@@ -215,7 +216,7 @@ All edit tools use the **Shadow Editor** validation pipeline — edits are valid
 |---|---|
 | `replace_body` | Replace the internal logic of a block-scoped construct (function, method, class body), keeping the signature intact. |
 | `replace_full` | Replace an entire declaration including its signature, body, decorators, and doc comments. |
-| `replace_batch` | Apply multiple edits atomically within a single file — back-to-front to avoid offset shifting, single OCC guard. Supports **two targeting modes**: Option A (semantic — `semantic_path` + `edit_type`) for code symbols, and Option B (text — `text_target` with `old_text` + `context_line`) for Vue `<template>`/`<style>` zones or any non-symbol region. Both modes can be mixed in one call. |
+| `replace_batch` | Apply multiple edits atomically within a single file — back-to-front to avoid offset shifting, single OCC guard. Supports **two targeting modes**: Option A (semantic — `semantic_path` + `edit_type`) for code symbols, and Option B (text — `old_text` + `context_line` + `replacement_text`) for Vue `<template>`/`<style>` zones or any non-symbol region. Both modes can be mixed in one call. |
 | `insert_before` | Insert new code before a target symbol. Use a bare file path (without `::`) to insert at the top of a file. |
 | `insert_after` | Insert new code after a target symbol. Use a bare file path (without `::`) to append to the bottom of a file. |
 | `delete_symbol` | Delete a symbol and all its associated decorators, attributes, and doc comments. |

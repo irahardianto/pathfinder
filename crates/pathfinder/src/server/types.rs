@@ -283,29 +283,16 @@ pub struct ReadSourceFileParams {
     pub end_line: Option<u32>,
 }
 
-/// Specifies a text-range target for a batch edit.
-///
-/// The `old_text` is searched for within a ±10-line window around `context_line`.
-/// This makes it safe for template/style edits where semantic paths do not apply.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct TextEditTarget {
-    /// Exact text to find and replace (whitespace-sensitive by default).
-    pub old_text: String,
-    /// Line number (1-indexed) to anchor the search window (required).
-    /// The search scans ±10 lines around this line for `old_text`.
-    pub context_line: u32,
-}
-
 /// A single edit in a `replace_batch` call.
 ///
-/// Each edit specifies **either** semantic targeting OR text targeting:
+/// Each edit specifies **either** semantic targeting (Option A) OR text targeting (Option B):
 ///
-/// **Option A — Semantic targeting (existing):**\
-/// Set `semantic_path`, `edit_type`, and optionally `new_code`.
+/// **Option A — Semantic targeting:** Set `semantic_path`, `edit_type`, and optionally `new_code`.
+/// Use for source-code constructs that have a parseable AST symbol.
 ///
-/// **Option B — Text targeting (new in E3.1):**\
-/// Set `text_target` and `new_text`. Used for template/style zones where
-/// no AST symbol is available (e.g., Vue `<template>`, `<style>`).
+/// **Option B — Text targeting:** Set `old_text`, `context_line`, and optionally `replacement_text`.
+/// Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path.
+/// The search scans ±10 lines around `context_line` for an exact match of `old_text`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchEdit {
     // ── Semantic targeting (Option A) ─────────────────────────────────────
@@ -321,11 +308,16 @@ pub struct BatchEdit {
     pub new_code: Option<String>,
 
     // ── Text targeting (Option B) ──────────────────────────────────────────
-    /// Text-range target. Set this for template/style edits that have no semantic path.
+    /// Exact text to find and replace. Set this for template/style edits that have no
+    /// semantic path (e.g., Vue `<template>`, `<style>` zones, embedded SQL).
     /// When set, `semantic_path` and `edit_type` are ignored.
-    pub text_target: Option<TextEditTarget>,
-    /// Replacement text when using text targeting. Required when `text_target` is set.
-    pub new_text: Option<String>,
+    /// The search scans ±10 lines around `context_line` for an exact match.
+    pub old_text: Option<String>,
+    /// Line number (1-indexed) to anchor the `old_text` search window.
+    /// Required when `old_text` is set. The search scans ±10 lines around this line.
+    pub context_line: Option<u32>,
+    /// Replacement text when using text targeting. Required when `old_text` is set.
+    pub replacement_text: Option<String>,
 
     // ── Shared options ─────────────────────────────────────────────────────
     /// When `true`, collapses `\s+` to a single space before matching `old_text`.
@@ -668,19 +660,31 @@ pub struct ImpactReference {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactResponse {
     /// Symbols that call the target (caller graph).
-    pub incoming: Vec<ImpactReference>,
+    /// `null` when `degraded` is `true` — LSP was unavailable so callers are **unknown**.
+    /// An empty array `[]` means LSP confirmed zero callers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming: Option<Vec<ImpactReference>>,
     /// Symbols the target calls (callee graph).
-    pub outgoing: Vec<ImpactReference>,
+    /// `null` when `degraded` is `true` — LSP was unavailable so callees are **unknown**.
+    /// An empty array `[]` means LSP confirmed zero callees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outgoing: Option<Vec<ImpactReference>>,
     /// Number of transitive levels traversed.
     pub depth_reached: u32,
-    /// Total files referenced (for `version_hashes`).
+    /// Total files referenced across all incoming and outgoing references.
     pub files_referenced: usize,
-    /// `true` when LSP call hierarchy was unavailable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded: Option<bool>,
-    /// Reason for degradation.
+    /// Whether the call hierarchy analysis was degraded (LSP unavailable or crashed).
+    /// Always present. When `true`, `incoming` and `outgoing` are `null` (not empty arrays).
+    pub degraded: bool,
+    /// Machine-readable reason for degradation (e.g., `no_lsp`, `lsp_crash`, `lsp_timeout`).
+    /// Absent when `degraded` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
+    /// SHA-256 version hashes for all referenced files (including the target file itself),
+    /// keyed by relative file path. Agents can use these as `base_version` for immediate
+    /// editing without a separate read call.
+    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub version_hashes: std::collections::HashMap<String, String>,
 }
 
 // ── Default Value Functions ─────────────────────────────────────────

@@ -316,7 +316,7 @@ The error message `"unsupported edit type: "` (empty string) is not helpful.
 {
   "error": "INVALID_TARGET",
   "message": "edit_type is required for semantic targeting. Got: '' (empty).",
-  "hint": "Set edit_type to one of: 'replace_body', 'replace_full', 'insert_before', 'insert_after', 'delete'. Or use text_target for text-based targeting.",
+  "hint": "Set edit_type to one of: 'replace_body', 'replace_full', 'insert_before', 'insert_after', 'delete'. Or use old_text + context_line for text-based targeting.",
   "details": {
     "valid_edit_types": ["replace_body", "replace_full", "insert_before", "insert_after", "delete"],
     "edit_index": 0

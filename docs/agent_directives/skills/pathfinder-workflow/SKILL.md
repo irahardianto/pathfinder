@@ -351,13 +351,13 @@ replace_batch(filepath="src/views/Dashboard.vue", base_version=hash_v1, edits=[
     new_code: "..." },
 
   # Option B — Template zone: text targeting required
-  { text_target: { old_text: "<div class=\"card\">", context_line: 42 },
-    new_text: "<div class=\"card elevated\">" },
+  { old_text: "<div class=\"card\">", context_line: 42,
+    replacement_text: "<div class=\"card elevated\">" },
 
   # Option B with normalize_whitespace for multi-line HTML
-  { text_target: { old_text: "<Button @click=\"submit\">",
-                   context_line: 55, normalize_whitespace: true },
-    new_text: "<Button @click=\"handleSubmit\">" },
+  { old_text: "<Button @click=\"submit\">",
+    context_line: 55, normalize_whitespace: true,
+    replacement_text: "<Button @click=\"handleSubmit\">" },
 ])
 ```
 
@@ -463,7 +463,7 @@ When you see this:
 ### TEXT_NOT_FOUND (replace_batch Option B)
 
 ```
-Error: TEXT_NOT_FOUND for text_target with old_text="<div class=\"card\">"
+Error: TEXT_NOT_FOUND for old_text="<div class=\"card\">"
 
 Recovery:
 → The old_text was not found within ±10 lines of context_line

@@ -41,34 +41,33 @@ fn do_test() {
 
 #[test]
 fn test_batch_edit_text_target_deser() {
-    // A batch edit using text targeting (Option B) should deserialize fully.
+    // A batch edit using text targeting (Option B) should deserialize with the flat schema.
     let json = r#"{
         "filepath": "src/App.vue",
         "base_version": "sha256:abc",
         "edits": [
             {
-                "text_target": {
-                    "old_text": "<button>Click me</button>",
-                    "context_line": 14
-                },
-                "new_text": "<button>Submit</button>",
+                "old_text": "<button>Click me</button>",
+                "context_line": 14,
+                "replacement_text": "<button>Submit</button>",
                 "normalize_whitespace": false
             }
         ]
     }"#;
     let params: pathfinder_lib::server::types::ReplaceBatchParams =
-        serde_json::from_str(json).expect("text_target edit should deserialize");
+        serde_json::from_str(json).expect("flat text-targeting edit should deserialize");
     assert_eq!(params.filepath, "src/App.vue");
     assert_eq!(params.edits.len(), 1);
     let edit = &params.edits[0];
-    let tt = edit
-        .text_target
-        .as_ref()
-        .expect("text_target should be set");
-    assert_eq!(tt.old_text, "<button>Click me</button>");
-    assert_eq!(tt.context_line, 14);
-    assert_eq!(edit.new_text.as_deref(), Some("<button>Submit</button>"));
+    assert_eq!(edit.old_text.as_deref(), Some("<button>Click me</button>"));
+    assert_eq!(edit.context_line, Some(14));
+    assert_eq!(
+        edit.replacement_text.as_deref(),
+        Some("<button>Submit</button>")
+    );
     assert!(!edit.normalize_whitespace);
+    // Semantic fields should be absent
+    assert!(edit.new_code.is_none());
 }
 
 #[test]
@@ -91,6 +90,9 @@ fn test_batch_edit_semantic_target_deser() {
     let edit = &params.edits[0];
     assert_eq!(edit.semantic_path, "src/lib.rs::MyStruct.my_method");
     assert_eq!(edit.edit_type, "replace_body");
-    assert!(edit.text_target.is_none());
+    // Text targeting fields should all be absent for a pure semantic edit
+    assert!(edit.old_text.is_none());
+    assert!(edit.context_line.is_none());
+    assert!(edit.replacement_text.is_none());
     assert!(!edit.normalize_whitespace); // default
 }

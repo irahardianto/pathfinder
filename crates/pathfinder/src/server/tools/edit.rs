@@ -691,14 +691,23 @@ impl PathfinderServer {
         let mut resolved_edits = Vec::new();
 
         for (edit_index, edit) in params.edits.iter().enumerate() {
-            // ── Branch A: Text-range targeting (E3.1) ─────────────────────────────
-            if let Some(ref text_target) = edit.text_target {
-                let new_text = edit.new_text.as_deref().unwrap_or("");
+            // ── Branch A: Text-range targeting ─────────────────────────────────────
+            if let Some(ref old_text) = edit.old_text {
+                let Some(context_line) = edit.context_line else {
+                    let err = PathfinderError::InvalidTarget {
+                        semantic_path: format!("edit[{edit_index}]"),
+                        reason: "`context_line` is required when `old_text` is set".to_owned(),
+                        edit_index: Some(edit_index),
+                        valid_edit_types: None,
+                    };
+                    return Err(pathfinder_to_error_data(&err));
+                };
+                let replacement = edit.replacement_text.as_deref().unwrap_or("");
                 let free = resolve_text_edit(
                     &source,
-                    text_target.old_text.as_str(),
-                    text_target.context_line,
-                    new_text,
+                    old_text.as_str(),
+                    context_line,
+                    replacement,
                     edit.normalize_whitespace,
                     file_path,
                 )

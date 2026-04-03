@@ -8,7 +8,7 @@
 //! # Degraded Mode
 //! When the `Lawyer` returns `LspError::NoLspAvailable`:
 //! - `get_definition` — returns an error response (`LSP_REQUIRED`)
-//! - `analyze_impact` — returns empty caller/callee lists with `degraded: true`
+//! - `analyze_impact` — returns `null` caller/callee lists with `degraded: true`
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{pathfinder_to_error_data, treesitter_error_to_error_data};
@@ -419,8 +419,11 @@ impl PathfinderServer {
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         let lsp_start = std::time::Instant::now();
-        let mut incoming = Vec::new();
-        let mut outgoing = Vec::new();
+        // Use Option<Vec> to distinguish "unknown" (LSP unavailable) from "verified empty" (LSP confirmed zero).
+        // None = degraded (LSP was down — callers are unknown, do NOT treat as zero)
+        // Some([]) = LSP responded with confirmed zero callers/callees
+        let mut incoming: Option<Vec<crate::server::types::ImpactReference>> = None;
+        let mut outgoing: Option<Vec<crate::server::types::ImpactReference>> = None;
         let mut degraded = true;
         let mut degraded_reason = Some("no_lsp".to_owned());
         let mut engines = vec!["tree-sitter"];
@@ -442,6 +445,8 @@ impl PathfinderServer {
                 engines.push("lsp");
                 degraded = false;
                 degraded_reason = None;
+                incoming = Some(Vec::new());
+                outgoing = Some(Vec::new());
 
                 let initial_item = &items[0];
 
@@ -473,15 +478,20 @@ impl PathfinderServer {
                                     seen.insert(key);
                                     queue.push_back((caller.clone(), current_depth + 1));
 
-                                    incoming.push(crate::server::types::ImpactReference {
-                                        semantic_path: format!("{}::{}", caller.file, caller.name),
-                                        file: caller.file.clone(),
-                                        line: caller.line as usize,
-                                        snippet: caller
-                                            .detail
-                                            .unwrap_or_else(|| caller.name.clone()),
-                                        version_hash: String::new(), // Populated at higher layer if needed
-                                    });
+                                    incoming.get_or_insert_with(Vec::new).push(
+                                        crate::server::types::ImpactReference {
+                                            semantic_path: format!(
+                                                "{}::{}",
+                                                caller.file, caller.name
+                                            ),
+                                            file: caller.file.clone(),
+                                            line: caller.line as usize,
+                                            snippet: caller
+                                                .detail
+                                                .unwrap_or_else(|| caller.name.clone()),
+                                            version_hash: String::new(), // Populated at higher layer if needed
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -525,15 +535,20 @@ impl PathfinderServer {
                                     seen_out.insert(key);
                                     queue_out.push_back((callee.clone(), current_depth + 1));
 
-                                    outgoing.push(crate::server::types::ImpactReference {
-                                        semantic_path: format!("{}::{}", callee.file, callee.name),
-                                        file: callee.file.clone(),
-                                        line: callee.line as usize,
-                                        snippet: callee
-                                            .detail
-                                            .unwrap_or_else(|| callee.name.clone()),
-                                        version_hash: String::new(), // Populated at higher layer if needed
-                                    });
+                                    outgoing.get_or_insert_with(Vec::new).push(
+                                        crate::server::types::ImpactReference {
+                                            semantic_path: format!(
+                                                "{}::{}",
+                                                callee.file, callee.name
+                                            ),
+                                            file: callee.file.clone(),
+                                            line: callee.line as usize,
+                                            snippet: callee
+                                                .detail
+                                                .unwrap_or_else(|| callee.name.clone()),
+                                            version_hash: String::new(), // Populated at higher layer if needed
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -551,9 +566,12 @@ impl PathfinderServer {
                 }
             }
             Ok(_) => {
+                // LSP responded with empty items — confirmed zero callers/callees
                 engines.push("lsp");
                 degraded = false;
                 degraded_reason = None;
+                incoming = Some(Vec::new());
+                outgoing = Some(Vec::new());
             }
             Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
                 // Keep degraded default
@@ -569,6 +587,27 @@ impl PathfinderServer {
 
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
+
+        // Compute version hashes for all referenced files + the target file itself.
+        // This allows agents to immediately edit any impacted file without a separate read.
+        let mut version_hashes = std::collections::HashMap::new();
+        // Always include the target file
+        let target_file_path = self.workspace_root.path().join(&semantic_path.file_path);
+        if let Ok(bytes) = tokio::fs::read(&target_file_path).await {
+            let hash = pathfinder_common::types::VersionHash::compute(&bytes);
+            version_hashes.insert(
+                semantic_path.file_path.to_string_lossy().to_string(),
+                hash.as_str().to_owned(),
+            );
+        }
+        // Include all files from the call graph
+        for file_ref in &files_referenced {
+            let abs_path = self.workspace_root.path().join(file_ref);
+            if let Ok(bytes) = tokio::fs::read(&abs_path).await {
+                let hash = pathfinder_common::types::VersionHash::compute(&bytes);
+                version_hashes.insert(file_ref.clone(), hash.as_str().to_owned());
+            }
+        }
 
         tracing::info!(
             tool = "analyze_impact",
@@ -587,8 +626,9 @@ impl PathfinderServer {
             outgoing,
             depth_reached: max_depth_reached,
             files_referenced: files_referenced.len(),
-            degraded: if degraded { Some(true) } else { None },
+            degraded,
             degraded_reason,
+            version_hashes,
         }))
     }
 }
@@ -874,9 +914,15 @@ mod tests {
         let result = server.analyze_impact_impl(params).await;
         let val = result.expect("should succeed").0;
 
-        assert!(val.incoming.is_empty());
-        assert!(val.outgoing.is_empty());
-        assert_eq!(val.degraded, Some(true));
+        assert!(
+            val.incoming.is_none(),
+            "incoming must be null (not empty) when degraded"
+        );
+        assert!(
+            val.outgoing.is_none(),
+            "outgoing must be null (not empty) when degraded"
+        );
+        assert_eq!(val.degraded, true);
         assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
     }
 
@@ -937,13 +983,21 @@ mod tests {
         let result = server.analyze_impact_impl(params).await;
         let val = result.expect("should succeed").0;
 
-        assert_eq!(val.degraded, None);
+        assert_eq!(val.degraded, false);
         assert_eq!(val.degraded_reason, None);
         assert_eq!(val.depth_reached, 1); // BFS pops level 1, updates max_depth_reached, then continues
         assert_eq!(val.files_referenced, 3); // initial + caller + callee
-        assert_eq!(val.incoming.len(), 1);
-        assert_eq!(val.incoming[0].file, "src/server.rs");
-        assert_eq!(val.outgoing.len(), 1);
-        assert_eq!(val.outgoing[0].file, "src/token.rs");
+        let incoming = val
+            .incoming
+            .as_ref()
+            .expect("incoming must be Some when not degraded");
+        let outgoing = val
+            .outgoing
+            .as_ref()
+            .expect("outgoing must be Some when not degraded");
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].file, "src/server.rs");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].file, "src/token.rs");
     }
 }

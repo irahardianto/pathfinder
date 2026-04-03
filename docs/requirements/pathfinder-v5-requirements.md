@@ -291,19 +291,17 @@ OCC hash chaining creates friction for multi-symbol edits. Error messages are te
 }
 ```
 ```json
-// Option B: Text targeting (new)
+// Option B: Text targeting (new — flat schema as implemented)
 {
-  "text_target": {
-    "old_text": "<button class=\"check-btn\">Check</button>",
-    "context_line": 42
-  },
-  "new_text": "<button class=\"check-btn\" :disabled=\"isCorrect\">Check</button>"
+  "old_text": "<button class=\"check-btn\">Check</button>",
+  "context_line": 42,
+  "replacement_text": "<button class=\"check-btn\" :disabled=\"isCorrect\">Check</button>"
 }
 ```
 
 **Rules:**
-- Each edit in the batch specifies EITHER `semantic_path` + `edit_type` + `new_code` OR `text_target` + `new_text`
-- `text_target.context_line` is **required** (not optional) — prevents ambiguous matching across the file
+- Each edit in the batch specifies EITHER `semantic_path` + `edit_type` + `new_code` OR `old_text` + `context_line` + `replacement_text`
+- `context_line` is **required** (not optional) when `old_text` is set — prevents ambiguous matching across the file
 - Text matching searches for `old_text` within a ±10 line window around `context_line`
 - If `old_text` is not found within the window, the edit fails with `TEXT_NOT_FOUND` + hint
 - All edits in the batch share a single `base_version` and are applied atomically
