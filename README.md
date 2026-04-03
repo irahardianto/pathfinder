@@ -153,7 +153,7 @@ docs/agent_directives/
 **`rules/pathfinder-tool-routing.md`** — an always-on rule injected into every agent turn. It tells the agent:
 - To prefer Pathfinder's semantic tools over built-in text tools whenever possible
 - How to form correct semantic paths (e.g., `src/auth.ts::AuthService.login`)
-- Which tool to reach for for each action (reading, editing, searching, creating)
+- Which tool to reach for each action (reading, editing, searching, creating)
 - When to fall back gracefully if Pathfinder is unavailable
 
 **`skills/pathfinder-workflow/SKILL.md`** — a detailed on-demand skill the agent activates when it needs deeper guidance. It covers:
@@ -161,7 +161,9 @@ docs/agent_directives/
 - OCC (Optimistic Concurrency Control) version hash chaining across sequential edits
 - Multi-file and same-file batch edit patterns
 - Vue SFC text targeting for `<template>`/`<style>` zones
-- Error recovery patterns for `SYMBOL_NOT_FOUND`, `VERSION_MISMATCH`, and LSP validation failures
+- Efficient search with `filter_mode`, `exclude_glob`, `known_files`, `group_by_file`, and `is_regex`
+- `ignore_validation_failures` guidance for flaky or unavailable LSP environments
+- Error recovery patterns for `SYMBOL_NOT_FOUND`, `VERSION_MISMATCH`, `Validation Skipped`, `TEXT_NOT_FOUND`, and LSP validation failures
 
 ### Setup by Client
 
@@ -197,13 +199,13 @@ Pathfinder exposes 18 tools organized into three categories. Every tool operates
 
 | Tool | Description |
 |---|---|
-| `search_codebase` | Search for text patterns (literal or regex) with AST-aware filtering (`code_only`, `comments_only`, `all`). Supports `known_files` (suppress already-read file content), `group_by_file`, and `exclude_glob` for token efficiency. Returns matching lines with context and enclosing semantic paths. |
-| `get_repo_map` | Generate a structural skeleton of the project — an indented tree of classes, functions, and type signatures with semantic path annotations. Token-budgeted for LLM context windows. Supports `changed_since` (git ref/duration), `include_extensions`, and `exclude_extensions` for focused exploration. |
+| `search_codebase` | Search for text patterns with AST-aware filtering. Set `filter_mode` to `code_only` (default), `comments_only`, or `all`. Use `is_regex=true` for multi-pattern searches (e.g., `unwrap\(\)\|expect\(`). Token-efficiency parameters: `known_files` (suppress content for already-read files), `group_by_file`, `exclude_glob`. Returns matching lines with context and `enclosing_semantic_path` + `version_hash` per match. |
+| `get_repo_map` | Generate a structural skeleton of the project — an indented tree of classes, functions, and type signatures with semantic path annotations. Token-budgeted for LLM context windows. Supports `changed_since` (git ref/duration), `include_extensions`, `exclude_extensions`, and `include_imports` (`none`/`third_party`/`all`) for focused exploration. Returns `version_hashes` per file and `capabilities.lsp.per_language` for upfront LSP status. |
 | `read_symbol_scope` | Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns code, line range, and version hash. |
-| `read_source_file` | Read an entire source file and extract its complete AST symbol hierarchy. Supports three detail levels: `compact` (default — source + symbol list), `symbols` (symbol tree only, no source), `full` (nested AST). Use `start_line`/`end_line` to restrict output to a region of interest. **AST-only** — only call on source files (`.rs`, `.ts`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files. |
+| `read_source_file` | Read an entire source file and extract its complete AST symbol hierarchy. Supports three detail levels: `compact` (default — source + flat symbol list), `symbols` (symbol tree only, no source), `full` (source + complete nested AST). Use `start_line`/`end_line` to restrict output to a region of interest. **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files. |
 | `read_with_deep_context` | Read a symbol's source code **plus** the signatures of all functions it calls. Ideal for understanding dependencies before editing. |
 | `get_definition` | Jump to where a symbol is defined. Provide a semantic path to a reference and get the definition's file, line, and a code preview. |
-| `analyze_impact` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius before refactoring. |
+| `analyze_impact` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius before refactoring. Returns `version_hashes` for all referenced files — use these directly as `base_version` for edits without a separate read step. |
 
 ### ✏️ AST-Aware Editing
 

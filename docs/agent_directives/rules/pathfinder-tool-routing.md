@@ -12,10 +12,10 @@ Pathfinder tools operate at the **semantic level** (symbols, functions, classes)
 
 ### Addressing Rules (Semantic Paths)
 
-A **Semantic Path** is the addressing scheme for all Pathfinder tools. 
+A **Semantic Path** is the addressing scheme for all Pathfinder tools.
 **IMPORTANT:** Unless specifically targeting an entire file (like passing a bare file path to `insert_before` for the top of a file), semantic paths MUST ALWAYS include the file path and `::`.
 - **Correct:** `src/main.rs::MyClass.my_function`
-- **Incorrect:** `MyClass.my_function` (This will fail as it's parsed as a missing file named `MyClass.my_function`)
+- **Incorrect:** `MyClass.my_function` (This will fail — Pathfinder parses it as a missing file named `MyClass.my_function`)
 
 ### Tool Preference (Quick Reference)
 
@@ -24,10 +24,11 @@ A **Semantic Path** is the addressing scheme for all Pathfinder tools.
 | Explore project structure | `get_repo_map` | `list_dir` + `view_file` |
 | Search for code patterns | `search_codebase` | `grep_search` |
 | Read a function or class | `read_symbol_scope` | `view_file` |
-| Read entire source file + AST hierarchy | `read_source_file` | `view_file` + `view_file_outline` |
+| Read entire source file + AST hierarchy | `read_source_file` (AST-only; use `detail_level`: `compact`/`symbols`/`full`) | `view_file` |
 | Read function + its dependencies | `read_with_deep_context` | Multiple `view_file` calls |
 | Jump to a definition | `get_definition` | `grep_search` (approximation) |
 | Assess refactoring impact | `analyze_impact` | No equivalent |
+| Read a config/docs file | `read_file` | `view_file` |
 | Edit a function body | `replace_body` | `replace_file_content` |
 | Edit an entire declaration | `replace_full` | `replace_file_content` |
 | Batch-edit multiple symbols in one file | `replace_batch` | `multi_replace_file_content` |
@@ -37,13 +38,19 @@ A **Semantic Path** is the addressing scheme for all Pathfinder tools.
 | Pre-check a risky edit | `validate_only` | No equivalent |
 | Create a new file | `create_file` | `write_to_file` |
 | Edit config files (YAML, Dockerfile, .env) | `write_file` | `replace_file_content` |
+| Delete a file | `delete_file` | No built-in equivalent |
+
+### Critical Routing Rules
+
+**`read_source_file` is AST-only.** It only works on source code files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`). Calling it on config/docs files (YAML, TOML, JSON, Markdown, Dockerfile, `.env`) returns `UNSUPPORTED_LANGUAGE`. Use `read_file` or `view_file` for those.
+
+**`search_codebase` has token-efficiency parameters.** Use `filter_mode` (`code_only`/`comments_only`/`all`), `exclude_glob`, `known_files` (suppress content for already-read files), and `group_by_file` to reduce token waste. Default `filter_mode` is `code_only`.
 
 ### Keep Using Built-in Tools For
 
-- **Listing directories** → `list_dir`, `find_by_name`
+- **Listing directories** → `list_dir`
 - **Running commands** (tests, linters, builds) → `run_command`
 - **Viewing binary files** → `view_file`
-- **Config/docs files** (YAML, TOML, JSON, Markdown, Dockerfile) → `read_file` (not `read_source_file` — AST tools return `UNSUPPORTED_LANGUAGE` for non-source files)
 
 ### Multi-Symbol Edits in One File
 
@@ -61,9 +68,10 @@ When editing **multiple non-contiguous symbols** in a single file, you have thre
 
 If Pathfinder MCP tools are not available (server offline, tools not surfaced), fall back to built-in tools transparently:
 
-- `view_file` / `view_code_item` for reading
+- `view_file` for reading source code or config files
 - `replace_file_content` / `multi_replace_file_content` for editing
 - `grep_search` for searching
+- `list_dir` for project structure exploration
 
 Do not block on Pathfinder being unavailable — complete the work with built-in tools and note the degradation to the user if asked.
 

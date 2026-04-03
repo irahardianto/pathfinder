@@ -30,8 +30,8 @@ Pathfinder tools operate at the **semantic level** (symbols, functions, classes)
 
 ### What is a Semantic Path?
 
-A **Semantic Path** is the unified addressing scheme for Pathfinder tools. 
-**IMPORTANT:** Unless targeting an entire file (like BOF/EOF insertions), semantic paths MUST ALWAYS include the file path + `::` + the symbol chain. Providing just the symbol name (e.g. `send` or `login`) will FAIL because Pathfinder will mistakenly interpret it as a bare file named `send`. 
+A **Semantic Path** is the unified addressing scheme for Pathfinder tools.
+**IMPORTANT:** Unless targeting an entire file (like BOF/EOF insertions), semantic paths MUST ALWAYS include the file path + `::` + the symbol chain. Providing just the symbol name (e.g. `send` or `login`) will FAIL because Pathfinder will mistakenly interpret it as a bare file named `send`.
 
 **Correct Semantic Paths:**
 - `src/auth.ts::AuthService.login`
@@ -52,25 +52,26 @@ A **Semantic Path** is the unified addressing scheme for Pathfinder tools.
 | Explore project structure | `get_repo_map` | `list_dir` + `view_file` | One call returns full skeleton with semantic paths + version hashes for immediate editing |
 | Search for code patterns | `search_codebase` | `grep_search` | Returns `enclosing_semantic_path` + `version_hash` per match — enables Discovery→Edit chaining |
 | Read a function or class | `read_symbol_scope` | `view_file` | Extracts exactly one symbol — no context waste, returns `version_hash` for OCC |
-| Read entire source file + AST hierarchy | `read_source_file` | `view_file` + `view_file_outline` | Returns full file content + nested symbol tree with semantic paths + version hash — ideal when you need broader context beyond a single symbol |
+| Read entire source file + AST hierarchy | `read_source_file` | `view_file` | Returns full file content + nested symbol tree with semantic paths + version hash. Three detail levels: `compact` (default — source + flat symbol list), `symbols` (tree only, no source), `full` (source + nested AST). **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files |
 | Read function + dependencies | `read_with_deep_context` | Multiple `view_file` calls | Returns target code + signatures of all called functions in one call |
 | Jump to a definition | `get_definition` | `grep_search` (approximation) | LSP-powered, follows imports and re-exports across files |
-| Assess refactoring impact | `analyze_impact` | No equivalent | Maps all incoming callers + outgoing callees with BFS traversal |
+| Assess refactoring impact | `analyze_impact` | No equivalent | Maps all incoming callers + outgoing callees with BFS traversal; returns version hashes for all referenced files |
+| Read a config/docs file | `read_file` | `view_file` | Either is fine — roughly equivalent for config files. **Never** call `read_source_file` on config files (YAML, TOML, JSON, Markdown, `.env`, Dockerfile) — it returns `UNSUPPORTED_LANGUAGE` |
 | Edit a function body | `replace_body` | `replace_file_content` | Semantic addressing + auto-indentation + LSP validation before disk write |
 | Edit an entire declaration | `replace_full` | `replace_file_content` | Semantic addressing, includes signature/decorators/doc comments |
 | Batch-edit multiple symbols in one file | `replace_batch` | `multi_replace_file_content` | Atomic single-call with single OCC guard; edits applied back-to-front to avoid offset shifts |
 | Add code before/after a symbol | `insert_before` / `insert_after` | `replace_file_content` | Semantic anchor point + auto-spacing |
 | Delete a function or class | `delete_symbol` | `replace_file_content` (empty) | Handles decorators, doc comments, whitespace cleanup |
+| Delete a file | `delete_file` | No built-in equivalent | OCC-protected — requires `base_version` to prevent deleting a file modified after you last read it |
 | Pre-check a risky edit | `validate_only` | No equivalent | Dry-run with LSP diagnostics, zero disk side-effects |
 | Create a new file | `create_file` | `write_to_file` | Returns `version_hash` for subsequent OCC-protected edits |
 | Edit a config file (.env, Dockerfile, YAML) | `write_file` | `replace_file_content` | OCC protection; supports search-and-replace mode for surgical edits |
-| Read a config file | `read_file` | `view_file` | Either is fine — roughly equivalent for config files |
 
 ### Keep Using Built-in Tools For
 
 These tasks have **no Pathfinder equivalent** — always use built-in tools:
 
-- **Listing directory contents** → `list_dir`, `find_by_name`
+- **Listing directory contents** → `list_dir`
 - **Running commands** (tests, linters, builds) → `run_command`
 - **Viewing binary files** (images, videos) → `view_file`
 - **Quick one-line fixes where you already know the exact line** → `replace_file_content` is acceptable for trivial edits
@@ -88,8 +89,9 @@ All Pathfinder edit tools require a `base_version` (SHA-256 hash). This prevents
 | `read_symbol_scope` | `version_hash` |
 | `read_source_file` | `version_hash` |
 | `read_with_deep_context` | `version_hash` |
-| `search_codebase` | `version_hash` (per match) |
+| `search_codebase` | `version_hash` (per match, or per `file_group` when `group_by_file=true`) |
 | `get_repo_map` | `version_hashes` (per file) |
+| `analyze_impact` | `version_hashes` (for all referenced files — callers and callees) |
 | Any edit tool response | `new_version_hash` |
 
 ### The Hash Chain Pattern
@@ -106,6 +108,19 @@ insert_after(base_version=v2) → new_version_hash (v3)
 
 **Important:** `validate_only` does NOT write to disk, so `new_version_hash` is null. Reuse your original `base_version` for the real edit after a successful dry-run.
 
+### Validation Overrides
+
+Every edit tool supports `ignore_validation_failures` (default: `false`). When set to `true`, the edit is written to disk even if LSP validation detects introduced errors.
+
+**When to use `ignore_validation_failures: true`:**
+- LSP is flaky or unavailable for the target language (check `validation_skipped_reason`)
+- You are making a deliberate change that temporarily breaks type checking (e.g., updating an interface before updating all callers)
+- The LSP reports false positives for your specific pattern
+
+**When NOT to use it:**
+- For normal edits where LSP is healthy — let validation catch genuine errors
+- As a blanket habit — always try the edit with validation first
+
 ---
 
 ## Workflow 1: Explore (Understand a Codebase)
@@ -119,11 +134,13 @@ Step 1: get_repo_map(path=".", depth=5, visibility="public")
         → If coverage_percent is low: increase max_tokens (more files)
         → If files show [TRUNCATED DUE TO SIZE]: increase max_tokens_per_file (more detail per file)
         → Use visibility="all" to include private symbols (better for auditing)
+        → Use include_imports="third_party" (default) to see external dependencies,
+          or "all" to see internal imports too, or "none" for a minimal skeleton
         → Use changed_since="3h" (or a git ref like "HEAD~5") to scope the map
           to only recently modified files — useful when reviewing a PR or
           picking up where a previous session left off.
         → Use include_extensions=["ts","tsx"] to focus on a specific language
-          in mixed-language repos.
+          in mixed-language repos. Mutually exclusive with exclude_extensions.
 
 Step 2: search_codebase(query="<entry point pattern>", path_glob="src/**/*")
         → Find main entry points, API handlers, or CLI commands
@@ -132,6 +149,9 @@ Step 2: search_codebase(query="<entry point pattern>", path_glob="src/**/*")
 Step 3: read_with_deep_context(semantic_path="<chosen entry point>")
         → Read the entry point + all functions it calls
         → Follow the dependency chain to understand data flow
+
+        Alternative: read_source_file(filepath="<key file>", detail_level="compact")
+        → When you need the full file context + symbol tree, not just one function
 
 Step 4: analyze_impact(semantic_path="<key function>", max_depth=2)
         → Understand who calls this function (incoming)
@@ -207,21 +227,24 @@ Step 5: run_command("cargo test" / "npm test")  [built-in tool]
 **Goal:** Systematically review a codebase for issues.
 
 ```
-Step 1: get_repo_map(path=".", depth=4, visibility="all")
+Step 1: get_repo_map(path=".", depth=5, visibility="all")
         → Get complete project overview including private symbols
 
 Step 2: For each module/feature area:
-        a. read_symbol_scope(semantic_path="<public API function>")
-           → Review the public interface
-        b. read_with_deep_context(semantic_path="<complex function>")
+        a. read_source_file(filepath="<module entry file>", detail_level="compact")
+           → Get the full file with its symbol tree for a structural overview
+        b. read_symbol_scope(semantic_path="<public API function>")
+           → Review the public interface in detail
+        c. read_with_deep_context(semantic_path="<complex function>")
            → Check that dependencies are reasonable
-        c. search_codebase(query="<language-specific danger pattern>", path_glob="src/**/*")
+        d. search_codebase(query="<language-specific danger pattern>",
+                          path_glob="src/**/*", is_regex=true)
            → Find potential crash/error points. Examples by language:
-             - Go: `panic|log.Fatal`
-             - Rust: `unwrap|expect|panic`
-             - Python: `except:|pass  # noqa`
+             - Go: `panic|log\.Fatal`
+             - Rust: `unwrap\(\)|expect\(|panic!`
+             - Python: `except:|pass\s+# noqa`
              - TypeScript: `as any|@ts-ignore`
-        d. search_codebase(query="TODO|FIXME|HACK", filter_mode="comments_only")
+        e. search_codebase(query="TODO|FIXME|HACK", filter_mode="comments_only")
            → Find technical debt markers
 
 Step 3: For critical findings:
@@ -287,11 +310,19 @@ replace_batch(filepath="main.py", base_version=hash_v1, edits=[
 ]) → hash_v2
 ```
 
+**All five `edit_type` values for `replace_batch` Option A:**
+- `replace_body` — replace internal logic, keep signature
+- `replace_full` — replace entire declaration (signature + body + decorators + doc comments)
+- `insert_before` — insert new code before the target symbol
+- `insert_after` — insert new code after the target symbol
+- `delete` — delete the target symbol (no `new_code` needed)
+
 **Why `replace_batch` is preferred:**
 - **Atomic** — all edits land in one write with a single OCC guard
 - Each edit targets a **symbol name**, not a fragile text string
 - Edits are applied back-to-front (by byte offset) to avoid offset shifting
 - LSP validation runs once on the combined result
+- If any edit fails, the **entire batch is rolled back** atomically
 
 **Fallback: sequential chaining** (when edits depend on each other's results):
 
@@ -335,6 +366,30 @@ replace_batch(filepath="src/views/Dashboard.vue", base_version=hash_v1, edits=[
 - Set `normalize_whitespace: true` to collapse `\s+` → single space (safe for HTML; **do NOT** use for Python or YAML where indent is significant)
 - Both Option A and Option B edits may be mixed in a single `replace_batch` call
 - If any edit fails (e.g., `TEXT_NOT_FOUND`), the **entire batch is rolled back** atomically
+
+### Efficient Search
+
+`search_codebase` has several parameters that significantly reduce token waste:
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `filter_mode` | `code_only` | AST-aware filtering: `code_only` excludes comments/strings, `comments_only` for TODOs/FIXMEs, `all` for everything |
+| `exclude_glob` | `""` | Exclude files before search (e.g., `**/*.test.*`) — files are never read, saving I/O |
+| `known_files` | `[]` | List of file paths already in your context. Matches in these files return minimal metadata (no content), saving tokens |
+| `group_by_file` | `false` | Group matches by file with a single shared `version_hash` per group — cleaner for multi-file edits |
+| `is_regex` | `false` | Treat query as regex (e.g., `unwrap\(\)|expect\(` to find Rust panics) |
+| `path_glob` | `**/*` | Limit search scope (e.g., `src/**/*.ts` to search only TypeScript files in src/) |
+| `max_results` | `50` | Cap results returned |
+| `context_lines` | `2` | Lines of context above/below each match |
+
+**Token efficiency pattern:**
+```
+# After reading fileA.ts and fileB.ts, search without re-reading their content:
+search_codebase(query="deprecated_api",
+                known_files=["src/fileA.ts", "src/fileB.ts"],
+                exclude_glob="**/*.test.*",
+                group_by_file=true)
+```
 
 ### Discovery→Edit Chaining
 
@@ -387,6 +442,37 @@ Recovery:
 → Apply the corrected edit
 ```
 
+### Validation Skipped
+
+```
+Response: validation.validation_skipped = true
+          validation.validation_skipped_reason = "no_lsp" | "lsp_not_on_path" |
+              "lsp_start_failed" | "lsp_crash" | "lsp_timeout" |
+              "pull_diagnostics_unsupported"
+
+This means: The edit was written to disk but was NOT validated by LSP.
+
+When you see this:
+→ Check capabilities.lsp.per_language via get_repo_map to understand LSP status
+→ The edit landed successfully — but you have no compile-time safety net
+→ Compensate by running tests (run_command) or manual review
+→ If the reason is "lsp_not_on_path", suggest the user install the language server
+→ If the reason is "lsp_crash" or "lsp_timeout", the LSP may recover on next edit
+```
+
+### TEXT_NOT_FOUND (replace_batch Option B)
+
+```
+Error: TEXT_NOT_FOUND for text_target with old_text="<div class=\"card\">"
+
+Recovery:
+→ The old_text was not found within ±10 lines of context_line
+→ Re-read the file with read_source_file to find the correct text and line number
+→ Adjust old_text to match exactly, or update context_line
+→ Consider normalize_whitespace: true if whitespace differences are the issue
+→ Retry the replace_batch call
+```
+
 ---
 
 ## Tool Chain Quick Reference
@@ -401,6 +487,7 @@ Recovery:
 | Add a new function to a file | `read_symbol_scope` (neighbor) → `insert_after` |
 | Rename/restructure a function | `analyze_impact` → `replace_full` (+ update callers) |
 | Delete a function safely | `analyze_impact` → `delete_symbol` |
+| Delete a file safely | `read_file` → `delete_file` (use version_hash as base_version) |
 | Check an edit before applying | `read_symbol_scope` → `validate_only` → (if ok) → `replace_body` |
 | Find all usages before refactoring | `analyze_impact` (max_depth=2) |
 | Add imports to a file | `insert_before` (bare file path, no `::`) |
@@ -416,14 +503,20 @@ If Pathfinder MCP tools are **not available** (server offline, tools not surface
 
 | Pathfinder tool | Built-in fallback |
 |---|---|
-| `read_symbol_scope` / `read_with_deep_context` | `view_file` + `view_code_item` |
-| `read_source_file` | `view_file` + `view_file_outline` |
+| `read_symbol_scope` / `read_with_deep_context` | `view_file` (with line ranges for focused reading) |
+| `read_source_file` | `view_file` |
+| `read_file` | `view_file` |
 | `search_codebase` | `grep_search` |
 | `replace_body` / `replace_full` | `replace_file_content` |
 | `replace_batch` | `multi_replace_file_content` |
 | `insert_before` / `insert_after` | `replace_file_content` |
-| `get_repo_map` | `list_dir` + `view_file_outline` |
-| `analyze_impact` | Manual grep + `view_code_item` (approximate) |
+| `delete_symbol` | `replace_file_content` (replace with empty) |
+| `delete_file` | `run_command` (`rm`) |
+| `get_repo_map` | `list_dir` (recursive) |
+| `analyze_impact` | `grep_search` (search for function name — approximate) |
+| `create_file` | `write_to_file` |
+| `write_file` | `replace_file_content` / `multi_replace_file_content` |
+| `validate_only` | No equivalent — rely on `run_command` with linter/compiler |
 
 **Rules:**
 - Do not block on Pathfinder being unavailable — complete the work with built-in tools
