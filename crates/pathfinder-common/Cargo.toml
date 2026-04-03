@@ -12,7 +12,7 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["fs", "sync", "rt", "io-util"] }
+tokio = { version = "1", features = ["fs", "sync", "rt", "io-util", "process", "time"] }
 notify = "8"
 ignore = "0.4"
 tracing = "0.1"
@@ -20,4 +20,5 @@ schemars = "1.2.1"
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+mockall = "0.13"

@@ -360,7 +360,9 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
 
                         // strip #[0-9]+ from the end of the parent path
                         let clean_parent = match parent_path.rfind('#') {
-                            Some(idx) if parent_path[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
+                            Some(idx)
+                                if parent_path[idx + 1..].chars().all(|c| c.is_ascii_digit()) =>
+                            {
                                 &parent_path[..idx]
                             }
                             _ => parent_path,
@@ -413,7 +415,6 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
 
     merge_recursive(symbols);
 }
-
 
 /// Computes string similarity to offer did-you-mean suggestions.
 ///
@@ -1482,8 +1483,8 @@ mod tests {
 
         // With impl merging, `MyStruct.foo` should resolve perfectly.
         let chain = SymbolChain::parse("MyStruct.foo").unwrap();
-        let hit = resolve_symbol_chain(&syms, &chain)
-            .expect("impl merging must resolve MyStruct.foo");
+        let hit =
+            resolve_symbol_chain(&syms, &chain).expect("impl merging must resolve MyStruct.foo");
         assert_eq!(hit.name, "foo");
         assert_eq!(hit.kind, SymbolKind::Method);
         assert_eq!(hit.semantic_path, "MyStruct.foo");
@@ -1502,8 +1503,8 @@ mod tests {
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
         let chain = SymbolChain::parse("MyStruct.bar").unwrap();
-        let hit = resolve_symbol_chain(&syms, &chain)
-            .expect("impl merging must resolve MyStruct.bar");
+        let hit =
+            resolve_symbol_chain(&syms, &chain).expect("impl merging must resolve MyStruct.bar");
         assert_eq!(hit.name, "bar");
         assert_eq!(hit.kind, SymbolKind::Method);
     }

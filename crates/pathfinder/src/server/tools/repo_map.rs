@@ -34,7 +34,13 @@ impl PathfinderServer {
         let mut degraded_reason = None;
         let mut changed_files = None;
         if !params.changed_since.is_empty() {
-            match pathfinder_common::git::get_changed_files_since(self.workspace_root.path(), &params.changed_since).await {
+            match pathfinder_common::git::get_changed_files_since(
+                &pathfinder_common::git::SystemGit,
+                self.workspace_root.path(),
+                &params.changed_since,
+            )
+            .await
+            {
                 Ok(files) => changed_files = Some(files),
                 Err(e) => {
                     tracing::warn!(error = %e, "get_repo_map: fallback to full map (git failed)");

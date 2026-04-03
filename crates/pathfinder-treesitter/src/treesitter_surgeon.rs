@@ -207,12 +207,11 @@ impl Surgeon for TreeSitterSurgeon {
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
-        let symbol = resolve_symbol_chain(&symbols, chain).ok_or_else(|| {
-            SurgeonError::SymbolNotFound {
+        let symbol =
+            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
                 path: semantic_path.to_string(),
                 did_you_mean: did_you_mean(&symbols, chain, 3),
-            }
-        })?;
+            })?;
 
         let symbol_bytes =
             source
@@ -368,12 +367,11 @@ impl Surgeon for TreeSitterSurgeon {
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
-        let symbol = resolve_symbol_chain(&symbols, chain).ok_or_else(|| {
-            SurgeonError::SymbolNotFound {
+        let symbol =
+            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
                 path: semantic_path.to_string(),
                 did_you_mean: did_you_mean(&symbols, chain, 3),
-            }
-        })?;
+            })?;
 
         let last_newline_pos = source
             .get(..symbol.byte_range.start)
@@ -458,12 +456,11 @@ impl Surgeon for TreeSitterSurgeon {
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
-        let symbol = resolve_symbol_chain(&symbols, chain).ok_or_else(|| {
-            SurgeonError::SymbolNotFound {
+        let symbol =
+            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
                 path: semantic_path.to_string(),
                 did_you_mean: did_you_mean(&symbols, chain, 3),
-            }
-        })?;
+            })?;
 
         let start_byte = Self::expand_to_full_start_byte(&source, symbol.byte_range.start);
         let end_byte = symbol.byte_range.end;

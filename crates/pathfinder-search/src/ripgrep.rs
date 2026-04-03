@@ -45,6 +45,8 @@ struct MatchCollector<'a> {
     after_context_buf: Vec<String>,
     /// Matcher used to compute exact column offset.
     matcher: &'a grep_regex::RegexMatcher,
+    /// Keep track of the last seen line number to detect gaps.
+    last_seen_line: u64,
 }
 
 impl<'a> MatchCollector<'a> {
@@ -69,6 +71,7 @@ impl<'a> MatchCollector<'a> {
             pending_after_context: 0,
             after_context_buf: Vec::new(),
             matcher,
+            last_seen_line: 0,
         }
     }
 
@@ -134,7 +137,13 @@ impl Sink for MatchCollector<'_> {
         }
         self.pending_after_context = self.context_lines;
 
+        // Check for gap in line numbers to clear context before buf
         let line = mat.line_number().unwrap_or(0);
+        if line > self.last_seen_line + 1 {
+            self.context_before_buf.clear();
+        }
+        self.last_seen_line = line;
+
         let bytes = mat.bytes();
         let content = String::from_utf8_lossy(bytes)
             .trim_end_matches('\n')
@@ -153,13 +162,18 @@ impl Sink for MatchCollector<'_> {
             file: self.relative_path.clone(),
             line,
             column,
-            content,
+            content: content.clone(),
             context_before: std::mem::take(&mut self.context_before_buf).into(),
             context_after: Vec::new(), // filled later by `context()`
             enclosing_semantic_path: None,
             version_hash: self.version_hash.clone(),
             known: None, // set to Some(true) by search_codebase_impl for known_files
         };
+
+        // This matching line itself acts as "before context" for a subsequent adjacent overlap match
+        if self.context_lines > 0 {
+            self.context_before_buf.push_back(content);
+        }
 
         {
             let mut guard = self
@@ -177,27 +191,29 @@ impl Sink for MatchCollector<'_> {
         _searcher: &Searcher,
         ctx: &SinkContext<'_>,
     ) -> Result<bool, Self::Error> {
+        let line_num = ctx.line_number().unwrap_or(0);
+        if line_num > self.last_seen_line + 1 {
+            self.context_before_buf.clear();
+        }
+        self.last_seen_line = line_num;
+
         let line = String::from_utf8_lossy(ctx.bytes())
             .trim_end_matches('\n')
             .trim_end_matches('\r')
             .to_owned();
 
-        match ctx.kind() {
-            SinkContextKind::Before => {
-                // Rotate the before-context buffer (sliding window).
-                if self.context_before_buf.len() >= self.context_lines {
-                    self.context_before_buf.pop_front();
-                }
-                self.context_before_buf.push_back(line);
+        if self.context_lines > 0 {
+            if self.context_before_buf.len() >= self.context_lines {
+                self.context_before_buf.pop_front();
             }
-            SinkContextKind::After => {
-                if self.pending_after_context > 0 {
-                    self.after_context_buf.push(line);
-                    self.pending_after_context -= 1;
-                }
-            }
-            SinkContextKind::Other => {}
+            self.context_before_buf.push_back(line.clone());
         }
+
+        if *ctx.kind() == SinkContextKind::After && self.pending_after_context > 0 {
+            self.after_context_buf.push(line);
+            self.pending_after_context -= 1;
+        }
+
         Ok(true)
     }
 
@@ -379,10 +395,8 @@ impl Scout for RipgrepScout {
                 );
 
                 if let Err(e) = searcher.search_path(&matcher, abs_path, &mut sink) {
-                    tracing::error!(file = %relative, error = %e, "Scout: failed to search file");
-                    return Err(SearchError::Engine(format!(
-                        "failed to search {relative}: {e}"
-                    )));
+                    tracing::warn!(file = %relative, error = %e, "Scout: failed to search file; skipping");
+                    continue;
                 }
 
                 // Only hash the file when it produced at least one new match.
@@ -394,10 +408,13 @@ impl Scout for RipgrepScout {
                         .len()
                 };
                 if matches_after > matches_before {
-                    let bytes = std::fs::read(abs_path).map_err(|e| {
-                        tracing::error!(file = %relative, error = %e, "Scout: failed to read file for hashing");
-                        SearchError::Engine(format!("failed to hash {relative}: {e}"))
-                    })?;
+                    let bytes = match std::fs::read(abs_path) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(file = %relative, error = %e, "Scout: failed to read file for hashing; skipping hash");
+                            continue;
+                        }
+                    };
                     let hash = VersionHash::compute(&bytes).as_str().to_owned();
                     sink.backfill_hash(&hash);
                 }
@@ -733,5 +750,35 @@ mod tests {
         let err2 = scout.search(&params2).await;
         assert!(err2.is_err());
         assert!(matches!(err2, Err(SearchError::InvalidPattern(_))));
+    }
+
+    #[tokio::test]
+    async fn test_search_context_lines_overlap() {
+        let ws = make_workspace(&[("src/main.rs", "line1\nline2\nmatch\nline4\nmatch\nline6\nline7\nmatch\n")]);
+        let scout = RipgrepScout::new();
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "match".to_owned(),
+            context_lines: 2,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 3);
+        
+        // Match 1 at line 3
+        assert_eq!(result.matches[0].line, 3);
+        assert_eq!(result.matches[0].context_before, vec!["line1", "line2"]);
+        assert_eq!(result.matches[0].context_after, vec!["line4"]); // Only line4 before the next match at line 5
+        
+        // Match 2 at line 5
+        assert_eq!(result.matches[1].line, 5);
+        assert_eq!(result.matches[1].context_before, vec!["match", "line4"]); // "match" from line 3, "line4" from line 4
+        assert_eq!(result.matches[1].context_after, vec!["line6", "line7"]);
+        
+        // Match 3 at line 8
+        assert_eq!(result.matches[2].line, 8);
+        assert_eq!(result.matches[2].context_before, vec!["line6", "line7"]);
+        assert_eq!(result.matches[2].context_after, Vec::<String>::new());
     }
 }

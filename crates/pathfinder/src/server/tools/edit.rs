@@ -180,7 +180,7 @@ impl PathfinderServer {
                 .await
                 .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
             let current_hash = VersionHash::compute(&source);
-            
+
             let claimed = VersionHash::from_raw(params.base_version.clone());
             if claimed != current_hash {
                 let err = PathfinderError::VersionMismatch {
@@ -190,7 +190,7 @@ impl PathfinderServer {
                 };
                 return Err(pathfinder_to_error_data(&err));
             }
-            
+
             // For bare file substitution, insert exactly as provided
             (source, current_hash, params.new_code.as_bytes().to_vec())
         } else {
@@ -226,7 +226,7 @@ impl PathfinderServer {
             new_bytes.extend_from_slice(before);
             new_bytes.extend_from_slice(indented.as_bytes());
             new_bytes.extend_from_slice(after);
-            
+
             (source, current_hash, new_bytes)
         };
 
@@ -779,10 +779,10 @@ impl PathfinderServer {
                             .resolve_full_range(self.workspace_root.path(), &semantic_path)
                             .await
                             .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-    
+
                         let normalized = normalize_for_full_replace(new_code);
                         let indented = dedent_then_reindent(&normalized, full_range.indent_column);
-    
+
                         resolved_edits.push(ResolvedEdit {
                             start_byte: full_range.start_byte,
                             end_byte: full_range.end_byte,

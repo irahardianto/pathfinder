@@ -63,7 +63,9 @@ pub struct SearchMatch {
     pub context_after: Vec<String>,
     /// AST-derived semantic path enclosing this match.
     ///
-    /// Always `null` in Epic 2; populated by Tree-sitter in Epic 3.
+    /// Initialised to `None` by `RipgrepScout`. Downstream AST enrichment
+    /// pipelines (e.g. the `search_codebase` handler's Tree-sitter pass)
+    /// populate this field before results are returned to the caller.
     pub enclosing_semantic_path: Option<String>,
     /// SHA-256 hash of the matched file, for OCC chaining.
     pub version_hash: String,

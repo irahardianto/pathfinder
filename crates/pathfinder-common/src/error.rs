@@ -260,7 +260,11 @@ impl PathfinderError {
             Self::InvalidSemanticPath { issue, .. } => {
                 serde_json::json!({ "issue": issue })
             }
-            Self::InvalidTarget { edit_index, valid_edit_types, .. } => {
+            Self::InvalidTarget {
+                edit_index,
+                valid_edit_types,
+                ..
+            } => {
                 let mut map = serde_json::Map::new();
                 if let Some(idx) = edit_index {
                     map.insert("edit_index".to_string(), serde_json::json!(idx));
