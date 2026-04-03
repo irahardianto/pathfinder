@@ -30,6 +30,20 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        let mut degraded = None;
+        let mut degraded_reason = None;
+        let mut changed_files = None;
+        if !params.changed_since.is_empty() {
+            match pathfinder_common::git::get_changed_files_since(self.workspace_root.path(), &params.changed_since).await {
+                Ok(files) => changed_files = Some(files),
+                Err(e) => {
+                    tracing::warn!(error = %e, "get_repo_map: fallback to full map (git failed)");
+                    degraded = Some(true);
+                    degraded_reason = Some(format!("Git error: {e}"));
+                }
+            }
+        }
+
         let ts_start = std::time::Instant::now();
         let result = match self
             .surgeon
@@ -43,6 +57,9 @@ impl PathfinderServer {
                     pathfinder_common::types::Visibility::All => "all",
                 },
                 params.max_tokens_per_file,
+                changed_files,
+                params.include_extensions,
+                params.exclude_extensions,
             )
             .await
         {
@@ -77,6 +94,8 @@ impl PathfinderServer {
             // Visibility filtering is implemented via name-convention heuristics
             // (_-prefix = private, lowercase-first = Go package-private). Not degraded.
             visibility_degraded: None,
+            degraded,
+            degraded_reason,
             capabilities: RepoCapabilities {
                 edit: true,
                 search: true,

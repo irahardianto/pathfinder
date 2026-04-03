@@ -91,6 +91,15 @@ pub struct GetRepoMapParams {
     /// in the output. Default: 2000.
     #[serde(default = "default_max_tokens_per_file")]
     pub max_tokens_per_file: u32,
+    /// Git ref or duration to show only recently modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`).
+    #[serde(default)]
+    pub changed_since: String,
+    /// Only include files with these extensions. Mutually exclusive with `exclude_extensions`.
+    #[serde(default)]
+    pub include_extensions: Vec<String>,
+    /// Exclude files with these extensions. Mutually exclusive with `include_extensions`.
+    #[serde(default)]
+    pub exclude_extensions: Vec<String>,
 }
 
 /// Parameters for `read_symbol_scope`.
@@ -434,6 +443,12 @@ pub struct GetRepoMapResponse {
     /// Agents should treat all symbols as public regardless of `visibility` param.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility_degraded: Option<bool>,
+    /// `true` when filtering by `changed_since` fails (e.g., git is unavailable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    /// Reason for degradation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
     /// System capabilities available for this repository.
     pub capabilities: RepoCapabilities,
 }

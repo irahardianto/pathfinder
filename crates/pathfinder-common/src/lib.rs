@@ -16,3 +16,4 @@ pub mod indent;
 pub mod normalize;
 pub mod sandbox;
 pub mod types;
+pub mod git;

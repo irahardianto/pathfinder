@@ -88,6 +88,10 @@ pub enum PathfinderError {
     InvalidTarget {
         semantic_path: String,
         reason: String,
+        /// For batch edits: index of the failed edit.
+        edit_index: Option<usize>,
+        /// For batch edits: valid options when `edit_type` is missing/invalid.
+        valid_edit_types: Option<Vec<String>>,
     },
 
     /// Response would exceed `max_tokens`.
@@ -161,10 +165,13 @@ impl PathfinderError {
                     ))
                 }
             }
-            Self::InvalidTarget { .. } => Some(
-                "replace_body requires a block-bodied construct. For constants, use replace_full."
-                    .to_owned(),
-            ),
+            Self::InvalidTarget { valid_edit_types, .. } => {
+                if valid_edit_types.is_some() {
+                    Some("Set edit_type to one of: 'replace_body', 'replace_full', 'insert_before', 'insert_after', 'delete'. Or use text_target for text-based targeting.".to_owned())
+                } else {
+                    Some("replace_body requires a block-bodied construct. For constants, use replace_full.".to_owned())
+                }
+            }
             Self::VersionMismatch { .. } => Some(
                 "The file was modified. Use the new hash to retry your edit if the changes \
                  do not overlap with your target."
@@ -252,6 +259,16 @@ impl PathfinderError {
             }
             Self::InvalidSemanticPath { issue, .. } => {
                 serde_json::json!({ "issue": issue })
+            }
+            Self::InvalidTarget { edit_index, valid_edit_types, .. } => {
+                let mut map = serde_json::Map::new();
+                if let Some(idx) = edit_index {
+                    map.insert("edit_index".to_string(), serde_json::json!(idx));
+                }
+                if let Some(types) = valid_edit_types {
+                    map.insert("valid_edit_types".to_string(), serde_json::json!(types));
+                }
+                serde_json::Value::Object(map)
             }
             _ => serde_json::Value::Object(serde_json::Map::new()),
         }
@@ -389,6 +406,8 @@ mod tests {
             PathfinderError::InvalidTarget {
                 semantic_path: "a".into(),
                 reason: "a".into(),
+                edit_index: None,
+                valid_edit_types: None,
             },
             PathfinderError::TokenBudgetExceeded { used: 0, budget: 0 },
             PathfinderError::MatchNotFound {
@@ -574,6 +593,8 @@ mod tests {
         let err = PathfinderError::InvalidTarget {
             semantic_path: "src/lib.rs::CONST".into(),
             reason: "not a block construct".into(),
+            edit_index: None,
+            valid_edit_types: None,
         };
         let resp = err.to_error_response();
         assert!(

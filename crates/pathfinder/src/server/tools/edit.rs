@@ -174,57 +174,61 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&err));
         };
 
-        if semantic_path.is_bare_file() {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
-                    .to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            tracing::warn!(
-                tool = "replace_full",
-                semantic_path = %params.semantic_path,
-                error = %e,
-                "replace_full: access denied"
-            );
-            return Err(pathfinder_to_error_data(&e));
-        }
-
-        let (full_range, source, current_hash) = match self
-            .surgeon
-            .resolve_full_range(self.workspace_root.path(), &semantic_path)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(crate::server::helpers::treesitter_error_to_error_data(e));
+        let (source, current_hash, new_bytes) = if semantic_path.is_bare_file() {
+            let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+            let source = tokio::fs::read(&absolute_path)
+                .await
+                .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+            let current_hash = VersionHash::compute(&source);
+            
+            let claimed = VersionHash::from_raw(params.base_version.clone());
+            if claimed != current_hash {
+                let err = PathfinderError::VersionMismatch {
+                    path: semantic_path.file_path.clone(),
+                    current_version_hash: current_hash.as_str().to_owned(),
+                    lines_changed: None,
+                };
+                return Err(pathfinder_to_error_data(&err));
             }
-        };
-
-        let claimed = VersionHash::from_raw(params.base_version.clone());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
+            
+            // For bare file substitution, insert exactly as provided
+            (source, current_hash, params.new_code.as_bytes().to_vec())
+        } else {
+            let (full_range, source, current_hash) = match self
+                .surgeon
+                .resolve_full_range(self.workspace_root.path(), &semantic_path)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(crate::server::helpers::treesitter_error_to_error_data(e));
+                }
             };
-            return Err(pathfinder_to_error_data(&err));
-        }
 
-        // Normalize and indent the new code
-        let normalized = normalize_for_full_replace(&params.new_code);
-        let indented = dedent_then_reindent(&normalized, full_range.indent_column);
+            let claimed = VersionHash::from_raw(params.base_version.clone());
+            if claimed != current_hash {
+                let err = PathfinderError::VersionMismatch {
+                    path: semantic_path.file_path.clone(),
+                    current_version_hash: current_hash.as_str().to_owned(),
+                    lines_changed: None,
+                };
+                return Err(pathfinder_to_error_data(&err));
+            }
 
-        let before = &source[..full_range.start_byte];
-        let after = &source[full_range.end_byte..];
+            // Normalize and indent the new code
+            let normalized = normalize_for_full_replace(&params.new_code);
+            let indented = dedent_then_reindent(&normalized, full_range.indent_column);
 
-        let mut new_bytes = Vec::with_capacity(before.len() + indented.len() + after.len());
-        new_bytes.extend_from_slice(before);
-        new_bytes.extend_from_slice(indented.as_bytes());
-        new_bytes.extend_from_slice(after);
+            let before = &source[..full_range.start_byte];
+            let after = &source[full_range.end_byte..];
+
+            let mut new_bytes = Vec::with_capacity(before.len() + indented.len() + after.len());
+            new_bytes.extend_from_slice(before);
+            new_bytes.extend_from_slice(indented.as_bytes());
+            new_bytes.extend_from_slice(after);
+            
+            (source, current_hash, new_bytes)
+        };
 
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(
@@ -686,7 +690,7 @@ impl PathfinderServer {
         }
         let mut resolved_edits = Vec::new();
 
-        for edit in &params.edits {
+        for (edit_index, edit) in params.edits.iter().enumerate() {
             // ── Branch A: Text-range targeting (E3.1) ─────────────────────────────
             if let Some(ref text_target) = edit.text_target {
                 let new_text = edit.new_text.as_deref().unwrap_or("");
@@ -762,21 +766,29 @@ impl PathfinderServer {
                     }
                 }
                 "replace_full" => {
-                    let (full_range, _, _) = self
-                        .surgeon
-                        .resolve_full_range(self.workspace_root.path(), &semantic_path)
-                        .await
-                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
                     let new_code = edit.new_code.as_deref().unwrap_or_default();
-                    let normalized = normalize_for_full_replace(new_code);
-                    let indented = dedent_then_reindent(&normalized, full_range.indent_column);
-
-                    resolved_edits.push(ResolvedEdit {
-                        start_byte: full_range.start_byte,
-                        end_byte: full_range.end_byte,
-                        replacement: indented.into_bytes(),
-                    });
+                    if semantic_path.is_bare_file() {
+                        resolved_edits.push(ResolvedEdit {
+                            start_byte: 0,
+                            end_byte: source.len(),
+                            replacement: new_code.as_bytes().to_vec(),
+                        });
+                    } else {
+                        let (full_range, _, _) = self
+                            .surgeon
+                            .resolve_full_range(self.workspace_root.path(), &semantic_path)
+                            .await
+                            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+    
+                        let normalized = normalize_for_full_replace(new_code);
+                        let indented = dedent_then_reindent(&normalized, full_range.indent_column);
+    
+                        resolved_edits.push(ResolvedEdit {
+                            start_byte: full_range.start_byte,
+                            end_byte: full_range.end_byte,
+                            replacement: indented.into_bytes(),
+                        });
+                    }
                 }
                 "insert_before" => {
                     let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
@@ -875,9 +887,17 @@ impl PathfinderServer {
                     let err = pathfinder_common::error::PathfinderError::InvalidTarget {
                         semantic_path: edit.semantic_path.clone(),
                         reason: format!(
-                            "unsupported edit type: '{}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete.",
+                            "edit_type is required for semantic targeting. Got: '{}' (empty).",
                             edit.edit_type
                         ),
+                        edit_index: Some(edit_index),
+                        valid_edit_types: Some(vec![
+                            "replace_body".to_string(),
+                            "replace_full".to_string(),
+                            "insert_before".to_string(),
+                            "insert_after".to_string(),
+                            "delete".to_string(),
+                        ]),
                     };
                     return Err(pathfinder_to_error_data(&err));
                 }
@@ -955,7 +975,23 @@ impl PathfinderServer {
                     .map_err(treesitter_error_to_error_data)?;
                 Ok(hash)
             }
-            "replace_full" | "delete" => {
+            "replace_full" => {
+                if semantic_path.is_bare_file() {
+                    let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+                    let bytes = tokio::fs::read(&absolute_path)
+                        .await
+                        .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+                    Ok(VersionHash::compute(&bytes))
+                } else {
+                    let (_, _, hash) = self
+                        .surgeon
+                        .resolve_full_range(self.workspace_root.path(), semantic_path)
+                        .await
+                        .map_err(treesitter_error_to_error_data)?;
+                    Ok(hash)
+                }
+            }
+            "delete" => {
                 if semantic_path.is_bare_file() {
                     return Err(pathfinder_to_error_data(
                         &PathfinderError::InvalidSemanticPath {
@@ -995,6 +1031,8 @@ impl PathfinderServer {
                     reason: format!(
                         "unsupported edit type: '{unknown}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
                     ),
+                    edit_index: None,
+                    valid_edit_types: None,
                 };
                 Err(pathfinder_to_error_data(&err))
             }
@@ -1028,7 +1066,7 @@ impl PathfinderServer {
         }
     }
 
-    #[expect(
+    #[allow(
         clippy::too_many_lines,
         reason = "The LSP validation pipeline is intentionally a single sequential flow: \
                   open → pre-diags → change → post-diags → close → diff. \
@@ -1042,8 +1080,26 @@ impl PathfinderServer {
         ignore_validation_failures: bool,
     ) -> ValidationOutcome {
         // version 1 = original, version 2 = post-edit
+        // version 1 = original, version 2 = post-edit
         let relative = file_path;
         let workspace = self.workspace_root.path();
+
+        let return_skip = |reason: &str| -> ValidationOutcome {
+            let ext = relative.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let lang = pathfinder_lsp::client::language_id_for_extension(ext).unwrap_or("unknown");
+            tracing::debug!(
+                file = %relative.display(),
+                skip_reason = reason,
+                language = lang,
+                "validation skip"
+            );
+            ValidationOutcome {
+                validation: EditValidation::skipped(),
+                skipped: Some(true),
+                skipped_reason: Some(reason.to_owned()),
+                should_block: false,
+            }
+        };
 
         // ── did_open (original content, version 1) ──
         if let Err(e) = self
@@ -1060,12 +1116,7 @@ impl PathfinderServer {
             if should_log {
                 tracing::warn!(error = %e, "validation: did_open failed");
             }
-            return ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: Some(true),
-                skipped_reason: Some(skipped_reason.to_owned()),
-                should_block: false,
-            };
+            return return_skip(skipped_reason);
         }
 
         // ── pre-edit diagnostics ──
@@ -1074,23 +1125,13 @@ impl PathfinderServer {
             Err(LspError::UnsupportedCapability { .. }) => {
                 // LSP running but doesn't support Pull Diagnostics — close the document
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return ValidationOutcome {
-                    validation: EditValidation::skipped(),
-                    skipped: Some(true),
-                    skipped_reason: Some("pull_diagnostics_unsupported".to_owned()),
-                    should_block: false,
-                };
+                return return_skip("pull_diagnostics_unsupported");
             }
             Err(e) => {
                 let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: pre-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return ValidationOutcome {
-                    validation: EditValidation::skipped(),
-                    skipped: Some(true),
-                    skipped_reason: Some(skipped_reason.to_owned()),
-                    should_block: false,
-                };
+                return return_skip(skipped_reason);
             }
         };
 
@@ -1121,12 +1162,7 @@ impl PathfinderServer {
             let skipped_reason = Self::lsp_error_to_skip_reason(&e);
             tracing::warn!(error = %e, "validation: did_change failed");
             let _ = self.lawyer.did_close(workspace, relative).await;
-            return ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: Some(true),
-                skipped_reason: Some(skipped_reason.to_owned()),
-                should_block: false,
-            };
+            return return_skip(skipped_reason);
         }
 
         // ── post-edit diagnostics ──
@@ -1136,12 +1172,7 @@ impl PathfinderServer {
                 let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: post-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return ValidationOutcome {
-                    validation: EditValidation::skipped(),
-                    skipped: Some(true),
-                    skipped_reason: Some(skipped_reason.to_owned()),
-                    should_block: false,
-                };
+                return return_skip(skipped_reason);
             }
         };
 

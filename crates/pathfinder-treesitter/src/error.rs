@@ -56,6 +56,8 @@ impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
                 pathfinder_common::error::PathfinderError::InvalidTarget {
                     semantic_path: path,
                     reason,
+                    edit_index: None,
+                    valid_edit_types: None,
                 }
             }
         }

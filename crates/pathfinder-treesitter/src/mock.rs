@@ -135,28 +135,31 @@ impl Surgeon for MockSurgeon {
         results.remove(0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn generate_skeleton(
         &self,
-        workspace_root: &Path,
+        _workspace_root: &Path,
         path: &Path,
         max_tokens: u32,
         depth: u32,
         visibility: &str,
         max_tokens_per_file: u32,
+        _changed_files: Option<std::collections::HashSet<std::path::PathBuf>>,
+        _include_extensions: Vec<String>,
+        _exclude_extensions: Vec<String>,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
         self.generate_skeleton_calls.lock().unwrap().push((
-            workspace_root.to_path_buf(),
             path.to_path_buf(),
+            path.to_path_buf(), // target_path = path for mock
             max_tokens,
             depth,
-            visibility.to_string(),
+            visibility.to_owned(),
             max_tokens_per_file,
         ));
         let mut results = self.generate_skeleton_results.lock().unwrap();
-        assert!(
-            !results.is_empty(),
-            "MockSurgeon: Unexpected call to generate_skeleton"
-        );
+        if results.is_empty() {
+            panic!("MockSurgeon: Unexpected call to generate_skeleton");
+        }
         results.remove(0)
     }
 

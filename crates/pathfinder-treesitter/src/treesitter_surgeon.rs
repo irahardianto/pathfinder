@@ -4,7 +4,7 @@ use crate::language::SupportedLanguage;
 use crate::surgeon::{BodyRange, ExtractedSymbol, FullRange, Surgeon, SymbolRange};
 use crate::symbols::{
     did_you_mean, extract_symbols_from_multizone, extract_symbols_from_tree, find_enclosing_symbol,
-    resolve_symbol_chain_with_impl_fallback,
+    resolve_symbol_chain,
 };
 use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
 use std::path::Path;
@@ -207,7 +207,7 @@ impl Surgeon for TreeSitterSurgeon {
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
-        let symbol = resolve_symbol_chain_with_impl_fallback(&symbols, chain).ok_or_else(|| {
+        let symbol = resolve_symbol_chain(&symbols, chain).ok_or_else(|| {
             SurgeonError::SymbolNotFound {
                 path: semantic_path.to_string(),
                 did_you_mean: did_you_mean(&symbols, chain, 3),
@@ -320,6 +320,7 @@ impl Surgeon for TreeSitterSurgeon {
     }
 
     #[instrument(skip(self, workspace_root))]
+    #[allow(clippy::too_many_arguments)]
     async fn generate_skeleton(
         &self,
         workspace_root: &Path,
@@ -328,6 +329,9 @@ impl Surgeon for TreeSitterSurgeon {
         depth: u32,
         visibility: &str,
         max_tokens_per_file: u32,
+        changed_files: Option<std::collections::HashSet<std::path::PathBuf>>,
+        include_extensions: Vec<String>,
+        exclude_extensions: Vec<String>,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
         crate::repo_map::generate_skeleton_text(
             self,
@@ -337,6 +341,9 @@ impl Surgeon for TreeSitterSurgeon {
             depth,
             visibility,
             max_tokens_per_file,
+            changed_files,
+            include_extensions,
+            exclude_extensions,
         )
         .await
     }
@@ -361,7 +368,7 @@ impl Surgeon for TreeSitterSurgeon {
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
-        let symbol = resolve_symbol_chain_with_impl_fallback(&symbols, chain).ok_or_else(|| {
+        let symbol = resolve_symbol_chain(&symbols, chain).ok_or_else(|| {
             SurgeonError::SymbolNotFound {
                 path: semantic_path.to_string(),
                 did_you_mean: did_you_mean(&symbols, chain, 3),
@@ -451,7 +458,7 @@ impl Surgeon for TreeSitterSurgeon {
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
-        let symbol = resolve_symbol_chain_with_impl_fallback(&symbols, chain).ok_or_else(|| {
+        let symbol = resolve_symbol_chain(&symbols, chain).ok_or_else(|| {
             SurgeonError::SymbolNotFound {
                 path: semantic_path.to_string(),
                 did_you_mean: did_you_mean(&symbols, chain, 3),

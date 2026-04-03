@@ -62,6 +62,15 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&err));
         };
 
+        if semantic_path.is_bare_file() {
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
+                    .to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
             let duration_ms = start.elapsed().as_millis();
@@ -204,6 +213,15 @@ impl PathfinderServer {
             };
             return Err(pathfinder_to_error_data(&err));
         };
+
+        if semantic_path.is_bare_file() {
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
+                    .to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -357,6 +375,15 @@ impl PathfinderServer {
             };
             return Err(pathfinder_to_error_data(&err));
         };
+
+        if semantic_path.is_bare_file() {
+            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
+                input: params.semantic_path.clone(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
+                    .to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {

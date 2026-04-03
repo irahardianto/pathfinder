@@ -394,12 +394,15 @@ mod tests {
         );
 
         let params = GetRepoMapParams {
-            path: ".".to_string(),
-            max_tokens: 1000,
+            path: ".".to_owned(),
+            max_tokens: 16_000,
             depth: 3,
             visibility: pathfinder_common::types::Visibility::Public,
+            max_tokens_per_file: 2000,
+            changed_since: String::new(),
+            include_extensions: vec![],
+            exclude_extensions: vec![],
             include_imports: pathfinder_common::types::IncludeImports::None,
-            max_tokens_per_file: 2_000,
         };
 
         let result = server.get_repo_map(Parameters(params)).await;

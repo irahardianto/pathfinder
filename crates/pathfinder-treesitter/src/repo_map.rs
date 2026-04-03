@@ -190,6 +190,8 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
 /// Returns `SurgeonError` if an operation on the AST fails.
 #[expect(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::implicit_hasher,
     reason = "Sequential directory-walk pipeline; splitting into sub-functions would obscure the linear data flow without improving readability"
 )]
 pub async fn generate_skeleton_text(
@@ -200,6 +202,9 @@ pub async fn generate_skeleton_text(
     depth: u32,
     visibility: &str,
     max_tokens_per_file: u32,
+    changed_files: Option<std::collections::HashSet<std::path::PathBuf>>,
+    include_extensions: Vec<String>,
+    exclude_extensions: Vec<String>,
 ) -> Result<RepoMapResult, SurgeonError> {
     use ignore::WalkBuilder;
     use pathfinder_common::types::VersionHash;
@@ -231,6 +236,24 @@ pub async fn generate_skeleton_text(
 
         // Strip prefix carefully
         let rel_path = path.strip_prefix(workspace_root).unwrap_or(path);
+
+        // Filter by changed files (if requested)
+        if let Some(changed) = &changed_files {
+            if !changed.contains(rel_path) {
+                continue;
+            }
+        }
+
+        // Filter by file extensions (if requested)
+        if !include_extensions.is_empty() || !exclude_extensions.is_empty() {
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if !include_extensions.is_empty() && !include_extensions.iter().any(|e| e == ext) {
+                continue;
+            }
+            if !exclude_extensions.is_empty() && exclude_extensions.iter().any(|e| e == ext) {
+                continue;
+            }
+        }
 
         // Only parse supported languages
         let Some(lang) = crate::language::SupportedLanguage::detect(path) else {
@@ -340,7 +363,9 @@ pub async fn generate_skeleton_text(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::mock::MockSurgeon;
     use crate::surgeon::{ExtractedSymbol, SymbolKind};
+    use std::sync::Arc;
 
     fn make_sym(name: &str, kind: SymbolKind) -> ExtractedSymbol {
         ExtractedSymbol {
@@ -537,9 +562,20 @@ mod tests {
         let target = std::path::Path::new(".");
 
         // depth=4 must find the file at crates/my-crate/src/lib.rs
-        let result = generate_skeleton_text(&*surgeon, ws_root, target, 50_000, 4, "all", 2_000)
-            .await
-            .expect("skeleton generation succeeds");
+        let result = generate_skeleton_text(
+            &*surgeon,
+            ws_root,
+            target,
+            50_000,
+            4,
+            "all",
+            2_000,
+            None,
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("skeleton generation succeeds");
 
         assert_eq!(
             result.files_in_scope, 1,
@@ -579,6 +615,9 @@ mod tests {
             3, // OLD default — deliberately too shallow
             "all",
             2_000,
+            None,
+            vec![],
+            vec![],
         )
         .await
         .expect("skeleton generation succeeds");
@@ -587,5 +626,105 @@ mod tests {
             result.files_in_scope, 0,
             "depth=3 must NOT reach files at crates/my-crate/src/lib.rs (depth 4)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_generate_skeleton_with_filters() {
+        let ws_dir = tempfile::tempdir().expect("create temp dir");
+        let ws_root = ws_dir.path();
+
+        let rs_path = ws_root.join("src").join("lib.rs");
+        let txt_path = ws_root.join("src").join("notes.txt");
+        let toml_path = ws_root.join("Cargo.toml");
+        std::fs::create_dir_all(ws_root.join("src")).expect("create src dir");
+
+        tokio::fs::write(&rs_path, b"fn main() {}")
+            .await
+            .expect("write");
+        tokio::fs::write(&txt_path, b"hello").await.expect("write");
+        tokio::fs::write(&toml_path, b"[package]")
+            .await
+            .expect("write");
+
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .generate_skeleton_results
+            .lock()
+            .expect("mutex")
+            .push(Ok(crate::repo_map::RepoMapResult {
+                skeleton: "lib.rs skeleton".to_owned(),
+                files_in_scope: 1,
+                files_truncated: 0,
+                files_scanned: 1,
+                coverage_percent: 100,
+                version_hashes: std::collections::HashMap::default(),
+                tech_stack: vec![],
+            }));
+
+        // 1. changed_files filter
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .expect("mutex")
+            .push(Ok(vec![]));
+
+        let mut changed = std::collections::HashSet::new();
+        changed.insert(std::path::PathBuf::from("src/lib.rs"));
+        let _result_changed = generate_skeleton_text(
+            &*surgeon,
+            ws_root,
+            std::path::Path::new("."),
+            50_000,
+            4,
+            "all",
+            2_000,
+            Some(changed),
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("skeleton changed");
+
+        // 2. include_extensions filter
+        surgeon
+            .generate_skeleton_results
+            .lock()
+            .expect("mutex")
+            .push(Ok(crate::repo_map::RepoMapResult {
+                skeleton: "lib.rs skeleton".to_owned(),
+                files_in_scope: 1,
+                files_truncated: 0,
+                files_scanned: 1,
+                coverage_percent: 100,
+                version_hashes: std::collections::HashMap::default(),
+                tech_stack: vec![],
+            }));
+        // 2. include_extensions filter
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .expect("mutex")
+            .push(Ok(vec![]));
+
+        let _result_ext = generate_skeleton_text(
+            &*surgeon,
+            ws_root,
+            std::path::Path::new("."),
+            50_000,
+            4,
+            "all",
+            2_000,
+            None,
+            vec!["rs".to_owned()],
+            vec![],
+        )
+        .await
+        .expect("skeleton_ext");
+
+        let calls = surgeon.extract_symbols_calls.lock().expect("mutex");
+        assert_eq!(calls.len(), 2);
+
+        assert_eq!(calls[0].1, std::path::PathBuf::from("src/lib.rs"));
+        assert_eq!(calls[1].1, std::path::PathBuf::from("src/lib.rs"));
     }
 }

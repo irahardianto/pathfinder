@@ -17,6 +17,11 @@ pub fn extract_symbols_from_tree(
 
     // We start traversal at the root level without a parent path
     extract_symbols_recursive(root, source, types, lang, "", &mut symbols);
+
+    if matches!(lang, SupportedLanguage::Rust) {
+        merge_rust_impl_blocks(&mut symbols);
+    }
+
     symbols
 }
 
@@ -333,54 +338,82 @@ pub fn resolve_symbol_chain<'a>(
     result
 }
 
-/// Fallback resolution that also searches `Impl` sibling symbols.
-///
-/// Use this when [`resolve_symbol_chain`] returns `None`.  Given the top-level
-/// `symbols` slice (not a nested children slice) and a `chain` of at least two
-/// segments, this function:
-///
-/// 1. Resolves the first segment to find the base type symbol (e.g. `MyStruct`).
-/// 2. Collects **all** sibling `Impl` symbols whose name matches the base type
-///    name (ignoring `#N` suffixes, since they are the same type's impl blocks).
-/// 3. Repeats the rest of the chain resolution within each impl symbol's children.
-///
-/// Returns the first successful match, or `None` if nothing is found.
-#[must_use]
-pub fn resolve_symbol_chain_with_impl_fallback<'a>(
-    symbols: &'a [ExtractedSymbol],
-    chain: &SymbolChain,
-) -> Option<&'a ExtractedSymbol> {
-    // Fast path: try normal resolution first.
-    if let Some(hit) = resolve_symbol_chain(symbols, chain) {
-        return Some(hit);
-    }
+/// Merge Rust Impl methods directly under their associated Struct/Enum/Interface symbols.
+/// This prevents `SYMBOL_NOT_FOUND` when tools target methods using `MyStruct.method` instead
+/// of distinguishing between multiple Impl blocks.
+fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
+    fn merge_recursive(syms: &mut Vec<ExtractedSymbol>) {
+        let mut extracted_methods: std::collections::HashMap<String, Vec<ExtractedSymbol>> =
+            std::collections::HashMap::new();
 
-    // We need at least two segments to do impl-sibling lookup.
-    if chain.segments.len() < 2 {
-        return None;
-    }
+        // 1. Remove all Impl blocks and extract their children
+        syms.retain_mut(|s| {
+            if s.kind == SymbolKind::Impl {
+                let entry = extracted_methods.entry(s.name.clone()).or_default();
+                for mut method in std::mem::take(&mut s.children) {
+                    // Update method's semantic path to be under the struct instead of the Impl
+                    // Impl blocks have `#` suffix, we want it under the Struct which doesn't
+                    let parts: Vec<&str> = method.semantic_path.rsplitn(2, '.').collect();
+                    if parts.len() == 2 {
+                        let method_name = parts[0];
+                        let parent_path = parts[1];
 
-    // Resolve the first segment to identify the base type name.
-    let base_type_name = &chain.segments[0].name;
+                        // strip #[0-9]+ from the end of the parent path
+                        let clean_parent = match parent_path.rfind('#') {
+                            Some(idx) if parent_path[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
+                                &parent_path[..idx]
+                            }
+                            _ => parent_path,
+                        };
+                        method.semantic_path = format!("{clean_parent}.{method_name}");
+                    }
+                    entry.push(method);
+                }
+                false // remove Impl block completely
+            } else {
+                true
+            }
+        });
 
-    // Build a reduced chain for the remaining segments.
-    let tail_chain = SymbolChain {
-        segments: chain.segments[1..].to_vec(),
-    };
+        // 2. Append methods to the matching structural type
+        for s in syms.iter_mut() {
+            if matches!(
+                s.kind,
+                SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Interface | SymbolKind::Class
+            ) {
+                if let Some(methods) = extracted_methods.remove(&s.name) {
+                    s.children.extend(methods);
+                }
+            }
+        }
 
-    // Search all top-level Impl symbols whose name matches the base type.
-    // The name check intentionally ignores the `#N` suffix used by overload
-    // tracking, because all `impl MyStruct { }` blocks share the same base name.
-    for sym in symbols {
-        if sym.kind == SymbolKind::Impl && sym.name == *base_type_name {
-            if let Some(hit) = resolve_symbol_chain(&sym.children, &tail_chain) {
-                return Some(hit);
+        // 3. Re-insert remaining methods for types not in this scope (e.g. `impl ExternalType {}`)
+        for (name, methods) in extracted_methods {
+            if methods.is_empty() {
+                continue;
+            }
+            syms.push(ExtractedSymbol {
+                name: name.clone(),
+                semantic_path: name.clone(),
+                kind: SymbolKind::Impl,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                children: methods,
+            });
+        }
+
+        // 4. Recurse into children
+        for s in syms.iter_mut() {
+            if !s.children.is_empty() {
+                merge_recursive(&mut s.children);
             }
         }
     }
 
-    None
+    merge_recursive(symbols);
 }
+
 
 /// Computes string similarity to offer did-you-mean suggestions.
 ///
@@ -1396,17 +1429,19 @@ mod tests {
         .unwrap();
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
-        // Expect: one Struct + one Impl (with 2 Method children)
-        let impl_sym = syms.iter().find(|s| s.kind == SymbolKind::Impl).unwrap();
-        assert_eq!(impl_sym.name, "MyStruct");
-        assert_eq!(impl_sym.semantic_path, "MyStruct#2");
-        assert_eq!(impl_sym.children.len(), 2);
-        assert_eq!(impl_sym.children[0].name, "foo");
-        assert_eq!(impl_sym.children[0].kind, SymbolKind::Method);
-        assert_eq!(impl_sym.children[0].semantic_path, "MyStruct#2.foo");
-        assert_eq!(impl_sym.children[1].name, "bar");
-        assert_eq!(impl_sym.children[1].kind, SymbolKind::Method);
-        assert_eq!(impl_sym.children[1].semantic_path, "MyStruct#2.bar");
+        // Expect: one Class node holding the methods because rust Impl block methods are merged into the
+        // structural type symbol
+        assert_eq!(syms.len(), 1);
+        let struct_sym = &syms[0];
+        assert_eq!(struct_sym.name, "MyStruct");
+        assert_eq!(struct_sym.semantic_path, "MyStruct");
+        assert_eq!(struct_sym.children.len(), 2);
+        assert_eq!(struct_sym.children[0].name, "foo");
+        assert_eq!(struct_sym.children[0].kind, SymbolKind::Method);
+        assert_eq!(struct_sym.children[0].semantic_path, "MyStruct.foo");
+        assert_eq!(struct_sym.children[1].name, "bar");
+        assert_eq!(struct_sym.children[1].kind, SymbolKind::Method);
+        assert_eq!(struct_sym.children[1].semantic_path, "MyStruct.bar");
     }
 
     #[test]
@@ -1445,21 +1480,13 @@ mod tests {
         .unwrap();
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
-        // Normal resolve: `MyStruct.foo` should NOT find anything because the
-        // Struct symbol has no children (fields only).
+        // With impl merging, `MyStruct.foo` should resolve perfectly.
         let chain = SymbolChain::parse("MyStruct.foo").unwrap();
-        let normal = resolve_symbol_chain(&syms, &chain);
-        assert!(
-            normal.is_none(),
-            "normal resolve should miss impl method (struct has no children)"
-        );
-
-        // Fallback resolve MUST find the method via the sibling Impl symbol.
-        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain)
-            .expect("impl fallback must resolve MyStruct.foo");
+        let hit = resolve_symbol_chain(&syms, &chain)
+            .expect("impl merging must resolve MyStruct.foo");
         assert_eq!(hit.name, "foo");
         assert_eq!(hit.kind, SymbolKind::Method);
-        assert_eq!(hit.semantic_path, "MyStruct#2.foo");
+        assert_eq!(hit.semantic_path, "MyStruct.foo");
     }
 
     /// Confirm that the impl-fallback also resolves `bar` (the second method).
@@ -1475,8 +1502,8 @@ mod tests {
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
         let chain = SymbolChain::parse("MyStruct.bar").unwrap();
-        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain)
-            .expect("impl fallback must resolve MyStruct.bar");
+        let hit = resolve_symbol_chain(&syms, &chain)
+            .expect("impl merging must resolve MyStruct.bar");
         assert_eq!(hit.name, "bar");
         assert_eq!(hit.kind, SymbolKind::Method);
     }
@@ -1494,7 +1521,7 @@ mod tests {
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
         let chain = SymbolChain::parse("MyStruct.nonexistent").unwrap();
-        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain);
+        let hit = resolve_symbol_chain(&syms, &chain);
         assert!(hit.is_none(), "non-existent method must return None");
     }
 
@@ -1512,8 +1539,8 @@ mod tests {
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
         let chain = SymbolChain::parse("PathfinderError.hint").unwrap();
-        let hit = resolve_symbol_chain_with_impl_fallback(&syms, &chain)
-            .expect("impl fallback must resolve PathfinderError.hint");
+        let hit = resolve_symbol_chain(&syms, &chain)
+            .expect("impl merging must resolve PathfinderError.hint");
         assert_eq!(hit.name, "hint");
         assert_eq!(hit.kind, SymbolKind::Method);
     }
