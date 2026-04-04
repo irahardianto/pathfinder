@@ -159,7 +159,7 @@ impl PathfinderServer {
     async fn get_repo_map(
         &self,
         Parameters(params): Parameters<GetRepoMapParams>,
-    ) -> Result<Json<GetRepoMapResponse>, rmcp::model::ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
         self.get_repo_map_impl(params).await
     }
 
@@ -170,7 +170,7 @@ impl PathfinderServer {
     async fn read_symbol_scope(
         &self,
         Parameters(params): Parameters<ReadSymbolScopeParams>,
-    ) -> Result<Json<ReadSymbolScopeResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.read_symbol_scope_impl(params).await
     }
 
@@ -181,7 +181,7 @@ impl PathfinderServer {
     async fn read_source_file(
         &self,
         Parameters(params): Parameters<ReadSourceFileParams>,
-    ) -> Result<Json<ReadSourceFileResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.read_source_file_impl(params).await
     }
 
@@ -198,12 +198,12 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_with_deep_context",
-        description = "Extract a symbol's source code PLUS the signatures of all functions it calls. Use this when you need to understand a function's dependencies before editing it. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login')."
+        description = "Extract a symbol's source code PLUS the signatures of all functions it calls. Use this when you need to understand a function's dependencies before editing it. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login').\n\nReturns a hybrid response: raw source code in `content[0].text` for direct reading, and structured metadata in `structured_content` (JSON) containing `version_hash`, `start_line`, `end_line`, `language`, `dependencies` (callee signatures), `degraded`, and `degraded_reason`.\n\n**Latency note:** The first call may take significantly longer (30–120 seconds) due to LSP server warm-up. Subsequent calls are fast. This is expected behaviour — not a bug.\n\n**Degraded mode:** When no LSP is available, `degraded=true` and `degraded_reason=\"no_lsp\"`. The response still returns source code and Tree-sitter context, but `dependencies` will be empty. Check `degraded` before relying on dependency data."
     )]
     async fn read_with_deep_context(
         &self,
         Parameters(params): Parameters<ReadWithDeepContextParams>,
-    ) -> Result<Json<ReadWithDeepContextResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.read_with_deep_context_impl(params).await
     }
 
@@ -225,7 +225,7 @@ impl PathfinderServer {
     async fn analyze_impact(
         &self,
         Parameters(params): Parameters<AnalyzeImpactParams>,
-    ) -> Result<Json<AnalyzeImpactResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.analyze_impact_impl(params).await
     }
 
@@ -324,7 +324,7 @@ impl PathfinderServer {
     async fn read_file(
         &self,
         Parameters(params): Parameters<ReadFileParams>,
-    ) -> Result<Json<ReadFileResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.read_file_impl(params).await
     }
 
@@ -335,7 +335,7 @@ impl PathfinderServer {
     async fn write_file(
         &self,
         Parameters(params): Parameters<WriteFileParams>,
-    ) -> Result<Json<WriteFileResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.write_file_impl(params).await
     }
 }
@@ -407,8 +407,13 @@ mod tests {
 
         let result = server.get_repo_map(Parameters(params)).await;
         assert!(result.is_ok());
-        let response = result.unwrap().0;
-        assert_eq!(response.skeleton, "class Mock {}");
+        let call_res = result.unwrap();
+        let skeleton = match &call_res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let response: crate::server::types::GetRepoMapMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+        assert_eq!(skeleton, "class Mock {}");
         assert_eq!(response.files_scanned, 1);
         assert_eq!(response.coverage_percent, 100);
         // Visibility filtering is now implemented via name-convention heuristics.
@@ -455,8 +460,9 @@ mod tests {
             .get_repo_map(Parameters(params))
             .await
             .expect("should succeed");
+        let meta: crate::server::types::GetRepoMapMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
         assert_eq!(
-            result.0.visibility_degraded, None,
+            meta.visibility_degraded, None,
             "visibility filtering is implemented; visibility_degraded must be None"
         );
     }
@@ -730,7 +736,7 @@ mod tests {
         // total_matches reflects the ORIGINAL ripgrep count, not filtered count
         assert_eq!(result.total_matches, 3);
         // No degraded flag — filtering was real
-        assert!(result.degraded.is_none());
+        assert!(!result.degraded);
     }
 
     #[tokio::test]
@@ -785,7 +791,7 @@ mod tests {
         assert_eq!(result.matches.len(), 2, "comments_only should drop code");
         assert_eq!(result.matches[0].content, "// HelloWorld says hello");
         assert_eq!(result.matches[1].content, r#"msg := "Hello World""#);
-        assert!(result.degraded.is_none());
+        assert!(!result.degraded);
     }
 
     #[tokio::test]
@@ -833,7 +839,7 @@ mod tests {
 
         // All 3 matches returned, no filtering
         assert_eq!(result.matches.len(), 3);
-        assert!(result.degraded.is_none());
+        assert!(!result.degraded);
     }
 
     // ── delete_file tests ────────────────────────────────────────────
@@ -959,7 +965,7 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        let val = result.0;
+        let val: crate::server::types::ReadFileMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
         assert_eq!(val.total_lines, 10);
         assert_eq!(val.lines_returned, 10);
         assert!(!val.truncated);
@@ -974,13 +980,17 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        let val2 = result2.0;
+        let val2: crate::server::types::ReadFileMetadata = serde_json::from_value(result2.structured_content.unwrap()).unwrap();
         assert_eq!(val2.start_line, 3);
         assert_eq!(val2.lines_returned, 3);
         assert!(val2.truncated);
-        assert!(val2.content.contains("line3"));
-        assert!(val2.content.contains("line5"));
-        assert!(!val2.content.contains("line6"));
+        let text_content = match &result2.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert!(text_content.contains("line3"));
+        assert!(text_content.contains("line5"));
+        assert!(!text_content.contains("line6"));
 
         // FILE_NOT_FOUND
         let result3 = server
@@ -1040,13 +1050,22 @@ mod tests {
         };
 
         let result = server.read_symbol_scope(Parameters(params)).await;
-        let val = result.expect("should succeed").0;
+        let val = result.expect("should succeed");
 
-        assert_eq!(val.content, expected_scope.content);
-        assert_eq!(val.start_line, expected_scope.start_line);
-        assert_eq!(val.end_line, expected_scope.end_line);
-        assert_eq!(val.version_hash, expected_scope.version_hash.as_str());
-        assert_eq!(val.language, expected_scope.language);
+        let rmcp::model::RawContent::Text(t) = &val.content[0].raw else {
+            panic!("Expected text content");
+        };
+        assert_eq!(t.text, expected_scope.content);
+
+        let metadata: crate::server::types::ReadSymbolScopeMetadata = serde_json::from_value(
+            val.structured_content.expect("missing structured_content"),
+        )
+        .expect("valid metadata");
+
+        assert_eq!(metadata.start_line, expected_scope.start_line);
+        assert_eq!(metadata.end_line, expected_scope.end_line);
+        assert_eq!(metadata.version_hash, expected_scope.version_hash.as_str());
+        assert_eq!(metadata.language, expected_scope.language);
 
         let calls = mock_surgeon.read_symbol_scope_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1130,7 +1149,7 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        let val = result.0;
+        let val: crate::server::types::WriteFileMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
         assert!(val.success);
         let on_disk = fs::read_to_string(&abs).expect("read");
         assert_eq!(on_disk, replacement);
@@ -1192,10 +1211,11 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        assert!(result.0.success);
+        let val: crate::server::types::WriteFileMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
+        assert!(val.success);
         let on_disk = fs::read_to_string(&abs).expect("read");
         assert!(on_disk.contains("postgres:16-alpine"));
-        let new_hash_val = result.0.new_version_hash;
+        let new_hash_val = val.new_version_hash;
 
         // MATCH_NOT_FOUND — old text no longer exists
         let result2 = server

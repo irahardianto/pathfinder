@@ -355,8 +355,8 @@ pub struct SearchCodebaseResponse {
     /// unknown files) or minimal matches (for files in `known_files`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_groups: Option<Vec<SearchResultGroup>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded: Option<bool>,
+    #[serde(default)]
+    pub degraded: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
 }
@@ -421,10 +421,9 @@ pub struct GroupedMatch {
     pub enclosing_semantic_path: Option<String>,
 }
 
-/// The response for `get_repo_map`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct GetRepoMapResponse {
-    pub skeleton: String,
+/// The metadata embedded in `structured_content` for `get_repo_map`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetRepoMapMetadata {
     pub tech_stack: Vec<String>,
     pub files_scanned: usize,
     pub files_truncated: usize,
@@ -436,8 +435,8 @@ pub struct GetRepoMapResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility_degraded: Option<bool>,
     /// `true` when filtering by `changed_since` fails (e.g., git is unavailable).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded: Option<bool>,
+    #[serde(default)]
+    pub degraded: bool,
     /// Reason for degradation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
@@ -446,7 +445,7 @@ pub struct GetRepoMapResponse {
 }
 
 /// The overall capabilities of the Pathfinder system.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct RepoCapabilities {
     /// Whether AST-aware edit tools are supported.
     pub edit: bool,
@@ -457,13 +456,23 @@ pub struct RepoCapabilities {
 }
 
 /// LSP status and capabilities.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct LspCapabilities {
     /// `true` if LSP is generally supported by the system.
     pub supported: bool,
     /// Map of language ID to its specific LSP process status.
     pub per_language: std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus>,
 }
+
+/// The metadata embedded in `structured_content` for `read_symbol_scope`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadSymbolScopeMetadata {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub version_hash: String,
+    pub language: String,
+}
+
 
 /// The response for `read_symbol_scope`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -476,7 +485,7 @@ pub struct ReadSymbolScopeResponse {
 }
 
 /// A symbol output for `read_source_file`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SourceSymbol {
     pub name: String,
     pub semantic_path: String,
@@ -487,11 +496,9 @@ pub struct SourceSymbol {
     pub children: Vec<SourceSymbol>,
 }
 
-/// The response for `read_source_file`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ReadSourceFileResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+/// The metadata embedded in `structured_content` for `read_source_file`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadSourceFileMetadata {
     pub version_hash: String,
     pub language: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -513,8 +520,8 @@ pub struct EditResponse {
     /// LSP validation result.
     pub validation: EditValidation,
     /// `true` when LSP validation was skipped (no language server available).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validation_skipped: Option<bool>,
+    #[serde(default)]
+    pub validation_skipped: bool,
     /// Machine-readable reason why validation was skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation_skipped_reason: Option<String>,
@@ -557,10 +564,9 @@ pub struct DeleteFileResponse {
     pub success: bool,
 }
 
-/// The response for `read_file`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ReadFileResponse {
-    pub content: String,
+/// The metadata embedded in `structured_content` for `read_file`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadFileMetadata {
     pub start_line: u32,
     pub lines_returned: u32,
     pub total_lines: u32,
@@ -569,9 +575,9 @@ pub struct ReadFileResponse {
     pub language: String,
 }
 
-/// The response for `write_file`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct WriteFileResponse {
+/// The metadata embedded in `structured_content` for `write_file`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct WriteFileMetadata {
     pub success: bool,
     pub new_version_hash: String,
 }
@@ -586,7 +592,7 @@ pub struct ValidationResult {
 // ── Navigation Tool Response Types ─────────────────────────────────
 
 /// A dependency signature extracted for `read_with_deep_context`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeepContextDependency {
     /// Semantic path of the called symbol.
     pub semantic_path: String,
@@ -598,11 +604,9 @@ pub struct DeepContextDependency {
     pub line: usize,
 }
 
-/// The response for `read_with_deep_context`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ReadWithDeepContextResponse {
-    /// The source code of the requested symbol (same as `read_symbol_scope`).
-    pub content: String,
+/// The metadata embedded in `structured_content` for `read_with_deep_context`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadWithDeepContextMetadata {
     /// Start line of the symbol (1-indexed).
     pub start_line: usize,
     /// End line of the symbol (1-indexed).
@@ -612,11 +616,11 @@ pub struct ReadWithDeepContextResponse {
     /// Detected language.
     pub language: String,
     /// Signatures of all symbols called by this one.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub dependencies: Vec<DeepContextDependency>,
     /// `true` when LSP dependency resolution was unavailable (Tree-sitter only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded: Option<bool>,
+    #[serde(default)]
+    pub degraded: bool,
     /// Reason for degradation (e.g., `"no_lsp"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
@@ -634,15 +638,15 @@ pub struct GetDefinitionResponse {
     /// First line of the definition (code preview).
     pub preview: String,
     /// `true` when LSP was unavailable and no fallback was possible.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded: Option<bool>,
+    #[serde(default)]
+    pub degraded: bool,
     /// Reason for degradation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
 }
 
 /// A single reference in an impact analysis.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ImpactReference {
     /// Semantic path of the referencing/referenced symbol.
     pub semantic_path: String,
@@ -656,18 +660,16 @@ pub struct ImpactReference {
     pub version_hash: String,
 }
 
-/// The response for `analyze_impact`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct AnalyzeImpactResponse {
+/// The metadata embedded in `structured_content` for `analyze_impact`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct AnalyzeImpactMetadata {
     /// Symbols that call the target (caller graph).
     /// `null` when `degraded` is `true` — LSP was unavailable so callers are **unknown**.
     /// An empty array `[]` means LSP confirmed zero callers.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub incoming: Option<Vec<ImpactReference>>,
     /// Symbols the target calls (callee graph).
     /// `null` when `degraded` is `true` — LSP was unavailable so callees are **unknown**.
     /// An empty array `[]` means LSP confirmed zero callees.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub outgoing: Option<Vec<ImpactReference>>,
     /// Number of transitive levels traversed.
     pub depth_reached: u32,
@@ -683,7 +685,7 @@ pub struct AnalyzeImpactResponse {
     /// SHA-256 version hashes for all referenced files (including the target file itself),
     /// keyed by relative file path. Agents can use these as `base_version` for immediate
     /// editing without a separate read call.
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty", default)]
     pub version_hashes: std::collections::HashMap<String, String>,
 }
 

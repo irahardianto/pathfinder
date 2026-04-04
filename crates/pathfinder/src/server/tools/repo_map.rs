@@ -2,11 +2,10 @@
 
 use crate::server::helpers::pathfinder_to_error_data;
 use crate::server::types::{
-    GetRepoMapParams, GetRepoMapResponse, LspCapabilities, RepoCapabilities,
+    GetRepoMapParams, LspCapabilities, RepoCapabilities,
 };
 use crate::server::PathfinderServer;
-use rmcp::handler::server::wrapper::Json;
-use rmcp::model::ErrorData;
+use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
 
 impl PathfinderServer {
@@ -18,7 +17,7 @@ impl PathfinderServer {
     pub(crate) async fn get_repo_map_impl(
         &self,
         params: GetRepoMapParams,
-    ) -> Result<Json<GetRepoMapResponse>, ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
         tracing::info!(tool = "get_repo_map", path = %params.path, "get_repo_map: start");
 
@@ -30,7 +29,7 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
-        let mut degraded = None;
+        let mut degraded = false;
         let mut degraded_reason = None;
         let mut changed_files = None;
         if !params.changed_since.is_empty() {
@@ -44,7 +43,7 @@ impl PathfinderServer {
                 Ok(files) => changed_files = Some(files),
                 Err(e) => {
                     tracing::warn!(error = %e, "get_repo_map: fallback to full map (git failed)");
-                    degraded = Some(true);
+                    degraded = true;
                     degraded_reason = Some(format!("Git error: {e}"));
                 }
             }
@@ -89,16 +88,13 @@ impl PathfinderServer {
 
         let capability_status = self.lawyer.capability_status().await;
 
-        Ok(Json(GetRepoMapResponse {
-            skeleton: result.skeleton,
+        let metadata = crate::server::types::GetRepoMapMetadata {
             tech_stack: result.tech_stack,
             files_scanned: result.files_scanned,
             files_truncated: result.files_truncated,
             files_in_scope: result.files_in_scope,
             coverage_percent: result.coverage_percent,
             version_hashes: result.version_hashes,
-            // Visibility filtering is implemented via name-convention heuristics
-            // (_-prefix = private, lowercase-first = Go package-private). Not degraded.
             visibility_degraded: None,
             degraded,
             degraded_reason,
@@ -110,6 +106,10 @@ impl PathfinderServer {
                     per_language: capability_status,
                 },
             },
-        }))
+        };
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(result.skeleton)]);
+        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        Ok(res)
     }
 }

@@ -34,7 +34,7 @@ use tracing::instrument;
 /// Result of the LSP validation step.
 struct ValidationOutcome {
     validation: EditValidation,
-    skipped: Option<bool>,
+    skipped: bool,
     skipped_reason: Option<String>,
     /// `true` when new errors were introduced and `ignore_validation_failures = false`.
     /// The caller must NOT write to disk in this case.
@@ -639,7 +639,7 @@ impl PathfinderServer {
             new_version_hash: None, // No file written
             formatted: false,
             validation: EditValidation::skipped(),
-            validation_skipped: Some(true),
+            validation_skipped: true,
             validation_skipped_reason: Some("validate_only_no_write".to_owned()),
         }))
     }
@@ -1104,7 +1104,7 @@ impl PathfinderServer {
             );
             ValidationOutcome {
                 validation: EditValidation::skipped(),
-                skipped: Some(true),
+                skipped: true,
                 skipped_reason: Some(reason.to_owned()),
                 should_block: false,
             }
@@ -1281,7 +1281,7 @@ impl PathfinderServer {
             }
             _ => ValidationOutcome {
                 validation: EditValidation::skipped(),
-                skipped: Some(true),
+                skipped: true,
                 skipped_reason: Some("utf8_error".to_owned()),
                 should_block: false,
             },
@@ -1590,7 +1590,7 @@ fn build_validation_outcome(
             introduced_errors: introduced,
             resolved_errors: resolved,
         },
-        skipped: None,
+        skipped: false,
         skipped_reason: None,
         should_block,
     }
@@ -1788,7 +1788,7 @@ mod tests {
         assert!(resp.success);
         assert!(resp.new_version_hash.is_some());
         assert_eq!(resp.validation.status, "skipped");
-        assert_eq!(resp.validation_skipped, Some(true));
+        assert!(resp.validation_skipped);
 
         // Verify the file was actually written
         let written = std::fs::read_to_string(&abs).unwrap();
@@ -2253,7 +2253,7 @@ mod tests {
         assert!(resp.success);
         assert!(resp.new_version_hash.is_none());
         assert_eq!(resp.validation.status, "skipped");
-        assert_eq!(resp.validation_skipped, Some(true));
+        assert!(resp.validation_skipped);
 
         // Verify the file was NOT written
         let written = std::fs::read_to_string(&abs).unwrap();
@@ -2504,7 +2504,7 @@ mod tests {
 
         assert!(resp.success);
         assert_eq!(resp.validation.status, "skipped");
-        assert_eq!(resp.validation_skipped, Some(true));
+        assert!(resp.validation_skipped);
         assert_eq!(resp.validation_skipped_reason.as_deref(), Some("no_lsp"));
     }
 
@@ -2537,7 +2537,7 @@ mod tests {
         let resp = result.0;
 
         assert_eq!(resp.validation.status, "skipped");
-        assert_eq!(resp.validation_skipped, Some(true));
+        assert!(resp.validation_skipped);
         assert_eq!(
             resp.validation_skipped_reason.as_deref(),
             Some("pull_diagnostics_unsupported")
@@ -2575,7 +2575,7 @@ mod tests {
 
         assert!(resp.success);
         assert_eq!(resp.validation.status, "skipped");
-        assert_eq!(resp.validation_skipped, Some(true));
+        assert!(resp.validation_skipped);
         assert_eq!(
             resp.validation_skipped_reason.as_deref(),
             Some("lsp_protocol_error")
@@ -2659,7 +2659,7 @@ mod tests {
 
         assert!(resp.success);
         assert_eq!(resp.validation.status, "skipped");
-        assert_eq!(resp.validation_skipped, Some(true));
+        assert!(resp.validation_skipped);
         assert_eq!(
             resp.validation_skipped_reason.as_deref(),
             Some("lsp_protocol_error")
@@ -2863,7 +2863,7 @@ mod tests {
 
         assert!(resp.success);
         assert_eq!(resp.validation.status, "passed");
-        assert_eq!(resp.validation_skipped, None);
+        assert!(!resp.validation_skipped);
         assert!(resp.validation.introduced_errors.is_empty());
         assert!(resp.validation.resolved_errors.is_empty());
     }

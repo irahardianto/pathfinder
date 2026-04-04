@@ -3,13 +3,13 @@
 use crate::server::helpers::{io_error_data, language_from_path, pathfinder_to_error_data};
 use crate::server::types::{
     CreateFileParams, CreateFileResponse, DeleteFileParams, DeleteFileResponse, ReadFileParams,
-    ReadFileResponse, Replacement, ValidationResult, WriteFileParams, WriteFileResponse,
+    Replacement, ValidationResult, WriteFileParams,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::error::{compute_lines_changed, PathfinderError};
 use pathfinder_common::types::VersionHash;
 use rmcp::handler::server::wrapper::Json;
-use rmcp::model::ErrorData;
+use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
 use tokio::fs as tfs;
 use tokio::io::AsyncWriteExt as _;
@@ -223,7 +223,7 @@ impl PathfinderServer {
     pub(crate) async fn read_file_impl(
         &self,
         params: ReadFileParams,
-    ) -> Result<Json<ReadFileResponse>, ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
         let relative_path = Path::new(&params.filepath);
         let absolute_path = self.workspace_root.resolve(relative_path);
@@ -288,15 +288,18 @@ impl PathfinderServer {
             "read_file: complete"
         );
 
-        Ok(Json(ReadFileResponse {
-            content,
+        let metadata = crate::server::types::ReadFileMetadata {
             start_line: params.start_line,
             lines_returned,
             total_lines,
             truncated,
             version_hash: version_hash.as_str().to_owned(),
             language,
-        }))
+        };
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(content)]);
+        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        Ok(res)
     }
 
     /// Core logic for the `write_file` tool.
@@ -305,10 +308,11 @@ impl PathfinderServer {
     /// (via [`apply_replacements`]). Includes OCC version checking with a late
     /// TOCTOU re-check before the write, and sandbox authorization.
     #[tracing::instrument(skip(self, params), fields(filepath = %params.filepath))]
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn write_file_impl(
         &self,
         params: WriteFileParams,
-    ) -> Result<Json<WriteFileResponse>, ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
         let relative_path = Path::new(&params.filepath);
         let absolute_path = self.workspace_root.resolve(relative_path);
@@ -424,10 +428,14 @@ impl PathfinderServer {
             "write_file: complete"
         );
 
-        Ok(Json(WriteFileResponse {
+        let metadata = crate::server::types::WriteFileMetadata {
             success: true,
             new_version_hash: new_hash.as_str().to_owned(),
-        }))
+        };
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text("File successfully written")]);
+        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        Ok(res)
     }
 }
 

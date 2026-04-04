@@ -53,7 +53,7 @@ A **Semantic Path** is the unified addressing scheme for Pathfinder tools.
 | Search for code patterns | `search_codebase` | `grep_search` | Returns `enclosing_semantic_path` + `version_hash` per match — enables Discovery→Edit chaining |
 | Read a function or class | `read_symbol_scope` | `view_file` | Extracts exactly one symbol — no context waste, returns `version_hash` for OCC |
 | Read entire source file + AST hierarchy | `read_source_file` | `view_file` | Returns full file content + nested symbol tree with semantic paths + version hash. Three detail levels: `compact` (default — source + flat symbol list), `symbols` (tree only, no source), `full` (source + nested AST). **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files |
-| Read function + dependencies | `read_with_deep_context` | Multiple `view_file` calls | Returns target code + signatures of all called functions in one call |
+| Read function + dependencies | `read_with_deep_context` | Multiple `view_file` calls | Returns target code + signatures of all called functions in one call. **Latency:** first call may be slow (30–120s) due to LSP warm-up; subsequent calls are fast. Check `degraded` in metadata — if `true`, LSP was unavailable and `dependencies` will be empty |
 | Jump to a definition | `get_definition` | `grep_search` (approximation) | LSP-powered, follows imports and re-exports across files |
 | Assess refactoring impact | `analyze_impact` | No equivalent | Maps all incoming callers + outgoing callees with BFS traversal; returns version hashes for all referenced files |
 | Read a config/docs file | `read_file` | `view_file` | Either is fine — roughly equivalent for config files. **Never** call `read_source_file` on config files (YAML, TOML, JSON, Markdown, `.env`, Dockerfile) — it returns `UNSUPPORTED_LANGUAGE` |
@@ -149,6 +149,9 @@ Step 2: search_codebase(query="<entry point pattern>", path_glob="src/**/*")
 Step 3: read_with_deep_context(semantic_path="<chosen entry point>")
         → Read the entry point + all functions it calls
         → Follow the dependency chain to understand data flow
+        → NOTE: First call may be slow (30–120s) due to LSP warm-up. This is
+          expected — subsequent calls are fast. If degraded=true in metadata,
+          LSP was unavailable; dependencies will be empty but source is still returned.
 
         Alternative: read_source_file(filepath="<key file>", detail_level="compact")
         → When you need the full file context + symbol tree, not just one function

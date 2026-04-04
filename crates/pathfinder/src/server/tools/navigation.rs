@@ -13,15 +13,15 @@
 
 use crate::server::helpers::{pathfinder_to_error_data, treesitter_error_to_error_data};
 use crate::server::types::{
-    AnalyzeImpactParams, AnalyzeImpactResponse, GetDefinitionParams, GetDefinitionResponse,
-    ReadWithDeepContextParams, ReadWithDeepContextResponse,
+    AnalyzeImpactParams, GetDefinitionParams, GetDefinitionResponse,
+    ReadWithDeepContextParams,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
 use pathfinder_common::types::SemanticPath;
 use pathfinder_lsp::LspError;
 use rmcp::handler::server::wrapper::Json;
-use rmcp::model::ErrorData;
+use rmcp::model::{CallToolResult, ErrorData};
 
 impl PathfinderServer {
     /// Core logic for the `get_definition` tool.
@@ -125,7 +125,7 @@ impl PathfinderServer {
                     line: def.line,
                     column: def.column,
                     preview: def.preview,
-                    degraded: None,
+                    degraded: false,
                     degraded_reason: None,
                 }))
             }
@@ -189,7 +189,7 @@ impl PathfinderServer {
     pub(crate) async fn read_with_deep_context_impl(
         &self,
         params: ReadWithDeepContextParams,
-    ) -> Result<Json<ReadWithDeepContextResponse>, ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
         tracing::info!(
@@ -327,16 +327,19 @@ impl PathfinderServer {
             "read_with_deep_context: complete"
         );
 
-        Ok(Json(ReadWithDeepContextResponse {
-            content: scope.content,
+        let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
             version_hash: scope.version_hash.to_string(),
             language: scope.language,
             dependencies,
-            degraded: if degraded { Some(true) } else { None },
+            degraded,
             degraded_reason,
-        }))
+        };
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(scope.content)]);
+        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        Ok(res)
     }
 
     /// Core logic for the `analyze_impact` tool.
@@ -350,7 +353,7 @@ impl PathfinderServer {
     pub(crate) async fn analyze_impact_impl(
         &self,
         params: AnalyzeImpactParams,
-    ) -> Result<Json<AnalyzeImpactResponse>, ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
         tracing::info!(
@@ -621,7 +624,7 @@ impl PathfinderServer {
             "analyze_impact: complete"
         );
 
-        Ok(Json(AnalyzeImpactResponse {
+        let metadata = crate::server::types::AnalyzeImpactMetadata {
             incoming,
             outgoing,
             depth_reached: max_depth_reached,
@@ -629,7 +632,11 @@ impl PathfinderServer {
             degraded,
             degraded_reason,
             version_hashes,
-        }))
+        };
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text("Analyzed impact successfully")]);
+        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        Ok(res)
     }
 }
 
@@ -704,12 +711,13 @@ mod tests {
         };
 
         let result = server.get_definition_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
 
         assert_eq!(val.file, "src/auth.rs");
         assert_eq!(val.line, 42);
         assert_eq!(val.preview, "pub fn login() -> bool {");
-        assert!(val.degraded.is_none());
+        assert!(!val.degraded);
         assert_eq!(lawyer.goto_definition_call_count(), 1);
     }
 
@@ -818,10 +826,15 @@ mod tests {
             semantic_path: "src/auth.rs::login".to_owned(),
         };
         let result = server.read_with_deep_context_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let call_res = result.expect("should succeed");
+        let text_content = match &call_res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let val: crate::server::types::ReadWithDeepContextMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(val.content, "fn login() { }");
-        assert_eq!(val.degraded, Some(true));
+        assert_eq!(text_content, "fn login() { }");
+        assert!(val.degraded);
         assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
         assert!(val.dependencies.is_empty());
     }
@@ -867,10 +880,15 @@ mod tests {
             semantic_path: "src/auth.rs::login".to_owned(),
         };
         let result = server.read_with_deep_context_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let call_res = result.expect("should succeed");
+        let text_content = match &call_res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let val: crate::server::types::ReadWithDeepContextMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(val.content, "fn login() { }");
-        assert_eq!(val.degraded, None);
+        assert_eq!(text_content, "fn login() { }");
+        assert!(!val.degraded);
         assert_eq!(val.degraded_reason, None);
         assert_eq!(val.dependencies.len(), 1);
         assert_eq!(
@@ -912,7 +930,8 @@ mod tests {
             max_depth: 2,
         };
         let result = server.analyze_impact_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(
             val.incoming.is_none(),
@@ -981,7 +1000,8 @@ mod tests {
             max_depth: 1,
         };
         let result = server.analyze_impact_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert_eq!(val.degraded, false);
         assert_eq!(val.degraded_reason, None);

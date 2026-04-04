@@ -1,10 +1,10 @@
 //! `read_source_file` tool — AST-based full file symbol extraction via Tree-sitter.
 
 use crate::server::helpers::{pathfinder_to_error_data, treesitter_error_to_error_data};
-use crate::server::types::{ReadSourceFileParams, ReadSourceFileResponse, SourceSymbol};
+use crate::server::types::{ReadSourceFileMetadata, ReadSourceFileParams, SourceSymbol};
 use crate::server::PathfinderServer;
-use rmcp::handler::server::wrapper::Json;
-use rmcp::model::ErrorData;
+
+use rmcp::model::{CallToolResult, Content, ErrorData};
 
 fn map_symbols(syms: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>) -> Vec<SourceSymbol> {
     syms.into_iter()
@@ -78,7 +78,7 @@ impl PathfinderServer {
     pub(crate) async fn read_source_file_impl(
         &self,
         params: ReadSourceFileParams,
-    ) -> Result<Json<ReadSourceFileResponse>, ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
         tracing::info!(tool = "read_source_file", "read_source_file: start");
@@ -128,12 +128,21 @@ impl PathfinderServer {
                     "read_source_file: complete"
                 );
 
-                Ok(Json(ReadSourceFileResponse {
-                    content: final_content,
+                let metadata = ReadSourceFileMetadata {
                     version_hash: version_hash.to_string(),
                     language,
                     symbols: final_symbols,
-                }))
+                };
+
+                let mut contents = Vec::new();
+                if let Some(text) = final_content {
+                    contents.push(Content::text(text));
+                }
+
+                let mut result = CallToolResult::success(contents);
+                result.structured_content = Some(serde_json::to_value(&metadata).unwrap_or_default());
+
+                Ok(result)
             }
             Err(e) => {
                 let tree_sitter_ms = ts_start.elapsed().as_millis();

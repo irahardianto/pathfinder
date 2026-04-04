@@ -80,10 +80,10 @@ impl PathfinderServer {
                 let degraded = enriched_matches
                     .iter()
                     .any(|m| SupportedLanguage::detect(Path::new(&m.file)).is_none());
-                let (degraded_flag, degraded_reason) = if degraded {
-                    (Some(true), Some("unsupported_language".to_owned()))
+                let degraded_reason = if degraded {
+                    Some("unsupported_language".to_owned())
                 } else {
-                    (None, None)
+                    None
                 };
 
                 let filtered_matches =
@@ -139,7 +139,7 @@ impl PathfinderServer {
                     total_matches: result.total_matches,
                     truncated: result.truncated,
                     file_groups,
-                    degraded: degraded_flag,
+                    degraded,
                     degraded_reason,
                 }))
             }

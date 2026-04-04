@@ -1,11 +1,10 @@
 //! `read_symbol_scope` tool — AST-based symbol extraction via Tree-sitter.
 
 use crate::server::helpers::pathfinder_to_error_data;
-use crate::server::types::{ReadSymbolScopeParams, ReadSymbolScopeResponse};
+use crate::server::types::ReadSymbolScopeParams;
 use crate::server::PathfinderServer;
 use pathfinder_common::types::SemanticPath;
-use rmcp::handler::server::wrapper::Json;
-use rmcp::model::ErrorData;
+use rmcp::model::{CallToolResult, Content, ErrorData};
 
 impl PathfinderServer {
     /// Core logic for the `read_symbol_scope` tool.
@@ -16,7 +15,7 @@ impl PathfinderServer {
     pub(crate) async fn read_symbol_scope_impl(
         &self,
         params: ReadSymbolScopeParams,
-    ) -> Result<Json<ReadSymbolScopeResponse>, ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
         tracing::info!(tool = "read_symbol_scope", "read_symbol_scope: start");
@@ -64,13 +63,17 @@ impl PathfinderServer {
                     "read_symbol_scope: complete"
                 );
 
-                Ok(Json(ReadSymbolScopeResponse {
-                    content: scope.content,
+                let metadata = crate::server::types::ReadSymbolScopeMetadata {
                     start_line: scope.start_line,
                     end_line: scope.end_line,
                     version_hash: scope.version_hash.to_string(),
                     language: scope.language,
-                }))
+                };
+
+                let mut result = CallToolResult::success(vec![Content::text(scope.content)]);
+                result.structured_content = Some(serde_json::to_value(&metadata).unwrap_or_default());
+                
+                Ok(result)
             }
             Err(e) => {
                 let tree_sitter_ms = ts_start.elapsed().as_millis();
