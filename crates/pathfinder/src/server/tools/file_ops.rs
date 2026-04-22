@@ -433,7 +433,9 @@ impl PathfinderServer {
             new_version_hash: new_hash.as_str().to_owned(),
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text("File successfully written")]);
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
+            "File successfully written",
+        )]);
         res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
         Ok(res)
     }

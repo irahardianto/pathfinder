@@ -110,14 +110,16 @@ pub enum PathfinderError {
     },
 
     /// `replace_batch` text targeting: `old_text` not found within the
-    /// ±10-line context window around `context_line`.
+    /// ±25-line context window around `context_line`.
     ///
     /// The entire batch is rejected when any edit fails to resolve.
-    #[error("text not found: '{old_text}' not found within ±10 lines of line {context_line} in {filepath}")]
+    #[error("text not found: '{old_text}' not found within ±25 lines of line {context_line} in {filepath}")]
     TextNotFound {
         filepath: PathBuf,
         old_text: String,
         context_line: u32,
+        /// Snippet of actual content at `context_line` (for debugging)
+        actual_content: Option<String>,
     },
 }
 
@@ -203,7 +205,7 @@ impl PathfinderError {
                  replace_batch with a semantic_path to target a single symbol."
             )),
             Self::TextNotFound { context_line, .. } => Some(format!(
-                "The old_text was not found within ±10 lines of line {context_line}. \
+                "The old_text was not found within ±25 lines of line {context_line}. \
                  Use read_source_file to verify the exact text and adjust context_line."
             )),
             Self::InvalidSemanticPath { input, .. } => Some(format!(
@@ -271,6 +273,13 @@ impl PathfinderError {
                 }
                 if let Some(types) = valid_edit_types {
                     map.insert("valid_edit_types".to_string(), serde_json::json!(types));
+                }
+                serde_json::Value::Object(map)
+            }
+            Self::TextNotFound { actual_content, .. } => {
+                let mut map = serde_json::Map::new();
+                if let Some(content) = actual_content {
+                    map.insert("actual_content".to_string(), serde_json::json!(content));
                 }
                 serde_json::Value::Object(map)
             }
@@ -428,6 +437,7 @@ mod tests {
                 filepath: "a.vue".into(),
                 old_text: "<button>Check</button>".into(),
                 context_line: 42,
+                actual_content: None,
             },
             PathfinderError::InvalidSemanticPath {
                 input: "send".into(),
@@ -618,6 +628,7 @@ mod tests {
             filepath: "src/component.vue".into(),
             old_text: "<button>Check</button>".to_owned(),
             context_line: 42,
+            actual_content: None,
         };
         assert_eq!(err.error_code(), "TEXT_NOT_FOUND");
         let hint = err.hint().expect("TEXT_NOT_FOUND should have a hint");

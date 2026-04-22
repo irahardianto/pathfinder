@@ -473,7 +473,6 @@ pub struct ReadSymbolScopeMetadata {
     pub language: String,
 }
 
-
 /// The response for `read_symbol_scope`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ReadSymbolScopeResponse {

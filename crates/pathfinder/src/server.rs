@@ -412,7 +412,8 @@ mod tests {
             rmcp::model::RawContent::Text(t) => t.text.clone(),
             _ => panic!("expected text content"),
         };
-        let response: crate::server::types::GetRepoMapMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+        let response: crate::server::types::GetRepoMapMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
         assert_eq!(skeleton, "class Mock {}");
         assert_eq!(response.files_scanned, 1);
         assert_eq!(response.coverage_percent, 100);
@@ -460,7 +461,8 @@ mod tests {
             .get_repo_map(Parameters(params))
             .await
             .expect("should succeed");
-        let meta: crate::server::types::GetRepoMapMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
+        let meta: crate::server::types::GetRepoMapMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
         assert_eq!(
             meta.visibility_degraded, None,
             "visibility filtering is implemented; visibility_degraded must be None"
@@ -491,7 +493,7 @@ mod tests {
         let Err(err) = server.get_repo_map(Parameters(params)).await else {
             panic!("Expected ACCESS_DENIED error");
         };
-        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(err.code, ErrorCode(-32001));
     }
 
     #[tokio::test]
@@ -965,7 +967,8 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        let val: crate::server::types::ReadFileMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
+        let val: crate::server::types::ReadFileMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
         assert_eq!(val.total_lines, 10);
         assert_eq!(val.lines_returned, 10);
         assert!(!val.truncated);
@@ -980,7 +983,8 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        let val2: crate::server::types::ReadFileMetadata = serde_json::from_value(result2.structured_content.unwrap()).unwrap();
+        let val2: crate::server::types::ReadFileMetadata =
+            serde_json::from_value(result2.structured_content.unwrap()).unwrap();
         assert_eq!(val2.start_line, 3);
         assert_eq!(val2.lines_returned, 3);
         assert!(val2.truncated);
@@ -1057,10 +1061,9 @@ mod tests {
         };
         assert_eq!(t.text, expected_scope.content);
 
-        let metadata: crate::server::types::ReadSymbolScopeMetadata = serde_json::from_value(
-            val.structured_content.expect("missing structured_content"),
-        )
-        .expect("valid metadata");
+        let metadata: crate::server::types::ReadSymbolScopeMetadata =
+            serde_json::from_value(val.structured_content.expect("missing structured_content"))
+                .expect("valid metadata");
 
         assert_eq!(metadata.start_line, expected_scope.start_line);
         assert_eq!(metadata.end_line, expected_scope.end_line);
@@ -1104,7 +1107,7 @@ mod tests {
             panic!("Expected failed response");
         };
 
-        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR); // All PathfinderErrors are mapped to INTERNAL_ERROR in helpers.rs
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS); // SymbolNotFound maps to INVALID_PARAMS
         let code = err
             .data
             .as_ref()
@@ -1149,7 +1152,8 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        let val: crate::server::types::WriteFileMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
+        let val: crate::server::types::WriteFileMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
         assert!(val.success);
         let on_disk = fs::read_to_string(&abs).expect("read");
         assert_eq!(on_disk, replacement);
@@ -1211,7 +1215,8 @@ mod tests {
             }))
             .await
             .expect("should succeed");
-        let val: crate::server::types::WriteFileMetadata = serde_json::from_value(result.structured_content.unwrap()).unwrap();
+        let val: crate::server::types::WriteFileMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
         assert!(val.success);
         let on_disk = fs::read_to_string(&abs).expect("read");
         assert!(on_disk.contains("postgres:16-alpine"));

@@ -47,9 +47,8 @@ const DEFAULT_DENY_PATTERNS: &[&str] = &[
 
 /// The sandbox enforcer. Checks file paths against the three-tier deny model.
 pub struct Sandbox {
-    // KEEP: reserved for future use in resolving .pathfinderignore paths relative to workspace,
-    // and for potential audit logging that annotates denied paths with the workspace context.
-    _workspace_root: PathBuf,
+    /// Workspace root path. Used for normalizing same-workspace absolute paths.
+    workspace_root: PathBuf,
     /// Compiled default deny patterns with overrides applied.
     effective_default_deny: Vec<String>,
     /// User-defined `.pathfinderignore` rules.
@@ -98,7 +97,7 @@ impl Sandbox {
             .collect();
 
         Self {
-            _workspace_root: workspace_root.to_path_buf(),
+            workspace_root: workspace_root.to_path_buf(),
             effective_default_deny,
             user_ignore,
             additional_deny: config.additional_deny.clone(),
@@ -110,11 +109,28 @@ impl Sandbox {
     /// # Errors
     /// Returns `PathfinderError::AccessDenied` if the path is blocked.
     pub fn check(&self, relative_path: &Path) -> Result<(), PathfinderError> {
-        // Protect against path traversal and absolute path escapes
-        if relative_path.is_absolute()
-            || relative_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
+        // Normalize same-workspace absolute paths by stripping workspace_root prefix
+        let path_to_check = if relative_path.is_absolute() {
+            // Try to strip the workspace root prefix
+            if let Ok(stripped) = relative_path.strip_prefix(&self.workspace_root) {
+                // Same-workspace absolute path: normalize to relative
+                stripped
+            } else {
+                // Cross-workspace absolute path: deny
+                return Err(PathfinderError::AccessDenied {
+                    path: relative_path.to_path_buf(),
+                    tier: SandboxTier::HardcodedDeny,
+                });
+            }
+        } else {
+            // Relative path: use as-is
+            relative_path
+        };
+
+        // Protect against path traversal
+        if path_to_check
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
         {
             return Err(PathfinderError::AccessDenied {
                 path: relative_path.to_path_buf(),
@@ -122,10 +138,10 @@ impl Sandbox {
             });
         }
 
-        let path_str = relative_path.to_string_lossy();
+        let path_str = path_to_check.to_string_lossy();
 
         // Tier 1: Hardcoded deny (cannot be overridden)
-        if Self::is_hardcoded_denied(&path_str, relative_path) {
+        if Self::is_hardcoded_denied(&path_str, path_to_check) {
             return Err(PathfinderError::AccessDenied {
                 path: relative_path.to_path_buf(),
                 tier: SandboxTier::HardcodedDeny,
@@ -149,7 +165,7 @@ impl Sandbox {
         }
 
         // Tier 3: User-defined (.pathfinderignore)
-        if self.is_user_denied(relative_path) {
+        if self.is_user_denied(path_to_check) {
             return Err(PathfinderError::AccessDenied {
                 path: relative_path.to_path_buf(),
                 tier: SandboxTier::UserDefined,
@@ -456,5 +472,38 @@ mod tests {
         assert!(sandbox.check(Path::new("blocked_by_user.txt")).is_err());
         // Other paths are unaffected.
         assert!(sandbox.check(Path::new("src/main.rs")).is_ok());
+    }
+
+    #[test]
+    fn test_same_workspace_absolute_path_allowed() {
+        // Create a sandbox with a specific workspace root
+        let workspace = std::env::temp_dir();
+        let sandbox =
+            Sandbox::with_user_rules(workspace.as_path(), &SandboxConfig::default(), None);
+
+        // Same-workspace absolute path should be allowed (normalized to relative)
+        let abs_path = workspace.join("src/main.rs");
+        assert!(
+            sandbox.check(&abs_path).is_ok(),
+            "same-workspace absolute path should be allowed"
+        );
+
+        // Relative path should still work
+        assert!(sandbox.check(Path::new("src/main.rs")).is_ok());
+    }
+
+    #[test]
+    fn test_cross_workspace_absolute_path_denied() {
+        // Create a sandbox with one workspace root
+        let workspace1 = std::env::temp_dir().join("workspace1");
+        let sandbox = Sandbox::with_user_rules(&workspace1, &SandboxConfig::default(), None);
+
+        // Cross-workspace absolute path should be denied
+        let workspace2 = std::env::temp_dir().join("workspace2");
+        let cross_workspace_path = workspace2.join("src/main.rs");
+        assert!(
+            sandbox.check(&cross_workspace_path).is_err(),
+            "cross-workspace absolute path should be denied"
+        );
     }
 }

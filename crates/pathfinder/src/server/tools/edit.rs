@@ -14,7 +14,7 @@
 //! 10. `tokio::fs::write` (in-place, preserves inode)
 //! 11. Compute and return new `version_hash`
 
-use crate::server::helpers::{io_error_data, pathfinder_to_error_data};
+use crate::server::helpers::{io_error_data, parse_semantic_path, pathfinder_to_error_data, require_symbol_target};
 use crate::server::tools::diagnostics::diff_diagnostics;
 use crate::server::types::{
     DeleteSymbolParams, EditResponse, EditValidation, InsertAfterParams, InsertBeforeParams,
@@ -39,6 +39,17 @@ struct ValidationOutcome {
     /// `true` when new errors were introduced and `ignore_validation_failures = false`.
     /// The caller must NOT write to disk in this case.
     should_block: bool,
+}
+
+/// Selects which end of a resolved symbol range is used as the insertion point.
+///
+/// Passed to [`PathfinderServer::resolve_insert_position`] to distinguish
+/// `insert_before` (start of symbol) from `insert_after` (end of symbol).
+enum InsertEdge {
+    /// Insert at `symbol_range.start_byte` (before the symbol) or file offset 0.
+    Before,
+    /// Insert at `symbol_range.end_byte` (after the symbol) or end-of-file.
+    After,
 }
 
 impl PathfinderServer {
@@ -71,23 +82,8 @@ impl PathfinderServer {
         );
 
         // ── Step 1: Parse semantic path ────────────────────────────────
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
-
-        // replace_body requires a symbol chain, not just a bare file
-        if semantic_path.is_bare_file() {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
-                    .to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         // ── Step 2: Sandbox check ──────────────────────────────────────
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -166,13 +162,7 @@ impl PathfinderServer {
             "replace_full: start"
         );
 
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
         let (source, current_hash, new_bytes) = if semantic_path.is_bare_file() {
             let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
@@ -245,6 +235,7 @@ impl PathfinderServer {
         .await
     }
 
+
     /// Core logic for the `insert_before` tool (PRD Epic 5, Story 5.5).
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
     pub(crate) async fn insert_before_impl(
@@ -257,13 +248,7 @@ impl PathfinderServer {
             semantic_path = %params.semantic_path,
             "insert_before: start"
         );
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
             tracing::warn!(
@@ -275,31 +260,9 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
-        let (insert_byte, indent_column, source, current_hash) = if semantic_path.is_bare_file() {
-            let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-            let bytes = tokio::fs::read(&absolute_path)
-                .await
-                .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-            let hash = VersionHash::compute(&bytes);
-            (0, 0, bytes, hash)
-        } else {
-            let (symbol_range, source, hash) = match self
-                .surgeon
-                .resolve_symbol_range(self.workspace_root.path(), &semantic_path)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(crate::server::helpers::treesitter_error_to_error_data(e));
-                }
-            };
-            (
-                symbol_range.start_byte,
-                symbol_range.indent_column,
-                source,
-                hash,
-            )
-        };
+        let (insert_byte, indent_column, source, current_hash) = self
+            .resolve_insert_position(&semantic_path, InsertEdge::Before)
+            .await?;
 
         let claimed = VersionHash::from_raw(params.base_version.clone());
         if claimed != current_hash {
@@ -366,13 +329,7 @@ impl PathfinderServer {
             semantic_path = %params.semantic_path,
             "insert_after: start"
         );
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
             tracing::warn!(
@@ -384,31 +341,9 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
-        let (insert_byte, indent_column, source, current_hash) = if semantic_path.is_bare_file() {
-            let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-            let bytes = tokio::fs::read(&absolute_path)
-                .await
-                .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-            let hash = VersionHash::compute(&bytes);
-            (bytes.len(), 0, bytes, hash)
-        } else {
-            let (symbol_range, source, hash) = match self
-                .surgeon
-                .resolve_symbol_range(self.workspace_root.path(), &semantic_path)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(crate::server::helpers::treesitter_error_to_error_data(e));
-                }
-            };
-            (
-                symbol_range.end_byte,
-                symbol_range.indent_column,
-                source,
-                hash,
-            )
-        };
+        let (insert_byte, indent_column, source, current_hash) = self
+            .resolve_insert_position(&semantic_path, InsertEdge::After)
+            .await?;
 
         let claimed = VersionHash::from_raw(params.base_version.clone());
         if claimed != current_hash {
@@ -459,6 +394,46 @@ impl PathfinderServer {
         .await
     }
 
+    /// Resolve the byte offset, indentation column, file source, and current version hash
+    /// for an insertion operation.
+    ///
+    /// - `InsertEdge::Before` → byte offset = `symbol_range.start_byte` (or 0 for bare files)
+    /// - `InsertEdge::After`  → byte offset = `symbol_range.end_byte`   (or EOF for bare files)
+    ///
+    /// Extracted to eliminate the ~30-line duplicated file-read / symbol-range logic that
+    /// previously existed in both `insert_before_impl` and `insert_after_impl`.
+    async fn resolve_insert_position(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        edge: InsertEdge,
+    ) -> Result<(usize, usize, Vec<u8>, VersionHash), ErrorData> {
+        if semantic_path.is_bare_file() {
+            let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+            let bytes = tokio::fs::read(&absolute_path)
+                .await
+                .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+            let hash = VersionHash::compute(&bytes);
+            let offset = match edge {
+                InsertEdge::Before => 0,
+                InsertEdge::After => bytes.len(),
+            };
+            return Ok((offset, 0, bytes, hash));
+        }
+
+        let (symbol_range, source, hash) = self
+            .surgeon
+            .resolve_symbol_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+        let insert_byte = match edge {
+            InsertEdge::Before => symbol_range.start_byte,
+            InsertEdge::After => symbol_range.end_byte,
+        };
+
+        Ok((insert_byte, symbol_range.indent_column, source, hash))
+    }
+
     /// Core logic for the `delete_symbol` tool (PRD Epic 5, Story 5.6).
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
     pub(crate) async fn delete_symbol_impl(
@@ -472,22 +447,8 @@ impl PathfinderServer {
             "delete_symbol: start"
         );
 
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
-
-        if semantic_path.is_bare_file() {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
-                    .to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
             tracing::warn!(
@@ -584,13 +545,7 @@ impl PathfinderServer {
             "validate_only: start"
         );
 
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let err = PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
             tracing::warn!(
@@ -950,6 +905,15 @@ impl PathfinderServer {
         .await
     }
 
+    /// Read file and compute its version hash (for bare-file edit types).
+    async fn hash_file_content(&self, semantic_path: &SemanticPath) -> Result<VersionHash, ErrorData> {
+        let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+        let bytes = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+        Ok(VersionHash::compute(&bytes))
+    }
+
     /// Resolve the current on-disk `VersionHash` for the path targeted by a
     /// `validate_only` call.
     ///
@@ -967,16 +931,7 @@ impl PathfinderServer {
 
         match edit_type {
             "replace_body" => {
-                if semantic_path.is_bare_file() {
-                    return Err(pathfinder_to_error_data(
-                        &PathfinderError::InvalidSemanticPath {
-                            input: raw_path.to_owned(),
-                            issue:
-                                "this tool requires a symbol target — use 'file.rs::symbol' format"
-                                    .to_owned(),
-                        },
-                    ));
-                }
+                require_symbol_target(semantic_path, raw_path)?;
                 let (_, _, hash) = self
                     .surgeon
                     .resolve_body_range(self.workspace_root.path(), semantic_path)
@@ -986,11 +941,7 @@ impl PathfinderServer {
             }
             "replace_full" => {
                 if semantic_path.is_bare_file() {
-                    let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-                    let bytes = tokio::fs::read(&absolute_path)
-                        .await
-                        .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-                    Ok(VersionHash::compute(&bytes))
+                    self.hash_file_content(semantic_path).await
                 } else {
                     let (_, _, hash) = self
                         .surgeon
@@ -1001,16 +952,7 @@ impl PathfinderServer {
                 }
             }
             "delete" => {
-                if semantic_path.is_bare_file() {
-                    return Err(pathfinder_to_error_data(
-                        &PathfinderError::InvalidSemanticPath {
-                            input: raw_path.to_owned(),
-                            issue:
-                                "this tool requires a symbol target — use 'file.rs::symbol' format"
-                                    .to_owned(),
-                        },
-                    ));
-                }
+                require_symbol_target(semantic_path, raw_path)?;
                 let (_, _, hash) = self
                     .surgeon
                     .resolve_full_range(self.workspace_root.path(), semantic_path)
@@ -1020,11 +962,7 @@ impl PathfinderServer {
             }
             "insert_before" | "insert_after" => {
                 if semantic_path.is_bare_file() {
-                    let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-                    let bytes = tokio::fs::read(&absolute_path)
-                        .await
-                        .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-                    Ok(VersionHash::compute(&bytes))
+                    self.hash_file_content(semantic_path).await
                 } else {
                     let (_, _, hash) = self
                         .surgeon
@@ -1334,7 +1272,7 @@ impl PathfinderServer {
 /// # Algorithm
 ///
 /// 1. Collect byte offsets for all line starts (0-indexed lines).
-/// 2. Compute a search window: lines `(context_line - 1) ± 10` (clamped to file bounds).
+/// 2. Compute a search window: lines `(context_line - 1) ± 25` (clamped to file bounds).
 /// 3. Extract the UTF-8 text for that window.
 /// 4. Search for `old_text` within the window, optionally collapsing `\s+` → `' '`
 ///    when `normalize_whitespace` is `true`.
@@ -1344,7 +1282,7 @@ impl PathfinderServer {
 /// Returns [`PathfinderError::TextNotFound`] if no match is found.
 ///
 /// # Errors
-/// - [`PathfinderError::TextNotFound`] — `old_text` not present in the ±10-line window.
+/// - [`PathfinderError::TextNotFound`] — `old_text` not present in the ±25-line window.
 /// - Propagated UTF-8 errors if source is not valid UTF-8 (returns an opaque I/O error).
 #[allow(clippy::too_many_lines)]
 fn resolve_text_edit(
@@ -1376,8 +1314,8 @@ fn resolve_text_edit(
 
     // context_line is 1-indexed; convert to 0-indexed.
     let center = context_line.saturating_sub(1) as usize;
-    let window_start_line = center.saturating_sub(10);
-    let window_end_line = (center + 10).min(total_lines.saturating_sub(1));
+    let window_start_line = center.saturating_sub(25);
+    let window_end_line = (center + 25).min(total_lines.saturating_sub(1));
 
     // Byte range [window_byte_start, window_byte_end) covering the search window.
     let window_byte_start = line_starts[window_start_line];
@@ -1420,6 +1358,7 @@ fn resolve_text_edit(
                 filepath: filepath.to_path_buf(),
                 old_text: old_text.to_owned(),
                 context_line,
+                actual_content: Some(window_text.to_owned()),
             })?;
         let norm_match_end = norm_match_start + normalised_needle.len();
 
@@ -1473,16 +1412,35 @@ fn resolve_text_edit(
                     filepath: filepath.to_path_buf(),
                     old_text: old_text.to_owned(),
                     context_line,
+                    actual_content: Some(window_text.to_owned()),
                 });
             }
         }
     } else {
-        window_text.find(old_text).ok_or_else(|| {
-            pathfinder_common::error::PathfinderError::TextNotFound {
-                filepath: filepath.to_path_buf(),
-                old_text: old_text.to_owned(),
+        // Try exact match first
+        let exact_match = window_text.find(old_text);
+
+        if exact_match.is_none() && !normalize_whitespace {
+            // Exact match failed and we haven't tried fuzzy matching yet.
+            // Retry with whitespace normalization as a fallback.
+            tracing::info!(
+                filepath = %filepath.display(),
                 context_line,
-            }
+                old_text_len = old_text.len(),
+                "text_edit: exact match failed, trying whitespace-normalized fuzzy fallback"
+            );
+
+            // Recursively call with normalize_whitespace=true.
+            // Note: This recursion is bounded (max 1 level) because we only recurse
+            // when normalize_whitespace is false, and the recursive call sets it to true.
+            return resolve_text_edit(source, old_text, context_line, new_text, true, filepath);
+        }
+
+        exact_match.ok_or_else(|| pathfinder_common::error::PathfinderError::TextNotFound {
+            filepath: filepath.to_path_buf(),
+            old_text: old_text.to_owned(),
+            context_line,
+            actual_content: Some(window_text.to_owned()),
         })?
     };
 
@@ -3001,30 +2959,33 @@ mod text_edit_tests {
 
     #[test]
     fn test_no_normalize_fails_on_spacing_mismatch() {
+        // With fuzzy fallback, spacing mismatches are now handled automatically
         let source = src(&["<button   class=\"btn\">Click</button>"]);
-        let err = resolve_text_edit(
+        let r = resolve_text_edit(
             &source,
             "<button class=\"btn\">Click</button>",
             1,
-            "",
+            "<button>Submit</button>",
             false,
             Path::new("a.vue"),
         )
-        .expect_err("strict mode: spacing mismatch → TextNotFound");
-        assert!(matches!(
-            err,
-            pathfinder_common::error::PathfinderError::TextNotFound { .. }
-        ));
+        .expect("fuzzy fallback should handle spacing mismatch");
+
+        let mut out = source.clone();
+        out.splice(r.start_byte..r.end_byte, r.replacement);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("Submit"), "replacement present");
+        assert!(!s.contains("Click"), "old text removed");
     }
 
     // ── failure cases ───────────────────────────────────────────────────
 
     #[test]
     fn test_text_not_in_window_returns_text_not_found() {
-        let mut lines = vec!["line"; 30];
-        lines[24] = "target text"; // line 25
+        let mut lines = vec!["line"; 60];
+        lines[50] = "target text"; // line 51
         let source = src(&lines);
-        // Window for context_line=5 covers lines 1–15; line 25 is outside.
+        // Window for context_line=5 covers lines 1–30 (±25); line 51 is outside.
         let err = resolve_text_edit(&source, "target text", 5, "r", false, Path::new("a.rs"))
             .expect_err("out-of-window match should fail");
         let pathfinder_common::error::PathfinderError::TextNotFound { context_line, .. } = err
@@ -3043,5 +3004,94 @@ mod text_edit_tests {
             err,
             pathfinder_common::error::PathfinderError::TextNotFound { .. }
         ));
+    }
+
+    // ── Fix 3: Text Edit Improvements ─────────────────────────────────────
+
+    #[test]
+    fn test_window_25_lines() {
+        // Test that the search window is ±25 lines (not ±10)
+        let source = src(&[
+            "line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8",
+            "line 9", "line 10", "line 11", "line 12", "line 13", "line 14", "line 15", "line 16",
+            "line 17", "line 18", "line 19", "line 20", "line 21", "line 22", "line 23", "line 24",
+            "line 25", "line 26", "line 27", "line 28", "line 29", "line 30",
+        ]);
+
+        // context_line=15, target text at line 30 (15+15=30, within ±25 window)
+        let r = resolve_text_edit(
+            &source,
+            "line 30",
+            15,
+            "replaced",
+            false,
+            Path::new("test.rs"),
+        )
+        .expect("match at line 30 (±25 from line 15) should succeed");
+
+        let mut out = source.clone();
+        out.splice(r.start_byte..r.end_byte, r.replacement);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("replaced"), "replacement present");
+        assert!(!s.contains("line 30"), "old text removed");
+    }
+
+    #[test]
+    fn test_fuzzy_whitespace_fallback() {
+        // Test that whitespace-normalized fuzzy matching is attempted when exact match fails
+        let source = src(&[
+            "<div>",
+            "  <button   class=\"btn\">Click</button>",
+            "</div>",
+        ]);
+
+        // Exact match should fail (wrong spacing), but fuzzy fallback should succeed
+        let r = resolve_text_edit(
+            &source,
+            "<button class=\"btn\">Click</button>",
+            2,
+            "<button>Submit</button>",
+            false,
+            Path::new("comp.vue"),
+        )
+        .expect("fuzzy whitespace fallback should succeed");
+
+        let mut out = source.clone();
+        out.splice(r.start_byte..r.end_byte, r.replacement);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("Submit"), "replacement present");
+        assert!(!s.contains("Click"), "old text removed");
+    }
+
+    #[test]
+    fn test_text_not_found_includes_actual_content() {
+        let source = src(&["line 1", "line 2", "line 3"]);
+
+        let err = resolve_text_edit(&source, "not present", 2, "", false, Path::new("f.rs"))
+            .expect_err("missing text returns TextNotFound");
+
+        let pathfinder_common::error::PathfinderError::TextNotFound {
+            filepath,
+            old_text,
+            context_line,
+            actual_content,
+        } = err
+        else {
+            panic!("expected TextNotFound, got: {err:?}");
+        };
+
+        assert_eq!(filepath, Path::new("f.rs"));
+        assert_eq!(old_text, "not present");
+        assert_eq!(context_line, 2);
+        assert!(
+            actual_content.is_some(),
+            "actual_content should be populated with window text"
+        );
+
+        let content = actual_content.unwrap();
+        assert!(
+            content.contains("line 1") || content.contains("line 2") || content.contains("line 3"),
+            "actual_content should contain context from the source file"
+        );
     }
 }

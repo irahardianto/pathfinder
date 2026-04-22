@@ -1,9 +1,7 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
 use crate::server::helpers::pathfinder_to_error_data;
-use crate::server::types::{
-    GetRepoMapParams, LspCapabilities, RepoCapabilities,
-};
+use crate::server::types::{GetRepoMapParams, LspCapabilities, RepoCapabilities};
 use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;

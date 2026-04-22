@@ -4,6 +4,7 @@
 //! used by `read_file`.
 
 use pathfinder_common::error::PathfinderError;
+use pathfinder_common::types::SemanticPath;
 use rmcp::model::{ErrorCode, ErrorData};
 use std::path::Path;
 
@@ -24,7 +25,44 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
             None
         }
     };
-    ErrorData::new(ErrorCode::INTERNAL_ERROR, err.error_code(), data)
+
+    // Map PathfinderError variants to semantically correct JSON-RPC error codes
+    let error_code = match err {
+        // Client errors (invalid parameters) -> INVALID_PARAMS (-32602)
+        pathfinder_common::error::PathfinderError::FileNotFound { .. }
+        | pathfinder_common::error::PathfinderError::FileAlreadyExists { .. }
+        | pathfinder_common::error::PathfinderError::SymbolNotFound { .. }
+        | pathfinder_common::error::PathfinderError::AmbiguousSymbol { .. }
+        | pathfinder_common::error::PathfinderError::InvalidSemanticPath { .. }
+        | pathfinder_common::error::PathfinderError::UnsupportedLanguage { .. }
+        | pathfinder_common::error::PathfinderError::InvalidTarget { .. }
+        | pathfinder_common::error::PathfinderError::TokenBudgetExceeded { .. }
+        | pathfinder_common::error::PathfinderError::MatchNotFound { .. }
+        | pathfinder_common::error::PathfinderError::AmbiguousMatch { .. }
+        | pathfinder_common::error::PathfinderError::TextNotFound { .. } => {
+            ErrorCode::INVALID_PARAMS
+        }
+
+        // Access control -> custom error -32001
+        pathfinder_common::error::PathfinderError::AccessDenied { .. } => ErrorCode(-32001),
+
+        // OCC/conflict -> custom error -32003 (avoid -32002, used by rmcp for RESOURCE_NOT_FOUND)
+        pathfinder_common::error::PathfinderError::VersionMismatch { .. } => ErrorCode(-32003),
+
+        // Validation -> custom error -32004
+        pathfinder_common::error::PathfinderError::ValidationFailed { .. } => ErrorCode(-32004),
+
+        // Genuine internal errors -> INTERNAL_ERROR (-32603)
+        pathfinder_common::error::PathfinderError::IoError { .. }
+        | pathfinder_common::error::PathfinderError::ParseError { .. }
+        | pathfinder_common::error::PathfinderError::LspError { .. }
+        | pathfinder_common::error::PathfinderError::LspTimeout { .. }
+        | pathfinder_common::error::PathfinderError::NoLspAvailable { .. } => {
+            ErrorCode::INTERNAL_ERROR
+        }
+    };
+
+    ErrorData::new(error_code, err.error_code(), data)
 }
 
 /// Convert a `SurgeonError` into a `PathfinderError` and then to an [`ErrorData`].
@@ -62,4 +100,172 @@ pub(crate) fn language_from_path(path: &Path) -> String {
         _ => "text",
     }
     .to_owned()
+}
+
+// ── Semantic-Path Helpers ───────────────────────────────────────────
+
+/// Parse `raw` into a [`SemanticPath`], returning a structured [`ErrorData`] on failure.
+///
+/// This centralises the `let Some(semantic_path) = SemanticPath::parse(...)` preamble
+/// that previously appeared in every tool handler.
+pub(crate) fn parse_semantic_path(raw: &str) -> Result<SemanticPath, ErrorData> {
+    SemanticPath::parse(raw).ok_or_else(|| {
+        pathfinder_to_error_data(&PathfinderError::InvalidSemanticPath {
+            input: raw.to_owned(),
+            issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+        })
+    })
+}
+
+/// Reject a bare file path for tool operations that require a symbol target.
+///
+/// Returns `Err` with a structured [`PathfinderError::InvalidSemanticPath`] when
+/// `semantic_path.is_bare_file()` is `true`, otherwise `Ok(())`.
+pub(crate) fn require_symbol_target(
+    semantic_path: &SemanticPath,
+    raw_path: &str,
+) -> Result<(), ErrorData> {
+    if semantic_path.is_bare_file() {
+        return Err(pathfinder_to_error_data(
+            &PathfinderError::InvalidSemanticPath {
+                input: raw_path.to_owned(),
+                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
+                    .to_owned(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use pathfinder_common::error::{PathfinderError, SandboxTier};
+    use rmcp::model::ErrorCode;
+
+    #[test]
+    fn test_error_code_mapping_client_errors_to_invalid_params() {
+        // Client errors should map to INVALID_PARAMS (-32602)
+        let client_errors = vec![
+            PathfinderError::FileNotFound {
+                path: "src/main.rs".into(),
+            },
+            PathfinderError::FileAlreadyExists {
+                path: "src/main.rs".into(),
+            },
+            PathfinderError::SymbolNotFound {
+                semantic_path: "src/auth.ts::login".into(),
+                did_you_mean: vec![],
+            },
+            PathfinderError::AmbiguousSymbol {
+                semantic_path: "src/auth.ts::login".into(),
+                matches: vec![],
+            },
+            PathfinderError::InvalidSemanticPath {
+                input: "invalid".into(),
+                issue: "missing ::".into(),
+            },
+            PathfinderError::UnsupportedLanguage {
+                path: "data.xyz".into(),
+            },
+            PathfinderError::InvalidTarget {
+                semantic_path: "src/lib.rs::CONST".into(),
+                reason: "not a block construct".into(),
+                edit_index: None,
+                valid_edit_types: None,
+            },
+            PathfinderError::TokenBudgetExceeded {
+                used: 1000,
+                budget: 500,
+            },
+            PathfinderError::MatchNotFound {
+                filepath: "config.yaml".into(),
+            },
+            PathfinderError::AmbiguousMatch {
+                filepath: "config.yaml".into(),
+                occurrences: 2,
+            },
+            PathfinderError::TextNotFound {
+                filepath: "src/main.rs".into(),
+                old_text: "fn main()".into(),
+                context_line: 10,
+                actual_content: None,
+            },
+        ];
+
+        for err in client_errors {
+            let error_data = pathfinder_to_error_data(&err);
+            assert_eq!(
+                error_data.code,
+                ErrorCode::INVALID_PARAMS,
+                "Expected INVALID_PARAMS for error: {}",
+                err.error_code()
+            );
+        }
+    }
+
+    #[test]
+    fn test_error_code_mapping_access_denied_to_custom_code() {
+        let err = PathfinderError::AccessDenied {
+            path: ".env".into(),
+            tier: SandboxTier::HardcodedDeny,
+        };
+
+        let error_data = pathfinder_to_error_data(&err);
+        assert_eq!(error_data.code, ErrorCode(-32001));
+    }
+
+    #[test]
+    fn test_error_code_mapping_version_mismatch_to_custom_code() {
+        let err = PathfinderError::VersionMismatch {
+            path: "src/main.rs".into(),
+            current_version_hash: "sha256:abc123".into(),
+            lines_changed: None,
+        };
+
+        let error_data = pathfinder_to_error_data(&err);
+        assert_eq!(error_data.code, ErrorCode(-32003));
+    }
+
+    #[test]
+    fn test_error_code_mapping_validation_failed_to_custom_code() {
+        let err = PathfinderError::ValidationFailed {
+            count: 2,
+            introduced_errors: vec![],
+        };
+
+        let error_data = pathfinder_to_error_data(&err);
+        assert_eq!(error_data.code, ErrorCode(-32004));
+    }
+
+    #[test]
+    fn test_error_code_mapping_internal_errors_to_internal_error() {
+        let internal_errors = vec![
+            PathfinderError::IoError {
+                message: "disk full".into(),
+            },
+            PathfinderError::ParseError {
+                path: "src/main.rs".into(),
+                reason: "unexpected token".into(),
+            },
+            PathfinderError::LspError {
+                message: "LSP crashed".into(),
+            },
+            PathfinderError::LspTimeout { timeout_ms: 5000 },
+            PathfinderError::NoLspAvailable {
+                language: "ruby".into(),
+            },
+        ];
+
+        for err in internal_errors {
+            let error_data = pathfinder_to_error_data(&err);
+            assert_eq!(
+                error_data.code,
+                ErrorCode::INTERNAL_ERROR,
+                "Expected INTERNAL_ERROR for error: {}",
+                err.error_code()
+            );
+        }
+    }
 }

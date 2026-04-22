@@ -140,7 +140,8 @@ impl PathfinderServer {
                 }
 
                 let mut result = CallToolResult::success(contents);
-                result.structured_content = Some(serde_json::to_value(&metadata).unwrap_or_default());
+                result.structured_content =
+                    Some(serde_json::to_value(&metadata).unwrap_or_default());
 
                 Ok(result)
             }
