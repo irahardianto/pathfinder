@@ -1,7 +1,72 @@
 use crate::error::SurgeonError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Configuration for skeleton generation.
+///
+/// Bundles token budget, traversal depth, visibility filtering, and
+/// file extension filters into a single struct to reduce parameter
+/// count across the call chain.
+#[derive(Debug, Clone)]
+pub struct SkeletonConfig<'a> {
+    /// Maximum total tokens for the entire skeleton.
+    pub max_tokens: u32,
+    /// Maximum directory depth to traverse (0 = unlimited).
+    pub depth: u32,
+    /// Visibility filter: "public" or "all".
+    pub visibility: &'a str,
+    /// Per-file token cap before truncation.
+    pub max_tokens_per_file: u32,
+    /// Optional whitelist of changed files (None = no filter).
+    pub changed_files: Option<HashSet<PathBuf>>,
+    /// File extensions to include (empty = all).
+    pub include_extensions: Vec<String>,
+    /// File extensions to exclude (empty = none).
+    pub exclude_extensions: Vec<String>,
+}
+
+impl<'a> SkeletonConfig<'a> {
+    /// Create a new skeleton config with sensible defaults.
+    #[must_use]
+    pub const fn new(
+        max_tokens: u32,
+        depth: u32,
+        visibility: &'a str,
+        max_tokens_per_file: u32,
+    ) -> Self {
+        Self {
+            max_tokens,
+            depth,
+            visibility,
+            max_tokens_per_file,
+            changed_files: None,
+            include_extensions: Vec::new(),
+            exclude_extensions: Vec::new(),
+        }
+    }
+
+    /// Builder-style setter for changed files filter.
+    #[must_use]
+    pub fn with_changed_files(mut self, changed_files: Option<HashSet<PathBuf>>) -> Self {
+        self.changed_files = changed_files;
+        self
+    }
+
+    /// Builder-style setter for include extensions.
+    #[must_use]
+    pub fn with_include_extensions(mut self, include_extensions: Vec<String>) -> Self {
+        self.include_extensions = include_extensions;
+        self
+    }
+
+    /// Builder-style setter for exclude extensions.
+    #[must_use]
+    pub fn with_exclude_extensions(mut self, exclude_extensions: Vec<String>) -> Self {
+        self.exclude_extensions = exclude_extensions;
+        self
+    }
+}
 
 /// The result of a `get_repo_map` generation.
 #[derive(Debug, Clone)]
@@ -182,29 +247,17 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
 
 /// Generate an AST-based skeleton of a directory.
 ///
-/// # Arguments
-/// - `visibility` — `"public"` to filter out private-by-convention symbols;
-///   `"all"` to include every extracted symbol.
-///
 /// # Errors
 /// Returns `SurgeonError` if an operation on the AST fails.
 #[expect(
     clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::implicit_hasher,
     reason = "Sequential directory-walk pipeline; splitting into sub-functions would obscure the linear data flow without improving readability"
 )]
 pub async fn generate_skeleton_text(
     surgeon: &impl crate::surgeon::Surgeon,
     workspace_root: &Path,
     target_path: &Path,
-    max_tokens: u32,
-    depth: u32,
-    visibility: &str,
-    max_tokens_per_file: u32,
-    changed_files: Option<std::collections::HashSet<std::path::PathBuf>>,
-    include_extensions: Vec<String>,
-    exclude_extensions: Vec<String>,
+    config: &SkeletonConfig<'_>,
 ) -> Result<RepoMapResult, SurgeonError> {
     use ignore::WalkBuilder;
     use pathfinder_common::types::VersionHash;
@@ -212,7 +265,7 @@ pub async fn generate_skeleton_text(
     let abs_target = workspace_root.join(target_path);
 
     let mut builder = WalkBuilder::new(&abs_target);
-    builder.max_depth(Some(depth as usize)); // WalkBuilder handles max_depth
+    builder.max_depth(Some(config.depth as usize)); // WalkBuilder handles max_depth
     builder.require_git(false);
     builder.hidden(true); // Ignore hidden files
     builder.add_custom_ignore_filename(".pathfinderignore"); // Standard ignore from searcher
@@ -238,19 +291,23 @@ pub async fn generate_skeleton_text(
         let rel_path = path.strip_prefix(workspace_root).unwrap_or(path);
 
         // Filter by changed files (if requested)
-        if let Some(changed) = &changed_files {
+        if let Some(changed) = &config.changed_files {
             if !changed.contains(rel_path) {
                 continue;
             }
         }
 
         // Filter by file extensions (if requested)
-        if !include_extensions.is_empty() || !exclude_extensions.is_empty() {
+        if !config.include_extensions.is_empty() || !config.exclude_extensions.is_empty() {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if !include_extensions.is_empty() && !include_extensions.iter().any(|e| e == ext) {
+            if !config.include_extensions.is_empty()
+                && !config.include_extensions.iter().any(|e| e == ext)
+            {
                 continue;
             }
-            if !exclude_extensions.is_empty() && exclude_extensions.iter().any(|e| e == ext) {
+            if !config.exclude_extensions.is_empty()
+                && config.exclude_extensions.iter().any(|e| e == ext)
+            {
                 continue;
             }
         }
@@ -301,7 +358,7 @@ pub async fn generate_skeleton_text(
 
         // Apply visibility filtering heuristic
         let lang_is_go = matches!(lang, crate::language::SupportedLanguage::Go);
-        let symbols = filter_by_visibility(raw_symbols, visibility, lang_is_go);
+        let symbols = filter_by_visibility(raw_symbols, config.visibility, lang_is_go);
 
         if symbols.is_empty() {
             continue;
@@ -309,7 +366,7 @@ pub async fn generate_skeleton_text(
 
         files_scanned += 1;
 
-        let file_skeleton = render_file_skeleton(&symbols, max_tokens_per_file);
+        let file_skeleton = render_file_skeleton(&symbols, config.max_tokens_per_file);
         let file_skeleton_tokens = estimate_tokens(&file_skeleton);
 
         let path_header = format!(
@@ -319,8 +376,8 @@ pub async fn generate_skeleton_text(
         );
 
         let current_tokens = estimate_tokens(&skeleton_out);
-        if current_tokens + file_skeleton_tokens > max_tokens {
-            if current_tokens + 50 <= max_tokens {
+        if current_tokens + file_skeleton_tokens > config.max_tokens {
+            if current_tokens + 50 <= config.max_tokens {
                 use std::fmt::Write;
                 let _ = write!(
                     skeleton_out,
@@ -562,20 +619,10 @@ mod tests {
         let target = std::path::Path::new(".");
 
         // depth=4 must find the file at crates/my-crate/src/lib.rs
-        let result = generate_skeleton_text(
-            &*surgeon,
-            ws_root,
-            target,
-            50_000,
-            4,
-            "all",
-            2_000,
-            None,
-            vec![],
-            vec![],
-        )
-        .await
-        .expect("skeleton generation succeeds");
+        let config = SkeletonConfig::new(50_000, 4, "all", 2_000);
+        let result = generate_skeleton_text(&*surgeon, ws_root, target, &config)
+            .await
+            .expect("skeleton generation succeeds");
 
         assert_eq!(
             result.files_in_scope, 1,
@@ -607,20 +654,11 @@ mod tests {
         let surgeon = Arc::new(MockSurgeon::new());
         // No extract_symbols_results configured — the file should never be reached.
 
-        let result = generate_skeleton_text(
-            &*surgeon,
-            ws_dir.path(),
-            std::path::Path::new("."),
-            50_000,
-            3, // OLD default — deliberately too shallow
-            "all",
-            2_000,
-            None,
-            vec![],
-            vec![],
-        )
-        .await
-        .expect("skeleton generation succeeds");
+        let config = SkeletonConfig::new(50_000, 3, "all", 2_000); // OLD default — deliberately too shallow
+        let result =
+            generate_skeleton_text(&*surgeon, ws_dir.path(), std::path::Path::new("."), &config)
+                .await
+                .expect("skeleton generation succeeds");
 
         assert_eq!(
             result.files_in_scope, 0,
@@ -670,17 +708,13 @@ mod tests {
 
         let mut changed = std::collections::HashSet::new();
         changed.insert(std::path::PathBuf::from("src/lib.rs"));
+        let config_changed =
+            SkeletonConfig::new(50_000, 4, "all", 2_000).with_changed_files(Some(changed));
         let _result_changed = generate_skeleton_text(
             &*surgeon,
             ws_root,
             std::path::Path::new("."),
-            50_000,
-            4,
-            "all",
-            2_000,
-            Some(changed),
-            vec![],
-            vec![],
+            &config_changed,
         )
         .await
         .expect("skeleton changed");
@@ -706,20 +740,12 @@ mod tests {
             .expect("mutex")
             .push(Ok(vec![]));
 
-        let _result_ext = generate_skeleton_text(
-            &*surgeon,
-            ws_root,
-            std::path::Path::new("."),
-            50_000,
-            4,
-            "all",
-            2_000,
-            None,
-            vec!["rs".to_owned()],
-            vec![],
-        )
-        .await
-        .expect("skeleton_ext");
+        let config_ext = SkeletonConfig::new(50_000, 4, "all", 2_000)
+            .with_include_extensions(vec!["rs".to_owned()]);
+        let _result_ext =
+            generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config_ext)
+                .await
+                .expect("skeleton_ext");
 
         let calls = surgeon.extract_symbols_calls.lock().expect("mutex");
         assert_eq!(calls.len(), 2);

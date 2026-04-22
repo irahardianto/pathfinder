@@ -38,7 +38,8 @@ pub struct MockSurgeon {
     pub extract_symbols_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
     pub enclosing_symbol_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
     #[allow(clippy::type_complexity)]
-    pub generate_skeleton_calls: Mutex<Vec<(PathBuf, PathBuf, u32, u32, String, u32)>>,
+    pub generate_skeleton_calls:
+        Mutex<Vec<(PathBuf, PathBuf, crate::repo_map::SkeletonConfig<'static>)>>,
     pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     pub resolve_full_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     pub resolve_symbol_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
@@ -160,26 +161,30 @@ impl Surgeon for MockSurgeon {
         results.remove(0)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn generate_skeleton(
         &self,
         _workspace_root: &Path,
         path: &Path,
-        max_tokens: u32,
-        depth: u32,
-        visibility: &str,
-        max_tokens_per_file: u32,
-        _changed_files: Option<std::collections::HashSet<std::path::PathBuf>>,
-        _include_extensions: Vec<String>,
-        _exclude_extensions: Vec<String>,
+        config: &crate::repo_map::SkeletonConfig<'_>,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
+        // Convert lifetime to static for storage in mock
+        let static_config = crate::repo_map::SkeletonConfig {
+            max_tokens: config.max_tokens,
+            depth: config.depth,
+            visibility: if config.visibility == "public" {
+                "public"
+            } else {
+                "all"
+            },
+            max_tokens_per_file: config.max_tokens_per_file,
+            changed_files: config.changed_files.clone(),
+            include_extensions: config.include_extensions.clone(),
+            exclude_extensions: config.exclude_extensions.clone(),
+        };
         self.generate_skeleton_calls.lock().unwrap().push((
             path.to_path_buf(),
             path.to_path_buf(), // target_path = path for mock
-            max_tokens,
-            depth,
-            visibility.to_owned(),
-            max_tokens_per_file,
+            static_config,
         ));
         let mut results = self.generate_skeleton_results.lock().unwrap();
         assert!(

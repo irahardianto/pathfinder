@@ -318,33 +318,14 @@ impl Surgeon for TreeSitterSurgeon {
         Ok("code".to_owned())
     }
 
-    #[instrument(skip(self, workspace_root))]
-    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self, workspace_root, config))]
     async fn generate_skeleton(
         &self,
         workspace_root: &Path,
         path: &Path,
-        max_tokens: u32,
-        depth: u32,
-        visibility: &str,
-        max_tokens_per_file: u32,
-        changed_files: Option<std::collections::HashSet<std::path::PathBuf>>,
-        include_extensions: Vec<String>,
-        exclude_extensions: Vec<String>,
+        config: &crate::repo_map::SkeletonConfig<'_>,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
-        crate::repo_map::generate_skeleton_text(
-            self,
-            workspace_root,
-            path,
-            max_tokens,
-            depth,
-            visibility,
-            max_tokens_per_file,
-            changed_files,
-            include_extensions,
-            exclude_extensions,
-        )
-        .await
+        crate::repo_map::generate_skeleton_text(self, workspace_root, path, config).await
     }
 
     #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]

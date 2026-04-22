@@ -188,28 +188,7 @@ impl<'a> SymbolExtractionContext<'a> {
     }
 }
 
-/// Extract all supported symbols from a parsed AST tree using `TreeCursor` traversal.
-#[must_use]
-pub fn extract_symbols_from_tree(
-    tree: &Tree,
-    source: &[u8],
-    lang: SupportedLanguage,
-) -> Vec<ExtractedSymbol> {
-    let mut symbols = Vec::new();
-    let root = tree.root_node();
-    let types = lang.node_types();
-
-    // We start traversal at the root level without a parent path
-    extract_symbols_recursive(root, source, types, lang, "", &mut symbols);
-
-    if matches!(lang, SupportedLanguage::Rust) {
-        merge_rust_impl_blocks(&mut symbols);
-    }
-
-    symbols
-}
-
-/// Core recursive extraction function (legacy entry point).
+/// Core recursive extraction function (delegates to SymbolExtractionContext).
 fn extract_symbols_recursive(
     node: Node,
     source: &[u8],

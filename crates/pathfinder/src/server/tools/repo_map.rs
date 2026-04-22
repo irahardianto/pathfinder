@@ -48,22 +48,23 @@ impl PathfinderServer {
         }
 
         let ts_start = std::time::Instant::now();
+        let visibility_str = match params.visibility {
+            pathfinder_common::types::Visibility::Public => "public",
+            pathfinder_common::types::Visibility::All => "all",
+        };
+        let config = pathfinder_treesitter::repo_map::SkeletonConfig::new(
+            params.max_tokens,
+            params.depth,
+            visibility_str,
+            params.max_tokens_per_file,
+        )
+        .with_changed_files(changed_files)
+        .with_include_extensions(params.include_extensions)
+        .with_exclude_extensions(params.exclude_extensions);
+
         let result = match self
             .surgeon
-            .generate_skeleton(
-                self.workspace_root.path(),
-                target_path,
-                params.max_tokens,
-                params.depth,
-                match params.visibility {
-                    pathfinder_common::types::Visibility::Public => "public",
-                    pathfinder_common::types::Visibility::All => "all",
-                },
-                params.max_tokens_per_file,
-                changed_files,
-                params.include_extensions,
-                params.exclude_extensions,
-            )
+            .generate_skeleton(self.workspace_root.path(), target_path, &config)
             .await
         {
             Ok(r) => r,
