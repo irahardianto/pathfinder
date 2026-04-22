@@ -25,7 +25,191 @@ pub fn extract_symbols_from_tree(
     symbols
 }
 
-#[allow(clippy::too_many_lines)]
+/// Context for symbol extraction, bundling shared parameters.
+struct SymbolExtractionContext<'a> {
+    node: Node<'a>,
+    source: &'a [u8],
+    types: &'a crate::language::LanguageNodeTypes,
+    lang: SupportedLanguage,
+    parent_path: &'a str,
+    out: &'a mut Vec<ExtractedSymbol>,
+    name_counts: std::collections::HashMap<String, usize>,
+}
+
+impl<'a> SymbolExtractionContext<'a> {
+    fn process_children(&mut self) {
+        let mut cursor = self.node.walk();
+        for child in self.node.named_children(&mut cursor) {
+            self.process_child(child);
+        }
+    }
+
+    fn process_child(&mut self, child: Node<'a>) {
+        let kind = child.kind();
+
+        if self.types.impl_kinds.contains(&kind) {
+            extract_impl_block(
+                child,
+                self.source,
+                self.types,
+                self.parent_path,
+                self.out,
+                &mut self.name_counts,
+            );
+            return;
+        }
+
+        let sym_kind = self.determine_symbol_kind(child, kind);
+        if let Some(sk) = sym_kind {
+            if let Some(name_node) = self.resolve_name_node(child) {
+                if let Some(name) = self.extract_name(name_node) {
+                    self.extract_symbol(child, name, sk);
+                    return;
+                }
+            }
+        }
+
+        // Recurse for unrecognized symbols or failed extraction
+        extract_symbols_recursive(
+            child,
+            self.source,
+            self.types,
+            self.lang,
+            self.parent_path,
+            self.out,
+        );
+    }
+
+    fn determine_symbol_kind(&self, node: Node, kind: &str) -> Option<SymbolKind> {
+        if self.types.function_kinds.contains(&kind) {
+            return Some(SymbolKind::Function);
+        }
+
+        if self.types.class_kinds.contains(&kind) {
+            return Some(refine_class_kind(node));
+        }
+
+        if self.types.method_kinds.contains(&kind) {
+            return Some(SymbolKind::Method);
+        }
+
+        if self.types.constant_kinds.contains(&kind) {
+            return Some(refine_constant_kind(node, kind));
+        }
+
+        None
+    }
+
+    fn resolve_name_node(&self, child: Node<'a>) -> Option<Node<'a>> {
+        child
+            .child_by_field_name("name")
+            .or_else(|| child.child_by_field_name("identifier"))
+            .or_else(|| find_variable_declarator_name(child))
+    }
+
+    fn extract_name(&self, name_node: Node<'a>) -> Option<String> {
+        let name_bytes = self.source.get(name_node.byte_range())?;
+        std::str::from_utf8(name_bytes)
+            .ok()
+            .map(str::trim)
+            .map(String::from)
+    }
+
+    fn extract_symbol(&mut self, child: Node<'a>, name: String, sk: SymbolKind) {
+        let (unique_name, suffix) = make_unique_name(&mut self.name_counts, name);
+        let path = self.build_path(&unique_name, &suffix);
+
+        let mut symbol = ExtractedSymbol {
+            name: unique_name.clone(),
+            semantic_path: path.clone(),
+            kind: sk,
+            byte_range: child.byte_range(),
+            start_line: child.start_position().row,
+            end_line: child.end_position().row,
+            children: Vec::new(),
+        };
+
+        if matches!(
+            sk,
+            SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface
+        ) {
+            self.extract_nested_symbols(child, &path, &mut symbol.children);
+        }
+
+        if matches!(sk, SymbolKind::Function)
+            && matches!(
+                self.lang,
+                SupportedLanguage::Tsx | SupportedLanguage::JavaScript
+            )
+        {
+            extract_jsx_children(child, self.source, &path, &mut symbol.children);
+        }
+
+        self.out.push(symbol);
+    }
+
+    fn build_path(&self, name: &str, suffix: &str) -> String {
+        if self.parent_path.is_empty() {
+            format!("{name}{suffix}")
+        } else {
+            format!("{}.{}{}", self.parent_path, name, suffix)
+        }
+    }
+
+    fn extract_nested_symbols(
+        &self,
+        child: Node<'a>,
+        path: &str,
+        children_out: &mut Vec<ExtractedSymbol>,
+    ) {
+        let body_node = child
+            .child_by_field_name("body")
+            .or_else(|| child.child_by_field_name("type"));
+
+        if let Some(body) = body_node {
+            extract_symbols_recursive(
+                body,
+                self.source,
+                self.types,
+                self.lang,
+                path,
+                children_out,
+            );
+        } else {
+            extract_symbols_recursive(
+                child,
+                self.source,
+                self.types,
+                self.lang,
+                path,
+                children_out,
+            );
+        }
+    }
+}
+
+/// Extract all supported symbols from a parsed AST tree using `TreeCursor` traversal.
+#[must_use]
+pub fn extract_symbols_from_tree(
+    tree: &Tree,
+    source: &[u8],
+    lang: SupportedLanguage,
+) -> Vec<ExtractedSymbol> {
+    let mut symbols = Vec::new();
+    let root = tree.root_node();
+    let types = lang.node_types();
+
+    // We start traversal at the root level without a parent path
+    extract_symbols_recursive(root, source, types, lang, "", &mut symbols);
+
+    if matches!(lang, SupportedLanguage::Rust) {
+        merge_rust_impl_blocks(&mut symbols);
+    }
+
+    symbols
+}
+
+/// Core recursive extraction function (legacy entry point).
 fn extract_symbols_recursive(
     node: Node,
     source: &[u8],
@@ -34,157 +218,82 @@ fn extract_symbols_recursive(
     parent_path: &str,
     out: &mut Vec<ExtractedSymbol>,
 ) {
-    let mut cursor = node.walk();
-    let mut name_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut ctx = SymbolExtractionContext {
+        node,
+        source,
+        types,
+        lang,
+        parent_path,
+        out,
+        name_counts: std::collections::HashMap::new(),
+    };
+    ctx.process_children();
+}
 
-    // Check all children
-    for child in node.named_children(&mut cursor) {
-        let kind = child.kind();
+/// Refine Go `type_spec` to precise kind (Interface/Struct/Class).
+fn refine_class_kind(node: Node) -> SymbolKind {
+    node
+        .child_by_field_name("type")
+        .map_or(SymbolKind::Class, |type_node| match type_node.kind() {
+            "interface_type" => SymbolKind::Interface,
+            "struct_type" => SymbolKind::Struct,
+            _ => SymbolKind::Class,
+        })
+}
 
-        let sym_kind = if types.function_kinds.contains(&kind) {
-            Some(SymbolKind::Function)
-        } else if types.class_kinds.contains(&kind) {
-            // For Go `type_spec`, inspect the type body to assign a precise kind:
-            // `interface_type` → Interface, `struct_type` → Struct, otherwise Class.
-            let refined =
-                child
-                    .child_by_field_name("type")
-                    .map_or(SymbolKind::Class, |type_node| match type_node.kind() {
-                        "interface_type" => SymbolKind::Interface,
-                        "struct_type" => SymbolKind::Struct,
-                        _ => SymbolKind::Class,
-                    });
-            Some(refined)
-        } else if types.method_kinds.contains(&kind) {
-            Some(SymbolKind::Method)
-        } else if types.constant_kinds.contains(&kind) {
-            let mut kind_refine = SymbolKind::Constant;
-            if kind == "lexical_declaration" || kind == "variable_declaration" {
-                let mut d_cursor = child.walk();
-                for decl in child.named_children(&mut d_cursor) {
-                    if decl.kind() == "variable_declarator" {
-                        if let Some(val) = decl.child_by_field_name("value") {
-                            if val.kind() == "arrow_function" || val.kind() == "function_expression"
-                            {
-                                kind_refine = SymbolKind::Function;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            Some(kind_refine)
-        } else {
-            None
-        };
-
-        // Handle impl blocks (Rust-style): extract the implementing type name and
-        // list all associated functions as Method children under that type.
-        if types.impl_kinds.contains(&kind) {
-            extract_impl_block(child, source, types, parent_path, out, &mut name_counts);
-            continue;
+/// Refine constant kind to detect arrow functions in JS/TS.
+fn refine_constant_kind(node: Node, kind: &str) -> SymbolKind {
+    let mut kind_refine = SymbolKind::Constant;
+    if kind == "lexical_declaration" || kind == "variable_declaration" {
+        if has_arrow_function_value(node) {
+            kind_refine = SymbolKind::Function;
         }
-
-        if let Some(sk) = sym_kind {
-            // Try to extract the name
-            if let Some(name_node) = child
-                .child_by_field_name("name")
-                .or_else(|| child.child_by_field_name("identifier"))
-                .or_else(|| {
-                    let mut wc = child.walk();
-                    for n in child.named_children(&mut wc) {
-                        if n.kind() == "variable_declarator" {
-                            if let Some(name) = n.child_by_field_name("name") {
-                                return Some(name);
-                            }
-                        }
-                    }
-                    None
-                })
-            {
-                if let Some(name_bytes) = source.get(name_node.byte_range()) {
-                    if let Ok(name) = std::str::from_utf8(name_bytes) {
-                        let name = name.trim().to_string();
-
-                        let count = name_counts.entry(name.clone()).or_insert(0);
-                        *count += 1;
-
-                        let suffix = if *count > 1 {
-                            format!("#{count}")
-                        } else {
-                            String::new()
-                        };
-
-                        let path = if parent_path.is_empty() {
-                            format!("{name}{suffix}")
-                        } else {
-                            format!("{parent_path}.{name}{suffix}")
-                        };
-
-                        let mut symbol = ExtractedSymbol {
-                            name,
-                            semantic_path: path.clone(),
-                            kind: sk,
-                            byte_range: child.byte_range(),
-                            start_line: child.start_position().row,
-                            end_line: child.end_position().row,
-                            children: Vec::new(),
-                        };
-
-                        // For classes/structs/interfaces, recurse to extract nested methods.
-                        // Try `body` first (TypeScript/Python classes), then `type` (Go type_spec),
-                        // then fall back to traversing all children.
-                        if matches!(
-                            sk,
-                            SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface
-                        ) {
-                            let body_node = child
-                                .child_by_field_name("body")
-                                .or_else(|| child.child_by_field_name("type"));
-                            if let Some(body) = body_node {
-                                extract_symbols_recursive(
-                                    body,
-                                    source,
-                                    types,
-                                    lang,
-                                    &path,
-                                    &mut symbol.children,
-                                );
-                            } else {
-                                extract_symbols_recursive(
-                                    child,
-                                    source,
-                                    types,
-                                    lang,
-                                    &path,
-                                    &mut symbol.children,
-                                );
-                            }
-                        }
-
-                        // E1-J: For TSX/JSX functions, extract JSX elements from
-                        // return statements as child symbols.
-                        if matches!(sk, SymbolKind::Function)
-                            && matches!(
-                                lang,
-                                SupportedLanguage::Tsx | SupportedLanguage::JavaScript
-                            )
-                        {
-                            extract_jsx_children(child, source, &path, &mut symbol.children);
-                        }
-
-                        out.push(symbol);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // If not a recognized symbol, or we failed to extract a name, still recurse down
-        // to find nested symbols (like functions inside export blocks)
-        extract_symbols_recursive(child, source, types, lang, parent_path, out);
     }
+    kind_refine
+}
+
+/// Check if a variable declaration contains an arrow function or function expression.
+fn has_arrow_function_value(node: Node) -> bool {
+    let mut cursor = node.walk();
+    for decl in node.named_children(&mut cursor) {
+        if decl.kind() == "variable_declarator" {
+            if let Some(val) = decl.child_by_field_name("value") {
+                if val.kind() == "arrow_function" || val.kind() == "function_expression" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Find the name node within a variable_declarator child.
+fn find_variable_declarator_name(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    for n in node.named_children(&mut cursor) {
+        if n.kind() == "variable_declarator" {
+            if let Some(name) = n.child_by_field_name("name") {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Generate unique name with suffix for duplicate symbols.
+/// Returns (unique_name, suffix) where suffix is "#N" for N>1 or empty for first occurrence.
+fn make_unique_name(
+    name_counts: &mut std::collections::HashMap<String, usize>,
+    name: String,
+) -> (String, String) {
+    let count = name_counts.entry(name.clone()).or_insert(0);
+    *count += 1;
+    let suffix = if *count > 1 {
+        format!("#{count}")
+    } else {
+        String::new()
+    };
+    (name, suffix)
 }
 
 /// Extract methods from a Rust `impl_item` node.
@@ -213,23 +322,16 @@ fn extract_impl_block(
     };
     let type_name = type_name.trim().to_string();
 
-    let count = name_counts.entry(type_name.clone()).or_insert(0);
-    *count += 1;
-    let suffix = if *count > 1 {
-        format!("#{count}")
-    } else {
-        String::new()
-    };
-
+    let (unique_name, suffix) = make_unique_name(name_counts, type_name);
     let impl_path = if parent_path.is_empty() {
-        format!("{type_name}{suffix}")
+        format!("{unique_name}{suffix}")
     } else {
-        format!("{parent_path}.{type_name}{suffix}")
+        format!("{parent_path}.{unique_name}{suffix}")
     };
 
     // Collect all child function_items from the impl body as Method symbols.
     let mut methods: Vec<ExtractedSymbol> = Vec::new();
-    let mut name_counts: std::collections::HashMap<String, usize> =
+    let mut method_name_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     if let Some(body) = node.child_by_field_name("body") {
         let mut body_cursor = body.walk();
@@ -248,17 +350,11 @@ fn extract_impl_block(
             };
             let method_name = method_name.trim().to_string();
 
-            let count = name_counts.entry(method_name.clone()).or_insert(0);
-            *count += 1;
-            let suffix = if *count > 1 {
-                format!("#{count}")
-            } else {
-                String::new()
-            };
-
-            let method_path = format!("{impl_path}.{method_name}{suffix}");
+            let (unique_method_name, method_suffix) =
+                make_unique_name(&mut method_name_counts, method_name);
+            let method_path = format!("{impl_path}.{unique_method_name}{method_suffix}");
             methods.push(ExtractedSymbol {
-                name: method_name,
+                name: unique_method_name,
                 semantic_path: method_path,
                 kind: SymbolKind::Method,
                 byte_range: item.byte_range(),
@@ -271,7 +367,7 @@ fn extract_impl_block(
 
     if !methods.is_empty() {
         out.push(ExtractedSymbol {
-            name: type_name,
+            name: unique_name,
             semantic_path: impl_path,
             kind: SymbolKind::Impl,
             byte_range: node.byte_range(),
