@@ -96,6 +96,32 @@ pub struct MockLawyer {
 }
 
 impl MockLawyer {
+    /// Pop the next result from a queued result mutex.
+    ///
+    /// Shared helper for `call_hierarchy_prepare`, `call_hierarchy_incoming`,
+    /// `call_hierarchy_outgoing`, `pull_diagnostics`, and `pull_workspace_diagnostics`.
+    /// Extracted to eliminate 23-line duplication across these methods.
+    /// Pop the next queued result, returning `None` when the queue is empty.
+    ///
+    /// Returns:
+    /// - `Some(Ok(item))` when the queue has a success result
+    /// - `Some(Err(..))` when the queue has a configured error
+    /// - `None` when the queue is empty (caller decides default behavior)
+    fn pop_queued_result<T>(
+        mutex: &Arc<Mutex<Vec<Result<T, String>>>>,
+    ) -> Option<Result<T, LspError>> {
+        let mut guard = mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.first() {
+            Some(_) => match guard.remove(0) {
+                Ok(item) => Some(Ok(item)),
+                Err(msg) => Some(Err(LspError::Protocol(msg))),
+            },
+            None => None,
+        }
+    }
+
     // ── goto_definition ───────────────────────────────────────────────────────
 
     /// Set the result to return from the next `goto_definition()` call.
@@ -268,23 +294,7 @@ impl Lawyer for MockLawyer {
         _line: u32,
         _column: u32,
     ) -> Result<Vec<CallHierarchyItem>, LspError> {
-        let next = {
-            let mut guard = self
-                .prepare_call_hierarchy_results
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.is_empty() {
-                None
-            } else {
-                Some(guard.remove(0))
-            }
-        };
-
-        match next {
-            Some(Ok(items)) => Ok(items),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
-            None => Ok(vec![]),
-        }
+        Self::pop_queued_result(&self.prepare_call_hierarchy_results).unwrap_or(Ok(vec![]))
     }
 
     async fn call_hierarchy_incoming(
@@ -292,23 +302,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
-        let next = {
-            let mut guard = self
-                .incoming_call_results
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.is_empty() {
-                None
-            } else {
-                Some(guard.remove(0))
-            }
-        };
-
-        match next {
-            Some(Ok(calls)) => Ok(calls),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
-            None => Ok(vec![]),
-        }
+        Self::pop_queued_result(&self.incoming_call_results).unwrap_or(Ok(vec![]))
     }
 
     async fn call_hierarchy_outgoing(
@@ -316,23 +310,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
-        let next = {
-            let mut guard = self
-                .outgoing_call_results
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.is_empty() {
-                None
-            } else {
-                Some(guard.remove(0))
-            }
-        };
-
-        match next {
-            Some(Ok(calls)) => Ok(calls),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
-            None => Ok(vec![]),
-        }
+        Self::pop_queued_result(&self.outgoing_call_results).unwrap_or(Ok(vec![]))
     }
 
     async fn did_open(
@@ -391,23 +369,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError> {
-        let next = {
-            let mut guard = self
-                .pull_diagnostics_results
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.is_empty() {
-                None
-            } else {
-                Some(guard.remove(0))
-            }
-        };
-
-        match next {
-            Some(Ok(diags)) => Ok(diags),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
-            None => Ok(vec![]),
-        }
+        Self::pop_queued_result(&self.pull_diagnostics_results).unwrap_or(Ok(vec![]))
     }
 
     async fn pull_workspace_diagnostics(
@@ -415,23 +377,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError> {
-        let next = {
-            let mut guard = self
-                .pull_workspace_diagnostics_results
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.is_empty() {
-                None
-            } else {
-                Some(guard.remove(0))
-            }
-        };
-
-        match next {
-            Some(Ok(diags)) => Ok(diags),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
-            None => Ok(vec![]),
-        }
+        Self::pop_queued_result(&self.pull_workspace_diagnostics_results).unwrap_or(Ok(vec![]))
     }
 
     async fn range_formatting(
@@ -566,6 +512,10 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    /// Shared test helper for diagnostics queue operations.
+    ///
+    /// Extracted to eliminate duplication between `test_mock_pull_diagnostics_returns_configured`
+    /// and `test_mock_pull_workspace_diagnostics_returns_configured`.
     #[tokio::test]
     async fn test_mock_pull_diagnostics_returns_configured() {
         use crate::types::LspDiagnosticSeverity;

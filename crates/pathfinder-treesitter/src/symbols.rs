@@ -506,6 +506,30 @@ pub fn find_enclosing_symbol(symbols: &[ExtractedSymbol], row: usize) -> Option<
 
 // ─── Vue multi-zone symbol extraction ─────────────────────────────────────────
 
+/// Push a zone symbol (template or style) into the output if children are non-empty.
+fn push_zone_symbol(
+    output: &mut Vec<ExtractedSymbol>,
+    zone_name: &str,
+    children: Vec<ExtractedSymbol>,
+    zone_range: Option<&crate::vue_zones::VueZoneRange>,
+) {
+    if children.is_empty() {
+        return;
+    }
+    let byte_range = zone_range.map_or(0..0, |z| z.start_byte..z.end_byte);
+    let start_line = zone_range.map_or(0, |z| z.start_point.row);
+    let end_line = zone_range.map_or(0, |z| z.end_point.row);
+    output.push(ExtractedSymbol {
+        name: zone_name.to_string(),
+        semantic_path: zone_name.to_string(),
+        kind: crate::surgeon::SymbolKind::Zone,
+        byte_range,
+        start_line,
+        end_line,
+        children,
+    });
+}
+
 /// Extract symbols from all zones of a parsed Vue SFC.
 ///
 /// Returns a flat list that includes:
@@ -531,51 +555,18 @@ pub fn extract_symbols_from_multizone(
     // ── Template zone ─────────────────────────────────────────────────────────
     if let Some(ref tree) = multi.template_tree {
         let children = extract_template_symbols(tree, &multi.source);
-        if !children.is_empty() {
-            let zone_range = multi
-                .zones
-                .template
-                .as_ref()
-                .map_or(0..0, |z| z.start_byte..z.end_byte);
-            let start_line = multi
-                .zones
-                .template
-                .as_ref()
-                .map_or(0, |z| z.start_point.row);
-            let end_line = multi.zones.template.as_ref().map_or(0, |z| z.end_point.row);
-            output.push(ExtractedSymbol {
-                name: "template".to_string(),
-                semantic_path: "template".to_string(),
-                kind: crate::surgeon::SymbolKind::Zone,
-                byte_range: zone_range,
-                start_line,
-                end_line,
-                children,
-            });
-        }
+        push_zone_symbol(
+            &mut output,
+            "template",
+            children,
+            multi.zones.template.as_ref(),
+        );
     }
 
     // ── Style zone ────────────────────────────────────────────────────────────
     if let Some(ref tree) = multi.style_tree {
         let children = extract_style_symbols(tree, &multi.source);
-        if !children.is_empty() {
-            let zone_range = multi
-                .zones
-                .style
-                .as_ref()
-                .map_or(0..0, |z| z.start_byte..z.end_byte);
-            let start_line = multi.zones.style.as_ref().map_or(0, |z| z.start_point.row);
-            let end_line = multi.zones.style.as_ref().map_or(0, |z| z.end_point.row);
-            output.push(ExtractedSymbol {
-                name: "style".to_string(),
-                semantic_path: "style".to_string(),
-                kind: crate::surgeon::SymbolKind::Zone,
-                byte_range: zone_range,
-                start_line,
-                end_line,
-                children,
-            });
-        }
+        push_zone_symbol(&mut output, "style", children, multi.zones.style.as_ref());
     }
 
     output

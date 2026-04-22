@@ -305,6 +305,61 @@ impl LspClient {
             Some(ProcessEntry::Unavailable(_)) | None => Err(LspError::NoLspAvailable),
         }
     }
+
+    /// Shared implementation for call hierarchy incoming/outgoing requests.
+    ///
+    /// Extracted to eliminate 47-line duplication between `call_hierarchy_incoming`
+    /// and `call_hierarchy_outgoing`. The only differences are:
+    /// - Tool name (for logging)
+    /// - LSP method name
+    /// - Response parser key (`from` vs `to`)
+    async fn call_hierarchy_request(
+        &self,
+        workspace_root: &Path,
+        item: &CallHierarchyItem,
+        tool_name: &str,
+        lsp_method: &str,
+        item_key: &str,
+        ranges_key: &str,
+    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+        let start = Instant::now();
+        tracing::info!(tool = tool_name, file = %item.file, "LSP operation started");
+        let ext = Path::new(&item.file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let lsp_item = item.data.clone().ok_or_else(|| {
+            LspError::Protocol("CallHierarchyItem missing original LSP data".to_owned())
+        })?;
+
+        let params = json!({ "item": lsp_item });
+
+        let response = match self
+            .request(language_id, lsp_method, params, Duration::from_secs(30))
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = tool_name, language = language_id, error = %e, "{} failed", lsp_method);
+                return Err(e);
+            }
+        };
+
+        self.touch(language_id).await;
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::info!(
+            language = language_id,
+            elapsed_ms = elapsed,
+            "{} complete",
+            lsp_method
+        );
+
+        parse_call_hierarchy_calls_response(&response, workspace_root, item_key, ranges_key)
+    }
 }
 
 #[async_trait]
@@ -431,47 +486,15 @@ impl Lawyer for LspClient {
         workspace_root: &Path,
         item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
-        let start = Instant::now();
-        tracing::info!(tool = "call_hierarchy_incoming", file = %item.file, "LSP operation started");
-        let ext = Path::new(&item.file)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        let lsp_item = item.data.clone().ok_or_else(|| {
-            LspError::Protocol("CallHierarchyItem missing original LSP data".to_owned())
-        })?;
-
-        let params = json!({ "item": lsp_item });
-
-        let response = match self
-            .request(
-                language_id,
-                "callHierarchy/incomingCalls",
-                params,
-                Duration::from_secs(30),
-            )
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::error!(tool = "call_hierarchy_incoming", language = language_id, error = %e, "callHierarchy/incomingCalls failed");
-                return Err(e);
-            }
-        };
-
-        self.touch(language_id).await;
-
-        let elapsed = start.elapsed().as_millis();
-        tracing::info!(
-            language = language_id,
-            elapsed_ms = elapsed,
-            "callHierarchy/incomingCalls complete"
-        );
-
-        parse_call_hierarchy_calls_response(&response, workspace_root, "from", "fromRanges")
+        self.call_hierarchy_request(
+            workspace_root,
+            item,
+            "call_hierarchy_incoming",
+            "callHierarchy/incomingCalls",
+            "from",
+            "fromRanges",
+        )
+        .await
     }
 
     async fn call_hierarchy_outgoing(
@@ -479,47 +502,15 @@ impl Lawyer for LspClient {
         workspace_root: &Path,
         item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
-        let start = Instant::now();
-        tracing::info!(tool = "call_hierarchy_outgoing", file = %item.file, "LSP operation started");
-        let ext = Path::new(&item.file)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        let lsp_item = item.data.clone().ok_or_else(|| {
-            LspError::Protocol("CallHierarchyItem missing original LSP data".to_owned())
-        })?;
-
-        let params = json!({ "item": lsp_item });
-
-        let response = match self
-            .request(
-                language_id,
-                "callHierarchy/outgoingCalls",
-                params,
-                Duration::from_secs(30),
-            )
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::error!(tool = "call_hierarchy_outgoing", language = language_id, error = %e, "callHierarchy/outgoingCalls failed");
-                return Err(e);
-            }
-        };
-
-        self.touch(language_id).await;
-
-        let elapsed = start.elapsed().as_millis();
-        tracing::info!(
-            language = language_id,
-            elapsed_ms = elapsed,
-            "callHierarchy/outgoingCalls complete"
-        );
-
-        parse_call_hierarchy_calls_response(&response, workspace_root, "to", "fromRanges")
+        self.call_hierarchy_request(
+            workspace_root,
+            item,
+            "call_hierarchy_outgoing",
+            "callHierarchy/outgoingCalls",
+            "to",
+            "fromRanges",
+        )
+        .await
     }
 
     async fn did_open(

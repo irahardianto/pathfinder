@@ -1,9 +1,10 @@
 //! `read_symbol_scope` tool — AST-based symbol extraction via Tree-sitter.
 
-use crate::server::helpers::pathfinder_to_error_data;
+use crate::server::helpers::{
+    parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+};
 use crate::server::types::ReadSymbolScopeParams;
 use crate::server::PathfinderServer;
-use pathfinder_common::types::SemanticPath;
 use rmcp::model::{CallToolResult, Content, ErrorData};
 
 impl PathfinderServer {
@@ -20,23 +21,10 @@ impl PathfinderServer {
 
         tracing::info!(tool = "read_symbol_scope", "read_symbol_scope: start");
 
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
         // read_symbol_scope requires a symbol chain, not just a bare file
-        if semantic_path.is_bare_file() {
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
-                    .to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         // Sandbox check on the file path
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -71,8 +59,9 @@ impl PathfinderServer {
                 };
 
                 let mut result = CallToolResult::success(vec![Content::text(scope.content)]);
-                result.structured_content = Some(serde_json::to_value(&metadata).unwrap_or_default());
-                
+                result.structured_content =
+                    Some(serde_json::to_value(&metadata).unwrap_or_default());
+
                 Ok(result)
             }
             Err(e) => {

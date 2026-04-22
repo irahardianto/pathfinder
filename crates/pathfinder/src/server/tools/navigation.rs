@@ -11,17 +11,27 @@
 //! - `analyze_impact` — returns `null` caller/callee lists with `degraded: true`
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
-use crate::server::helpers::{pathfinder_to_error_data, treesitter_error_to_error_data};
+use crate::server::helpers::{
+    parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+    treesitter_error_to_error_data,
+};
 use crate::server::types::{
-    AnalyzeImpactParams, GetDefinitionParams, GetDefinitionResponse,
-    ReadWithDeepContextParams,
+    AnalyzeImpactParams, GetDefinitionParams, GetDefinitionResponse, ReadWithDeepContextParams,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
-use pathfinder_common::types::SemanticPath;
 use pathfinder_lsp::LspError;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::{CallToolResult, ErrorData};
+
+/// Direction for call hierarchy BFS traversal in `analyze_impact`.
+///
+/// `Incoming` traverses callers (who calls this symbol).
+/// `Outgoing` traverses callees (what this symbol calls).
+enum CallDirection {
+    Incoming,
+    Outgoing,
+}
 
 impl PathfinderServer {
     /// Core logic for the `get_definition` tool.
@@ -47,29 +57,8 @@ impl PathfinderServer {
         );
 
         // Parse and validate the semantic path
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "get_definition",
-                error_code = "INVALID_SEMANTIC_PATH",
-                duration_ms,
-                "invalid semantic path format"
-            );
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
-
-        if semantic_path.is_bare_file() {
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
-                    .to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -199,29 +188,8 @@ impl PathfinderServer {
         );
 
         // Parse and validate the semantic path
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "read_with_deep_context",
-                error_code = "INVALID_SEMANTIC_PATH",
-                duration_ms,
-                "invalid semantic path format"
-            );
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
-
-        if semantic_path.is_bare_file() {
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
-                    .to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -342,13 +310,97 @@ impl PathfinderServer {
         Ok(res)
     }
 
+    /// Performs BFS traversal of the call hierarchy in the specified direction.
+    ///
+    /// Returns the collected references and the maximum depth reached during traversal.
+    async fn bfs_call_hierarchy(
+        &self,
+        initial_item: &pathfinder_lsp::types::CallHierarchyItem,
+        direction: CallDirection,
+        max_depth: u32,
+        files_referenced: &mut std::collections::HashSet<String>,
+    ) -> (Vec<crate::server::types::ImpactReference>, u32) {
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((initial_item.clone(), 0));
+        let mut seen = std::collections::HashSet::new();
+        seen.insert((initial_item.file.clone(), initial_item.line));
+        files_referenced.insert(initial_item.file.clone());
+
+        let mut references = Vec::new();
+        let mut max_depth_reached = 0;
+
+        while let Some((item, current_depth)) = queue.pop_front() {
+            max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
+            if current_depth >= max_depth {
+                continue;
+            }
+
+            let hierarchy_result = match direction {
+                CallDirection::Incoming => {
+                    self.lawyer
+                        .call_hierarchy_incoming(self.workspace_root.path(), &item)
+                        .await
+                }
+                CallDirection::Outgoing => {
+                    self.lawyer
+                        .call_hierarchy_outgoing(self.workspace_root.path(), &item)
+                        .await
+                }
+            };
+
+            match hierarchy_result {
+                Ok(calls) => {
+                    for call in calls {
+                        let referenced_item = call.item;
+                        files_referenced.insert(referenced_item.file.clone());
+
+                        let key = (referenced_item.file.clone(), referenced_item.line);
+                        if !seen.contains(&key) {
+                            seen.insert(key);
+                            queue.push_back((referenced_item.clone(), current_depth + 1));
+
+                            references.push(crate::server::types::ImpactReference {
+                                semantic_path: format!(
+                                    "{}::{}",
+                                    referenced_item.file, referenced_item.name
+                                ),
+                                file: referenced_item.file.clone(),
+                                line: referenced_item.line as usize,
+                                snippet: referenced_item
+                                    .detail
+                                    .unwrap_or_else(|| referenced_item.name.clone()),
+                                version_hash: String::new(), // Populated at higher layer if needed
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let direction_name = match direction {
+                        CallDirection::Incoming => "call_hierarchy_incoming",
+                        CallDirection::Outgoing => "call_hierarchy_outgoing",
+                    };
+                    tracing::warn!(
+                        tool = "analyze_impact",
+                        error = %e,
+                        file = %item.file,
+                        line = item.line,
+                        depth = current_depth,
+                        "{direction_name} failed during BFS (partial impact graph)"
+                    );
+                }
+            }
+        }
+
+        (references, max_depth_reached)
+    }
+
     /// Core logic for the `analyze_impact` tool.
     ///
     /// Returns callers (incoming) and callees (outgoing) for the target symbol.
     /// Degrades gracefully to empty results when no LSP is configured.
     #[expect(
         clippy::too_many_lines,
-        reason = "Two full BFS loops (incoming/outgoing) make this long but straightforward."
+        reason = "Sequential pipeline (parse→sandbox→tree-sitter→LSP→BFS→version hash)."
     )]
     pub(crate) async fn analyze_impact_impl(
         &self,
@@ -364,29 +416,8 @@ impl PathfinderServer {
         );
 
         // Parse and validate the semantic path
-        let Some(semantic_path) = SemanticPath::parse(&params.semantic_path) else {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "analyze_impact",
-                error_code = "INVALID_SEMANTIC_PATH",
-                duration_ms,
-                "invalid semantic path format"
-            );
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        };
-
-        if semantic_path.is_bare_file() {
-            let err = pathfinder_common::error::PathfinderError::InvalidSemanticPath {
-                input: params.semantic_path.clone(),
-                issue: "this tool requires a symbol target — use 'file.rs::symbol' format"
-                    .to_owned(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -448,125 +479,32 @@ impl PathfinderServer {
                 engines.push("lsp");
                 degraded = false;
                 degraded_reason = None;
-                incoming = Some(Vec::new());
-                outgoing = Some(Vec::new());
 
                 let initial_item = &items[0];
 
                 // --- INCOMING BFS ---
-                let mut queue = std::collections::VecDeque::new();
-                queue.push_back((initial_item.clone(), 0));
-                let mut seen = std::collections::HashSet::new();
-                seen.insert((initial_item.file.clone(), initial_item.line));
-                files_referenced.insert(initial_item.file.clone());
-
-                while let Some((item, current_depth)) = queue.pop_front() {
-                    max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
-                    if current_depth >= params.max_depth {
-                        continue;
-                    }
-
-                    match self
-                        .lawyer
-                        .call_hierarchy_incoming(self.workspace_root.path(), &item)
-                        .await
-                    {
-                        Ok(calls) => {
-                            for call in calls {
-                                let caller = call.item;
-                                files_referenced.insert(caller.file.clone());
-
-                                let key = (caller.file.clone(), caller.line);
-                                if !seen.contains(&key) {
-                                    seen.insert(key);
-                                    queue.push_back((caller.clone(), current_depth + 1));
-
-                                    incoming.get_or_insert_with(Vec::new).push(
-                                        crate::server::types::ImpactReference {
-                                            semantic_path: format!(
-                                                "{}::{}",
-                                                caller.file, caller.name
-                                            ),
-                                            file: caller.file.clone(),
-                                            line: caller.line as usize,
-                                            snippet: caller
-                                                .detail
-                                                .unwrap_or_else(|| caller.name.clone()),
-                                            version_hash: String::new(), // Populated at higher layer if needed
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = "analyze_impact",
-                                error = %e,
-                                file = %item.file,
-                                line = item.line,
-                                depth = current_depth,
-                                "call_hierarchy_incoming failed during BFS (partial impact graph)"
-                            );
-                        }
-                    }
-                }
+                let (incoming_refs, depth_in) = self
+                    .bfs_call_hierarchy(
+                        initial_item,
+                        CallDirection::Incoming,
+                        params.max_depth,
+                        &mut files_referenced,
+                    )
+                    .await;
+                incoming = Some(incoming_refs);
+                max_depth_reached = std::cmp::max(max_depth_reached, depth_in);
 
                 // --- OUTGOING BFS ---
-                let mut queue_out = std::collections::VecDeque::new();
-                queue_out.push_back((initial_item.clone(), 0));
-                let mut seen_out = std::collections::HashSet::new();
-                seen_out.insert((initial_item.file.clone(), initial_item.line));
-
-                while let Some((item, current_depth)) = queue_out.pop_front() {
-                    max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
-                    if current_depth >= params.max_depth {
-                        continue;
-                    }
-
-                    match self
-                        .lawyer
-                        .call_hierarchy_outgoing(self.workspace_root.path(), &item)
-                        .await
-                    {
-                        Ok(calls) => {
-                            for call in calls {
-                                let callee = call.item;
-                                files_referenced.insert(callee.file.clone());
-
-                                let key = (callee.file.clone(), callee.line);
-                                if !seen_out.contains(&key) {
-                                    seen_out.insert(key);
-                                    queue_out.push_back((callee.clone(), current_depth + 1));
-
-                                    outgoing.get_or_insert_with(Vec::new).push(
-                                        crate::server::types::ImpactReference {
-                                            semantic_path: format!(
-                                                "{}::{}",
-                                                callee.file, callee.name
-                                            ),
-                                            file: callee.file.clone(),
-                                            line: callee.line as usize,
-                                            snippet: callee
-                                                .detail
-                                                .unwrap_or_else(|| callee.name.clone()),
-                                            version_hash: String::new(), // Populated at higher layer if needed
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = "analyze_impact",
-                                error = %e,
-                                file = %item.file,
-                                line = item.line,
-                                depth = current_depth,
-                                "call_hierarchy_outgoing failed during BFS (partial impact graph)"
-                            );
-                        }
-                    }
-                }
+                let (outgoing_refs, depth_out) = self
+                    .bfs_call_hierarchy(
+                        initial_item,
+                        CallDirection::Outgoing,
+                        params.max_depth,
+                        &mut files_referenced,
+                    )
+                    .await;
+                outgoing = Some(outgoing_refs);
+                max_depth_reached = std::cmp::max(max_depth_reached, depth_out);
             }
             Ok(_) => {
                 // LSP responded with empty items — confirmed zero callers/callees
@@ -634,7 +572,9 @@ impl PathfinderServer {
             version_hashes,
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text("Analyzed impact successfully")]);
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
+            "Analyzed impact successfully",
+        )]);
         res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
         Ok(res)
     }
@@ -831,7 +771,8 @@ mod tests {
             rmcp::model::RawContent::Text(t) => t.text.clone(),
             _ => panic!("expected text content"),
         };
-        let val: crate::server::types::ReadWithDeepContextMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert_eq!(text_content, "fn login() { }");
         assert!(val.degraded);
@@ -885,7 +826,8 @@ mod tests {
             rmcp::model::RawContent::Text(t) => t.text.clone(),
             _ => panic!("expected text content"),
         };
-        let val: crate::server::types::ReadWithDeepContextMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert_eq!(text_content, "fn login() { }");
         assert!(!val.degraded);
@@ -931,7 +873,8 @@ mod tests {
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(
             val.incoming.is_none(),
@@ -941,7 +884,7 @@ mod tests {
             val.outgoing.is_none(),
             "outgoing must be null (not empty) when degraded"
         );
-        assert_eq!(val.degraded, true);
+        assert!(val.degraded);
         assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
     }
 
@@ -1001,9 +944,10 @@ mod tests {
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata = serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(val.degraded, false);
+        assert!(!val.degraded);
         assert_eq!(val.degraded_reason, None);
         assert_eq!(val.depth_reached, 1); // BFS pops level 1, updates max_depth_reached, then continues
         assert_eq!(val.files_referenced, 3); // initial + caller + callee
