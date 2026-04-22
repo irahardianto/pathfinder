@@ -140,6 +140,60 @@ impl TreeSitterSurgeon {
         }
     }
 
+    /// Detect the actual indentation column of a block body.
+    ///
+    /// For brace-delimited blocks (`{ ... }`), scans past the opening brace to find
+    /// the first non-empty line inside the block. For non-brace blocks (e.g., Python),
+    /// uses the line containing the start byte.
+    fn detect_body_indent(
+        source: &[u8],
+        start_byte: usize,
+        end_byte: usize,
+        is_brace_block: bool,
+        fallback_indent: usize,
+    ) -> usize {
+        if !is_brace_block {
+            // Non-brace block: use indentation of the line containing start_byte
+            let line_start = source
+                .get(..start_byte)
+                .unwrap_or(b"")
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |pos| pos + 1);
+
+            if let Some(line_bytes) = source.get(line_start..end_byte) {
+                if let Ok(full_str) = std::str::from_utf8(line_bytes) {
+                    if let Some(line) = full_str.lines().next() {
+                        return line.len() - line.trim_start().len();
+                    }
+                }
+            }
+            return fallback_indent;
+        }
+
+        // Brace-delimited block: find first non-empty line inside the block
+        let block_bytes = source.get((start_byte + 1)..end_byte);
+        let block_str = match block_bytes {
+            Some(bytes) => match std::str::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => return fallback_indent,
+            },
+            None => return fallback_indent,
+        };
+
+        // Find the first line that is purely inside the block and not on the same line as `{`
+        let mut lines = block_str.split('\n');
+        let _same_line_as_brace = lines.next();
+
+        for line in lines {
+            if !line.trim().is_empty() {
+                return line.len() - line.trim_start().len();
+            }
+        }
+
+        fallback_indent
+    }
+
     fn expand_to_full_start_byte(source: &[u8], mut start_byte: usize) -> usize {
         loop {
             let line_start = source
@@ -370,41 +424,15 @@ impl Surgeon for TreeSitterSurgeon {
         )?;
 
         // Detect actual body indentation
-        let mut body_indent_column = indent_column + 4; // default fallback
-
         let is_brace_block = source.get(start_byte) == Some(&b'{');
-
-        if is_brace_block {
-            if let Some(block_bytes) = source.get((start_byte + 1)..end_byte) {
-                if let Ok(inner_str) = std::str::from_utf8(block_bytes) {
-                    // Find the first line that is purely inside the block and not on the same line as `{`
-                    let mut lines = inner_str.split('\n');
-                    let _same_line_as_brace = lines.next();
-
-                    for line in lines {
-                        if !line.trim().is_empty() {
-                            body_indent_column = line.len() - line.trim_start().len();
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            let line_start = source
-                .get(..start_byte)
-                .unwrap_or(b"")
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map_or(0, |pos| pos + 1);
-
-            if let Some(line_bytes) = source.get(line_start..end_byte) {
-                if let Ok(full_str) = std::str::from_utf8(line_bytes) {
-                    if let Some(line) = full_str.lines().next() {
-                        body_indent_column = line.len() - line.trim_start().len();
-                    }
-                }
-            }
-        }
+        let fallback_indent = indent_column + 4;
+        let body_indent_column = Self::detect_body_indent(
+            &source,
+            start_byte,
+            end_byte,
+            is_brace_block,
+            fallback_indent,
+        );
 
         Ok((
             BodyRange {
