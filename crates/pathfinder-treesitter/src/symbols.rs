@@ -61,7 +61,7 @@ impl<'a> SymbolExtractionContext<'a> {
 
         let sym_kind = self.determine_symbol_kind(child, kind);
         if let Some(sk) = sym_kind {
-            if let Some(name_node) = self.resolve_name_node(child) {
+            if let Some(name_node) = Self::resolve_name_node(child) {
                 if let Some(name) = self.extract_name(name_node) {
                     self.extract_symbol(child, name, sk);
                     return;
@@ -100,7 +100,7 @@ impl<'a> SymbolExtractionContext<'a> {
         None
     }
 
-    fn resolve_name_node(&self, child: Node<'a>) -> Option<Node<'a>> {
+    fn resolve_name_node(child: Node<'a>) -> Option<Node<'a>> {
         child
             .child_by_field_name("name")
             .or_else(|| child.child_by_field_name("identifier"))
@@ -167,14 +167,7 @@ impl<'a> SymbolExtractionContext<'a> {
             .or_else(|| child.child_by_field_name("type"));
 
         if let Some(body) = body_node {
-            extract_symbols_recursive(
-                body,
-                self.source,
-                self.types,
-                self.lang,
-                path,
-                children_out,
-            );
+            extract_symbols_recursive(body, self.source, self.types, self.lang, path, children_out);
         } else {
             extract_symbols_recursive(
                 child,
@@ -188,7 +181,7 @@ impl<'a> SymbolExtractionContext<'a> {
     }
 }
 
-/// Core recursive extraction function (delegates to SymbolExtractionContext).
+/// Core recursive extraction function (delegates to `SymbolExtractionContext`).
 fn extract_symbols_recursive(
     node: Node,
     source: &[u8],
@@ -211,8 +204,7 @@ fn extract_symbols_recursive(
 
 /// Refine Go `type_spec` to precise kind (Interface/Struct/Class).
 fn refine_class_kind(node: Node) -> SymbolKind {
-    node
-        .child_by_field_name("type")
+    node.child_by_field_name("type")
         .map_or(SymbolKind::Class, |type_node| match type_node.kind() {
             "interface_type" => SymbolKind::Interface,
             "struct_type" => SymbolKind::Struct,
@@ -223,10 +215,10 @@ fn refine_class_kind(node: Node) -> SymbolKind {
 /// Refine constant kind to detect arrow functions in JS/TS.
 fn refine_constant_kind(node: Node, kind: &str) -> SymbolKind {
     let mut kind_refine = SymbolKind::Constant;
-    if kind == "lexical_declaration" || kind == "variable_declaration" {
-        if has_arrow_function_value(node) {
-            kind_refine = SymbolKind::Function;
-        }
+    if (kind == "lexical_declaration" || kind == "variable_declaration")
+        && has_arrow_function_value(node)
+    {
+        kind_refine = SymbolKind::Function;
     }
     kind_refine
 }
@@ -246,7 +238,7 @@ fn has_arrow_function_value(node: Node) -> bool {
     false
 }
 
-/// Find the name node within a variable_declarator child.
+/// Find the name node within a `variable_declarator` child.
 fn find_variable_declarator_name(node: Node) -> Option<Node> {
     let mut cursor = node.walk();
     for n in node.named_children(&mut cursor) {
@@ -260,7 +252,7 @@ fn find_variable_declarator_name(node: Node) -> Option<Node> {
 }
 
 /// Generate unique name with suffix for duplicate symbols.
-/// Returns (unique_name, suffix) where suffix is "#N" for N>1 or empty for first occurrence.
+/// Returns `(unique_name, suffix)` where suffix is "#N" for N>1 or empty for first occurrence.
 fn make_unique_name(
     name_counts: &mut std::collections::HashMap<String, usize>,
     name: String,
