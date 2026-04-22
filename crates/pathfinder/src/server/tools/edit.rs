@@ -43,6 +43,19 @@ struct ValidationOutcome {
     should_block: bool,
 }
 
+/// Parameter struct for [`finalize_edit`] to reduce parameter count from 9 to 2.
+struct FinalizeEditParams<'a> {
+    tool_name: &'static str,
+    semantic_path: &'a SemanticPath,
+    raw_semantic_path_str: &'a str,
+    source: &'a [u8],
+    original_hash: &'a VersionHash,
+    new_content: Vec<u8>,
+    ignore_validation_failures: bool,
+    start_time: std::time::Instant,
+    resolve_ms: u128,
+}
+
 /// Selects which end of a resolved symbol range is used as the insertion point.
 ///
 /// Passed to [`PathfinderServer::resolve_insert_position`] to distinguish
@@ -134,17 +147,17 @@ impl PathfinderServer {
 
         // ── Steps 8–11: Validate → TOCTOU → Write → Respond ────────────
         let resolve_ms = start.elapsed().as_millis();
-        self.finalize_edit(
-            "replace_body",
-            &semantic_path,
-            &params.semantic_path,
-            &source,
-            new_bytes,
-            &current_hash,
-            params.ignore_validation_failures,
-            start,
+        self.finalize_edit(FinalizeEditParams {
+            tool_name: "replace_body",
+            semantic_path: &semantic_path,
+            raw_semantic_path_str: &params.semantic_path,
+            source: &source,
+            original_hash: &current_hash,
+            new_content: new_bytes.to_vec(),
+            ignore_validation_failures: params.ignore_validation_failures,
+            start_time: start,
             resolve_ms,
-        )
+        })
         .await
     }
 
@@ -223,17 +236,17 @@ impl PathfinderServer {
         };
 
         let resolve_ms = start.elapsed().as_millis();
-        self.finalize_edit(
-            "replace_full",
-            &semantic_path,
-            &params.semantic_path,
-            &source,
-            &new_bytes,
-            &current_hash,
-            params.ignore_validation_failures,
-            start,
+        self.finalize_edit(FinalizeEditParams {
+            tool_name: "replace_full",
+            semantic_path: &semantic_path,
+            raw_semantic_path_str: &params.semantic_path,
+            source: &source,
+            original_hash: &current_hash,
+            new_content: new_bytes,
+            ignore_validation_failures: params.ignore_validation_failures,
+            start_time: start,
             resolve_ms,
-        )
+        })
         .await
     }
 
@@ -304,17 +317,17 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(after);
 
         let resolve_ms = start.elapsed().as_millis();
-        self.finalize_edit(
-            "insert_before",
-            &semantic_path,
-            &params.semantic_path,
-            &source,
-            &new_bytes,
-            &current_hash,
-            params.ignore_validation_failures,
-            start,
+        self.finalize_edit(FinalizeEditParams {
+            tool_name: "insert_before",
+            semantic_path: &semantic_path,
+            raw_semantic_path_str: &params.semantic_path,
+            source: &source,
+            original_hash: &current_hash,
+            new_content: new_bytes,
+            ignore_validation_failures: params.ignore_validation_failures,
+            start_time: start,
             resolve_ms,
-        )
+        })
         .await
     }
 
@@ -381,17 +394,17 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(after);
 
         let resolve_ms = start.elapsed().as_millis();
-        self.finalize_edit(
-            "insert_after",
-            &semantic_path,
-            &params.semantic_path,
-            &source,
-            &new_bytes,
-            &current_hash,
-            params.ignore_validation_failures,
-            start,
+        self.finalize_edit(FinalizeEditParams {
+            tool_name: "insert_after",
+            semantic_path: &semantic_path,
+            raw_semantic_path_str: &params.semantic_path,
+            source: &source,
+            original_hash: &current_hash,
+            new_content: new_bytes,
+            ignore_validation_failures: params.ignore_validation_failures,
+            start_time: start,
             resolve_ms,
-        )
+        })
         .await
     }
 
@@ -514,17 +527,17 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(after);
 
         let resolve_ms = start.elapsed().as_millis();
-        self.finalize_edit(
-            "delete_symbol",
-            &semantic_path,
-            &params.semantic_path,
-            &source,
-            &new_bytes,
-            &current_hash,
-            params.ignore_validation_failures,
-            start,
+        self.finalize_edit(FinalizeEditParams {
+            tool_name: "delete_symbol",
+            semantic_path: &semantic_path,
+            raw_semantic_path_str: &params.semantic_path,
+            source: &source,
+            original_hash: &current_hash,
+            new_content: new_bytes,
+            ignore_validation_failures: params.ignore_validation_failures,
+            start_time: start,
             resolve_ms,
-        )
+        })
         .await
     }
 
@@ -600,13 +613,310 @@ impl PathfinderServer {
         }))
     }
 
+    // ── Batch edit helpers ────────────────────────────────────────────────────────
+
+    /// Validate OCC and read file content for batch edits.
+    async fn validate_batch_occ(
+        &self,
+        absolute_path: &Path,
+        base_version: &str,
+        filepath_str: &str,
+    ) -> Result<(Vec<u8>, VersionHash), ErrorData> {
+        let source = tokio::fs::read(absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+        let current_hash = VersionHash::compute(&source);
+
+        let claimed = VersionHash::from_raw(base_version.to_owned());
+        if claimed != current_hash {
+            let err = PathfinderError::VersionMismatch {
+                path: std::path::PathBuf::from(filepath_str),
+                current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        Ok((source, current_hash))
+    }
+
+    /// Resolve a single edit from a batch into a concrete byte range.
+    async fn resolve_single_batch_edit(
+        &self,
+        edit: &crate::server::types::BatchEdit,
+        edit_index: usize,
+        source: &[u8],
+        file_path: &Path,
+    ) -> Result<ResolvedEdit, ErrorData> {
+        // ── Branch A: Text-range targeting ─────────────────────────────────────
+        if let Some(ref old_text) = edit.old_text {
+            let Some(context_line) = edit.context_line else {
+                let err = PathfinderError::InvalidTarget {
+                    semantic_path: format!("edit[{edit_index}]"),
+                    reason: "`context_line` is required when `old_text` is set".to_owned(),
+                    edit_index: Some(edit_index),
+                    valid_edit_types: None,
+                };
+                return Err(pathfinder_to_error_data(&err));
+            };
+            let replacement = edit.replacement_text.as_deref().unwrap_or("");
+            let free = resolve_text_edit(
+                source,
+                old_text.as_str(),
+                context_line,
+                replacement,
+                edit.normalize_whitespace,
+                file_path,
+            )
+            .map_err(|e| pathfinder_to_error_data(&e))?;
+            return Ok(ResolvedEdit {
+                start_byte: free.start_byte,
+                end_byte: free.end_byte,
+                replacement: free.replacement,
+            });
+        }
+
+        // ── Branch B: Semantic targeting ───────────────────────────────────────
+        let Some(semantic_path) = SemanticPath::parse(&edit.semantic_path) else {
+            let err = PathfinderError::InvalidSemanticPath {
+                input: edit.semantic_path.clone(),
+                issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        };
+
+        self.resolve_semantic_batch_edit(&semantic_path, edit, edit_index, source)
+            .await
+    }
+
+    /// Resolve a semantic edit (`replace_body`, `replace_full`, `insert_before`, `insert_after`, `delete`).
+    #[allow(clippy::too_many_lines)]
+    async fn resolve_semantic_batch_edit(
+        &self,
+        semantic_path: &SemanticPath,
+        edit: &crate::server::types::BatchEdit,
+        edit_index: usize,
+        source: &[u8],
+    ) -> Result<ResolvedEdit, ErrorData> {
+        match edit.edit_type.as_str() {
+            "replace_body" => {
+                let (body_range, _, _) = self
+                    .surgeon
+                    .resolve_body_range(self.workspace_root.path(), semantic_path)
+                    .await
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                let new_code = edit.new_code.as_deref().unwrap_or_default();
+                let normalized = normalize_for_body_replace(new_code);
+                let indented = dedent_then_reindent(&normalized, body_range.body_indent_column);
+
+                let is_brace_block = if body_range.end_byte > body_range.start_byte {
+                    source.get(body_range.start_byte) == Some(&b'{')
+                        && source.get(body_range.end_byte.saturating_sub(1)) == Some(&b'}')
+                } else {
+                    false
+                };
+
+                if is_brace_block {
+                    let inner_start = body_range.start_byte + 1;
+                    let inner_end = body_range.end_byte.saturating_sub(1);
+                    let replacement = if indented.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        let closing_indent = " ".repeat(body_range.indent_column);
+                        format!("\n{indented}\n{closing_indent}").into_bytes()
+                    };
+                    Ok(ResolvedEdit {
+                        start_byte: inner_start,
+                        end_byte: inner_end,
+                        replacement,
+                    })
+                } else {
+                    let mut end = body_range.start_byte;
+                    while end > 0 && (source[end - 1] == b' ' || source[end - 1] == b'\t') {
+                        end -= 1;
+                    }
+                    Ok(ResolvedEdit {
+                        start_byte: end,
+                        end_byte: body_range.end_byte,
+                        replacement: format!("\n{indented}").into_bytes(),
+                    })
+                }
+            }
+            "replace_full" => {
+                let new_code = edit.new_code.as_deref().unwrap_or_default();
+                if semantic_path.is_bare_file() {
+                    Ok(ResolvedEdit {
+                        start_byte: 0,
+                        end_byte: source.len(),
+                        replacement: new_code.as_bytes().to_vec(),
+                    })
+                } else {
+                    let (full_range, _, _) = self
+                        .surgeon
+                        .resolve_full_range(self.workspace_root.path(), semantic_path)
+                        .await
+                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                    let normalized = normalize_for_full_replace(new_code);
+                    let indented = dedent_then_reindent(&normalized, full_range.indent_column);
+
+                    Ok(ResolvedEdit {
+                        start_byte: full_range.start_byte,
+                        end_byte: full_range.end_byte,
+                        replacement: indented.into_bytes(),
+                    })
+                }
+            }
+            "insert_before" => {
+                let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
+                    (0, 0)
+                } else {
+                    let (symbol_range, _, _) = self
+                        .surgeon
+                        .resolve_symbol_range(self.workspace_root.path(), semantic_path)
+                        .await
+                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+                    (symbol_range.start_byte, symbol_range.indent_column)
+                };
+
+                let new_code = edit.new_code.as_deref().unwrap_or_default();
+                let normalized = normalize_for_full_replace(new_code);
+                let indented = dedent_then_reindent(&normalized, indent_column);
+
+                let trailing = if indented.ends_with('\n') { "" } else { "\n" };
+                let after = &source[insert_byte..];
+                let sep = if after.starts_with(b"\n\n") {
+                    ""
+                } else if after.starts_with(b"\n") {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+
+                Ok(ResolvedEdit {
+                    start_byte: insert_byte,
+                    end_byte: insert_byte,
+                    replacement: format!("{indented}{trailing}{sep}").into_bytes(),
+                })
+            }
+            "insert_after" => {
+                let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
+                    (source.len(), 0)
+                } else {
+                    let (symbol_range, _, _) = self
+                        .surgeon
+                        .resolve_symbol_range(self.workspace_root.path(), semantic_path)
+                        .await
+                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+                    (symbol_range.end_byte, symbol_range.indent_column)
+                };
+
+                let new_code = edit.new_code.as_deref().unwrap_or_default();
+                let normalized = normalize_for_full_replace(new_code);
+                let indented = dedent_then_reindent(&normalized, indent_column);
+
+                let before = &source[..insert_byte];
+                let before_sep = if before.ends_with(b"\n\n") {
+                    ""
+                } else if before.ends_with(b"\n") {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+                let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
+
+                Ok(ResolvedEdit {
+                    start_byte: insert_byte,
+                    end_byte: insert_byte,
+                    replacement: format!("{before_sep}{indented}{after_sep}").into_bytes(),
+                })
+            }
+            "delete" => {
+                let (full_range, _, _) = self
+                    .surgeon
+                    .resolve_full_range(self.workspace_root.path(), semantic_path)
+                    .await
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                let mut b_end = full_range.start_byte;
+                while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
+                    b_end -= 1;
+                }
+
+                let mut a_start = full_range.end_byte;
+                while a_start < source.len() && source[a_start].is_ascii_whitespace() {
+                    a_start += 1;
+                }
+
+                let sep = if b_end == 0 || a_start == source.len() {
+                    b"\n" as &[u8]
+                } else {
+                    b"\n\n"
+                };
+
+                Ok(ResolvedEdit {
+                    start_byte: b_end,
+                    end_byte: a_start,
+                    replacement: sep.to_vec(),
+                })
+            }
+            _unknown => {
+                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                    semantic_path: edit.semantic_path.clone(),
+                    reason: format!(
+                        "edit_type is required for semantic targeting. Got: '{}' (empty).",
+                        edit.edit_type
+                    ),
+                    edit_index: Some(edit_index),
+                    valid_edit_types: Some(vec![
+                        "replace_body".to_string(),
+                        "replace_full".to_string(),
+                        "insert_before".to_string(),
+                        "insert_after".to_string(),
+                        "delete".to_string(),
+                    ]),
+                };
+                Err(pathfinder_to_error_data(&err))
+            }
+        }
+    }
+
+    /// Apply resolved edits to source content, sorted backwards to prevent offset shifts.
+    fn apply_sorted_edits(
+        source: &[u8],
+        mut resolved_edits: Vec<ResolvedEdit>,
+    ) -> Result<Vec<u8>, ErrorData> {
+        // Sort edits backwards to prevent shifted byte offsets
+        resolved_edits.sort_by_key(|e| std::cmp::Reverse(e.start_byte));
+
+        // Ensure no overlapping edits
+        for i in 1..resolved_edits.len() {
+            let prev = &resolved_edits[i - 1]; // This is later in the file
+            let curr = &resolved_edits[i]; // This is earlier in the file
+            if curr.end_byte > prev.start_byte {
+                // This should not happen if edits are properly validated
+                return Err(io_error_data(format!(
+                    "overlapping edits in replace_batch: curr.end_byte={} > prev.start_byte={}",
+                    curr.end_byte, prev.start_byte
+                )));
+            }
+        }
+
+        let mut new_bytes = source.to_vec();
+        for edit in resolved_edits {
+            new_bytes.splice(edit.start_byte..edit.end_byte, edit.replacement.into_iter());
+        }
+
+        Ok(new_bytes)
+    }
+
     /// Core logic for the `replace_batch` tool (PRD Epic 5).
     ///
     /// Executes multiple edits on the same file atomically. Edits are resolved,
     /// sorted backwards by byte offset, and spliced together. This avoids OCC
     /// mismatches from chains of edits.
     #[instrument(skip(self, params), fields(filepath = %params.filepath))]
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn replace_batch_impl(
         &self,
         params: crate::server::types::ReplaceBatchParams,
@@ -624,285 +934,36 @@ impl PathfinderServer {
         }
 
         let absolute_path = self.workspace_root.resolve(file_path);
-        let source = tokio::fs::read(&absolute_path)
-            .await
-            .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-        let current_hash = VersionHash::compute(&source);
+        let (source, current_hash) = self
+            .validate_batch_occ(&absolute_path, &params.base_version, &params.filepath)
+            .await?;
 
-        let claimed = VersionHash::from_raw(params.base_version.clone());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: std::path::PathBuf::from(&params.filepath),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        struct ResolvedEdit {
-            start_byte: usize,
-            end_byte: usize,
-            replacement: Vec<u8>,
-        }
         let mut resolved_edits = Vec::new();
-
         for (edit_index, edit) in params.edits.iter().enumerate() {
-            // ── Branch A: Text-range targeting ─────────────────────────────────────
-            if let Some(ref old_text) = edit.old_text {
-                let Some(context_line) = edit.context_line else {
-                    let err = PathfinderError::InvalidTarget {
-                        semantic_path: format!("edit[{edit_index}]"),
-                        reason: "`context_line` is required when `old_text` is set".to_owned(),
-                        edit_index: Some(edit_index),
-                        valid_edit_types: None,
-                    };
-                    return Err(pathfinder_to_error_data(&err));
-                };
-                let replacement = edit.replacement_text.as_deref().unwrap_or("");
-                let free = resolve_text_edit(
-                    &source,
-                    old_text.as_str(),
-                    context_line,
-                    replacement,
-                    edit.normalize_whitespace,
-                    file_path,
-                )
-                .map_err(|e| pathfinder_to_error_data(&e))?;
-                resolved_edits.push(ResolvedEdit {
-                    start_byte: free.start_byte,
-                    end_byte: free.end_byte,
-                    replacement: free.replacement,
-                });
-                continue;
-            }
-
-            // ── Branch B: Semantic targeting (existing) ───────────────────────────
-            let Some(semantic_path) = SemanticPath::parse(&edit.semantic_path) else {
-                let err = PathfinderError::InvalidSemanticPath {
-                    input: edit.semantic_path.clone(),
-                    issue: "Semantic path is malformed or missing '::' separator.".to_owned(),
-                };
-                return Err(pathfinder_to_error_data(&err));
-            };
-
-            match edit.edit_type.as_str() {
-                "replace_body" => {
-                    let (body_range, _, _hash) = self
-                        .surgeon
-                        .resolve_body_range(self.workspace_root.path(), &semantic_path)
-                        .await
-                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                    let new_code = edit.new_code.as_deref().unwrap_or_default();
-                    let normalized = normalize_for_body_replace(new_code);
-                    let indented = dedent_then_reindent(&normalized, body_range.body_indent_column);
-
-                    let is_brace_block = if body_range.end_byte > body_range.start_byte {
-                        source.get(body_range.start_byte) == Some(&b'{')
-                            && source.get(body_range.end_byte.saturating_sub(1)) == Some(&b'}')
-                    } else {
-                        false
-                    };
-
-                    if is_brace_block {
-                        let inner_start = body_range.start_byte + 1;
-                        let inner_end = body_range.end_byte.saturating_sub(1);
-                        let replacement = if indented.trim().is_empty() {
-                            Vec::new()
-                        } else {
-                            let closing_indent = " ".repeat(body_range.indent_column);
-                            format!("\n{indented}\n{closing_indent}").into_bytes()
-                        };
-                        resolved_edits.push(ResolvedEdit {
-                            start_byte: inner_start,
-                            end_byte: inner_end,
-                            replacement,
-                        });
-                    } else {
-                        let mut end = body_range.start_byte;
-                        while end > 0 && (source[end - 1] == b' ' || source[end - 1] == b'\t') {
-                            end -= 1;
-                        }
-                        resolved_edits.push(ResolvedEdit {
-                            start_byte: end,
-                            end_byte: body_range.end_byte,
-                            replacement: format!("\n{indented}").into_bytes(),
-                        });
-                    }
-                }
-                "replace_full" => {
-                    let new_code = edit.new_code.as_deref().unwrap_or_default();
-                    if semantic_path.is_bare_file() {
-                        resolved_edits.push(ResolvedEdit {
-                            start_byte: 0,
-                            end_byte: source.len(),
-                            replacement: new_code.as_bytes().to_vec(),
-                        });
-                    } else {
-                        let (full_range, _, _) = self
-                            .surgeon
-                            .resolve_full_range(self.workspace_root.path(), &semantic_path)
-                            .await
-                            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                        let normalized = normalize_for_full_replace(new_code);
-                        let indented = dedent_then_reindent(&normalized, full_range.indent_column);
-
-                        resolved_edits.push(ResolvedEdit {
-                            start_byte: full_range.start_byte,
-                            end_byte: full_range.end_byte,
-                            replacement: indented.into_bytes(),
-                        });
-                    }
-                }
-                "insert_before" => {
-                    let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
-                        (0, 0)
-                    } else {
-                        let (symbol_range, _, _) = self
-                            .surgeon
-                            .resolve_symbol_range(self.workspace_root.path(), &semantic_path)
-                            .await
-                            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-                        (symbol_range.start_byte, symbol_range.indent_column)
-                    };
-
-                    let new_code = edit.new_code.as_deref().unwrap_or_default();
-                    let normalized = normalize_for_full_replace(new_code);
-                    let indented = dedent_then_reindent(&normalized, indent_column);
-
-                    let trailing = if indented.ends_with('\n') { "" } else { "\n" };
-                    let after = &source[insert_byte..];
-                    let sep = if after.starts_with(b"\n\n") {
-                        ""
-                    } else if after.starts_with(b"\n") {
-                        "\n"
-                    } else {
-                        "\n\n"
-                    };
-
-                    resolved_edits.push(ResolvedEdit {
-                        start_byte: insert_byte,
-                        end_byte: insert_byte,
-                        replacement: format!("{indented}{trailing}{sep}").into_bytes(),
-                    });
-                }
-                "insert_after" => {
-                    let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
-                        (source.len(), 0)
-                    } else {
-                        let (symbol_range, _, _) = self
-                            .surgeon
-                            .resolve_symbol_range(self.workspace_root.path(), &semantic_path)
-                            .await
-                            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-                        (symbol_range.end_byte, symbol_range.indent_column)
-                    };
-
-                    let new_code = edit.new_code.as_deref().unwrap_or_default();
-                    let normalized = normalize_for_full_replace(new_code);
-                    let indented = dedent_then_reindent(&normalized, indent_column);
-
-                    let before = &source[..insert_byte];
-                    let before_sep = if before.ends_with(b"\n\n") {
-                        ""
-                    } else if before.ends_with(b"\n") {
-                        "\n"
-                    } else {
-                        "\n\n"
-                    };
-                    let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
-
-                    resolved_edits.push(ResolvedEdit {
-                        start_byte: insert_byte,
-                        end_byte: insert_byte,
-                        replacement: format!("{before_sep}{indented}{after_sep}").into_bytes(),
-                    });
-                }
-                "delete" => {
-                    let (full_range, _, _) = self
-                        .surgeon
-                        .resolve_full_range(self.workspace_root.path(), &semantic_path)
-                        .await
-                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                    let mut b_end = full_range.start_byte;
-                    while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
-                        b_end -= 1;
-                    }
-
-                    let mut a_start = full_range.end_byte;
-                    while a_start < source.len() && source[a_start].is_ascii_whitespace() {
-                        a_start += 1;
-                    }
-
-                    let sep = if b_end == 0 || a_start == source.len() {
-                        b"\n" as &[u8]
-                    } else {
-                        b"\n\n"
-                    };
-
-                    resolved_edits.push(ResolvedEdit {
-                        start_byte: b_end,
-                        end_byte: a_start,
-                        replacement: sep.to_vec(),
-                    });
-                }
-                _ => {
-                    let err = pathfinder_common::error::PathfinderError::InvalidTarget {
-                        semantic_path: edit.semantic_path.clone(),
-                        reason: format!(
-                            "edit_type is required for semantic targeting. Got: '{}' (empty).",
-                            edit.edit_type
-                        ),
-                        edit_index: Some(edit_index),
-                        valid_edit_types: Some(vec![
-                            "replace_body".to_string(),
-                            "replace_full".to_string(),
-                            "insert_before".to_string(),
-                            "insert_after".to_string(),
-                            "delete".to_string(),
-                        ]),
-                    };
-                    return Err(pathfinder_to_error_data(&err));
-                }
-            }
+            let resolved = self
+                .resolve_single_batch_edit(edit, edit_index, &source, file_path)
+                .await?;
+            resolved_edits.push(resolved);
         }
 
-        // Sort edits backwards to prevent shifted byte offsets
-        resolved_edits.sort_by_key(|e| std::cmp::Reverse(e.start_byte));
-
-        // Ensure no overlapping edits
-        for i in 1..resolved_edits.len() {
-            let prev = &resolved_edits[i - 1]; // This is later in the file
-            let curr = &resolved_edits[i]; // This is earlier in the file
-            if curr.end_byte > prev.start_byte {
-                return Err(io_error_data("overlapping edits in replace_batch"));
-            }
-        }
-
-        let mut new_bytes = source.clone();
-        for edit in resolved_edits {
-            new_bytes.splice(edit.start_byte..edit.end_byte, edit.replacement.into_iter());
-        }
-
+        let new_bytes = Self::apply_sorted_edits(&source, resolved_edits)?;
         let resolve_ms = start.elapsed().as_millis();
         let dummy_path = SemanticPath::parse(&params.filepath).unwrap_or_else(|| SemanticPath {
             file_path: file_path.to_path_buf(),
             symbol_chain: None,
         });
 
-        self.finalize_edit(
-            "replace_batch",
-            &dummy_path,
-            &params.filepath,
-            &source,
-            &new_bytes,
-            &current_hash,
-            params.ignore_validation_failures,
-            start,
+        self.finalize_edit(FinalizeEditParams {
+            tool_name: "replace_batch",
+            semantic_path: &dummy_path,
+            raw_semantic_path_str: &params.filepath,
+            source: &source,
+            original_hash: &current_hash,
+            new_content: new_bytes,
+            ignore_validation_failures: params.ignore_validation_failures,
+            start_time: start,
             resolve_ms,
-        )
+        })
         .await
     }
 
@@ -918,6 +979,40 @@ impl PathfinderServer {
         Ok(VersionHash::compute(&bytes))
     }
 
+    /// Resolve hash for bare-file or full-range semantic paths.
+    async fn resolve_hash_for_full_or_bare(
+        &self,
+        semantic_path: &SemanticPath,
+    ) -> Result<VersionHash, ErrorData> {
+        if semantic_path.is_bare_file() {
+            self.hash_file_content(semantic_path).await
+        } else {
+            let (_, _, hash) = self
+                .surgeon
+                .resolve_full_range(self.workspace_root.path(), semantic_path)
+                .await
+                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+            Ok(hash)
+        }
+    }
+
+    /// Resolve hash for symbol-range paths (`insert_before`/`insert_after`).
+    async fn resolve_hash_for_symbol_range(
+        &self,
+        semantic_path: &SemanticPath,
+    ) -> Result<VersionHash, ErrorData> {
+        if semantic_path.is_bare_file() {
+            self.hash_file_content(semantic_path).await
+        } else {
+            let (_, _, hash) = self
+                .surgeon
+                .resolve_symbol_range(self.workspace_root.path(), semantic_path)
+                .await
+                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+            Ok(hash)
+        }
+    }
+
     /// Resolve the current on-disk `VersionHash` for the path targeted by a
     /// `validate_only` call.
     ///
@@ -931,8 +1026,6 @@ impl PathfinderServer {
         raw_path: &str,
         edit_type: &str,
     ) -> Result<VersionHash, ErrorData> {
-        use crate::server::helpers::treesitter_error_to_error_data;
-
         match edit_type {
             "replace_body" => {
                 require_symbol_target(semantic_path, raw_path)?;
@@ -940,41 +1033,21 @@ impl PathfinderServer {
                     .surgeon
                     .resolve_body_range(self.workspace_root.path(), semantic_path)
                     .await
-                    .map_err(treesitter_error_to_error_data)?;
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
                 Ok(hash)
             }
-            "replace_full" => {
-                if semantic_path.is_bare_file() {
-                    self.hash_file_content(semantic_path).await
-                } else {
-                    let (_, _, hash) = self
-                        .surgeon
-                        .resolve_full_range(self.workspace_root.path(), semantic_path)
-                        .await
-                        .map_err(treesitter_error_to_error_data)?;
-                    Ok(hash)
-                }
-            }
+            "replace_full" => self.resolve_hash_for_full_or_bare(semantic_path).await,
             "delete" => {
                 require_symbol_target(semantic_path, raw_path)?;
                 let (_, _, hash) = self
                     .surgeon
                     .resolve_full_range(self.workspace_root.path(), semantic_path)
                     .await
-                    .map_err(treesitter_error_to_error_data)?;
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
                 Ok(hash)
             }
             "insert_before" | "insert_after" => {
-                if semantic_path.is_bare_file() {
-                    self.hash_file_content(semantic_path).await
-                } else {
-                    let (_, _, hash) = self
-                        .surgeon
-                        .resolve_symbol_range(self.workspace_root.path(), semantic_path)
-                        .await
-                        .map_err(treesitter_error_to_error_data)?;
-                    Ok(hash)
-                }
+                self.resolve_hash_for_symbol_range(semantic_path).await
             }
             unknown => {
                 let err = pathfinder_common::error::PathfinderError::InvalidTarget {
@@ -1192,32 +1265,20 @@ impl PathfinderServer {
 
     /// Helper function to perform LSP validation, TOCTOU check, and disk write.
     /// This dries up the tail end of the edit tools.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Helper function to dry up edit tool validation and response tails."
-    )]
     async fn finalize_edit(
         &self,
-        tool_name: &'static str,
-        semantic_path: &SemanticPath,
-        raw_semantic_path_str: &str,
-        source: &[u8],
-        new_bytes: &[u8],
-        current_hash: &VersionHash,
-        ignore_validation_failures: bool,
-        start_time: std::time::Instant,
-        resolve_ms: u128,
+        params: FinalizeEditParams<'_>,
     ) -> Result<Json<EditResponse>, ErrorData> {
         let validate_start = std::time::Instant::now();
-        let original_str = std::str::from_utf8(source);
-        let new_str = std::str::from_utf8(new_bytes);
+        let original_str = std::str::from_utf8(params.source);
+        let new_str = std::str::from_utf8(&params.new_content);
         let validation_outcome = match (original_str, new_str) {
             (Ok(orig), Ok(new)) => {
                 self.run_lsp_validation(
-                    &semantic_path.file_path,
+                    &params.semantic_path.file_path,
                     orig,
                     new,
-                    ignore_validation_failures,
+                    params.ignore_validation_failures,
                 )
                 .await
             }
@@ -1241,21 +1302,27 @@ impl PathfinderServer {
 
         let flush_start = std::time::Instant::now();
         let new_hash = self
-            .flush_edit_with_toctou(semantic_path, current_hash, source, new_bytes)
+            .flush_edit_with_toctou(
+                params.semantic_path,
+                params.original_hash,
+                params.source,
+                &params.new_content,
+            )
             .await?;
         let flush_ms = flush_start.elapsed().as_millis();
 
-        let duration_ms = start_time.elapsed().as_millis();
+        let duration_ms = params.start_time.elapsed().as_millis();
         tracing::info!(
-            tool = tool_name,
-            semantic_path = %raw_semantic_path_str,
+            tool = params.tool_name,
+            semantic_path = %params.raw_semantic_path_str,
             duration_ms,
-            resolve_ms,
+            resolve_ms = params.resolve_ms,
             validate_ms,
             flush_ms,
             new_version_hash = new_hash.as_str(),
             engines_used = ?["tree-sitter"],
-            "{tool_name}: complete"
+            "{}: complete",
+            params.tool_name
         );
 
         Ok(Json(EditResponse {
@@ -1270,6 +1337,123 @@ impl PathfinderServer {
 }
 
 // ── Extracted helpers ──────────────────────────────────────────────────────────
+
+/// Build a list of byte offsets for the start of every line (0-indexed).
+fn build_line_starts(source_str: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(
+            source_str
+                .char_indices()
+                .filter(|(_, c)| *c == '\n')
+                .map(|(i, _)| i + 1),
+        )
+        .collect()
+}
+
+/// Compute the search window byte range for a given context line.
+fn compute_search_window(
+    line_starts: &[usize],
+    context_line: u32,
+    source_str_len: usize,
+) -> (usize, usize) {
+    let total_lines = line_starts.len();
+    let center = context_line.saturating_sub(1) as usize;
+    let window_start_line = center.saturating_sub(25);
+    let window_end_line = (center + 25).min(total_lines.saturating_sub(1));
+
+    let window_byte_start = line_starts[window_start_line];
+    let window_byte_end = if window_end_line + 1 < total_lines {
+        line_starts[window_end_line + 1]
+    } else {
+        source_str_len
+    };
+
+    (window_byte_start, window_byte_end)
+}
+
+/// Collapse all runs of whitespace to a single space.
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_ws = false;
+    for ch in s.chars() {
+        if ch.is_ascii_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            out.push(ch);
+            prev_ws = false;
+        }
+    }
+    out
+}
+
+/// Normalize and match, then map back to original byte positions.
+fn collapse_and_match(
+    window_text: &str,
+    old_text: &str,
+    filepath: &std::path::Path,
+    context_line: u32,
+) -> Result<(usize, usize), pathfinder_common::error::PathfinderError> {
+    let normalised_window = collapse_whitespace(window_text);
+    let normalised_needle = collapse_whitespace(old_text);
+
+    let norm_match_start = normalised_window
+        .find(&normalised_needle[..])
+        .ok_or_else(|| pathfinder_common::error::PathfinderError::TextNotFound {
+            filepath: filepath.to_path_buf(),
+            old_text: old_text.to_owned(),
+            context_line,
+            actual_content: Some(window_text.to_owned()),
+        })?;
+    let norm_match_end = norm_match_start + normalised_needle.len();
+
+    // Re-walk the window to find the original byte span
+    let mut orig_start: Option<usize> = None;
+    let mut orig_end: Option<usize> = None;
+    let mut norm_pos = 0usize;
+    let mut prev_ws2 = false;
+
+    for (orig_i, ch) in window_text.char_indices() {
+        let was_prev_ws = prev_ws2;
+        let ch_is_ws = ch.is_ascii_whitespace();
+
+        let norm_char_start = norm_pos;
+        if ch_is_ws {
+            if !was_prev_ws {
+                norm_pos += 1; // the space we emitted
+            }
+            prev_ws2 = true;
+        } else {
+            norm_pos += ch.len_utf8();
+            prev_ws2 = false;
+        }
+
+        if orig_start.is_none() && norm_char_start == norm_match_start {
+            orig_start = Some(orig_i);
+        }
+        if orig_end.is_none() && norm_pos >= norm_match_end {
+            orig_end = Some(orig_i + ch.len_utf8());
+            break;
+        }
+    }
+
+    // If the match reached end-of-window.
+    if orig_end.is_none() && norm_pos >= norm_match_end {
+        orig_end = Some(window_text.len());
+    }
+
+    match (orig_start, orig_end) {
+        (Some(s), Some(e)) => Ok((s, e)),
+        _ => Err(pathfinder_common::error::PathfinderError::TextNotFound {
+            filepath: filepath.to_path_buf(),
+            old_text: old_text.to_owned(),
+            context_line,
+            actual_content: Some(window_text.to_owned()),
+        }),
+    }
+}
 
 /// Resolve a text-range edit (E3.1) to a concrete byte span in `source`.
 ///
@@ -1288,7 +1472,6 @@ impl PathfinderServer {
 /// # Errors
 /// - [`PathfinderError::TextNotFound`] — `old_text` not present in the ±25-line window.
 /// - Propagated UTF-8 errors if source is not valid UTF-8 (returns an opaque I/O error).
-#[allow(clippy::too_many_lines)]
 fn resolve_text_edit(
     source: &[u8],
     old_text: &str,
@@ -1304,138 +1487,31 @@ fn resolve_text_edit(
         }
     })?;
 
-    // Build a list of byte offsets for the start of every line (0-indexed).
-    let line_starts: Vec<usize> = std::iter::once(0)
-        .chain(
-            source_str
-                .char_indices()
-                .filter(|(_, c)| *c == '\n')
-                .map(|(i, _)| i + 1),
-        )
-        .collect();
-
-    let total_lines = line_starts.len();
-
-    // context_line is 1-indexed; convert to 0-indexed.
-    let center = context_line.saturating_sub(1) as usize;
-    let window_start_line = center.saturating_sub(25);
-    let window_end_line = (center + 25).min(total_lines.saturating_sub(1));
-
-    // Byte range [window_byte_start, window_byte_end) covering the search window.
-    let window_byte_start = line_starts[window_start_line];
-    let window_byte_end = if window_end_line + 1 < total_lines {
-        line_starts[window_end_line + 1]
-    } else {
-        source_str.len()
-    };
-
+    // Build line starts and compute search window
+    let line_starts = build_line_starts(source_str);
+    let (window_byte_start, window_byte_end) =
+        compute_search_window(&line_starts, context_line, source_str.len());
     let window_text = &source_str[window_byte_start..window_byte_end];
 
-    // Perform the match, with optional whitespace normalisation.
-    let match_offset_in_window: usize = if normalize_whitespace {
-        // Collapse all runs of whitespace to a single space for both needle and haystack.
-        let normalise = |s: &str| {
-            let mut out = String::with_capacity(s.len());
-            let mut prev_ws = false;
-            for ch in s.chars() {
-                if ch.is_ascii_whitespace() {
-                    if !prev_ws {
-                        out.push(' ');
-                    }
-                    prev_ws = true;
-                } else {
-                    out.push(ch);
-                    prev_ws = false;
-                }
-            }
-            out
-        };
-        let normalised_window = normalise(window_text);
-        let normalised_needle = normalise(old_text);
-
-        // After normalisation the char-level offsets no longer map 1:1 to the
-        // original bytes. We need to find the match in the *normalised* window
-        // and then walk back to find the corresponding byte span in the original.
-        let norm_match_start = normalised_window
-            .find(normalised_needle.as_str())
-            .ok_or_else(|| pathfinder_common::error::PathfinderError::TextNotFound {
-                filepath: filepath.to_path_buf(),
-                old_text: old_text.to_owned(),
-                context_line,
-                actual_content: Some(window_text.to_owned()),
-            })?;
-        let norm_match_end = norm_match_start + normalised_needle.len();
-
-        // Re-walk the window to find the original byte span that corresponds to
-        // the normalised match range [norm_match_start, norm_match_end).
-        let mut orig_start: Option<usize> = None;
-        let mut orig_end: Option<usize> = None;
-        let mut norm_pos = 0usize;
-        let mut prev_ws2 = false;
-
-        for (orig_i, ch) in window_text.char_indices() {
-            let was_prev_ws = prev_ws2;
-            let ch_is_ws = ch.is_ascii_whitespace();
-
-            let norm_char_start = norm_pos;
-            if ch_is_ws {
-                if !was_prev_ws {
-                    norm_pos += 1; // the space we emitted
-                }
-                prev_ws2 = true;
-            } else {
-                norm_pos += ch.len_utf8();
-                prev_ws2 = false;
-            }
-
-            if orig_start.is_none() && norm_char_start == norm_match_start {
-                orig_start = Some(orig_i);
-            }
-            if orig_end.is_none() && norm_pos >= norm_match_end {
-                // The original span ends after this character.
-                orig_end = Some(orig_i + ch.len_utf8());
-                break;
-            }
-        }
-
-        // If the match reached end-of-window.
-        if orig_end.is_none() && norm_pos >= norm_match_end {
-            orig_end = Some(window_text.len());
-        }
-
-        match (orig_start, orig_end) {
-            (Some(s), Some(e)) => {
-                return Ok(ResolvedEditFree {
-                    start_byte: window_byte_start + s,
-                    end_byte: window_byte_start + e,
-                    replacement: new_text.as_bytes().to_vec(),
-                });
-            }
-            _ => {
-                return Err(pathfinder_common::error::PathfinderError::TextNotFound {
-                    filepath: filepath.to_path_buf(),
-                    old_text: old_text.to_owned(),
-                    context_line,
-                    actual_content: Some(window_text.to_owned()),
-                });
-            }
-        }
+    // Perform the match, with optional whitespace normalisation
+    if normalize_whitespace {
+        // Use whitespace normalization
+        let (start, end) = collapse_and_match(window_text, old_text, filepath, context_line)?;
+        Ok(ResolvedEditFree {
+            start_byte: window_byte_start + start,
+            end_byte: window_byte_start + end,
+            replacement: new_text.as_bytes().to_vec(),
+        })
     } else {
-        // Two-path control flow: exact match attempt, then fuzzy fallback.
-        // For whitespace-significant languages (.py, .yaml, .yml, .toml),
-        // fuzzy fallback is skipped to avoid corrupting indentation.
-        let match_result = window_text.find(old_text);
-
-        if match_result.is_none() && !normalize_whitespace {
-            // Exact match failed. Check if this is a whitespace-significant file
-            // before attempting fuzzy fallback.
+        // Exact match with optional fuzzy fallback for non-whitespace-significant files
+        let Some(abs_start) = window_text.find(old_text) else {
+            // Check if this is a whitespace-significant file before attempting fuzzy fallback
             let is_whitespace_significant = filepath
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| matches!(ext, "py" | "yaml" | "yml" | "toml"));
 
             if is_whitespace_significant {
-                // Skip fuzzy fallback for whitespace-significant languages
                 return Err(pathfinder_common::error::PathfinderError::TextNotFound {
                     filepath: filepath.to_path_buf(),
                     old_text: old_text.to_owned(),
@@ -1444,7 +1520,7 @@ fn resolve_text_edit(
                 });
             }
 
-            // Retry with whitespace normalization as a fallback for non-significant files.
+            // Retry with whitespace normalization as a fallback
             tracing::warn!(
                 filepath = %filepath.display(),
                 context_line,
@@ -1452,28 +1528,18 @@ fn resolve_text_edit(
                 "text_edit: exact match failed, trying whitespace-normalized fuzzy fallback"
             );
 
-            // Recursively call with normalize_whitespace=true.
-            // Note: This recursion is bounded (max 1 level) because we only recurse
-            // when normalize_whitespace is false, and the recursive call sets it to true.
             return resolve_text_edit(source, old_text, context_line, new_text, true, filepath);
-        }
+        };
 
-        match_result.ok_or_else(|| pathfinder_common::error::PathfinderError::TextNotFound {
-            filepath: filepath.to_path_buf(),
-            old_text: old_text.to_owned(),
-            context_line,
-            actual_content: Some(window_text.to_owned()),
-        })?
-    };
+        let abs_start = window_byte_start + abs_start;
+        let abs_end = abs_start + old_text.len();
 
-    let abs_start = window_byte_start + match_offset_in_window;
-    let abs_end = abs_start + old_text.len();
-
-    Ok(ResolvedEditFree {
-        start_byte: abs_start,
-        end_byte: abs_end,
-        replacement: new_text.as_bytes().to_vec(),
-    })
+        Ok(ResolvedEditFree {
+            start_byte: abs_start,
+            end_byte: abs_end,
+            replacement: new_text.as_bytes().to_vec(),
+        })
+    }
 }
 
 /// Mirror of the local `ResolvedEdit` struct used by free functions outside
@@ -1488,10 +1554,12 @@ struct ResolvedEditFree {
     replacement: Vec<u8>,
 }
 
-impl From<ResolvedEditFree> for (usize, usize, Vec<u8>) {
-    fn from(r: ResolvedEditFree) -> Self {
-        (r.start_byte, r.end_byte, r.replacement)
-    }
+/// Resolved edit for batch operations — a byte span and its replacement content.
+#[derive(Debug)]
+struct ResolvedEdit {
+    start_byte: usize,
+    end_byte: usize,
+    replacement: Vec<u8>,
 }
 
 /// Splice `indented` code into `source` at the given `body_range`.

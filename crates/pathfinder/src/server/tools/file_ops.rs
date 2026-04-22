@@ -51,6 +51,63 @@ fn apply_replacements(
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
+/// Validate file path and sandbox access. Returns early error if validation fails.
+fn validate_file_path(
+    sandbox: &pathfinder_common::sandbox::Sandbox,
+    relative_path: &Path,
+    tool_name: &str,
+) -> Result<(), ErrorData> {
+    if let Err(e) = sandbox.check(relative_path) {
+        tracing::warn!(tool = tool_name, error = %e, "sandbox check failed");
+        return Err(pathfinder_to_error_data(&e));
+    }
+    Ok(())
+}
+
+/// Prepare file for writing: validate sandbox, read content, check OCC.
+/// Returns `(current_content, current_hash)` on success.
+async fn prepare_file_write(
+    sandbox: &pathfinder_common::sandbox::Sandbox,
+    workspace_root: &pathfinder_common::types::WorkspaceRoot,
+    relative_path: &Path,
+    base_version: &str,
+    tool_name: &str,
+) -> Result<(String, VersionHash), ErrorData> {
+    // Sandbox check
+    validate_file_path(sandbox, relative_path, tool_name)?;
+
+    // Read current content
+    let absolute_path = workspace_root.resolve(relative_path);
+    let current_content = match tfs::read_to_string(&absolute_path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let err = PathfinderError::FileNotFound {
+                path: relative_path.to_path_buf(),
+            };
+            tracing::warn!(tool = tool_name, error = %err, "file not found");
+            return Err(pathfinder_to_error_data(&err));
+        }
+        Err(e) => {
+            tracing::warn!(tool = tool_name, error = %e, "failed to read file");
+            return Err(io_error_data(format!("failed to read file: {e}")));
+        }
+    };
+
+    // OCC check
+    let current_hash = VersionHash::compute(current_content.as_bytes());
+    if current_hash.as_str() != base_version {
+        let err = PathfinderError::VersionMismatch {
+            path: relative_path.to_path_buf(),
+            current_version_hash: current_hash.as_str().to_owned(),
+            lines_changed: None,
+        };
+        tracing::warn!(tool = tool_name, error = %err, "OCC version mismatch");
+        return Err(pathfinder_to_error_data(&err));
+    }
+
+    Ok((current_content, current_hash))
+}
+
 impl PathfinderServer {
     /// Core logic for the `create_file` tool.
     ///
@@ -68,10 +125,7 @@ impl PathfinderServer {
         tracing::info!(tool = "create_file", "create_file: start");
 
         // 1. Sandbox check
-        if let Err(e) = self.sandbox.check(relative_path) {
-            tracing::warn!(tool = "create_file", error = %e, "sandbox check failed");
-            return Err(pathfinder_to_error_data(&e));
-        }
+        validate_file_path(&self.sandbox, relative_path, "create_file")?;
 
         // 2. Create parent directories
         if let Some(parent) = absolute_path.parent() {
@@ -337,41 +391,17 @@ impl PathfinderServer {
             _ => {}
         }
 
-        // 2. Sandbox check
-        if let Err(e) = self.sandbox.check(relative_path) {
-            tracing::warn!(tool = "write_file", error = %e, "sandbox check failed");
-            return Err(pathfinder_to_error_data(&e));
-        }
+        // 2. Sandbox check, read file, and OCC check
+        let (current_content, _current_hash) = prepare_file_write(
+            &self.sandbox,
+            &self.workspace_root,
+            relative_path,
+            &params.base_version,
+            "write_file",
+        )
+        .await?;
 
-        // 3. Verify file exists and read current content
-        let current_content = match tfs::read_to_string(&absolute_path).await {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let err = PathfinderError::FileNotFound {
-                    path: relative_path.to_path_buf(),
-                };
-                tracing::warn!(tool = "write_file", error = %err, "file not found");
-                return Err(pathfinder_to_error_data(&err));
-            }
-            Err(e) => {
-                tracing::warn!(tool = "write_file", error = %e, "failed to read file");
-                return Err(io_error_data(format!("failed to read file: {e}")));
-            }
-        };
-
-        // 4. OCC check
-        let current_hash = VersionHash::compute(current_content.as_bytes());
-        if current_hash.as_str() != params.base_version {
-            let err = PathfinderError::VersionMismatch {
-                path: relative_path.to_path_buf(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            tracing::warn!(tool = "write_file", error = %err, "OCC version mismatch");
-            return Err(pathfinder_to_error_data(&err));
-        }
-
-        // 5. Compute new content (full replacement or search-and-replace)
+        // 3. Compute new content (full replacement or search-and-replace)
         let new_content = if let Some(content) = params.content {
             content
         } else {
@@ -385,7 +415,7 @@ impl PathfinderServer {
             )?
         };
 
-        // 6. TOCTOU late-check: re-read and re-hash immediately before write.
+        // 4. TOCTOU late-check: re-read and re-hash immediately before write.
         //    At this point we still have the agent's prior content (`current_content`)
         //    and we read fresh disk content (`late_content`) — making this the only
         //    site where both versions are available to compute `lines_changed`.
@@ -409,7 +439,7 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&err));
         }
 
-        // 7. Write to disk (in-place: preserves inode for HMR/watchers)
+        // 5. Write to disk (in-place: preserves inode for HMR/watchers)
         let io_start = std::time::Instant::now();
         if let Err(e) = tfs::write(&absolute_path, new_content.as_bytes()).await {
             tracing::warn!(tool = "write_file", error = %e, "failed to write file");
