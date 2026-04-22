@@ -292,7 +292,7 @@ pub struct ReadSourceFileParams {
 ///
 /// **Option B — Text targeting:** Set `old_text`, `context_line`, and optionally `replacement_text`.
 /// Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path.
-/// The search scans ±10 lines around `context_line` for an exact match of `old_text`.
+/// The search scans ±25 lines around `context_line` for an exact match of `old_text`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchEdit {
     // ── Semantic targeting (Option A) ─────────────────────────────────────
@@ -311,10 +311,10 @@ pub struct BatchEdit {
     /// Exact text to find and replace. Set this for template/style edits that have no
     /// semantic path (e.g., Vue `<template>`, `<style>` zones, embedded SQL).
     /// When set, `semantic_path` and `edit_type` are ignored.
-    /// The search scans ±10 lines around `context_line` for an exact match.
+    /// The search scans ±25 lines around `context_line` for an exact match.
     pub old_text: Option<String>,
     /// Line number (1-indexed) to anchor the `old_text` search window.
-    /// Required when `old_text` is set. The search scans ±10 lines around this line.
+    /// Required when `old_text` is set. The search scans ±25 lines around this line.
     pub context_line: Option<u32>,
     /// Replacement text when using text targeting. Required when `old_text` is set.
     pub replacement_text: Option<String>,

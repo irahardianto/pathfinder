@@ -26,7 +26,13 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
         }
     };
 
-    // Map PathfinderError variants to semantically correct JSON-RPC error codes
+    // JSON-RPC error code allocation (-320xx range, implementation-defined):
+    // -32602  INVALID_PARAMS     Client errors (file not found, bad paths, etc.)
+    // -32001  ACCESS_DENIED      Sandbox violation
+    // -32002  [reserved by rmcp] RESOURCE_NOT_FOUND
+    // -32003  VERSION_MISMATCH   OCC conflict
+    // -32004  VALIDATION_FAILED  LSP errors introduced by edit
+    // -32603  INTERNAL_ERROR     Genuine server failures (I/O, parse, LSP crash)
     let error_code = match err {
         // Client errors (invalid parameters) -> INVALID_PARAMS (-32602)
         pathfinder_common::error::PathfinderError::FileNotFound { .. }

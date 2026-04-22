@@ -14,7 +14,9 @@
 //! 10. `tokio::fs::write` (in-place, preserves inode)
 //! 11. Compute and return new `version_hash`
 
-use crate::server::helpers::{io_error_data, parse_semantic_path, pathfinder_to_error_data, require_symbol_target};
+use crate::server::helpers::{
+    io_error_data, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+};
 use crate::server::tools::diagnostics::diff_diagnostics;
 use crate::server::types::{
     DeleteSymbolParams, EditResponse, EditValidation, InsertAfterParams, InsertBeforeParams,
@@ -234,7 +236,6 @@ impl PathfinderServer {
         )
         .await
     }
-
 
     /// Core logic for the `insert_before` tool (PRD Epic 5, Story 5.5).
     #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
@@ -906,7 +907,10 @@ impl PathfinderServer {
     }
 
     /// Read file and compute its version hash (for bare-file edit types).
-    async fn hash_file_content(&self, semantic_path: &SemanticPath) -> Result<VersionHash, ErrorData> {
+    async fn hash_file_content(
+        &self,
+        semantic_path: &SemanticPath,
+    ) -> Result<VersionHash, ErrorData> {
         let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
         let bytes = tokio::fs::read(&absolute_path)
             .await
@@ -1417,13 +1421,31 @@ fn resolve_text_edit(
             }
         }
     } else {
-        // Try exact match first
-        let exact_match = window_text.find(old_text);
+        // Two-path control flow: exact match attempt, then fuzzy fallback.
+        // For whitespace-significant languages (.py, .yaml, .yml, .toml),
+        // fuzzy fallback is skipped to avoid corrupting indentation.
+        let match_result = window_text.find(old_text);
 
-        if exact_match.is_none() && !normalize_whitespace {
-            // Exact match failed and we haven't tried fuzzy matching yet.
-            // Retry with whitespace normalization as a fallback.
-            tracing::info!(
+        if match_result.is_none() && !normalize_whitespace {
+            // Exact match failed. Check if this is a whitespace-significant file
+            // before attempting fuzzy fallback.
+            let is_whitespace_significant = filepath
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| matches!(ext, "py" | "yaml" | "yml" | "toml"));
+
+            if is_whitespace_significant {
+                // Skip fuzzy fallback for whitespace-significant languages
+                return Err(pathfinder_common::error::PathfinderError::TextNotFound {
+                    filepath: filepath.to_path_buf(),
+                    old_text: old_text.to_owned(),
+                    context_line,
+                    actual_content: Some(window_text.to_owned()),
+                });
+            }
+
+            // Retry with whitespace normalization as a fallback for non-significant files.
+            tracing::warn!(
                 filepath = %filepath.display(),
                 context_line,
                 old_text_len = old_text.len(),
@@ -1436,7 +1458,7 @@ fn resolve_text_edit(
             return resolve_text_edit(source, old_text, context_line, new_text, true, filepath);
         }
 
-        exact_match.ok_or_else(|| pathfinder_common::error::PathfinderError::TextNotFound {
+        match_result.ok_or_else(|| pathfinder_common::error::PathfinderError::TextNotFound {
             filepath: filepath.to_path_buf(),
             old_text: old_text.to_owned(),
             context_line,
@@ -2876,10 +2898,10 @@ mod text_edit_tests {
     }
 
     #[test]
-    fn test_window_boundary_at_plus_10_is_included() {
-        // Target on line 20, context_line 10 → window = [1, 20].
-        let mut lines = vec!["filler"; 25];
-        lines[19] = "special text"; // line 20 (1-indexed)
+    fn test_window_boundary_at_plus_25_is_included() {
+        // Target on line 35, context_line 10 → window = [1, 35] (±25 from line 10).
+        let mut lines = vec!["filler"; 40];
+        lines[34] = "special text"; // line 35 (1-indexed)
         let source = src(&lines);
         resolve_text_edit(
             &source,
@@ -2889,7 +2911,7 @@ mod text_edit_tests {
             false,
             Path::new("a.rs"),
         )
-        .expect("±10 edge should be included");
+        .expect("±25 edge should be included");
     }
 
     #[test]
