@@ -53,25 +53,22 @@ pub struct LanguageLsp {
 ///
 /// Returns `None` and logs a warning if the binary is not found on `PATH`.
 fn resolve_command(name: &str, lang: &str) -> Option<String> {
-    match which::which(name) {
-        Ok(path) => {
-            tracing::debug!(
-                language = lang,
-                binary = %path.display(),
-                "LSP: resolved binary path"
-            );
-            Some(path.to_string_lossy().into_owned())
-        }
-        Err(_) => {
-            tracing::warn!(
-                language = lang,
-                binary = name,
-                "LSP: binary not found on PATH — language server will not start. \
-                 Install it or set `lsp.{lang}.command` in .pathfinder.toml to \
-                 an absolute path (e.g. for nix, asdf, volta, or GUI launcher installs)"
-            );
-            None
-        }
+    if let Ok(path) = which::which(name) {
+        tracing::debug!(
+            language = lang,
+            binary = %path.display(),
+            "LSP: resolved binary path"
+        );
+        Some(path.to_string_lossy().into_owned())
+    } else {
+        tracing::warn!(
+            language = lang,
+            binary = name,
+            "LSP: binary not found on PATH — language server will not start. \
+             Install it or set `lsp.{lang}.command` in .pathfinder.toml to \
+             an absolute path (e.g. for nix, asdf, volta, or GUI launcher installs)"
+        );
+        None
     }
 }
 
@@ -150,8 +147,8 @@ pub async fn detect_languages(
         None => find_marker(workspace_root, "Cargo.toml", 0).await,
     };
     if let Some(root) = rust_root {
-        let cmd = get_command_override!("rust")
-            .or_else(|| resolve_command("rust-analyzer", "rust"));
+        let cmd =
+            get_command_override!("rust").or_else(|| resolve_command("rust-analyzer", "rust"));
         if let Some(command) = cmd {
             detected.push(LanguageLsp {
                 language_id: "rust".to_owned(),
@@ -169,8 +166,7 @@ pub async fn detect_languages(
         None => find_marker(workspace_root, "go.mod", 2).await,
     };
     if let Some(root) = go_root {
-        let cmd = get_command_override!("go")
-            .or_else(|| resolve_command("gopls", "go"));
+        let cmd = get_command_override!("go").or_else(|| resolve_command("gopls", "go"));
         if let Some(command) = cmd {
             detected.push(LanguageLsp {
                 language_id: "go".to_owned(),
@@ -212,8 +208,7 @@ pub async fn detect_languages(
             .or(find_marker(workspace_root, "requirements.txt", 2).await),
     };
     if let Some(root) = py_root {
-        let cmd = get_command_override!("python")
-            .or_else(|| resolve_command("pyright", "python"));
+        let cmd = get_command_override!("python").or_else(|| resolve_command("pyright", "python"));
         if let Some(command) = cmd {
             detected.push(LanguageLsp {
                 language_id: "python".to_owned(),

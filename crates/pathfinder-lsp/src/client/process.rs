@@ -8,19 +8,29 @@
 //!
 //! # Spawn reliability
 //!
-//! LSP processes are spawned with three key hardening measures:
+//! LSP processes are spawned with four key hardening measures:
 //!
 //! 1. **stderr → /dev/null**: LSP servers write verbose diagnostics to stderr.
 //!    If stderr is piped but never read, the 64 KB OS pipe buffer fills up and the
 //!    child process blocks on its next log write — deadlocking the entire server.
 //!    Redirecting to null is the only safe option since we never consume LSP stderr.
 //!
-//! 2. **Process group via `command-group`**: Children are spawned in their own
-//!    process group. When Pathfinder exits — even via SIGKILL where Rust `Drop`
-//!    handlers do not run — the OS terminates the entire group, preventing orphaned
-//!    LSP processes that would hold file locks (e.g. `.rust-analyzer/` directories).
+//! 2. **`prctl(PR_SET_PDEATHSIG, SIGKILL)` (Unix only)**: This asks the Linux
+//!    kernel to deliver `SIGKILL` to the LSP child the instant Pathfinder's process
+//!    exits — for *any* reason including `SIGKILL`. Because `SIGKILL` cannot be
+//!    caught or deferred, Rust `Drop` handlers (including `kill_on_drop`) are *not*
+//!    executed when Pathfinder is force-killed by a GUI MCP client reload. The
+//!    `prctl` flag is set in a `pre_exec` hook (runs in the child after `fork` but
+//!    before `exec`) and is therefore owned by the kernel, not by Rust.
+//!    Without this, orphaned LSP processes accumulate across reloads, lock workspace
+//!    resources, and prevent freshly-spawned LSPs from initialising — causing the
+//!    server to fall back to degraded (no-LSP) mode.
 //!
-//! 3. **Absolute binary path**: `detect.rs` resolves bare binary names (e.g.
+//! 3. **Process group via `command-group`**: Belt-and-suspenders for clean
+//!    (non-SIGKILL) exits. Children are spawned in their own process group;
+//!    `kill_on_drop` terminates the group when `AsyncGroupChild` is dropped.
+//!
+//! 4. **Absolute binary path**: `detect.rs` resolves bare binary names (e.g.
 //!    `"rust-analyzer"`) to absolute paths via `which` at startup. This ensures
 //!    GUI launchers that strip `~/.cargo/bin` and similar paths from `$PATH` still
 //!    find the language server binary at spawn time.
@@ -71,6 +81,14 @@ const INIT_TIMEOUT_SECS: u64 = 120;
 /// - `LspError::Timeout` — LSP did not initialize within the configured timeout
 /// - `LspError::Io` — failed to spawn child process
 /// - `LspError::Protocol` — invalid response from LSP
+///
+/// # Safety
+///
+/// On Unix, this function calls [`spawn_lsp_child`] which contains an `unsafe`
+/// block to set `prctl(PR_SET_PDEATHSIG, SIGKILL)` via a `pre_exec` hook.
+/// This is safe: `prctl` is async-signal-safe, and the call has no Rust
+/// memory-safety implications (no raw pointers, no aliased state).
+#[allow(unsafe_code)]
 pub(super) async fn spawn_and_initialize(
     command: &str,
     args: &[String],
@@ -78,109 +96,23 @@ pub(super) async fn spawn_and_initialize(
     language_id: &str,
     dispatcher: Arc<RequestDispatcher>,
     init_timeout_secs: Option<u64>,
-) -> Result<(ManagedProcess, ChildStdout), LspError> {
-    // Spawn the child into its own process group with piped stdio.
-    //
-    // Process group (command-group): when Pathfinder exits — even via SIGKILL
-    // where Rust Drop handlers do not run — the OS sends termination to the
-    // entire group, preventing orphaned LSP processes that hold file locks.
-    //
-    // stderr → null: a piped-but-never-read stderr fills its 64 KB OS buffer
-    // and blocks the child on the next log write, deadlocking the server.
-    // See module-level doc for full rationale.
-    let mut child_group = tokio::process::Command::new(command)
-        .args(args)
-        .current_dir(project_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        // Redirect stderr to /dev/null — see module-level doc for rationale.
-        .stderr(std::process::Stdio::null())
-        // Belt-and-suspenders: also kill on Drop for clean (non-SIGKILL) exits.
-        .kill_on_drop(true)
-        .group_spawn()
-        .map_err(|e: std::io::Error| {
-            // Emit a targeted diagnostic so operators know exactly what to fix.
-            if e.kind() == std::io::ErrorKind::NotFound {
-                tracing::error!(
-                    command = command,
-                    language = language_id,
-                    "LSP: binary not found — ensure the language server is installed \
-                     and on your PATH, or set `lsp.{language_id}.command` in \
-                     .pathfinder.toml to an absolute path"
-                );
-            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                tracing::error!(
-                    command = command,
-                    language = language_id,
-                    "LSP: permission denied spawning binary — check file permissions"
-                );
-            } else {
-                tracing::error!(
-                    command = command,
-                    language = language_id,
-                    error = %e,
-                    "LSP: unexpected spawn error"
-                );
-            }
-            LspError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to spawn LSP '{command}': {e}"),
-            ))
-        })?;
-
-    // Extract stdio handles from the AsyncGroupChild before converting to plain Child.
-    // `group_spawn()` returns an AsyncGroupChild wrapping the inner tokio Child;
-    // we take the stdio handles first, then call `into_inner()` to recover
-    // the plain `tokio::process::Child` that ManagedProcess stores for liveness checks.
-    let stdout = child_group
-        .inner()
-        .stdout
-        .take()
-        .ok_or_else(|| LspError::Protocol("LSP stdout was not piped".to_owned()))?;
-    let stdin = child_group
-        .inner()
-        .stdin
-        .take()
-        .ok_or_else(|| LspError::Protocol("LSP stdin was not piped".to_owned()))?;
-    let child = child_group.into_inner();
-
+) -> Result<(ManagedProcess, tokio::task::JoinHandle<()>), LspError> {
+    let (child, stdin, stdout) = spawn_lsp_child(command, args, project_root, language_id)?;
     let mut writer = tokio::io::BufWriter::new(stdin);
 
-    // Build workspace URI string (file:///path/to/workspace/)
-    let workspace_uri = path_to_file_uri(project_root).await?;
-    let workspace_name = project_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("workspace");
+    // Start the reader task BEFORE writing the initialize request.
+    //
+    // The reader task reads from stdout and dispatches JSON-RPC responses via
+    // the RequestDispatcher. Without it running, the initialize response would
+    // sit unread in the stdout pipe buffer forever — the oneshot channel `rx`
+    // would never be filled, causing a deadlock.
+    let reader_handle = start_reader_task(stdout, Arc::clone(&dispatcher));
 
-    // Build initialize request manually to avoid lsp-types URI type issues
     let (id, rx) = dispatcher.register();
-    let init_request = RequestDispatcher::make_request(
-        id,
-        "initialize",
-        &json!({
-            "processId": std::process::id(),
-            "clientInfo": { "name": "pathfinder", "version": "0.1.0" },
-            "rootUri": workspace_uri,
-            "workspaceFolders": [{ "uri": workspace_uri, "name": workspace_name }],
-            "capabilities": {
-                "textDocument": {
-                    "definition": { "dynamicRegistration": false, "linkSupport": false },
-                    "publishDiagnostics": { "relatedInformation": false }
-                },
-                "workspace": {
-                    "workspaceFolders": true,
-                    "diagnostics": true
-                }
-            }
-        }),
-    );
+    let init_request = build_initialize_request(id, project_root).await?;
     write_message(&mut writer, &init_request).await?;
 
-    // Use configured timeout or default (120 seconds)
     let timeout_secs = init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
-
-    // Await the `initialize` response with configured timeout
     let response = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
         .await
         .map_err(|_| {
@@ -192,10 +124,7 @@ pub(super) async fn spawn_and_initialize(
         })?
         .map_err(|_| LspError::ConnectionLost)??;
 
-    // Parse capabilities from the initialize result
     let capabilities = DetectedCapabilities::from_response_json(&response);
-
-    // Send `initialized` notification NOW, so the server can complete setup
     let initialized_notif = RequestDispatcher::make_notification("initialized", &json!({}));
     write_message(&mut writer, &initialized_notif).await?;
 
@@ -216,7 +145,92 @@ pub(super) async fn spawn_and_initialize(
         in_flight: Arc::new(AtomicU32::new(0)),
     };
 
-    Ok((process, stdout))
+    Ok((process, reader_handle))
+}
+
+/// Spawn the LSP child process with process-group hardening and extract stdio handles.
+///
+/// See module-level doc for the rationale of each hardening measure (stderr null,
+/// prctl PDEATHSIG, process group, absolute binary path).
+#[allow(unsafe_code)]
+fn spawn_lsp_child(
+    command: &str,
+    args: &[String],
+    project_root: &Path,
+    language_id: &str,
+) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(args)
+        .current_dir(project_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+
+    let mut child_group = cmd.group_spawn().map_err(|e: std::io::Error| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            tracing::error!(
+                command,
+                language = language_id,
+                "LSP: binary not found — install it or set lsp.{language_id}.command"
+            );
+        } else {
+            tracing::error!(command, language = language_id, error = %e, "LSP: spawn error");
+        }
+        LspError::Io(std::io::Error::new(
+            e.kind(),
+            format!("failed to spawn LSP '{command}': {e}"),
+        ))
+    })?;
+
+    let stdout = child_group
+        .inner()
+        .stdout
+        .take()
+        .ok_or_else(|| LspError::Protocol("LSP stdout was not piped".to_owned()))?;
+    let stdin = child_group
+        .inner()
+        .stdin
+        .take()
+        .ok_or_else(|| LspError::Protocol("LSP stdin was not piped".to_owned()))?;
+    let child = child_group.into_inner();
+
+    Ok((child, stdin, stdout))
+}
+
+/// Build the LSP `initialize` request JSON-RPC message.
+async fn build_initialize_request(id: u64, project_root: &Path) -> Result<Value, LspError> {
+    let workspace_uri = path_to_file_uri(project_root).await?;
+    let workspace_name = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+
+    Ok(RequestDispatcher::make_request(
+        id,
+        "initialize",
+        &json!({
+            "processId": std::process::id(),
+            "clientInfo": { "name": "pathfinder", "version": "0.1.0" },
+            "rootUri": workspace_uri,
+            "workspaceFolders": [{ "uri": workspace_uri, "name": workspace_name }],
+            "capabilities": {
+                "textDocument": {
+                    "definition": { "dynamicRegistration": false, "linkSupport": false },
+                    "publishDiagnostics": { "relatedInformation": false }
+                },
+                "workspace": { "workspaceFolders": true, "diagnostics": {} }
+            }
+        }),
+    ))
 }
 
 /// Send a JSON-RPC message to the process stdin.

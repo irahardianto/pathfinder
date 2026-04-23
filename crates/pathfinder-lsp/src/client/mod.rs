@@ -22,7 +22,7 @@ use crate::types::{CallHierarchyCall, CallHierarchyItem, LspDiagnostic, LspDiagn
 use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use detect::LanguageLsp as LspDescriptor;
-use process::{send, shutdown, spawn_and_initialize, start_reader_task, ManagedProcess};
+use process::{send, shutdown, spawn_and_initialize, ManagedProcess};
 use protocol::RequestDispatcher;
 use serde_json::json;
 use std::collections::HashMap;
@@ -157,7 +157,8 @@ impl LspClient {
         tokio::spawn(idle_timeout_task(processes, dispatcher));
 
         Ok(client)
-    }    /// Kick off LSP processes for all detected languages in background tasks.
+    }
+    /// Kick off LSP processes for all detected languages in background tasks.
     ///
     /// This is a fire-and-forget call — it returns immediately. Each language's
     /// process is spawned via `tokio::spawn`, giving it a head start on
@@ -202,7 +203,6 @@ impl LspClient {
             });
         }
     }
-
 
     /// Ensure an LSP process is running for `language_id`, starting it if needed.
     ///
@@ -334,7 +334,7 @@ impl LspClient {
         )
         .await;
 
-        let (process, stdout) = match spawn_result {
+        let (process, reader_handle) = match spawn_result {
             Ok(res) => res,
             Err(e) => {
                 tracing::error!(
@@ -360,9 +360,9 @@ impl LspClient {
             }
         };
 
-        let reader_handle = start_reader_task(stdout, Arc::clone(&self.dispatcher));
-
-        // Spawn the supervisor task to monitor the reader handle
+        // The reader task was started inside spawn_and_initialize (before the
+        // initialize handshake) to avoid the stdout-read deadlock. We only need
+        // to wrap it in the supervisor task here.
         let supervisor_handle = tokio::spawn(reader_supervisor_task(
             language_id.clone(),
             reader_handle,
