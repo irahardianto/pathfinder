@@ -245,6 +245,7 @@ mod tests {
                 old_text: "fn main()".into(),
                 context_line: 10,
                 actual_content: None,
+                closest_match: None,
             },
         ];
 
