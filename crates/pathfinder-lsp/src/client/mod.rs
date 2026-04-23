@@ -157,7 +157,52 @@ impl LspClient {
         tokio::spawn(idle_timeout_task(processes, dispatcher));
 
         Ok(client)
+    }    /// Kick off LSP processes for all detected languages in background tasks.
+    ///
+    /// This is a fire-and-forget call — it returns immediately. Each language's
+    /// process is spawned via `tokio::spawn`, giving it a head start on
+    /// initialization while the agent issues non-LSP tool calls (e.g.
+    /// `get_repo_map`, `search_codebase`).
+    ///
+    /// Failures are logged as warnings. The lazy `ensure_process` path will
+    /// handle retries on the first actual LSP tool call.
+    pub fn warm_start(&self) {
+        let languages: Vec<String> = self
+            .descriptors
+            .iter()
+            .map(|d| d.language_id.clone())
+            .collect();
+
+        if languages.is_empty() {
+            tracing::debug!("LSP warm_start: no languages detected, skipping");
+            return;
+        }
+
+        tracing::info!(
+            languages = ?languages,
+            "LSP warm_start: spawning background initialization"
+        );
+
+        for lang in languages {
+            let client = self.clone();
+            tokio::spawn(async move {
+                tracing::debug!(language = %lang, "LSP warm_start: starting process");
+                match client.ensure_process(&lang).await {
+                    Ok(()) => {
+                        tracing::info!(language = %lang, "LSP warm_start: ready");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            language = %lang,
+                            error = %e,
+                            "LSP warm_start: failed (will retry lazily on first use)"
+                        );
+                    }
+                }
+            });
+        }
     }
+
 
     /// Ensure an LSP process is running for `language_id`, starting it if needed.
     ///

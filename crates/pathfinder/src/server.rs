@@ -67,9 +67,13 @@ impl PathfinderServer {
         let lawyer: Arc<dyn Lawyer> =
             match LspClient::new(workspace_root.path(), Arc::new(config.clone())).await {
                 Ok(client) => {
+                    // Kick off background initialization so LSP processes are
+                    // already loading while the agent issues its first non-LSP
+                    // tool calls (get_repo_map, search_codebase, etc.).
+                    client.warm_start();
                     tracing::info!(
                         workspace = %workspace_root.path().display(),
-                        "LspClient initialised (lazy, processes start on first use)"
+                        "LspClient initialised (warm start in progress)"
                     );
                     Arc::new(client)
                 }
