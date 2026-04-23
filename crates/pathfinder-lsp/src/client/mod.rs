@@ -38,6 +38,8 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_RESTART_ATTEMPTS: u32 = 3;
 /// Grace period between idle checks.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// Recovery cooldown: time to wait before retrying a permanently unavailable LSP.
+const RECOVERY_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 struct LanguageState {
     /// The running LSP process.
@@ -49,7 +51,10 @@ struct LanguageState {
 }
 
 /// Marks a language as permanently unavailable after repeated crashes.
-struct UnavailableState;
+struct UnavailableState {
+    /// When this language was marked unavailable (for cooldown recovery).
+    unavailable_since: Instant,
+}
 
 enum ProcessEntry {
     /// Active LSP process. Boxed to equalise variant sizes.
@@ -122,7 +127,24 @@ impl LspClient {
             if let Some(entry) = guard.get(language_id) {
                 return match entry {
                     ProcessEntry::Running(_) => Ok(()),
-                    ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
+                    ProcessEntry::Unavailable(state) => {
+                        // Check if cooldown has elapsed for recovery
+                        let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
+                        if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
+                            // Attempt recovery: remove unavailable entry and proceed to spawn
+                            drop(guard);
+                            tracing::info!(
+                                language = %language_id,
+                                cooldown_elapsed_secs,
+                                "LSP: recovery cooldown elapsed, attempting restart"
+                            );
+                            let mut guard = self.processes.write().await;
+                            guard.remove(language_id);
+                            Ok(())
+                        } else {
+                            Err(LspError::NoLspAvailable)
+                        }
+                    }
                 };
             }
         }
@@ -143,7 +165,24 @@ impl LspClient {
             if let Some(entry) = guard.get(language_id) {
                 return match entry {
                     ProcessEntry::Running(_) => Ok(()),
-                    ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
+                    ProcessEntry::Unavailable(state) => {
+                        // Check if cooldown has elapsed for recovery
+                        let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
+                        if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
+                            // Attempt recovery: remove unavailable entry and proceed to spawn
+                            drop(guard);
+                            tracing::info!(
+                                language = %language_id,
+                                cooldown_elapsed_secs,
+                                "LSP: recovery cooldown elapsed, attempting restart"
+                            );
+                            let mut guard = self.processes.write().await;
+                            guard.remove(language_id);
+                            Ok(())
+                        } else {
+                            Err(LspError::NoLspAvailable)
+                        }
+                    }
                 };
             }
         }
@@ -171,7 +210,9 @@ impl LspClient {
             );
             self.processes.write().await.insert(
                 language_id.clone(),
-                ProcessEntry::Unavailable(UnavailableState),
+                ProcessEntry::Unavailable(UnavailableState {
+                    unavailable_since: Instant::now(),
+                }),
             );
             return Err(LspError::NoLspAvailable);
         }
@@ -212,6 +253,17 @@ impl LspClient {
                     attempt,
                     "LSP: initialization failed — retrying"
                 );
+                // On recovery failure (attempt > 0), reset the unavailable_since timestamp
+                if attempt > 0 {
+                    let mut guard = self.processes.write().await;
+                    if let Some(ProcessEntry::Unavailable(state)) = guard.get_mut(&language_id) {
+                        state.unavailable_since = Instant::now();
+                        tracing::info!(
+                            language = %language_id,
+                            "LSP: recovery failed, cooldown reset"
+                        );
+                    }
+                }
                 // Recurse with attempt+1; the guard at the top of this function handles
                 // exhaustion (attempt >= MAX_RESTART_ATTEMPTS) by inserting Unavailable.
                 return Box::pin(self.start_process(descriptor, attempt + 1)).await;
