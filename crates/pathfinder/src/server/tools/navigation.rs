@@ -355,14 +355,12 @@ impl PathfinderServer {
         // Prepend degradation notice when in degraded mode
         let text = if degraded {
             let reason = degraded_reason.as_deref().unwrap_or("unknown");
-            let dep_count = dependencies.len();
             format!(
-                "DEGRADED MODE ({}) — {} dependencies loaded (results may be incomplete)\n\n{}",
-                reason, dep_count, scope.content
+                "DEGRADED MODE ({}) — {dep_count} dependencies loaded (results may be incomplete)\n\n{}",
+                reason, scope.content
             )
         } else {
-            let dep_count = dependencies.len();
-            format!("{} dependencies loaded\n\n{}", dep_count, scope.content)
+            format!("{dep_count} dependencies loaded\n\n{}", scope.content)
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
@@ -621,6 +619,10 @@ impl PathfinderServer {
             "analyze_impact: complete"
         );
 
+        let inc_count = incoming.as_ref().map_or(0, Vec::len);
+        let out_count = outgoing.as_ref().map_or(0, Vec::len);
+        let degraded_reason_cloned = degraded_reason.clone();
+
         let metadata = crate::server::types::AnalyzeImpactMetadata {
             incoming,
             outgoing,
@@ -636,26 +638,12 @@ impl PathfinderServer {
         if degraded {
             text_parts.push(format!(
                 "Degraded analysis ({}) — results may be incomplete.",
-                degraded_reason.as_deref().unwrap_or("unknown")
+                degraded_reason_cloned.as_deref().unwrap_or("unknown")
             ));
         }
         // Add summary
-        let inc = incoming.as_ref().map(|v| v.len()).unwrap_or(0);
-        let out = outgoing.as_ref().map(|v| v.len()).unwrap_or(0);
-        text_parts.push(format!("Incoming references: {}", inc));
-        text_parts.push(format!("Outgoing references: {}", out));
-
-        // Add reference details
-        if let Some(refs) = &incoming {
-            for r in refs {
-                text_parts.push(format!("  <- {}:{} ({})", r.file, r.line, r.semantic_path));
-            }
-        }
-        if let Some(refs) = &outgoing {
-            for r in refs {
-                text_parts.push(format!("  -> {}:{} ({})", r.file, r.line, r.semantic_path));
-            }
-        }
+        text_parts.push(format!("Incoming references: {inc_count}"));
+        text_parts.push(format!("Outgoing references: {out_count}"));
 
         let text = text_parts.join("\n");
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);

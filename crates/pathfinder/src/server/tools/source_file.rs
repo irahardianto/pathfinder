@@ -69,11 +69,7 @@ fn render_recursive(symbols: &[SourceSymbol], prefix: &str, output: &mut Vec<Str
         ));
 
         if !sym.children.is_empty() {
-            render_recursive(
-                &sym.children,
-                &format!("{}{}", prefix, child_prefix),
-                output,
-            );
+            render_recursive(&sym.children, &format!("{prefix}{child_prefix}"), output);
         }
     }
 }
