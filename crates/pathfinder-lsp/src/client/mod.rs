@@ -45,7 +45,7 @@ struct LanguageState {
     /// The running LSP process.
     process: ManagedProcess,
     /// Background reader task handle.
-    _reader: tokio::task::JoinHandle<()>,
+    reader_handle: tokio::task::JoinHandle<()>,
     /// Number of times we have restarted this LSP (used in M3 crash recovery UI).
     restart_count: u32,
 }
@@ -272,11 +272,18 @@ impl LspClient {
 
         let reader_handle = start_reader_task(stdout, Arc::clone(&self.dispatcher));
 
+        // Spawn the supervisor task to monitor the reader handle
+        let supervisor_handle = tokio::spawn(reader_supervisor_task(
+            language_id.clone(),
+            reader_handle,
+            Arc::clone(&self.processes),
+        ));
+
         self.processes.write().await.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
                 process,
-                _reader: reader_handle,
+                reader_handle: supervisor_handle,
                 restart_count: attempt,
             })),
         );
@@ -1185,6 +1192,36 @@ fn parse_call_hierarchy_calls_response(
     Ok(result)
 }
 
+/// Reader task supervisor: monitors the reader handle and cleans up on crash.
+///
+/// When the reader task exits (EOF or crash), this supervisor removes the
+/// process entry from the map, allowing future requests to attempt recovery
+/// via the cooldown mechanism.
+async fn reader_supervisor_task(
+    language_id: String,
+    reader_handle: tokio::task::JoinHandle<()>,
+    processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
+) {
+    match reader_handle.await {
+        Ok(()) => {
+            tracing::warn!(
+                language = %language_id,
+                "LSP: reader task exited normally (EOF), removing process entry"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                language = %language_id,
+                error = %e,
+                "LSP: reader task crashed (panic or abort), removing process entry"
+            );
+        }
+    }
+    // Remove the process entry — this allows future requests to retry
+    // via the recovery cooldown mechanism in ensure_process()
+    processes.write().await.remove(&language_id);
+}
+
 /// Background task: check for idle processes and terminate them.
 async fn idle_timeout_task(
     processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
@@ -1216,6 +1253,8 @@ async fn idle_timeout_task(
                     restarts = state.restart_count,
                     "LSP: idle timeout — terminating"
                 );
+                // Abort the supervisor task to prevent it from logging after cleanup
+                state.reader_handle.abort();
                 shutdown(&mut state.process, &dispatcher).await;
             }
         }
