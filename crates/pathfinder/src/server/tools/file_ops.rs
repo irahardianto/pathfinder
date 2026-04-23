@@ -351,7 +351,10 @@ impl PathfinderServer {
             language,
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(content)]);
+        // Append version_hash footer to text content so agents can extract it
+        let full_content = format!("{}\n---\nversion_hash: {}", content, version_hash.as_str());
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(full_content)]);
         res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
         Ok(res)
     }

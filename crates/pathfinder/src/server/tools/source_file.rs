@@ -19,6 +19,65 @@ fn map_symbols(syms: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>) -> Ve
         .collect()
 }
 
+/// Render a tree-like representation of symbols for text output.
+///
+/// Output format:
+/// ```text
+/// src/main.rs (12 symbols)
+/// ├── main [fn] L1-L45
+/// ├── Config [struct] L47-L62
+/// │   ├── name [field] L48
+/// │   └── value [field] L49
+/// └── parse [fn] L64-L80
+/// ```
+fn render_symbol_tree(symbols: &[SourceSymbol], file_path: &str) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("{} ({} symbols)", file_path, symbols.len()));
+
+    // Render top-level symbols
+    for (i, sym) in symbols.iter().enumerate() {
+        let is_last = i == symbols.len() - 1;
+        let connector = if is_last { "└── " } else { "├── " };
+        let child_prefix = if is_last { "    " } else { "│   " };
+
+        lines.push(format!(
+            "{}{} [{}] L{}-L{} ({})",
+            connector, sym.name, sym.kind, sym.start_line, sym.end_line, sym.semantic_path
+        ));
+
+        // Render children recursively
+        render_recursive(&sym.children, child_prefix, &mut lines);
+    }
+
+    lines.join("\n")
+}
+
+/// Helper function to render symbol tree recursively.
+fn render_recursive(symbols: &[SourceSymbol], prefix: &str, output: &mut Vec<String>) {
+    for (i, sym) in symbols.iter().enumerate() {
+        let is_last_item = i == symbols.len() - 1;
+        let connector = if is_last_item {
+            "└── "
+        } else {
+            "├── "
+        };
+        let child_prefix = if is_last_item { "    " } else { "│   " };
+
+        output.push(format!(
+            "{}{}{} [{}] L{}-L{}",
+            prefix, connector, sym.name, sym.kind, sym.start_line, sym.end_line
+        ));
+
+        if !sym.children.is_empty() {
+            render_recursive(
+                &sym.children,
+                &format!("{}{}", prefix, child_prefix),
+                output,
+            );
+        }
+    }
+}
+
 fn map_symbols_compact(
     syms: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>,
 ) -> Vec<SourceSymbol> {
@@ -114,9 +173,13 @@ impl PathfinderServer {
 
                 // Detail level
                 let (final_content, final_symbols) = match params.detail_level.as_str() {
-                    "symbols" => (None, map_symbols(symbols)),
-                    "full" => (Some(content), map_symbols(symbols)),
-                    _ => (Some(content), map_symbols_compact(symbols)), // "compact"
+                    "symbols" => {
+                        let syms = map_symbols(symbols);
+                        let tree_text = render_symbol_tree(&syms, &params.filepath);
+                        (Some(tree_text), syms)
+                    }
+                    "full" => (Some(content.clone()), map_symbols(symbols)),
+                    _ => (Some(content.clone()), map_symbols_compact(symbols)), // "compact"
                 };
 
                 let duration_ms = start.elapsed().as_millis();

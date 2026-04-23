@@ -33,7 +33,114 @@ enum CallDirection {
     Outgoing,
 }
 
+/// Result of LSP call-hierarchy resolution for `read_with_deep_context`.
+struct LspResolution {
+    dependencies: Vec<crate::server::types::DeepContextDependency>,
+    degraded: bool,
+    degraded_reason: Option<String>,
+    engines: Vec<&'static str>,
+}
+
 impl PathfinderServer {
+    /// Resolve LSP call-hierarchy dependencies for a symbol.
+    ///
+    /// Extracted from `read_with_deep_context` to reduce nesting depth.
+    /// Prepares the call hierarchy, then fetches outgoing calls and
+    /// maps them to `DeepContextDependency` entries.
+    async fn resolve_lsp_dependencies(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        start_line: usize,
+    ) -> LspResolution {
+        let mut dependencies = Vec::new();
+        let mut degraded = true;
+        let mut degraded_reason = Some("no_lsp".to_owned());
+        let mut engines = vec!["tree-sitter"];
+
+        let lsp_result = self
+            .lawyer
+            .call_hierarchy_prepare(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(start_line + 1).unwrap_or(1),
+                1,
+            )
+            .await;
+
+        match lsp_result {
+            Ok(items) if !items.is_empty() => {
+                self.append_outgoing_deps(
+                    &items[0],
+                    &mut dependencies,
+                    &mut engines,
+                    &mut degraded,
+                    &mut degraded_reason,
+                )
+                .await;
+            }
+            Ok(_) => {
+                engines.push("lsp");
+                degraded = false;
+                degraded_reason = None;
+            }
+            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {}
+            Err(e) => {
+                tracing::warn!(
+                    tool = "read_with_deep_context",
+                    error = %e,
+                    "call_hierarchy_prepare failed"
+                );
+            }
+        }
+
+        LspResolution {
+            dependencies,
+            degraded,
+            degraded_reason,
+            engines,
+        }
+    }
+
+    /// Fetch outgoing call-hierarchy items and append them as dependencies.
+    async fn append_outgoing_deps(
+        &self,
+        item: &pathfinder_lsp::types::CallHierarchyItem,
+        dependencies: &mut Vec<crate::server::types::DeepContextDependency>,
+        engines: &mut Vec<&'static str>,
+        degraded: &mut bool,
+        degraded_reason: &mut Option<String>,
+    ) {
+        match self
+            .lawyer
+            .call_hierarchy_outgoing(self.workspace_root.path(), item)
+            .await
+        {
+            Ok(outgoing) => {
+                engines.push("lsp");
+                for call in outgoing {
+                    let callee = call.item;
+                    let signature = callee.detail.clone().unwrap_or_else(|| callee.name.clone());
+                    let sp = format!("{}::{}", callee.file, callee.name);
+                    dependencies.push(crate::server::types::DeepContextDependency {
+                        semantic_path: sp,
+                        signature,
+                        file: callee.file,
+                        line: callee.line as usize,
+                    });
+                }
+                *degraded = false;
+                *degraded_reason = None;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tool = "read_with_deep_context",
+                    error = %e,
+                    "call_hierarchy_outgoing failed"
+                );
+            }
+        }
+    }
+
     /// Core logic for the `get_definition` tool.
     ///
     /// Resolves the semantic path to a file position, queries the LSP for the
@@ -171,10 +278,6 @@ impl PathfinderServer {
     /// Returns the symbol's source code. When LSP is available, appends the
     /// signatures of all called symbols. Degrades gracefully to symbol scope
     /// only when no LSP is configured.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequential pipeline (parse→sandbox→tree-sitter→LSP→fallback branches)."
-    )]
     pub(crate) async fn read_with_deep_context_impl(
         &self,
         params: ReadWithDeepContextParams,
@@ -213,72 +316,15 @@ impl PathfinderServer {
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         let lsp_start = std::time::Instant::now();
-        let mut dependencies = Vec::new();
-        let mut degraded = true;
-        let mut degraded_reason = Some("no_lsp".to_owned());
-        let mut engines = vec!["tree-sitter"];
 
-        let lsp_result = self
-            .lawyer
-            .call_hierarchy_prepare(
-                self.workspace_root.path(),
-                &semantic_path.file_path,
-                u32::try_from(scope.start_line + 1).unwrap_or(1),
-                1, // Column 1
-            )
+        let LspResolution {
+            dependencies,
+            degraded,
+            degraded_reason,
+            engines,
+        } = self
+            .resolve_lsp_dependencies(&semantic_path, scope.start_line)
             .await;
-
-        match lsp_result {
-            Ok(items) if !items.is_empty() => {
-                let item = &items[0];
-                match self
-                    .lawyer
-                    .call_hierarchy_outgoing(self.workspace_root.path(), item)
-                    .await
-                {
-                    Ok(outgoing) => {
-                        engines.push("lsp");
-                        for call in outgoing {
-                            let callee = call.item;
-                            let signature =
-                                callee.detail.clone().unwrap_or_else(|| callee.name.clone());
-                            let sp = format!("{}::{}", callee.file, callee.name);
-                            dependencies.push(crate::server::types::DeepContextDependency {
-                                semantic_path: sp,
-                                signature,
-                                file: callee.file,
-                                line: callee.line as usize,
-                            });
-                        }
-                        degraded = false;
-                        degraded_reason = None;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            tool = "read_with_deep_context",
-                            error = %e,
-                            "call_hierarchy_outgoing failed"
-                        );
-                    }
-                }
-            }
-            Ok(_) => {
-                // Empty prepare result, LSP is available and attempted.
-                engines.push("lsp");
-                degraded = false;
-                degraded_reason = None;
-            }
-            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
-                // Keep degraded default
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tool = "read_with_deep_context",
-                    error = %e,
-                    "call_hierarchy_prepare failed"
-                );
-            }
-        }
 
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
@@ -295,6 +341,7 @@ impl PathfinderServer {
             "read_with_deep_context: complete"
         );
 
+        let dep_count = dependencies.len();
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
@@ -302,10 +349,22 @@ impl PathfinderServer {
             language: scope.language,
             dependencies,
             degraded,
-            degraded_reason,
+            degraded_reason: degraded_reason.clone(),
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(scope.content)]);
+        // Prepend degradation notice when in degraded mode
+        let text = if degraded {
+            let reason = degraded_reason.as_deref().unwrap_or("unknown");
+            let dep_count = dependencies.len();
+            format!(
+                "DEGRADED MODE ({}) — {} dependencies loaded (results may be incomplete)\n\n{}",
+                reason, dep_count, scope.content
+            )
+        } else {
+            let dep_count = dependencies.len();
+            format!("{} dependencies loaded\n\n{}", dep_count, scope.content)
+        };
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
         Ok(res)
     }
@@ -572,9 +631,34 @@ impl PathfinderServer {
             version_hashes,
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
-            "Analyzed impact successfully",
-        )]);
+        // Build honest text output based on actual results
+        let mut text_parts = Vec::new();
+        if degraded {
+            text_parts.push(format!(
+                "Degraded analysis ({}) — results may be incomplete.",
+                degraded_reason.as_deref().unwrap_or("unknown")
+            ));
+        }
+        // Add summary
+        let inc = incoming.as_ref().map(|v| v.len()).unwrap_or(0);
+        let out = outgoing.as_ref().map(|v| v.len()).unwrap_or(0);
+        text_parts.push(format!("Incoming references: {}", inc));
+        text_parts.push(format!("Outgoing references: {}", out));
+
+        // Add reference details
+        if let Some(refs) = &incoming {
+            for r in refs {
+                text_parts.push(format!("  <- {}:{} ({})", r.file, r.line, r.semantic_path));
+            }
+        }
+        if let Some(refs) = &outgoing {
+            for r in refs {
+                text_parts.push(format!("  -> {}:{} ({})", r.file, r.line, r.semantic_path));
+            }
+        }
+
+        let text = text_parts.join("\n");
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
         Ok(res)
     }
@@ -774,7 +858,7 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(text_content, "fn login() { }");
+        assert_eq!(text_content, "DEGRADED MODE (no_lsp) — 0 dependencies loaded (results may be incomplete)\n\nfn login() { }");
         assert!(val.degraded);
         assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
         assert!(val.dependencies.is_empty());
@@ -829,7 +913,7 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(text_content, "fn login() { }");
+        assert_eq!(text_content, "1 dependencies loaded\n\nfn login() { }");
         assert!(!val.degraded);
         assert_eq!(val.degraded_reason, None);
         assert_eq!(val.dependencies.len(), 1);
