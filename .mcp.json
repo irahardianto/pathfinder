@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+        "pathfinder": {
+        "command": "/home/irahardianto/works/projects/pathfinder/target/release/pathfinder",
+        "args": [
+            "/home/irahardianto/works/projects/pathfinder"
+        ]
+        }
+    }
+}
