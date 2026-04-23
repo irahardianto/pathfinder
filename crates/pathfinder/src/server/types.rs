@@ -467,6 +467,12 @@ pub struct LspCapabilities {
 /// The metadata embedded in `structured_content` for `read_symbol_scope`.
 #[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSymbolScopeMetadata {
+    /// The extracted symbol source code.
+    ///
+    /// Mirrors `content[0].text` in the MCP response. Provided here so that
+    /// agents consuming `structured_content` directly have the full source
+    /// without needing to inspect the main content array.
+    pub content: String,
     pub start_line: usize,
     pub end_line: usize,
     pub version_hash: String,
@@ -657,6 +663,15 @@ pub struct ImpactReference {
     pub snippet: String,
     /// OCC version hash for this file.
     pub version_hash: String,
+    /// Direction of the reference relative to the target symbol.
+    ///
+    /// - `"incoming"` — this symbol calls or references the target (a caller).
+    /// - `"outgoing"` — the target calls or references this symbol (a callee).
+    /// - `"incoming_heuristic"` — inferred by grep fallback when LSP is unavailable;
+    ///   treat as a candidate, not a confirmed call.
+    pub direction: String,
+    /// BFS traversal depth (0 = direct caller/callee, 1 = one hop away, etc.).
+    pub depth: usize,
 }
 
 /// The metadata embedded in `structured_content` for `analyze_impact`.

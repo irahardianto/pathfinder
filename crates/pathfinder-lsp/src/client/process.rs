@@ -5,11 +5,31 @@
 //! - A background reader task that dispatches JSON-RPC responses
 //! - Crash detection (non-zero exit or broken pipe)
 //! - Idle `last_used` tracking for auto-termination (PRD §6.2)
+//!
+//! # Spawn reliability
+//!
+//! LSP processes are spawned with three key hardening measures:
+//!
+//! 1. **stderr → /dev/null**: LSP servers write verbose diagnostics to stderr.
+//!    If stderr is piped but never read, the 64 KB OS pipe buffer fills up and the
+//!    child process blocks on its next log write — deadlocking the entire server.
+//!    Redirecting to null is the only safe option since we never consume LSP stderr.
+//!
+//! 2. **Process group via `command-group`**: Children are spawned in their own
+//!    process group. When Pathfinder exits — even via SIGKILL where Rust `Drop`
+//!    handlers do not run — the OS terminates the entire group, preventing orphaned
+//!    LSP processes that would hold file locks (e.g. `.rust-analyzer/` directories).
+//!
+//! 3. **Absolute binary path**: `detect.rs` resolves bare binary names (e.g.
+//!    `"rust-analyzer"`) to absolute paths via `which` at startup. This ensures
+//!    GUI launchers that strip `~/.cargo/bin` and similar paths from `$PATH` still
+//!    find the language server binary at spawn time.
 
 use crate::client::capabilities::DetectedCapabilities;
 use crate::client::protocol::RequestDispatcher;
 use crate::client::transport::{read_message, write_message};
 use crate::LspError;
+use command_group::AsyncCommandGroup as _;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
@@ -59,30 +79,70 @@ pub(super) async fn spawn_and_initialize(
     dispatcher: Arc<RequestDispatcher>,
     init_timeout_secs: Option<u64>,
 ) -> Result<(ManagedProcess, ChildStdout), LspError> {
-    // Spawn child with piped stdio
-    let mut child = tokio::process::Command::new(command)
+    // Spawn the child into its own process group with piped stdio.
+    //
+    // Process group (command-group): when Pathfinder exits — even via SIGKILL
+    // where Rust Drop handlers do not run — the OS sends termination to the
+    // entire group, preventing orphaned LSP processes that hold file locks.
+    //
+    // stderr → null: a piped-but-never-read stderr fills its 64 KB OS buffer
+    // and blocks the child on the next log write, deadlocking the server.
+    // See module-level doc for full rationale.
+    let mut child_group = tokio::process::Command::new(command)
         .args(args)
         .current_dir(project_root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        // Redirect stderr to /dev/null — see module-level doc for rationale.
+        .stderr(std::process::Stdio::null())
+        // Belt-and-suspenders: also kill on Drop for clean (non-SIGKILL) exits.
         .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
+        .group_spawn()
+        .map_err(|e: std::io::Error| {
+            // Emit a targeted diagnostic so operators know exactly what to fix.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                tracing::error!(
+                    command = command,
+                    language = language_id,
+                    "LSP: binary not found — ensure the language server is installed \
+                     and on your PATH, or set `lsp.{language_id}.command` in \
+                     .pathfinder.toml to an absolute path"
+                );
+            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                tracing::error!(
+                    command = command,
+                    language = language_id,
+                    "LSP: permission denied spawning binary — check file permissions"
+                );
+            } else {
+                tracing::error!(
+                    command = command,
+                    language = language_id,
+                    error = %e,
+                    "LSP: unexpected spawn error"
+                );
+            }
             LspError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to spawn LSP '{command}': {e}"),
             ))
         })?;
 
-    let stdout = child
+    // Extract stdio handles from the AsyncGroupChild before converting to plain Child.
+    // `group_spawn()` returns an AsyncGroupChild wrapping the inner tokio Child;
+    // we take the stdio handles first, then call `into_inner()` to recover
+    // the plain `tokio::process::Child` that ManagedProcess stores for liveness checks.
+    let stdout = child_group
+        .inner()
         .stdout
         .take()
         .ok_or_else(|| LspError::Protocol("LSP stdout was not piped".to_owned()))?;
-    let stdin = child
+    let stdin = child_group
+        .inner()
         .stdin
         .take()
         .ok_or_else(|| LspError::Protocol("LSP stdin was not piped".to_owned()))?;
+    let child = child_group.into_inner();
 
     let mut writer = tokio::io::BufWriter::new(stdin);
 

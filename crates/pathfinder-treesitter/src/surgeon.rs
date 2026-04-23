@@ -195,4 +195,32 @@ pub trait Surgeon: Send + Sync {
         workspace_root: &Path,
         semantic_path: &SemanticPath,
     ) -> Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError>;
+
+    /// Evict `path` from the AST cache, forcing a full re-parse on the next read.
+    ///
+    /// **Must be called immediately after every successful file write** (edit, insert,
+    /// create) to prevent mtime-granularity races where a sub-second write+read
+    /// pair returns the stale pre-edit AST, causing `SYMBOL_NOT_FOUND` for newly
+    /// inserted symbols.
+    ///
+    /// The default implementation is a no-op — safe for mock implementations that
+    /// hold no in-process cache. Override in concrete implementations that maintain
+    /// an AST cache (e.g., `TreeSitterSurgeon`).
+    fn invalidate_cache(&self, _path: &Path) {}
 }
+
+/// Extension methods for cache management on [`Surgeon`] implementors.
+///
+/// Provided as a blanket extension to avoid a breaking change to the `Surgeon` trait.
+/// Call `invalidate_cache` after any write to ensure the next `read_symbol_scope`
+/// or `read_source_file` call sees the updated content without a 1-second mtime
+/// granularity race.
+pub trait SurgeonCacheExt {
+    /// Remove a file from the AST cache, forcing a full re-parse on next access.
+    ///
+    /// Must be called immediately after every successful file write (edit, insert,
+    /// create) to prevent stale cached ASTs from causing `SYMBOL_NOT_FOUND` errors
+    /// on newly inserted symbols.
+    fn invalidate_cache(&self, path: &std::path::Path);
+}
+

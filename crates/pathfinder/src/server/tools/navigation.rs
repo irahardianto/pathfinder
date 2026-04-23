@@ -491,6 +491,11 @@ impl PathfinderServer {
                                     .detail
                                     .unwrap_or_else(|| referenced_item.name.clone()),
                                 version_hash: String::new(), // Populated at higher layer if needed
+                                direction: match direction {
+                                    CallDirection::Incoming => "incoming".to_owned(),
+                                    CallDirection::Outgoing => "outgoing".to_owned(),
+                                },
+                                depth: current_depth as usize,
                             });
                         }
                     }
@@ -678,6 +683,9 @@ impl PathfinderServer {
                                     line: m.line as usize,
                                     snippet: m.content,
                                     version_hash: String::new(),
+                                    // Grep fallback: heuristic, direction is assumed incoming
+                                    direction: "incoming_heuristic".to_owned(),
+                                    depth: 0,
                                 }
                             })
                             .collect();

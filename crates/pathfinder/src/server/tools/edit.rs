@@ -1426,6 +1426,13 @@ impl PathfinderServer {
             .await
             .map_err(|e| io_error_data(format!("write failed: {e}")))?;
 
+        // Immediately evict this file from the AST cache so the next read
+        // re-parses from disk rather than returning the stale pre-edit AST.
+        // Without this, a sub-second write+read pair would still see the old
+        // symbol tree, causing SYMBOL_NOT_FOUND for newly inserted symbols.
+        self.surgeon
+            .invalidate_cache(&semantic_path.file_path);
+
         Ok(VersionHash::compute(new_bytes))
     }
 

@@ -513,9 +513,15 @@ impl Surgeon for TreeSitterSurgeon {
             hash,
         ))
     }
+
+    fn invalidate_cache(&self, path: &std::path::Path) {
+        self.cache.invalidate(path);
+    }
 }
 
 // ── Node-type classification helpers ───────────────────────────────────────
+
+
 
 /// Returns `true` if the tree-sitter node kind is a comment variant.
 ///

@@ -157,6 +157,9 @@ impl PathfinderServer {
                 if let Err(e) = file.sync_all().await {
                     return Err(io_error_data(format!("failed to sync file: {e}")));
                 }
+                // Evict the new file from the AST cache so any prior stale entry
+                // (from a temp-path overlap) is cleared before the first read.
+                self.surgeon.invalidate_cache(relative_path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let err = PathfinderError::FileAlreadyExists {
@@ -448,6 +451,10 @@ impl PathfinderServer {
             tracing::warn!(tool = "write_file", error = %e, "failed to write file");
             return Err(io_error_data(format!("failed to write file: {e}")));
         }
+        // Evict file from AST cache — write_file can be called on source files
+        // (e.g., Dockerfile, YAML) and a stale cache would return old content
+        // to any follow-up read_source_file or read_symbol_scope call.
+        self.surgeon.invalidate_cache(relative_path);
         let io_ms = io_start.elapsed().as_millis();
 
         let new_hash = VersionHash::compute(new_content.as_bytes());

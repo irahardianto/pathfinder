@@ -52,6 +52,7 @@ impl PathfinderServer {
                 );
 
                 let metadata = crate::server::types::ReadSymbolScopeMetadata {
+                    content: scope.content.clone(),
                     start_line: scope.start_line,
                     end_line: scope.end_line,
                     version_hash: scope.version_hash.to_string(),

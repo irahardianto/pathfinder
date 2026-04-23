@@ -17,5 +17,5 @@ pub mod treesitter_surgeon;
 pub mod vue_zones;
 
 pub use error::SurgeonError;
-pub use surgeon::Surgeon;
+pub use surgeon::{Surgeon, SurgeonCacheExt};
 pub use treesitter_surgeon::TreeSitterSurgeon;

@@ -17,6 +17,12 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 url = "2"
 schemars = "1.2.1"
+# Spawn LSP children into their own process group so they are cleaned up
+# automatically when Pathfinder exits — even via SIGKILL.
+command-group = { version = "5", features = ["with-tokio"] }
+# Resolve LSP binary names to absolute paths at detection time so that GUI
+# launchers (which strip ~/.cargo/bin etc. from $PATH) still find the server.
+which = "7"
 
 [dev-dependencies]
 tempfile = "3"
