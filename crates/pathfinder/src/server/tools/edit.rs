@@ -363,6 +363,10 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(sep.as_bytes());
         new_bytes.extend_from_slice(after);
 
+        if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
+            new_bytes = normalize_blank_lines(&new_bytes);
+        }
+
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(FinalizeEditParams {
             tool_name: "insert_before",
@@ -441,6 +445,10 @@ impl PathfinderServer {
         new_bytes.extend_from_slice(indented.as_bytes());
         new_bytes.extend_from_slice(after_sep.as_bytes());
         new_bytes.extend_from_slice(after);
+
+        if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
+            new_bytes = normalize_blank_lines(&new_bytes);
+        }
 
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(FinalizeEditParams {
@@ -541,6 +549,10 @@ impl PathfinderServer {
         // Or simply: strip the symbol, then normalise the gap.
         let before_end = full_range.start_byte;
         let after_start = full_range.end_byte;
+
+        // Post-pass: strip any orphaned doc-comment fragment on the line immediately
+        // preceding the symbol.
+        let before_end = strip_orphaned_doc_comment(&source, before_end);
 
         // Trim trailing whitespace (except newlines if we want, but trimming all is safer)
         let mut b_end = before_end;
@@ -1568,6 +1580,7 @@ fn collapse_and_match(
             old_text: old_text.to_owned(),
             context_line,
             actual_content: Some(window_text.to_owned()),
+            closest_match: None,
         })?;
     let norm_match_end = norm_match_start + normalised_needle.len();
 
@@ -1613,6 +1626,7 @@ fn collapse_and_match(
             old_text: old_text.to_owned(),
             context_line,
             actual_content: Some(window_text.to_owned()),
+            closest_match: None,
         }),
     }
 }
@@ -1679,6 +1693,7 @@ fn resolve_text_edit(
                     old_text: old_text.to_owned(),
                     context_line,
                     actual_content: Some(window_text.to_owned()),
+                    closest_match: find_closest_match(&window_text, old_text),
                 });
             }
 
@@ -3337,6 +3352,7 @@ mod text_edit_tests {
             old_text,
             context_line,
             actual_content,
+            closest_match: _,
         } = err
         else {
             panic!("expected TextNotFound, got: {err:?}");
@@ -3355,5 +3371,134 @@ mod text_edit_tests {
             content.contains("line 1") || content.contains("line 2") || content.contains("line 3"),
             "actual_content should contain context from the source file"
         );
+    }
+}
+
+pub fn normalize_blank_lines(content: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(content.len());
+    let mut i = 0;
+    while i < content.len() {
+        result.push(content[i]);
+        if content[i] == b'\n' {
+            let mut count = 1;
+            while i + count < content.len() && content[i + count] == b'\n' {
+                count += 1;
+            }
+            if count > 1 {
+                result.push(b'\n');
+            }
+            i += count;
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
+pub fn is_whitespace_significant_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| matches!(ext, "py" | "yaml" | "yml" | "toml"))
+}
+
+pub fn strip_orphaned_doc_comment(source: &[u8], before_end: usize) -> usize {
+    if before_end == 0 {
+        return before_end;
+    }
+    let search_end = if source[before_end - 1] == b'\n' {
+        before_end - 1
+    } else {
+        before_end
+    };
+    if search_end == 0 {
+        return before_end;
+    }
+    let line_start = source[..search_end]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    let line_bytes = &source[line_start..search_end];
+    let Ok(line_str) = std::str::from_utf8(line_bytes) else {
+        return before_end;
+    };
+    let stripped = line_str.trim_start_matches(|c: char| c == '}' || c.is_ascii_whitespace());
+    if stripped.starts_with("///") || stripped.starts_with("//!") {
+        if let Some(slash_idx) = line_str.find("//") {
+            let mut del_start = slash_idx;
+            while del_start > 0 {
+                let prev_char = line_str[..del_start].chars().next_back().unwrap();
+                if prev_char.is_whitespace() && prev_char != '\n' {
+                    del_start -= prev_char.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            return line_start + del_start;
+        }
+    }
+    before_end
+}
+
+pub fn find_closest_match(window: &str, needle: &str) -> Option<String> {
+    if needle.is_empty() || window.is_empty() {
+        return None;
+    }
+    let needle_chars: Vec<char> = needle.chars().collect();
+    let window_chars: Vec<char> = window.chars().collect();
+    let needle_len = needle_chars.len();
+    let window_len = window_chars.len();
+    if needle_len == 0 || window_len == 0 || needle_len > window_len {
+        return None;
+    }
+
+    // Precompute counts to avoid allocating inside the hot loop
+    let mut needle_ascii_counts = [0usize; 256];
+    let mut needle_other_counts = std::collections::HashMap::new();
+    for &c in &needle_chars {
+        if (c as u32) < 256 {
+            needle_ascii_counts[c as usize] += 1;
+        } else {
+            *needle_other_counts.entry(c).or_insert(0) += 1;
+        }
+    }
+
+    let mut best_score = 0.0;
+    let mut best_slice = None;
+    for start in 0..=(window_len - needle_len) {
+        let slice = &window_chars[start..(start + needle_len)];
+        
+        let mut ascii_counts = needle_ascii_counts;
+        // Cloning is essentially free when other_counts is empty (99% of source code)
+        let mut other_counts = needle_other_counts.clone();
+        
+        let mut overlap = 0;
+        for &c in slice {
+            if (c as u32) < 256 {
+                let count = &mut ascii_counts[c as usize];
+                if *count > 0 {
+                    overlap += 1;
+                    *count -= 1;
+                }
+            } else if let Some(count) = other_counts.get_mut(&c) {
+                if *count > 0 {
+                    overlap += 1;
+                    *count -= 1;
+                }
+            }
+        }
+        
+        let score = overlap as f64 / needle_len as f64;
+        if score > best_score {
+            best_score = score;
+            let byte_start = window.char_indices().nth(start).map(|(i, _)| i).unwrap_or(0);
+            let byte_end = window.char_indices().nth(start + needle_len).map(|(i, _)| i).unwrap_or(window.len());
+            best_slice = Some(window[byte_start..byte_end].to_owned());
+        }
+    }
+    
+    if best_score >= 0.6 {
+        best_slice
+    } else {
+        None
     }
 }
