@@ -4,9 +4,10 @@
 //! used by `read_file`.
 
 use pathfinder_common::error::PathfinderError;
-use pathfinder_common::types::SemanticPath;
+use pathfinder_common::sandbox::Sandbox;
+use pathfinder_common::types::{SemanticPath, VersionHash};
 use rmcp::model::{ErrorCode, ErrorData};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── Error Helpers ─────────────────────────────────────────────────
 
@@ -63,7 +64,8 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
         | pathfinder_common::error::PathfinderError::ParseError { .. }
         | pathfinder_common::error::PathfinderError::LspError { .. }
         | pathfinder_common::error::PathfinderError::LspTimeout { .. }
-        | pathfinder_common::error::PathfinderError::NoLspAvailable { .. } => {
+        | pathfinder_common::error::PathfinderError::NoLspAvailable { .. }
+        | pathfinder_common::error::PathfinderError::PathTraversal { .. } => {
             ErrorCode::INTERNAL_ERROR
         }
     };
@@ -80,6 +82,52 @@ pub(crate) fn treesitter_error_to_error_data(e: pathfinder_treesitter::SurgeonEr
 /// Wrap a plain IO / infrastructure message in an [`ErrorData`].
 pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
     ErrorData::internal_error(msg, None)
+}
+
+/// OCC version-mismatch guard.
+///
+/// Returns `Err(VERSION_MISMATCH)` when `base_version` does not match the
+/// `current_hash` of the file on disk. Centralises the 8-line check that
+/// was duplicated across every edit handler.
+pub(crate) fn check_occ(
+    base_version: &str,
+    current_hash: &VersionHash,
+    path: PathBuf,
+) -> Result<(), ErrorData> {
+    let claimed = VersionHash::from_raw(base_version.to_owned());
+    if claimed.as_str() != current_hash.as_str() {
+        return Err(pathfinder_to_error_data(
+            &PathfinderError::VersionMismatch {
+                path,
+                current_version_hash: current_hash.as_str().to_owned(),
+                lines_changed: None,
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Sandbox access guard with structured logging.
+///
+/// Checks whether `relative_path` is accessible per the sandbox rules.
+/// On denial, logs a structured warning and returns `Err(ACCESS_DENIED)`.
+/// Centralises the 7-line sandbox-check preamble duplicated across edit handlers.
+pub(crate) fn check_sandbox_access(
+    sandbox: &Sandbox,
+    relative_path: &Path,
+    tool_name: &str,
+    raw_semantic_path: &str,
+) -> Result<(), ErrorData> {
+    if let Err(e) = sandbox.check(relative_path) {
+        tracing::warn!(
+            tool = tool_name,
+            semantic_path = raw_semantic_path,
+            error = %e,
+            "{tool_name}: access denied"
+        );
+        return Err(pathfinder_to_error_data(&e));
+    }
+    Ok(())
 }
 
 // ── Language Detection ──────────────────────────────────────────────
