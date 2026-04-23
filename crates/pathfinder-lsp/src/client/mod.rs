@@ -285,6 +285,7 @@ impl LspClient {
             &descriptor.root,
             &language_id,
             Arc::clone(&self.dispatcher),
+            descriptor.init_timeout_secs,
         )
         .await;
 
@@ -322,6 +323,14 @@ impl LspClient {
             reader_handle,
             Arc::clone(&self.processes),
         ));
+
+        // Log successful recovery (attempt > 0 means we're recovering from a failure)
+        if attempt > 0 {
+            tracing::info!(
+                language = %language_id,
+                "LSP: recovery successful"
+            );
+        }
 
         self.processes.write().await.insert(
             language_id,

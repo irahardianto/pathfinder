@@ -25,6 +25,8 @@ pub struct LanguageLsp {
     /// marker file (e.g., `apps/backend` for a Go backend with `go.mod` there)
     /// rather than the workspace root.
     pub root: std::path::PathBuf,
+    /// Optional initialization timeout in seconds (overrides default).
+    pub init_timeout_secs: Option<u64>,
 }
 
 /// Search for a marker file within `base` directory up to `max_depth` levels deep.
@@ -96,6 +98,7 @@ pub async fn detect_languages(
             command: "rust-analyzer".to_owned(),
             args: vec![],
             root,
+            init_timeout_secs: None,
         });
     }
 
@@ -110,6 +113,7 @@ pub async fn detect_languages(
             command: "gopls".to_owned(),
             args: vec![],
             root,
+            init_timeout_secs: None,
         });
     }
 
@@ -126,6 +130,7 @@ pub async fn detect_languages(
             command: "typescript-language-server".to_owned(),
             args: vec!["--stdio".to_owned()],
             root,
+            init_timeout_secs: None,
         });
     }
 
@@ -143,6 +148,7 @@ pub async fn detect_languages(
             command: "pyright".to_owned(),
             args: vec!["--stdio".to_owned()],
             root,
+            init_timeout_secs: None,
         });
     }
 
@@ -185,6 +191,7 @@ mod tests {
         assert_eq!(langs[0].language_id, "rust");
         assert_eq!(langs[0].command, "rust-analyzer");
         assert!(langs[0].args.is_empty());
+        assert_eq!(langs[0].init_timeout_secs, None);
     }
 
     #[tokio::test]
@@ -215,6 +222,7 @@ mod tests {
         assert_eq!(langs.len(), 1);
         assert_eq!(langs[0].language_id, "typescript");
         assert_eq!(langs[0].args, ["--stdio"]);
+        assert_eq!(langs[0].init_timeout_secs, None);
     }
 
     #[tokio::test]

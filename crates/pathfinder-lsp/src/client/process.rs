@@ -1,7 +1,7 @@
 //! LSP child process lifecycle management.
 //!
 //! `ManagedProcess` wraps a spawned LSP child process and provides:
-//! - The `initialize` handshake with a 30-second hard timeout (PRD §6.1)
+//! - The `initialize` handshake with a configurable timeout (PRD §6.1)
 //! - A background reader task that dispatches JSON-RPC responses
 //! - Crash detection (non-zero exit or broken pipe)
 //! - Idle `last_used` tracking for auto-termination (PRD §6.2)
@@ -36,19 +36,19 @@ pub(super) struct ManagedProcess {
     pub(super) in_flight: Arc<AtomicU32>,
 }
 
-/// Initialize timeout — 30 seconds as per PRD §6.1.
-const INIT_TIMEOUT_SECS: u64 = 30;
+/// Initialize timeout — 120 seconds (2 minutes) as per PRD §6.1.
+const INIT_TIMEOUT_SECS: u64 = 120;
 
 /// Spawn an LSP child process and perform the `initialize` handshake.
 ///
 /// Blocks (via `.await`) until the LSP responds to `initialize` or the
-/// 30-second timeout fires. Returns a fully-initialized [`ManagedProcess`].
+/// timeout fires (default 120 seconds, configurable per-language). Returns a fully-initialized [`ManagedProcess`].
 ///
 /// The background reader task is started inside this function and runs until
 /// the process exits or `dispatcher.cancel_all()` is called.
 ///
 /// # Errors
-/// - `LspError::Timeout` — LSP did not initialize within 30 seconds
+/// - `LspError::Timeout` — LSP did not initialize within the configured timeout
 /// - `LspError::Io` — failed to spawn child process
 /// - `LspError::Protocol` — invalid response from LSP
 pub(super) async fn spawn_and_initialize(
@@ -57,6 +57,7 @@ pub(super) async fn spawn_and_initialize(
     project_root: &Path,
     language_id: &str,
     dispatcher: Arc<RequestDispatcher>,
+    init_timeout_secs: Option<u64>,
 ) -> Result<(ManagedProcess, ChildStdout), LspError> {
     // Spawn child with piped stdio
     let mut child = tokio::process::Command::new(command)
@@ -116,14 +117,17 @@ pub(super) async fn spawn_and_initialize(
     );
     write_message(&mut writer, &init_request).await?;
 
-    // Await the `initialize` response with hard 30s timeout
-    let response = tokio::time::timeout(std::time::Duration::from_secs(INIT_TIMEOUT_SECS), rx)
+    // Use configured timeout or default (120 seconds)
+    let timeout_secs = init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
+
+    // Await the `initialize` response with configured timeout
+    let response = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
         .await
         .map_err(|_| {
             dispatcher.remove(id);
             LspError::Timeout {
                 operation: "initialize".to_owned(),
-                timeout_ms: INIT_TIMEOUT_SECS * 1000,
+                timeout_ms: timeout_secs * 1000,
             }
         })?
         .map_err(|_| LspError::ConnectionLost)??;
