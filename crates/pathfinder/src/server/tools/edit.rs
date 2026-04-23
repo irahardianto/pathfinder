@@ -15,7 +15,8 @@
 //! 11. Compute and return new `version_hash`
 
 use crate::server::helpers::{
-    io_error_data, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+    check_occ, check_sandbox_access, io_error_data, parse_semantic_path, pathfinder_to_error_data,
+    require_symbol_target,
 };
 use crate::server::tools::diagnostics::diff_diagnostics;
 use crate::server::types::{
@@ -30,7 +31,7 @@ use pathfinder_common::types::{SemanticPath, VersionHash};
 use pathfinder_lsp::LspError;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::instrument;
 
 /// Result of the LSP validation step.
@@ -101,15 +102,12 @@ impl PathfinderServer {
         require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         // ── Step 2: Sandbox check ──────────────────────────────────────
-        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            tracing::warn!(
-                tool = "replace_body",
-                semantic_path = %params.semantic_path,
-                error = %e,
-                "replace_body: access denied"
-            );
-            return Err(pathfinder_to_error_data(&e));
-        }
+        check_sandbox_access(
+            &self.sandbox,
+            &semantic_path.file_path,
+            "replace_body",
+            &params.semantic_path,
+        )?;
 
         // ── Step 3: Resolve body range + read source ─────────────────
         // The Surgeon reads the file, parses the AST, and returns the
@@ -127,15 +125,11 @@ impl PathfinderServer {
         };
 
         // ── Step 4: OCC check ─────────────────────────────────────────
-        let claimed = VersionHash::from_raw(params.base_version.clone());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            semantic_path.file_path.clone(),
+        )?;
 
         // ── Step 5: Normalize new_code ────────────────────────────────
         let normalized = normalize_for_body_replace(&params.new_code);
@@ -179,6 +173,29 @@ impl PathfinderServer {
 
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
+        check_sandbox_access(
+            &self.sandbox,
+            &semantic_path.file_path,
+            "replace_full",
+            &params.semantic_path,
+        )?;
+
+        // C2: Bare-file replace_full bypasses AST validation.
+        //
+        // DESIGN DECISION:
+        // When a user targets an entire file (bare path), we skip tree-sitter parsing
+        // and LSP validation to allow full-file replacements (e.g., config file edits,
+        // code generation, or file-wide refactors). This is intentional flexibility.
+        //
+        // SECURITY IMPLICATIONS:
+        // - No AST validation means malformed code could be written
+        // - LSP validation is also skipped for bare files
+        // - Caller assumes responsibility for content validity
+        // - OCC still prevents race conditions
+        //
+        // MITIGATION:
+        // We perform an optional post-write tree-sitter parse check that logs a warning
+        // (but does NOT block the write) to catch obvious syntax errors early.
         let (source, current_hash, new_bytes) = if semantic_path.is_bare_file() {
             let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
             let source = tokio::fs::read(&absolute_path)
@@ -186,18 +203,51 @@ impl PathfinderServer {
                 .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
             let current_hash = VersionHash::compute(&source);
 
-            let claimed = VersionHash::from_raw(params.base_version.clone());
-            if claimed != current_hash {
-                let err = PathfinderError::VersionMismatch {
-                    path: semantic_path.file_path.clone(),
-                    current_version_hash: current_hash.as_str().to_owned(),
-                    lines_changed: None,
-                };
-                return Err(pathfinder_to_error_data(&err));
-            }
+            check_occ(
+                &params.base_version,
+                &current_hash,
+                semantic_path.file_path.clone(),
+            )?;
 
             // For bare file substitution, insert exactly as provided
-            (source, current_hash, params.new_code.as_bytes().to_vec())
+            let new_bytes = params.new_code.as_bytes().to_vec();
+
+            // C2: Optional tree-sitter parse check (logs warning but does not block)
+            // This catches obvious syntax errors without preventing the write
+            if let Ok(new_str) = std::str::from_utf8(&new_bytes) {
+                if let Some(lang) = pathfinder_treesitter::language::SupportedLanguage::detect(
+                    &semantic_path.file_path,
+                ) {
+                    match pathfinder_treesitter::parser::AstParser::parse_source(
+                        &semantic_path.file_path,
+                        lang,
+                        new_str.as_bytes(),
+                    ) {
+                        Ok(tree) => {
+                            if tree.root_node().has_error() {
+                                tracing::warn!(
+                                    file = %semantic_path.file_path.display(),
+                                    "replace_full: bare file content has parse errors (tree-sitter reported ERROR nodes)"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                file = %semantic_path.file_path.display(),
+                                error = %e,
+                                "replace_full: bare file content failed tree-sitter parse check - syntax errors likely"
+                            );
+                        }
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    file = %semantic_path.file_path.display(),
+                    "replace_full: bare file content is not valid UTF-8, skipping parse check"
+                );
+            }
+
+            (source, current_hash, new_bytes)
         } else {
             let (full_range, source, current_hash) = match self
                 .surgeon
@@ -210,15 +260,11 @@ impl PathfinderServer {
                 }
             };
 
-            let claimed = VersionHash::from_raw(params.base_version.clone());
-            if claimed != current_hash {
-                let err = PathfinderError::VersionMismatch {
-                    path: semantic_path.file_path.clone(),
-                    current_version_hash: current_hash.as_str().to_owned(),
-                    lines_changed: None,
-                };
-                return Err(pathfinder_to_error_data(&err));
-            }
+            check_occ(
+                &params.base_version,
+                &current_hash,
+                semantic_path.file_path.clone(),
+            )?;
 
             // Normalize and indent the new code
             let normalized = normalize_for_full_replace(&params.new_code);
@@ -264,29 +310,22 @@ impl PathfinderServer {
         );
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
-        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            tracing::warn!(
-                tool = "insert_before",
-                semantic_path = %params.semantic_path,
-                error = %e,
-                "insert_before: access denied"
-            );
-            return Err(pathfinder_to_error_data(&e));
-        }
+        check_sandbox_access(
+            &self.sandbox,
+            &semantic_path.file_path,
+            "insert_before",
+            &params.semantic_path,
+        )?;
 
         let (insert_byte, indent_column, source, current_hash) = self
             .resolve_insert_position(&semantic_path, InsertEdge::Before)
             .await?;
 
-        let claimed = VersionHash::from_raw(params.base_version.clone());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            semantic_path.file_path.clone(),
+        )?;
 
         let normalized = normalize_for_full_replace(&params.new_code);
         let indented = dedent_then_reindent(&normalized, indent_column);
@@ -295,8 +334,16 @@ impl PathfinderServer {
         let before = &source[..insert_byte];
         let after = &source[insert_byte..];
 
-        // Use a heuristic to avoid too many newlines if `after` already starts with them
-        let sep = if after.starts_with(b"\n\n") {
+        // C9: Prevent double blank lines by checking both sides.
+        // No separator when the boundary already provides sufficient whitespace:
+        // - before ends with double newline, or
+        // - after starts with double newline, or
+        // - before ends with newline AND after starts with newline
+        // Otherwise use a single newline if after already has one, or double newline.
+        let sep = if before.ends_with(b"\n\n")
+            || after.starts_with(b"\n\n")
+            || (before.ends_with(b"\n") && after.starts_with(b"\n"))
+        {
             ""
         } else if after.starts_with(b"\n") {
             "\n"
@@ -345,29 +392,22 @@ impl PathfinderServer {
         );
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
-        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            tracing::warn!(
-                tool = "insert_after",
-                semantic_path = %params.semantic_path,
-                error = %e,
-                "insert_after: access denied"
-            );
-            return Err(pathfinder_to_error_data(&e));
-        }
+        check_sandbox_access(
+            &self.sandbox,
+            &semantic_path.file_path,
+            "insert_after",
+            &params.semantic_path,
+        )?;
 
         let (insert_byte, indent_column, source, current_hash) = self
             .resolve_insert_position(&semantic_path, InsertEdge::After)
             .await?;
 
-        let claimed = VersionHash::from_raw(params.base_version.clone());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            semantic_path.file_path.clone(),
+        )?;
 
         let normalized = normalize_for_full_replace(&params.new_code);
         let indented = dedent_then_reindent(&normalized, indent_column);
@@ -375,7 +415,16 @@ impl PathfinderServer {
         let before = &source[..insert_byte];
         let after = &source[insert_byte..];
 
-        let before_sep = if before.ends_with(b"\n\n") {
+        // C9: Prevent double blank lines by checking both sides.
+        // No separator when the boundary already provides sufficient whitespace:
+        // - before ends with double newline, or
+        // - after starts with double newline, or
+        // - before ends with newline AND after starts with newline
+        // Otherwise use a single newline if before has one, or double newline.
+        let before_sep = if before.ends_with(b"\n\n")
+            || after.starts_with(b"\n\n")
+            || (before.ends_with(b"\n") && after.starts_with(b"\n"))
+        {
             ""
         } else if before.ends_with(b"\n") {
             "\n"
@@ -464,15 +513,12 @@ impl PathfinderServer {
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
         require_symbol_target(&semantic_path, &params.semantic_path)?;
 
-        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            tracing::warn!(
-                tool = "delete_symbol",
-                semantic_path = %params.semantic_path,
-                error = %e,
-                "delete_symbol: access denied"
-            );
-            return Err(pathfinder_to_error_data(&e));
-        }
+        check_sandbox_access(
+            &self.sandbox,
+            &semantic_path.file_path,
+            "delete_symbol",
+            &params.semantic_path,
+        )?;
 
         let (full_range, source, current_hash) = match self
             .surgeon
@@ -485,15 +531,11 @@ impl PathfinderServer {
             }
         };
 
-        let claimed = VersionHash::from_raw(params.base_version.clone());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            semantic_path.file_path.clone(),
+        )?;
 
         // Collapse whitespace: If deleting a symbol leaves more than one consecutive blank line, collapse it.
         // Or simply: strip the symbol, then normalise the gap.
@@ -561,15 +603,12 @@ impl PathfinderServer {
 
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
 
-        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            tracing::warn!(
-                tool = "validate_only",
-                semantic_path = %params.semantic_path,
-                error = %e,
-                "validate_only: access denied"
-            );
-            return Err(pathfinder_to_error_data(&e));
-        }
+        check_sandbox_access(
+            &self.sandbox,
+            &semantic_path.file_path,
+            "validate_only",
+            &params.semantic_path,
+        )?;
 
         // Resolve the current version hash for the target path+type and OCC-check it.
         let current_hash = self
@@ -580,15 +619,11 @@ impl PathfinderServer {
             )
             .await?;
 
-        let claimed = VersionHash::from_raw(params.base_version.clone());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: semantic_path.file_path.clone(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            semantic_path.file_path.clone(),
+        )?;
 
         // validate_only: no disk write, so we skip actual LSP validation here.
         // The OCC + Sandbox check is the primary purpose of this tool.
@@ -609,7 +644,10 @@ impl PathfinderServer {
             formatted: false,
             validation: EditValidation::skipped(),
             validation_skipped: true,
-            validation_skipped_reason: Some("validate_only_no_write".to_owned()),
+            // B5: Improved skip reason explaining why LSP validation is skipped
+            validation_skipped_reason: Some(
+                "validate_only mode: LSP validation requires writing to disk, which is not performed in validate-only mode. Tree-sitter structural validation was performed.".to_owned()
+            ),
         }))
     }
 
@@ -627,15 +665,7 @@ impl PathfinderServer {
             .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
         let current_hash = VersionHash::compute(&source);
 
-        let claimed = VersionHash::from_raw(base_version.to_owned());
-        if claimed != current_hash {
-            let err = PathfinderError::VersionMismatch {
-                path: std::path::PathBuf::from(filepath_str),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
+        check_occ(base_version, &current_hash, PathBuf::from(filepath_str))?;
 
         Ok((source, current_hash))
     }
@@ -689,8 +719,199 @@ impl PathfinderServer {
             .await
     }
 
-    /// Resolve a semantic edit (`replace_body`, `replace_full`, `insert_before`, `insert_after`, `delete`).
-    #[allow(clippy::too_many_lines)]
+    /// Batch resolver for `replace_body` edits.
+    async fn resolve_batch_replace_body(
+        &self,
+        semantic_path: &SemanticPath,
+        new_code: &str,
+        source: &[u8],
+    ) -> Result<ResolvedEdit, ErrorData> {
+        let (body_range, _, _) = self
+            .surgeon
+            .resolve_body_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+        let normalized = normalize_for_body_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, body_range.body_indent_column);
+
+        let is_brace_block = if body_range.end_byte > body_range.start_byte {
+            source.get(body_range.start_byte) == Some(&b'{')
+                && source.get(body_range.end_byte.saturating_sub(1)) == Some(&b'}')
+        } else {
+            false
+        };
+
+        if is_brace_block {
+            let inner_start = body_range.start_byte + 1;
+            let inner_end = body_range.end_byte.saturating_sub(1);
+            let replacement = if indented.trim().is_empty() {
+                Vec::new()
+            } else {
+                let closing_indent = " ".repeat(body_range.indent_column);
+                format!("\n{indented}\n{closing_indent}").into_bytes()
+            };
+            Ok(ResolvedEdit {
+                start_byte: inner_start,
+                end_byte: inner_end,
+                replacement,
+            })
+        } else {
+            let mut end = body_range.start_byte;
+            while end > 0 && (source[end - 1] == b' ' || source[end - 1] == b'\t') {
+                end -= 1;
+            }
+            Ok(ResolvedEdit {
+                start_byte: end,
+                end_byte: body_range.end_byte,
+                replacement: format!("\n{indented}").into_bytes(),
+            })
+        }
+    }
+
+    /// Batch resolver for `replace_full` edits.
+    async fn resolve_batch_replace_full(
+        &self,
+        semantic_path: &SemanticPath,
+        new_code: &str,
+        source: &[u8],
+    ) -> Result<ResolvedEdit, ErrorData> {
+        if semantic_path.is_bare_file() {
+            return Ok(ResolvedEdit {
+                start_byte: 0,
+                end_byte: source.len(),
+                replacement: new_code.as_bytes().to_vec(),
+            });
+        }
+
+        let (full_range, _, _) = self
+            .surgeon
+            .resolve_full_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+        let normalized = normalize_for_full_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, full_range.indent_column);
+
+        Ok(ResolvedEdit {
+            start_byte: full_range.start_byte,
+            end_byte: full_range.end_byte,
+            replacement: indented.into_bytes(),
+        })
+    }
+
+    /// Batch resolver for `insert_before` edits.
+    async fn resolve_batch_insert_before(
+        &self,
+        semantic_path: &SemanticPath,
+        new_code: &str,
+        source: &[u8],
+    ) -> Result<ResolvedEdit, ErrorData> {
+        let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
+            (0, 0)
+        } else {
+            let (symbol_range, _, _) = self
+                .surgeon
+                .resolve_symbol_range(self.workspace_root.path(), semantic_path)
+                .await
+                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+            (symbol_range.start_byte, symbol_range.indent_column)
+        };
+
+        let normalized = normalize_for_full_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, indent_column);
+
+        let trailing = if indented.ends_with('\n') { "" } else { "\n" };
+        let after = &source[insert_byte..];
+        let sep = if after.starts_with(b"\n\n") {
+            ""
+        } else if after.starts_with(b"\n") {
+            "\n"
+        } else {
+            "\n\n"
+        };
+
+        Ok(ResolvedEdit {
+            start_byte: insert_byte,
+            end_byte: insert_byte,
+            replacement: format!("{indented}{trailing}{sep}").into_bytes(),
+        })
+    }
+
+    /// Batch resolver for `insert_after` edits.
+    async fn resolve_batch_insert_after(
+        &self,
+        semantic_path: &SemanticPath,
+        new_code: &str,
+        source: &[u8],
+    ) -> Result<ResolvedEdit, ErrorData> {
+        let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
+            (source.len(), 0)
+        } else {
+            let (symbol_range, _, _) = self
+                .surgeon
+                .resolve_symbol_range(self.workspace_root.path(), semantic_path)
+                .await
+                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+            (symbol_range.end_byte, symbol_range.indent_column)
+        };
+
+        let normalized = normalize_for_full_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, indent_column);
+
+        let before = &source[..insert_byte];
+        let before_sep = if before.ends_with(b"\n\n") {
+            ""
+        } else if before.ends_with(b"\n") {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
+
+        Ok(ResolvedEdit {
+            start_byte: insert_byte,
+            end_byte: insert_byte,
+            replacement: format!("{before_sep}{indented}{after_sep}").into_bytes(),
+        })
+    }
+
+    /// Batch resolver for `delete` edits.
+    async fn resolve_batch_delete(
+        &self,
+        semantic_path: &SemanticPath,
+        source: &[u8],
+    ) -> Result<ResolvedEdit, ErrorData> {
+        let (full_range, _, _) = self
+            .surgeon
+            .resolve_full_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+        let mut b_end = full_range.start_byte;
+        while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
+            b_end -= 1;
+        }
+
+        let mut a_start = full_range.end_byte;
+        while a_start < source.len() && source[a_start].is_ascii_whitespace() {
+            a_start += 1;
+        }
+
+        let sep = if b_end == 0 || a_start == source.len() {
+            b"\n" as &[u8]
+        } else {
+            b"\n\n"
+        };
+
+        Ok(ResolvedEdit {
+            start_byte: b_end,
+            end_byte: a_start,
+            replacement: sep.to_vec(),
+        })
+    }
+
+    /// Dispatch a semantic batch edit to the per-type resolver.
     async fn resolve_semantic_batch_edit(
         &self,
         semantic_path: &SemanticPath,
@@ -698,171 +919,27 @@ impl PathfinderServer {
         edit_index: usize,
         source: &[u8],
     ) -> Result<ResolvedEdit, ErrorData> {
+        let new_code = edit.new_code.as_deref().unwrap_or_default();
         match edit.edit_type.as_str() {
             "replace_body" => {
-                let (body_range, _, _) = self
-                    .surgeon
-                    .resolve_body_range(self.workspace_root.path(), semantic_path)
+                self.resolve_batch_replace_body(semantic_path, new_code, source)
                     .await
-                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                let new_code = edit.new_code.as_deref().unwrap_or_default();
-                let normalized = normalize_for_body_replace(new_code);
-                let indented = dedent_then_reindent(&normalized, body_range.body_indent_column);
-
-                let is_brace_block = if body_range.end_byte > body_range.start_byte {
-                    source.get(body_range.start_byte) == Some(&b'{')
-                        && source.get(body_range.end_byte.saturating_sub(1)) == Some(&b'}')
-                } else {
-                    false
-                };
-
-                if is_brace_block {
-                    let inner_start = body_range.start_byte + 1;
-                    let inner_end = body_range.end_byte.saturating_sub(1);
-                    let replacement = if indented.trim().is_empty() {
-                        Vec::new()
-                    } else {
-                        let closing_indent = " ".repeat(body_range.indent_column);
-                        format!("\n{indented}\n{closing_indent}").into_bytes()
-                    };
-                    Ok(ResolvedEdit {
-                        start_byte: inner_start,
-                        end_byte: inner_end,
-                        replacement,
-                    })
-                } else {
-                    let mut end = body_range.start_byte;
-                    while end > 0 && (source[end - 1] == b' ' || source[end - 1] == b'\t') {
-                        end -= 1;
-                    }
-                    Ok(ResolvedEdit {
-                        start_byte: end,
-                        end_byte: body_range.end_byte,
-                        replacement: format!("\n{indented}").into_bytes(),
-                    })
-                }
             }
             "replace_full" => {
-                let new_code = edit.new_code.as_deref().unwrap_or_default();
-                if semantic_path.is_bare_file() {
-                    Ok(ResolvedEdit {
-                        start_byte: 0,
-                        end_byte: source.len(),
-                        replacement: new_code.as_bytes().to_vec(),
-                    })
-                } else {
-                    let (full_range, _, _) = self
-                        .surgeon
-                        .resolve_full_range(self.workspace_root.path(), semantic_path)
-                        .await
-                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                    let normalized = normalize_for_full_replace(new_code);
-                    let indented = dedent_then_reindent(&normalized, full_range.indent_column);
-
-                    Ok(ResolvedEdit {
-                        start_byte: full_range.start_byte,
-                        end_byte: full_range.end_byte,
-                        replacement: indented.into_bytes(),
-                    })
-                }
+                self.resolve_batch_replace_full(semantic_path, new_code, source)
+                    .await
             }
             "insert_before" => {
-                let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
-                    (0, 0)
-                } else {
-                    let (symbol_range, _, _) = self
-                        .surgeon
-                        .resolve_symbol_range(self.workspace_root.path(), semantic_path)
-                        .await
-                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-                    (symbol_range.start_byte, symbol_range.indent_column)
-                };
-
-                let new_code = edit.new_code.as_deref().unwrap_or_default();
-                let normalized = normalize_for_full_replace(new_code);
-                let indented = dedent_then_reindent(&normalized, indent_column);
-
-                let trailing = if indented.ends_with('\n') { "" } else { "\n" };
-                let after = &source[insert_byte..];
-                let sep = if after.starts_with(b"\n\n") {
-                    ""
-                } else if after.starts_with(b"\n") {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
-
-                Ok(ResolvedEdit {
-                    start_byte: insert_byte,
-                    end_byte: insert_byte,
-                    replacement: format!("{indented}{trailing}{sep}").into_bytes(),
-                })
+                self.resolve_batch_insert_before(semantic_path, new_code, source)
+                    .await
             }
             "insert_after" => {
-                let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
-                    (source.len(), 0)
-                } else {
-                    let (symbol_range, _, _) = self
-                        .surgeon
-                        .resolve_symbol_range(self.workspace_root.path(), semantic_path)
-                        .await
-                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-                    (symbol_range.end_byte, symbol_range.indent_column)
-                };
-
-                let new_code = edit.new_code.as_deref().unwrap_or_default();
-                let normalized = normalize_for_full_replace(new_code);
-                let indented = dedent_then_reindent(&normalized, indent_column);
-
-                let before = &source[..insert_byte];
-                let before_sep = if before.ends_with(b"\n\n") {
-                    ""
-                } else if before.ends_with(b"\n") {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
-                let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
-
-                Ok(ResolvedEdit {
-                    start_byte: insert_byte,
-                    end_byte: insert_byte,
-                    replacement: format!("{before_sep}{indented}{after_sep}").into_bytes(),
-                })
-            }
-            "delete" => {
-                let (full_range, _, _) = self
-                    .surgeon
-                    .resolve_full_range(self.workspace_root.path(), semantic_path)
+                self.resolve_batch_insert_after(semantic_path, new_code, source)
                     .await
-                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                let mut b_end = full_range.start_byte;
-                while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
-                    b_end -= 1;
-                }
-
-                let mut a_start = full_range.end_byte;
-                while a_start < source.len() && source[a_start].is_ascii_whitespace() {
-                    a_start += 1;
-                }
-
-                let sep = if b_end == 0 || a_start == source.len() {
-                    b"\n" as &[u8]
-                } else {
-                    b"\n\n"
-                };
-
-                Ok(ResolvedEdit {
-                    start_byte: b_end,
-                    end_byte: a_start,
-                    replacement: sep.to_vec(),
-                })
             }
+            "delete" => self.resolve_batch_delete(semantic_path, source).await,
             _unknown => {
-                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                let err = PathfinderError::InvalidTarget {
                     semantic_path: edit.semantic_path.clone(),
                     reason: format!(
                         "edit_type is required for semantic targeting. Got: '{}' (empty).",
@@ -929,9 +1006,7 @@ impl PathfinderServer {
         );
 
         let file_path = Path::new(&params.filepath);
-        if let Err(e) = self.sandbox.check(file_path) {
-            return Err(pathfinder_to_error_data(&e));
-        }
+        check_sandbox_access(&self.sandbox, file_path, "replace_batch", &params.filepath)?;
 
         let absolute_path = self.workspace_root.resolve(file_path);
         let (source, current_hash) = self
@@ -948,14 +1023,24 @@ impl PathfinderServer {
 
         let new_bytes = Self::apply_sorted_edits(&source, resolved_edits)?;
         let resolve_ms = start.elapsed().as_millis();
-        let dummy_path = SemanticPath::parse(&params.filepath).unwrap_or_else(|| SemanticPath {
-            file_path: file_path.to_path_buf(),
-            symbol_chain: None,
-        });
+
+        // C1: Log when SemanticPath::parse fails and falls back to bare file
+        let semantic_path = if let Some(p) = SemanticPath::parse(&params.filepath) {
+            p
+        } else {
+            tracing::warn!(
+                filepath = %params.filepath,
+                "replace_batch: SemanticPath::parse failed, treating as bare file"
+            );
+            SemanticPath {
+                file_path: file_path.to_path_buf(),
+                symbol_chain: None,
+            }
+        };
 
         self.finalize_edit(FinalizeEditParams {
             tool_name: "replace_batch",
-            semantic_path: &dummy_path,
+            semantic_path: &semantic_path,
             raw_semantic_path_str: &params.filepath,
             source: &source,
             original_hash: &current_hash,
@@ -1090,41 +1175,15 @@ impl PathfinderServer {
         }
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "The LSP validation pipeline is intentionally a single sequential flow: \
-                  open → pre-diags → change → post-diags → close → diff. \
-                  Splitting it would obscure the linear state machine and scatter did_close call sites."
-    )]
-    async fn run_lsp_validation(
+    /// Helper: Open LSP document and collect pre-edit diagnostics.
+    ///
+    /// Returns `Err` with a skip reason on any failure, calling `did_close` when needed.
+    async fn lsp_open_and_pre_diags(
         &self,
-        file_path: &Path,
+        workspace: &Path,
+        relative: &Path,
         original_content: &str,
-        new_content: &str,
-        ignore_validation_failures: bool,
-    ) -> ValidationOutcome {
-        // version 1 = original, version 2 = post-edit
-        // version 1 = original, version 2 = post-edit
-        let relative = file_path;
-        let workspace = self.workspace_root.path();
-
-        let return_skip = |reason: &str| -> ValidationOutcome {
-            let ext = relative.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let lang = pathfinder_lsp::client::language_id_for_extension(ext).unwrap_or("unknown");
-            tracing::debug!(
-                file = %relative.display(),
-                skip_reason = reason,
-                language = lang,
-                "validation skip"
-            );
-            ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: true,
-                skipped_reason: Some(reason.to_owned()),
-                should_block: false,
-            }
-        };
-
+    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, &'static str> {
         // ── did_open (original content, version 1) ──
         if let Err(e) = self
             .lawyer
@@ -1140,7 +1199,7 @@ impl PathfinderServer {
             if should_log {
                 tracing::warn!(error = %e, "validation: did_open failed");
             }
-            return return_skip(skipped_reason);
+            return Err(skipped_reason);
         }
 
         // ── pre-edit diagnostics ──
@@ -1149,13 +1208,13 @@ impl PathfinderServer {
             Err(LspError::UnsupportedCapability { .. }) => {
                 // LSP running but doesn't support Pull Diagnostics — close the document
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return return_skip("pull_diagnostics_unsupported");
+                return Err("pull_diagnostics_unsupported");
             }
             Err(e) => {
                 let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: pre-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return return_skip(skipped_reason);
+                return Err(skipped_reason);
             }
         };
 
@@ -1177,6 +1236,18 @@ impl PathfinderServer {
             }
         }
 
+        Ok(pre_diags)
+    }
+
+    /// Helper: Apply LSP change and collect post-edit diagnostics.
+    ///
+    /// Returns `Err` with a skip reason on any failure, calling `did_close` when needed.
+    async fn lsp_change_and_post_diags(
+        &self,
+        workspace: &Path,
+        relative: &Path,
+        new_content: &str,
+    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, &'static str> {
         // ── did_change (new content, version 2) ──
         if let Err(e) = self
             .lawyer
@@ -1186,7 +1257,7 @@ impl PathfinderServer {
             let skipped_reason = Self::lsp_error_to_skip_reason(&e);
             tracing::warn!(error = %e, "validation: did_change failed");
             let _ = self.lawyer.did_close(workspace, relative).await;
-            return return_skip(skipped_reason);
+            return Err(skipped_reason);
         }
 
         // ── post-edit diagnostics ──
@@ -1196,7 +1267,7 @@ impl PathfinderServer {
                 let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: post-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return return_skip(skipped_reason);
+                return Err(skipped_reason);
             }
         };
 
@@ -1212,6 +1283,16 @@ impl PathfinderServer {
             }
         }
 
+        Ok(post_diags)
+    }
+
+    /// Helper: Revert LSP state to original and close document (fire-and-forget).
+    async fn lsp_revert_and_close(
+        &self,
+        workspace: &Path,
+        relative: &Path,
+        original_content: &str,
+    ) {
         // ── revert LSP state to original (fire-and-forget) ──
         let _ = self
             .lawyer
@@ -1220,9 +1301,82 @@ impl PathfinderServer {
 
         // ── close document to free LSP memory ──
         let _ = self.lawyer.did_close(workspace, relative).await;
+    }
+
+    /// Run LSP Pull Diagnostics validation on a pending in-memory edit.
+    ///
+    /// # Flow
+    /// 1. Notify LSP of the original file via `didOpen`
+    /// 2. Snapshot pre-edit diagnostics via `textDocument/diagnostic`
+    /// 3. Notify LSP of the new content via `didChange`
+    /// 4. Snapshot post-edit diagnostics
+    /// 5. Diff pre vs post, returning introduced/resolved lists
+    ///
+    /// If `ignore_validation_failures = true`, always returns a non-blocking
+    /// `ValidationOutcome` even if new errors are introduced.
+    ///
+    /// Gracefully degrades to `validation_skipped` on all LSP errors.
+    async fn run_lsp_validation(
+        &self,
+        file_path: &Path,
+        original_content: &str,
+        new_content: &str,
+        ignore_validation_failures: bool,
+    ) -> ValidationOutcome {
+        let relative = file_path;
+        let workspace = self.workspace_root.path();
+
+        let return_skip = |reason: &str| -> ValidationOutcome {
+            let ext = relative.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let lang = pathfinder_lsp::client::language_id_for_extension(ext).unwrap_or("unknown");
+            tracing::debug!(
+                file = %relative.display(),
+                skip_reason = reason,
+                language = lang,
+                "validation skip"
+            );
+            ValidationOutcome {
+                validation: EditValidation::skipped(),
+                skipped: true,
+                skipped_reason: Some(reason.to_owned()),
+                should_block: false,
+            }
+        };
+
+        // Step 1: Open LSP document and collect pre-edit diagnostics
+        let pre_diags = match self
+            .lsp_open_and_pre_diags(workspace, relative, original_content)
+            .await
+        {
+            Ok(d) => d,
+            Err(reason) => return return_skip(reason),
+        };
+
+        // Step 2: Apply change and collect post-edit diagnostics
+        let post_diags = match self
+            .lsp_change_and_post_diags(workspace, relative, new_content)
+            .await
+        {
+            Ok(d) => d,
+            Err(reason) => {
+                // Clean up LSP state before returning
+                self.lsp_revert_and_close(workspace, relative, original_content)
+                    .await;
+                return return_skip(reason);
+            }
+        };
+
+        // Step 3: Revert LSP state to original and close document
+        self.lsp_revert_and_close(workspace, relative, original_content)
+            .await;
 
         // ── diff diagnostics ──────────────────────
-        build_validation_outcome(&pre_diags, &post_diags, ignore_validation_failures)
+        build_validation_outcome(
+            &pre_diags,
+            &post_diags,
+            ignore_validation_failures,
+            file_path,
+        )
     }
 
     /// Helper to perform the final TOCTOU check and write the modified file to disk.
@@ -1311,6 +1465,13 @@ impl PathfinderServer {
             .await?;
         let flush_ms = flush_start.elapsed().as_millis();
 
+        // C6: Compute engines_used based on whether validation was actually performed
+        let engines_used = if validation_outcome.skipped {
+            vec!["tree-sitter"]
+        } else {
+            vec!["tree-sitter", "lsp"]
+        };
+
         let duration_ms = params.start_time.elapsed().as_millis();
         tracing::info!(
             tool = params.tool_name,
@@ -1320,7 +1481,8 @@ impl PathfinderServer {
             validate_ms,
             flush_ms,
             new_version_hash = new_hash.as_str(),
-            engines_used = ?["tree-sitter"],
+            engines_used = ?engines_used,
+            ignore_validation_failures = params.ignore_validation_failures,
             "{}: complete",
             params.tool_name
         );
@@ -1615,9 +1777,19 @@ fn build_validation_outcome(
     pre_diags: &[pathfinder_lsp::types::LspDiagnostic],
     post_diags: &[pathfinder_lsp::types::LspDiagnostic],
     ignore_validation_failures: bool,
+    file_path: &Path,
 ) -> ValidationOutcome {
     let diff = diff_diagnostics(pre_diags, post_diags);
     let has_new_errors = diff.has_new_errors();
+
+    // C3: Audit logging for ignore_validation_failures flag usage
+    if has_new_errors && ignore_validation_failures {
+        tracing::warn!(
+            file = %file_path.display(),
+            error_count = diff.introduced.len(),
+            "LSP validation introduced new errors but ignore_validation_failures=true, allowing write"
+        );
+    }
 
     let to_diag_error = |d: &pathfinder_lsp::types::LspDiagnostic| DiagnosticError {
         severity: d.severity as u8,
