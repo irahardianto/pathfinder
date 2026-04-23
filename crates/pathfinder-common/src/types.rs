@@ -3,6 +3,7 @@
 //! These types are used across all crates to ensure consistent
 //! representation of semantic paths, version hashes, and filter modes.
 
+use crate::error::PathfinderError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -248,6 +249,32 @@ impl WorkspaceRoot {
         self.0.join(normalized)
     }
 
+    /// Strict variant of resolve that rejects path traversal attempts.
+    ///
+    /// Use this in security-critical paths (file operations, edit tools).
+    /// Returns an error if the relative path contains `..` components or is absolute.
+    ///
+    /// # Errors
+    /// Returns `PathfinderError::PathTraversal` if the path contains traversal
+    /// components or is absolute.
+    pub fn resolve_strict(&self, relative: &Path) -> Result<PathBuf, PathfinderError> {
+        let is_absolute = relative.is_absolute();
+        let has_traversal = relative
+            .components()
+            .any(|c| c == std::path::Component::ParentDir);
+
+        if is_absolute || has_traversal {
+            return Err(PathfinderError::PathTraversal {
+                path: relative.to_path_buf(),
+                workspace_root: self.0.clone(),
+            });
+        }
+
+        // Delegate to resolve for the actual normalization
+        // (which still warns but since we've already filtered, it won't trigger)
+        Ok(self.resolve(relative))
+    }
+
     /// Get the workspace root path.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -394,5 +421,42 @@ mod tests {
         // The resolved path escapes the workspace — that is expected here.
         // The Sandbox (not resolve) is responsible for rejection.
         assert!(resolved.to_string_lossy().contains("etc/passwd"));
+    }
+
+    #[test]
+    fn test_resolve_strict_rejects_traversal() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = WorkspaceRoot::new(dir.path()).expect("create workspace root");
+
+        let traversal = std::path::Path::new("../../etc/passwd");
+        let result = root.resolve_strict(traversal);
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(PathfinderError::PathTraversal { .. })));
+    }
+
+    #[test]
+    fn test_resolve_strict_rejects_absolute_path() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = WorkspaceRoot::new(dir.path()).expect("create workspace root");
+
+        let absolute = std::path::Path::new("/etc/passwd");
+        let result = root.resolve_strict(absolute);
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(PathfinderError::PathTraversal { .. })));
+    }
+
+    #[test]
+    fn test_resolve_strict_accepts_relative_path() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = WorkspaceRoot::new(dir.path()).expect("create workspace root");
+
+        let relative = std::path::Path::new("src/main.rs");
+        let result = root.resolve_strict(relative);
+
+        assert!(result.is_ok());
+        let resolved = result.expect("should be Ok");
+        assert!(resolved.to_string_lossy().contains("src/main.rs"));
     }
 }

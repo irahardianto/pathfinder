@@ -121,6 +121,13 @@ pub enum PathfinderError {
         /// Snippet of actual content at `context_line` (for debugging)
         actual_content: Option<String>,
     },
+
+    /// Path traversal detected in `resolve_strict`.
+    #[error("path traversal rejected: {path} escapes workspace root {workspace_root}")]
+    PathTraversal {
+        path: PathBuf,
+        workspace_root: PathBuf,
+    },
 }
 
 impl PathfinderError {
@@ -147,6 +154,7 @@ impl PathfinderError {
             Self::AmbiguousMatch { .. } => "AMBIGUOUS_MATCH",
             Self::TextNotFound { .. } => "TEXT_NOT_FOUND",
             Self::InvalidSemanticPath { .. } => "INVALID_SEMANTIC_PATH",
+            Self::PathTraversal { .. } => "PATH_TRAVERSAL",
         }
     }
 
@@ -212,6 +220,10 @@ impl PathfinderError {
                 "'{input}' is missing the file path — did you mean 'crates/.../file.rs::{input}'? \
                  Semantic paths must include the file path and '::' separator (e.g., 'src/auth.ts::AuthService.login')."
             )),
+            Self::PathTraversal { .. } => Some(
+                "Path traversal is not allowed. Use a relative path without '..' components or absolute paths."
+                    .to_owned(),
+            ),
             _ => None,
         }
     }
@@ -282,6 +294,12 @@ impl PathfinderError {
                     map.insert("actual_content".to_string(), serde_json::json!(content));
                 }
                 serde_json::Value::Object(map)
+            }
+            Self::PathTraversal {
+                path,
+                workspace_root,
+            } => {
+                serde_json::json!({ "path": path, "workspace_root": workspace_root })
             }
             _ => serde_json::Value::Object(serde_json::Map::new()),
         }
@@ -640,5 +658,25 @@ mod tests {
             hint.contains("read_source_file"),
             "hint should reference read_source_file: {hint}"
         );
+    }
+
+    #[test]
+    fn test_path_traversal_error() {
+        let err = PathfinderError::PathTraversal {
+            path: "../../etc/passwd".into(),
+            workspace_root: "/workspace".into(),
+        };
+
+        assert_eq!(err.error_code(), "PATH_TRAVERSAL");
+        let hint = err.hint().expect("PATH_TRAVERSAL should have a hint");
+        assert!(
+            hint.contains("not allowed"),
+            "hint should explain traversal is not allowed: {hint}"
+        );
+
+        let response = err.to_error_response();
+        assert_eq!(response.error, "PATH_TRAVERSAL");
+        assert_eq!(response.details["path"], "../../etc/passwd");
+        assert_eq!(response.details["workspace_root"], "/workspace");
     }
 }

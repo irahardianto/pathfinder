@@ -15,7 +15,26 @@ use ignore::WalkBuilder;
 use pathfinder_common::types::VersionHash;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+
+// ── Helper Functions ─────────────────────────────────────────────────────
+
+/// Recover from mutex poisoning with a warning log.
+///
+/// Mutex poisoning indicates a panic occurred while holding the lock;
+/// the data MAY be in an inconsistent state, but for search result caches
+/// this is acceptable since results will simply be regenerated.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::warn!(
+                "mutex poisoned, recovering (possible data inconsistency in search cache)"
+            );
+            e.into_inner()
+        }
+    }
+}
 
 // ── Sink implementation ──────────────────────────────────────────────
 
@@ -80,10 +99,7 @@ impl<'a> MatchCollector<'a> {
     /// Called after the search completes and only if the file had matches,
     /// so we only pay the cost of reading + hashing files that actually matched.
     fn backfill_hash(&self, hash: &str) {
-        let mut guard = self
-            .matches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = lock_or_recover(self.matches);
         for m in guard.iter_mut() {
             if m.file == self.relative_path && m.version_hash.is_empty() {
                 m.version_hash = hash.to_string();
@@ -92,11 +108,7 @@ impl<'a> MatchCollector<'a> {
     }
 
     fn current_match_count(&self) -> usize {
-        // ALLOW: mutex poisoning can only happen on panic → treat as error
-        self.matches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        lock_or_recover(self.matches).len()
     }
 }
 
@@ -110,11 +122,7 @@ impl Sink for MatchCollector<'_> {
 
         // Increment total regardless of cap.
         {
-            // ALLOW: lock needed for shared counter
-            let mut count = self
-                .total_count
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut count = lock_or_recover(self.total_count);
             *count += 1;
         }
 
@@ -127,10 +135,7 @@ impl Sink for MatchCollector<'_> {
 
         // Flush the after-context buffer from the previous match into the last stored match.
         if !self.after_context_buf.is_empty() {
-            let mut guard = self
-                .matches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = lock_or_recover(self.matches);
             if let Some(last) = guard.last_mut() {
                 last.context_after = std::mem::take(&mut self.after_context_buf);
             }
@@ -176,10 +181,7 @@ impl Sink for MatchCollector<'_> {
         }
 
         {
-            let mut guard = self
-                .matches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = lock_or_recover(self.matches);
             guard.push(search_match);
         }
 
@@ -224,10 +226,7 @@ impl Sink for MatchCollector<'_> {
     ) -> Result<(), Self::Error> {
         // Flush any remaining after-context into the last match.
         if !self.after_context_buf.is_empty() {
-            let mut guard = self
-                .matches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = lock_or_recover(self.matches);
             if let Some(last) = guard.last_mut() {
                 last.context_after = std::mem::take(&mut self.after_context_buf);
             }
@@ -377,13 +376,7 @@ impl Scout for RipgrepScout {
                 .build();
 
             for (abs_path, relative) in &files {
-                let matches_before = {
-                    // ALLOW: lock is only poisoned on panic from within this function
-                    match_buf
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .len()
-                };
+                let matches_before = { lock_or_recover(&match_buf).len() };
 
                 let mut sink = MatchCollector::new(
                     relative.clone(),
@@ -401,12 +394,7 @@ impl Scout for RipgrepScout {
 
                 // Only hash the file when it produced at least one new match.
                 // This avoids reading every file into memory just to compute a hash.
-                let matches_after = {
-                    match_buf
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .len()
-                };
+                let matches_after = { lock_or_recover(&match_buf).len() };
                 if matches_after > matches_before {
                     let bytes = match std::fs::read(abs_path) {
                         Ok(b) => b,
