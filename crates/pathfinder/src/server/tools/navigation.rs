@@ -241,20 +241,84 @@ impl PathfinderServer {
                 }))
             }
             Err(LspError::NoLspAvailable) => {
-                // Degraded mode — LSP not configured
+                // Degraded mode — LSP not available. Use a grep-based heuristic to
+                // find a likely definition location. This is not LSP-accurate but
+                // gives the agent a starting point without requiring a full
+                // `search_codebase` call.
                 tracing::info!(
                     tool = "get_definition",
-                    tree_sitter_ms,
-                    lsp_ms,
-                    duration_ms,
-                    degraded = true,
-                    degraded_reason = "no_lsp",
-                    engines_used = ?["none"],
-                    "get_definition: degraded (no LSP)"
+                    symbol = %semantic_path,
+                    "get_definition: no LSP — attempting grep-based fallback"
                 );
-                Err(pathfinder_to_error_data(&PathfinderError::NoLspAvailable {
-                    language: symbol_scope.language,
-                }))
+
+                let symbol_name = semantic_path
+                    .symbol_chain
+                    .as_ref()
+                    .and_then(|c| c.segments.last())
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+
+                // Search for common definition-like patterns across the workspace
+                let pattern = format!(
+                    r"(?:fn|def|func|class|struct|type|interface|const|let|var)\s+{symbol_name}"
+                );
+                let search_result = self
+                    .scout
+                    .search(&pathfinder_search::SearchParams {
+                        workspace_root: self.workspace_root.path().to_path_buf(),
+                        query: pattern,
+                        is_regex: true,
+                        max_results: 5,
+                        path_glob: "**/*".to_owned(),
+                        exclude_glob: String::new(),
+                        context_lines: 0,
+                    })
+                    .await;
+
+                let duration_ms = start.elapsed().as_millis();
+
+                match search_result {
+                    Ok(result) if !result.matches.is_empty() => {
+                        let m = &result.matches[0];
+                        tracing::info!(
+                            tool = "get_definition",
+                            file = %m.file,
+                            line = m.line,
+                            duration_ms,
+                            degraded = true,
+                            degraded_reason = "no_lsp_grep_fallback",
+                            engines_used = ?["tree-sitter", "ripgrep"],
+                            "get_definition: degraded complete (grep fallback)"
+                        );
+                        Ok(Json(GetDefinitionResponse {
+                            file: m.file.clone(),
+                            line: u32::try_from(m.line).unwrap_or(u32::MAX),
+                            column: u32::try_from(m.column).unwrap_or(1),
+                            preview: m.content.clone(),
+                            degraded: true,
+                            degraded_reason: Some(
+                                "no_lsp_grep_fallback: LSP unavailable; result from Ripgrep \
+                                 pattern search — may not be the canonical definition. \
+                                 Verify with read_source_file."
+                                    .to_owned(),
+                            ),
+                        }))
+                    }
+                    Ok(_) | Err(_) => {
+                        // No grep match either — return the original LSP error
+                        tracing::info!(
+                            tool = "get_definition",
+                            duration_ms,
+                            degraded = true,
+                            degraded_reason = "no_lsp",
+                            engines_used = ?["none"],
+                            "get_definition: degraded (no LSP, grep fallback also empty)"
+                        );
+                        Err(pathfinder_to_error_data(&PathfinderError::NoLspAvailable {
+                            language: symbol_scope.language,
+                        }))
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -572,7 +636,61 @@ impl PathfinderServer {
                 outgoing = Some(Vec::new());
             }
             Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
-                // Keep degraded default
+                // Degraded mode — LSP not available. Use grep-based reference search
+                // as a heuristic fallback. Results may over-count (string references)
+                // or under-count (indirect calls), but give the agent a starting point.
+                tracing::info!(
+                    tool = "analyze_impact",
+                    symbol = %semantic_path,
+                    "analyze_impact: no LSP — attempting grep-based reference fallback"
+                );
+
+                let symbol_name = semantic_path
+                    .symbol_chain
+                    .as_ref()
+                    .and_then(|c| c.segments.last())
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+
+                let search_result = self
+                    .scout
+                    .search(&pathfinder_search::SearchParams {
+                        workspace_root: self.workspace_root.path().to_path_buf(),
+                        query: symbol_name.clone(),
+                        is_regex: false,
+                        max_results: 50,
+                        path_glob: "**/*".to_owned(),
+                        exclude_glob: String::new(),
+                        context_lines: 0,
+                    })
+                    .await;
+
+                if let Ok(result) = search_result {
+                    if !result.matches.is_empty() {
+                        let refs: Vec<crate::server::types::ImpactReference> = result
+                            .matches
+                            .into_iter()
+                            .map(|m| {
+                                files_referenced.insert(m.file.clone());
+                                crate::server::types::ImpactReference {
+                                    semantic_path: format!("{}::{symbol_name}", m.file),
+                                    file: m.file,
+                                    line: m.line as usize,
+                                    snippet: m.content,
+                                    version_hash: String::new(),
+                                }
+                            })
+                            .collect();
+                        incoming = Some(refs);
+                        degraded_reason = Some("no_lsp_grep_fallback".to_owned());
+                        tracing::info!(
+                            tool = "analyze_impact",
+                            references_found = incoming.as_ref().map_or(0, Vec::len),
+                            "analyze_impact: grep-based fallback references found"
+                        );
+                    }
+                }
+                // Keep degraded = true to signal this is heuristic data
             }
             Err(e) => {
                 tracing::warn!(
