@@ -313,6 +313,22 @@ impl LspClient {
         let (id, rx) = self.dispatcher.register();
         let message = RequestDispatcher::make_request(id, method, &params);
 
+        // Health check: verify reader task is still alive
+        {
+            let guard = self.processes.read().await;
+            let state = match guard.get(language_id) {
+                Some(ProcessEntry::Running(s)) => s,
+                Some(ProcessEntry::Unavailable(_)) | None => return Err(LspError::NoLspAvailable),
+            };
+            if state.reader_handle.is_finished() {
+                tracing::warn!(
+                    language = %language_id,
+                    "LSP: reader task not alive, returning ConnectionLost"
+                );
+                return Err(LspError::ConnectionLost);
+            }
+        }
+
         // Write the request to stdin
         {
             let guard = self.processes.read().await;
