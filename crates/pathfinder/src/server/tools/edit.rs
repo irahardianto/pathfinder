@@ -3433,7 +3433,7 @@ pub fn strip_orphaned_doc_comment(source: &[u8], before_end: usize) -> usize {
         if let Some(slash_idx) = line_str.find("//") {
             let mut del_start = slash_idx;
             while del_start > 0 {
-                let prev_char = line_str[..del_start].chars().next_back().unwrap();
+                let prev_char = line_str[..del_start].chars().next_back().unwrap_or('\n');
                 if prev_char.is_whitespace() && prev_char != '\n' {
                     del_start -= prev_char.len_utf8();
                 } else {
