@@ -12,6 +12,13 @@ use crate::error::{PathfinderError, SandboxTier};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::{Path, PathBuf};
 
+/// Extract the basename from a path string, returning the path itself if none.
+fn path_basename(path_str: &str) -> std::borrow::Cow<'_, str> {
+    Path::new(path_str)
+        .file_name()
+        .map_or_else(|| path_str.into(), |f| f.to_string_lossy())
+}
+
 /// The hardcoded deny patterns. These CANNOT be overridden.
 const HARDCODED_DENY_PATTERNS: &[&str] = &[
     ".git/objects/",
@@ -205,40 +212,39 @@ impl Sandbox {
     }
 
     fn is_default_denied(&self, path_str: &str) -> bool {
-        for pattern in &self.effective_default_deny {
-            // Handle directory patterns (ending with /)
-            if pattern.ends_with('/') {
-                let dir_prefix = pattern.trim_end_matches('/');
-                if path_str.starts_with(dir_prefix)
-                    && (path_str.len() == dir_prefix.len()
-                        || path_str.as_bytes().get(dir_prefix.len()) == Some(&b'/'))
-                {
-                    return true;
-                }
-            }
-            // Handle wildcard patterns like ".env.*"
-            else if pattern.contains('*') {
-                if let Some(prefix) = pattern.strip_suffix("*") {
-                    // Simple prefix wildcard
-                    let basename = Path::new(path_str)
-                        .file_name()
-                        .map_or_else(|| path_str.to_string(), |f| f.to_string_lossy().to_string());
-                    if basename.starts_with(prefix.trim_start_matches('/')) {
-                        return true;
-                    }
-                }
-            }
-            // Handle exact file matches
-            else {
-                let basename = Path::new(path_str)
-                    .file_name()
-                    .map_or_else(|| path_str.to_string(), |f| f.to_string_lossy().to_string());
-                if basename == *pattern || path_str == *pattern {
-                    return true;
-                }
-            }
+        self.effective_default_deny
+            .iter()
+            .any(|p| Self::matches_default_pattern(p, path_str))
+    }
+
+    fn matches_default_pattern(pattern: &str, path_str: &str) -> bool {
+        if pattern.ends_with('/') {
+            Self::matches_directory_pattern(pattern, path_str)
+        } else if pattern.contains('*') {
+            Self::matches_wildcard_pattern(pattern, path_str)
+        } else {
+            Self::matches_exact_pattern(pattern, path_str)
         }
-        false
+    }
+
+    fn matches_directory_pattern(pattern: &str, path_str: &str) -> bool {
+        let dir_prefix = pattern.trim_end_matches('/');
+        path_str.starts_with(dir_prefix)
+            && (path_str.len() == dir_prefix.len()
+                || path_str.as_bytes().get(dir_prefix.len()) == Some(&b'/'))
+    }
+
+    fn matches_wildcard_pattern(pattern: &str, path_str: &str) -> bool {
+        let Some(prefix) = pattern.strip_suffix('*') else {
+            return false;
+        };
+        let basename = path_basename(path_str);
+        basename.starts_with(prefix.trim_start_matches('/'))
+    }
+
+    fn matches_exact_pattern(pattern: &str, path_str: &str) -> bool {
+        let basename = path_basename(path_str);
+        basename == pattern || path_str == pattern
     }
 
     fn is_additional_denied(&self, path_str: &str) -> bool {

@@ -120,6 +120,9 @@ pub enum PathfinderError {
         context_line: u32,
         /// Snippet of actual content at `context_line` (for debugging)
         actual_content: Option<String>,
+        /// Closest matching substring found in the window (for agent self-correction).
+        /// Present when a near-match (>60% character overlap) exists but exact match fails.
+        closest_match: Option<String>,
     },
 
     /// Path traversal detected in `resolve_strict`.
@@ -212,10 +215,17 @@ impl PathfinderError {
                 "old_text matched {occurrences} times. Make it more specific or use \
                  replace_batch with a semantic_path to target a single symbol."
             )),
-            Self::TextNotFound { context_line, .. } => Some(format!(
-                "The old_text was not found within ±25 lines of line {context_line}. \
-                 Use read_source_file to verify the exact text and adjust context_line."
-            )),
+            Self::TextNotFound { context_line, closest_match, .. } => {
+                let base = format!(
+                    "The old_text was not found within ±25 lines of line {context_line}. \
+                     Use read_source_file to verify the exact text and adjust context_line."
+                );
+                if let Some(candidate) = closest_match {
+                    Some(format!("{base} Closest match found: '{candidate}'."))
+                } else {
+                    Some(base)
+                }
+            }
             Self::InvalidSemanticPath { input, .. } => Some(format!(
                 "'{input}' is missing the file path — did you mean 'crates/.../file.rs::{input}'? \
                  Semantic paths must include the file path and '::' separator (e.g., 'src/auth.ts::AuthService.login')."
@@ -288,10 +298,13 @@ impl PathfinderError {
                 }
                 serde_json::Value::Object(map)
             }
-            Self::TextNotFound { actual_content, .. } => {
+            Self::TextNotFound { actual_content, closest_match, .. } => {
                 let mut map = serde_json::Map::new();
                 if let Some(content) = actual_content {
                     map.insert("actual_content".to_string(), serde_json::json!(content));
+                }
+                if let Some(candidate) = closest_match {
+                    map.insert("closest_match".to_string(), serde_json::json!(candidate));
                 }
                 serde_json::Value::Object(map)
             }
@@ -456,6 +469,7 @@ mod tests {
                 old_text: "<button>Check</button>".into(),
                 context_line: 42,
                 actual_content: None,
+                closest_match: None,
             },
             PathfinderError::InvalidSemanticPath {
                 input: "send".into(),
@@ -647,6 +661,7 @@ mod tests {
             old_text: "<button>Check</button>".to_owned(),
             context_line: 42,
             actual_content: None,
+            closest_match: None,
         };
         assert_eq!(err.error_code(), "TEXT_NOT_FOUND");
         let hint = err.hint().expect("TEXT_NOT_FOUND should have a hint");
@@ -658,6 +673,24 @@ mod tests {
             hint.contains("read_source_file"),
             "hint should reference read_source_file: {hint}"
         );
+    }
+
+    #[test]
+    fn test_text_not_found_hint_with_closest_match() {
+        let err = PathfinderError::TextNotFound {
+            filepath: "src/auth.ts".into(),
+            old_text: "const x = 1;".to_owned(),
+            context_line: 10,
+            actual_content: None,
+            closest_match: Some("const x = 2;".to_owned()),
+        };
+        let hint = err.hint().expect("TEXT_NOT_FOUND with closest_match should have a hint");
+        assert!(
+            hint.contains("const x = 2;"),
+            "hint should include the closest match candidate: {hint}"
+        );
+        let response = err.to_error_response();
+        assert_eq!(response.details["closest_match"], "const x = 2;");
     }
 
     #[test]
