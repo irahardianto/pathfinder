@@ -27,6 +27,7 @@ use protocol::RequestDispatcher;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -60,6 +61,49 @@ enum ProcessEntry {
     /// Active LSP process. Boxed to equalise variant sizes.
     Running(Box<LanguageState>),
     Unavailable(UnavailableState),
+}
+
+impl ProcessEntry {
+    fn to_validation_status(&self, command: &str) -> crate::types::LspLanguageStatus {
+        match self {
+            Self::Running(state) => {
+                if state.process.capabilities.diagnostic_provider {
+                    crate::types::LspLanguageStatus {
+                        validation: true,
+                        reason: "LSP connected and supports validation".to_owned(),
+                    }
+                } else {
+                    crate::types::LspLanguageStatus {
+                        validation: false,
+                        reason: "LSP connected but does not support textDocument/diagnostic"
+                            .to_owned(),
+                    }
+                }
+            }
+            Self::Unavailable(_) => crate::types::LspLanguageStatus {
+                validation: false,
+                reason: format!("{command} failed to start or crashed repeatedly"),
+            },
+        }
+    }
+}
+
+/// RAII guard that increments in-flight counter on creation and decrements on drop.
+struct InFlightGuard {
+    counter: Arc<AtomicU32>,
+}
+
+impl InFlightGuard {
+    fn new(counter: Arc<AtomicU32>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// The production `Lawyer` implementation.
@@ -313,13 +357,14 @@ impl LspClient {
         let (id, rx) = self.dispatcher.register();
         let message = RequestDispatcher::make_request(id, method, &params);
 
-        // Health check: verify reader task is still alive
-        {
+        // Increment in-flight counter (decremented on drop) and health check
+        let _in_flight_guard = {
             let guard = self.processes.read().await;
             let state = match guard.get(language_id) {
                 Some(ProcessEntry::Running(s)) => s,
                 Some(ProcessEntry::Unavailable(_)) | None => return Err(LspError::NoLspAvailable),
             };
+            // Health check: verify reader task is still alive
             if state.reader_handle.is_finished() {
                 tracing::warn!(
                     language = %language_id,
@@ -327,7 +372,9 @@ impl LspClient {
                 );
                 return Err(LspError::ConnectionLost);
             }
-        }
+            let counter = Arc::clone(&state.process.in_flight);
+            InFlightGuard::new(counter)
+        };
 
         // Write the request to stdin
         {
@@ -866,31 +913,11 @@ impl Lawyer for LspClient {
         for desc in self.descriptors.iter() {
             let guard = self.processes.read().await;
             let lang_status = match guard.get(&desc.language_id) {
-                Some(ProcessEntry::Running(state)) => {
-                    if state.process.capabilities.diagnostic_provider {
-                        crate::types::LspLanguageStatus {
-                            validation: true,
-                            reason: "LSP connected and supports validation".to_owned(),
-                        }
-                    } else {
-                        crate::types::LspLanguageStatus {
-                            validation: false,
-                            reason: "LSP connected but does not support textDocument/diagnostic"
-                                .to_owned(),
-                        }
-                    }
-                }
-                Some(ProcessEntry::Unavailable(_)) => crate::types::LspLanguageStatus {
-                    validation: false,
-                    reason: format!("{} failed to start or crashed repeatedly", desc.command),
+                Some(entry) => entry.to_validation_status(&desc.command),
+                None => crate::types::LspLanguageStatus {
+                    validation: true,
+                    reason: format!("{} available (lazy start)", desc.command),
                 },
-                None => {
-                    // Lazy start: it hasn't crashed, and it was detected in the workspace
-                    crate::types::LspLanguageStatus {
-                        validation: true,
-                        reason: format!("{} available (lazy start)", desc.command),
-                    }
-                }
             };
             status.insert(desc.language_id.clone(), lang_status);
         }
@@ -1251,7 +1278,10 @@ async fn idle_timeout_task(
             .iter()
             .filter_map(|(lang, entry)| {
                 if let ProcessEntry::Running(state) = entry {
-                    if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT {
+                    // Only remove if idle timeout elapsed AND no in-flight requests
+                    if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT
+                        && state.process.in_flight.load(Ordering::Relaxed) == 0
+                    {
                         Some(lang.clone())
                     } else {
                         None

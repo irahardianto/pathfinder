@@ -12,6 +12,7 @@ use crate::client::transport::{read_message, write_message};
 use crate::LspError;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -31,6 +32,8 @@ pub(super) struct ManagedProcess {
     pub(super) capabilities: DetectedCapabilities,
     /// Last time this process was used (for idle-timeout tracking).
     pub(super) last_used: Instant,
+    /// Number of in-flight requests (prevents idle timeout during active ops).
+    pub(super) in_flight: Arc<AtomicU32>,
 }
 
 /// Initialize timeout — 30 seconds as per PRD §6.1.
@@ -146,6 +149,7 @@ pub(super) async fn spawn_and_initialize(
         language_id: language_id.to_owned(),
         capabilities,
         last_used: Instant::now(),
+        in_flight: Arc::new(AtomicU32::new(0)),
     };
 
     Ok((process, stdout))
