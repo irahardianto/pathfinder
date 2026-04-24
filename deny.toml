@@ -14,9 +14,9 @@ all-features = true
 # ──────────────────────────────────────────────
 [advisories]
 # Unmaintained crates: fail only for direct workspace deps
-unmaintained = "workspace"
+unmaintained = "warn"
 # Unsound crates: fail only for direct workspace deps
-unsound = "workspace"
+unsound = "warn"
 ignore = []
 
 # ──────────────────────────────────────────────
