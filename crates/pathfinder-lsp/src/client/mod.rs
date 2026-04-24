@@ -34,13 +34,13 @@ use tokio::sync::RwLock;
 use url::Url;
 
 /// Default idle timeout: 15 minutes for standard LSPs.
-const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(15);
 /// Maximum restart attempts before marking a language as unavailable.
 const MAX_RESTART_ATTEMPTS: u32 = 3;
 /// Grace period between idle checks.
-const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_mins(1);
 /// Recovery cooldown: time to wait before retrying a permanently unavailable LSP.
-const RECOVERY_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const RECOVERY_COOLDOWN: Duration = Duration::from_mins(5);
 
 struct LanguageState {
     /// The running LSP process.
@@ -870,7 +870,7 @@ impl Lawyer for LspClient {
                 language_id,
                 "workspace/diagnostic",
                 params,
-                Duration::from_secs(60), // Workspace diagnostics might take longer
+                Duration::from_mins(1), // Workspace diagnostics might take longer
             )
             .await
         {
