@@ -2,6 +2,7 @@
 name = "pathfinder-search"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "The Scout — Ripgrep-powered text search engine for Pathfinder"
 
 [lints]

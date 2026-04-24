@@ -1,0 +1,64 @@
+# cargo-deny configuration (v0.19+)
+# https://embarkstudios.github.io/cargo-deny/
+
+# ──────────────────────────────────────────────
+# Graph — target platforms to evaluate
+# ──────────────────────────────────────────────
+[graph]
+targets = []
+all-features = true
+
+# ──────────────────────────────────────────────
+# Advisories — check for known vulnerabilities
+# Vulnerabilities are denied by default in v0.19+
+# ──────────────────────────────────────────────
+[advisories]
+# Unmaintained crates: fail only for direct workspace deps
+unmaintained = "workspace"
+# Unsound crates: fail only for direct workspace deps
+unsound = "workspace"
+ignore = []
+
+# ──────────────────────────────────────────────
+# Licenses — allowlist of acceptable licenses
+# All licenses are denied unless explicitly allowed (v0.19+)
+# ──────────────────────────────────────────────
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "BSL-1.0",
+    "MPL-2.0",
+    "0BSD",
+    "CC0-1.0",
+    "OpenSSL",
+]
+unused-allowed-license = "allow"
+
+# Ignore license checks for unpublished workspace members
+[licenses.private]
+ignore = true
+
+# ──────────────────────────────────────────────
+# Bans — control dependency duplication
+# ──────────────────────────────────────────────
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+# ──────────────────────────────────────────────
+# Sources — restrict where crates come from
+# ──────────────────────────────────────────────
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
