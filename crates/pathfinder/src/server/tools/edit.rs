@@ -988,8 +988,7 @@ impl PathfinderServer {
                 let err = PathfinderError::InvalidTarget {
                     semantic_path: curr_path.clone(),
                     reason: format!(
-                        "overlapping edits in replace_batch: edit {} overlaps with edit {}",
-                        curr_idx, prev_idx
+                        "overlapping edits in replace_batch: edit {curr_idx} overlaps with edit {prev_idx}"
                     ),
                     edit_index: Some(*curr_idx),
                     valid_edit_types: None,
@@ -1039,7 +1038,7 @@ impl PathfinderServer {
             let path_or_text = if !edit.semantic_path.is_empty() {
                 edit.semantic_path.clone()
             } else if let Some(old_text) = &edit.old_text {
-                format!("text match: '{}'", old_text)
+                format!("text match: '{old_text}'")
             } else {
                 "unknown".to_string()
             };
@@ -1723,7 +1722,7 @@ fn resolve_text_edit(
                     old_text: old_text.to_owned(),
                     context_line,
                     actual_content: Some(window_text.to_owned()),
-                    closest_match: find_closest_match(&window_text, old_text),
+                    closest_match: find_closest_match(window_text, old_text),
                 });
             }
 
@@ -3559,19 +3558,16 @@ pub fn find_closest_match(window: &str, needle: &str) -> Option<String> {
             }
         }
 
-        let score = overlap as f64 / needle_len as f64;
+        #[allow(clippy::cast_precision_loss)]
+        // needle_len is a string length; f64 mantissa is sufficient for this heuristic score
+        let score = f64::from(overlap) / needle_len as f64;
         if score > best_score {
             best_score = score;
-            let byte_start = window
-                .char_indices()
-                .nth(start)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            let byte_start = window.char_indices().nth(start).map_or(0, |(i, _)| i);
             let byte_end = window
                 .char_indices()
                 .nth(start + needle_len)
-                .map(|(i, _)| i)
-                .unwrap_or(window.len());
+                .map_or(window.len(), |(i, _)| i);
             best_slice = Some(window[byte_start..byte_end].to_owned());
         }
     }

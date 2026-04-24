@@ -147,10 +147,6 @@ impl PathfinderServer {
     /// definition location, and returns the result.
     ///
     /// **Degraded mode:** Returns a `LSP_REQUIRED` error when no LSP is configured.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequential pipeline (parse→sandbox→tree-sitter→LSP→match 4 result variants) plus per-engine timing."
-    )]
     pub(crate) async fn get_definition_impl(
         &self,
         params: GetDefinitionParams,
@@ -680,7 +676,7 @@ impl PathfinderServer {
                                 crate::server::types::ImpactReference {
                                     semantic_path: format!("{}::{symbol_name}", m.file),
                                     file: m.file,
-                                    line: m.line as usize,
+                                    line: usize::try_from(m.line).unwrap_or(usize::MAX),
                                     snippet: m.content,
                                     version_hash: String::new(),
                                     // Grep fallback: heuristic, direction is assumed incoming
