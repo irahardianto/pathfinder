@@ -28,6 +28,7 @@ use pathfinder_common::error::{compute_lines_changed, DiagnosticError, Pathfinde
 use pathfinder_common::indent::dedent_then_reindent;
 use pathfinder_common::normalize::{normalize_for_body_replace, normalize_for_full_replace};
 use pathfinder_common::types::{SemanticPath, VersionHash};
+use pathfinder_lsp::types::{FileChangeType, FileEvent};
 use pathfinder_lsp::LspError;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
@@ -247,7 +248,7 @@ impl PathfinderServer {
                 );
             }
 
-            (source, current_hash, new_bytes)
+            (std::sync::Arc::from(source), current_hash, new_bytes)
         } else {
             let (full_range, source, current_hash) = match self
                 .surgeon
@@ -477,7 +478,7 @@ impl PathfinderServer {
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
         edge: InsertEdge,
-    ) -> Result<(usize, usize, Vec<u8>, VersionHash), ErrorData> {
+    ) -> Result<(usize, usize, std::sync::Arc<[u8]>, VersionHash), ErrorData> {
         if semantic_path.is_bare_file() {
             let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
             let bytes = tokio::fs::read(&absolute_path)
@@ -488,7 +489,7 @@ impl PathfinderServer {
                 InsertEdge::Before => 0,
                 InsertEdge::After => bytes.len(),
             };
-            return Ok((offset, 0, bytes, hash));
+            return Ok((offset, 0, std::sync::Arc::from(bytes), hash));
         }
 
         let (symbol_range, source, hash) = self
@@ -974,26 +975,31 @@ impl PathfinderServer {
     /// Apply resolved edits to source content, sorted backwards to prevent offset shifts.
     fn apply_sorted_edits(
         source: &[u8],
-        mut resolved_edits: Vec<ResolvedEdit>,
+        mut resolved_edits: Vec<(usize, String, ResolvedEdit)>,
     ) -> Result<Vec<u8>, ErrorData> {
         // Sort edits backwards to prevent shifted byte offsets
-        resolved_edits.sort_by_key(|e| std::cmp::Reverse(e.start_byte));
+        resolved_edits.sort_by_key(|(_, _, e)| std::cmp::Reverse(e.start_byte));
 
         // Ensure no overlapping edits
         for i in 1..resolved_edits.len() {
-            let prev = &resolved_edits[i - 1]; // This is later in the file
-            let curr = &resolved_edits[i]; // This is earlier in the file
+            let (prev_idx, _, prev) = &resolved_edits[i - 1]; // This is later in the file
+            let (curr_idx, curr_path, curr) = &resolved_edits[i]; // This is earlier in the file
             if curr.end_byte > prev.start_byte {
-                // This should not happen if edits are properly validated
-                return Err(io_error_data(format!(
-                    "overlapping edits in replace_batch: curr.end_byte={} > prev.start_byte={}",
-                    curr.end_byte, prev.start_byte
-                )));
+                let err = PathfinderError::InvalidTarget {
+                    semantic_path: curr_path.clone(),
+                    reason: format!(
+                        "overlapping edits in replace_batch: edit {} overlaps with edit {}",
+                        curr_idx, prev_idx
+                    ),
+                    edit_index: Some(*curr_idx),
+                    valid_edit_types: None,
+                };
+                return Err(pathfinder_to_error_data(&err));
             }
         }
 
         let mut new_bytes = source.to_vec();
-        for edit in resolved_edits {
+        for (_, _, edit) in resolved_edits {
             new_bytes.splice(edit.start_byte..edit.end_byte, edit.replacement.into_iter());
         }
 
@@ -1030,7 +1036,14 @@ impl PathfinderServer {
             let resolved = self
                 .resolve_single_batch_edit(edit, edit_index, &source, file_path)
                 .await?;
-            resolved_edits.push(resolved);
+            let path_or_text = if !edit.semantic_path.is_empty() {
+                edit.semantic_path.clone()
+            } else if let Some(old_text) = &edit.old_text {
+                format!("text match: '{}'", old_text)
+            } else {
+                "unknown".to_string()
+            };
+            resolved_edits.push((edit_index, path_or_text, resolved));
         }
 
         let new_bytes = Self::apply_sorted_edits(&source, resolved_edits)?;
@@ -1426,12 +1439,22 @@ impl PathfinderServer {
             .await
             .map_err(|e| io_error_data(format!("write failed: {e}")))?;
 
+        // Broadcast file change to LSP processes
+        if let Ok(uri) = url::Url::from_file_path(&absolute_path) {
+            let event = FileEvent {
+                uri: uri.to_string(),
+                change_type: FileChangeType::Changed,
+            };
+            if let Err(e) = self.lawyer.did_change_watched_files(vec![event]).await {
+                tracing::warn!(error = %e, "Failed to broadcast didChangeWatchedFiles on edit");
+            }
+        }
+
         // Immediately evict this file from the AST cache so the next read
         // re-parses from disk rather than returning the stale pre-edit AST.
         // Without this, a sub-second write+read pair would still see the old
         // symbol tree, causing SYMBOL_NOT_FOUND for newly inserted symbols.
-        self.surgeon
-            .invalidate_cache(&semantic_path.file_path);
+        self.surgeon.invalidate_cache(&semantic_path.file_path);
 
         Ok(VersionHash::compute(new_bytes))
     }
@@ -1855,6 +1878,40 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    #[test]
+    fn test_apply_sorted_edits_overlap() {
+        // Edit 1: bytes 0..5, Edit 2: bytes 2..7 (overlap)
+        let edits = vec![
+            (
+                0,
+                "edit0".to_string(),
+                ResolvedEdit {
+                    start_byte: 0,
+                    end_byte: 5,
+                    replacement: vec![],
+                },
+            ),
+            (
+                1,
+                "edit1".to_string(),
+                ResolvedEdit {
+                    start_byte: 2,
+                    end_byte: 7,
+                    replacement: vec![],
+                },
+            ),
+        ];
+
+        let result = PathfinderServer::apply_sorted_edits(b"0123456789", edits);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code.0, -32602); // INVALID_PARAMS mapped from InvalidTarget
+        let data = err.data.expect("should have data");
+        assert_eq!(data["details"]["edit_index"], 0);
+        assert_eq!(data["details"]["valid_edit_types"], serde_json::Value::Null);
+        // not applicable here
+    }
+
     /// Minimal `Lawyer` that always returns `LspError::UnsupportedCapability` from
     /// `pull_diagnostics`. Used to exercise the `pull_diagnostics_unsupported` branch
     /// in `run_lsp_validation` (the `MockLawyer`'s queue can only inject `Protocol`
@@ -1946,6 +2003,7 @@ mod tests {
             _file_path: &Path,
             _start_line: u32,
             _end_line: u32,
+            _original_content: &str,
         ) -> Result<Option<String>, LspError> {
             Ok(None)
         }
@@ -1954,6 +2012,13 @@ mod tests {
             &self,
         ) -> std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus> {
             std::collections::HashMap::new()
+        }
+
+        async fn did_change_watched_files(
+            &self,
+            _changes: Vec<pathfinder_lsp::types::FileEvent>,
+        ) -> Result<(), LspError> {
+            Ok(())
         }
     }
 
@@ -2008,7 +2073,7 @@ mod tests {
             .unwrap()
             .push(Ok((
                 make_body_range(open, close, 0, 4),
-                src_bytes.to_vec(),
+                std::sync::Arc::from(src_bytes),
                 hash.clone(),
             )));
 
@@ -2064,7 +2129,7 @@ mod tests {
             .unwrap()
             .push(Ok((
                 make_body_range(open, close, 0, 4),
-                src_bytes.to_vec(),
+                std::sync::Arc::from(src_bytes),
                 real_hash,
             )));
 
@@ -2184,7 +2249,7 @@ mod tests {
             .unwrap()
             .push(Ok((
                 make_body_range(open, close, 0, 4),
-                src_bytes.to_vec(),
+                std::sync::Arc::from(src_bytes),
                 hash.clone(),
             )));
 
@@ -2473,7 +2538,7 @@ mod tests {
             .unwrap()
             .push(Ok((
                 make_body_range(open, close, 0, 4),
-                src_bytes.to_vec(),
+                std::sync::Arc::from(src_bytes),
                 hash.clone(),
             )));
 
@@ -2532,7 +2597,7 @@ mod tests {
             .unwrap()
             .push(Ok((
                 make_body_range(open, close, 0, 4),
-                src_bytes.to_vec(),
+                std::sync::Arc::from(src_bytes),
                 real_hash,
             )));
 
@@ -2598,7 +2663,7 @@ mod tests {
                     end_byte: src_bytes.len(),
                     indent_column: 0,
                 },
-                src_bytes.to_vec(),
+                std::sync::Arc::from(src_bytes),
                 hash.clone(),
             )));
 
@@ -2711,7 +2776,7 @@ mod tests {
                     end_byte: src_bytes.len(),
                     indent_column: 0,
                 },
-                src_bytes.to_vec(),
+                std::sync::Arc::from(src_bytes),
                 hash.clone(),
             )));
 
@@ -3473,11 +3538,11 @@ pub fn find_closest_match(window: &str, needle: &str) -> Option<String> {
     let mut best_slice = None;
     for start in 0..=(window_len - needle_len) {
         let slice = &window_chars[start..(start + needle_len)];
-        
+
         let mut ascii_counts = needle_ascii_counts;
         // Cloning is essentially free when other_counts is empty (99% of source code)
         let mut other_counts = needle_other_counts.clone();
-        
+
         let mut overlap = 0;
         for &c in slice {
             if (c as u32) < 256 {
@@ -3493,16 +3558,24 @@ pub fn find_closest_match(window: &str, needle: &str) -> Option<String> {
                 }
             }
         }
-        
+
         let score = overlap as f64 / needle_len as f64;
         if score > best_score {
             best_score = score;
-            let byte_start = window.char_indices().nth(start).map(|(i, _)| i).unwrap_or(0);
-            let byte_end = window.char_indices().nth(start + needle_len).map(|(i, _)| i).unwrap_or(window.len());
+            let byte_start = window
+                .char_indices()
+                .nth(start)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let byte_end = window
+                .char_indices()
+                .nth(start + needle_len)
+                .map(|(i, _)| i)
+                .unwrap_or(window.len());
             best_slice = Some(window[byte_start..byte_end].to_owned());
         }
     }
-    
+
     if best_score >= 0.6 {
         best_slice
     } else {

@@ -1,0 +1,892 @@
+542:impl Lawyer for LspClient {
+543-    async fn goto_definition(
+544-        &self,
+545-        workspace_root: &Path,
+546-        file_path: &Path,
+547-        line: u32,
+548-        column: u32,
+549-    ) -> Result<Option<DefinitionLocation>, LspError> {
+550-        let start = Instant::now();
+551-        tracing::info!(tool = "goto_definition", file = %file_path.display(), "LSP operation started");
+552-
+553-        // Determine language from file extension
+554-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+555-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+556-
+557-        // Ensure the LSP process is running
+558-        self.ensure_process(language_id).await?;
+559-
+560-        // Build the textDocument/definition request (LSP positions are 0-indexed)
+561-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+562-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+563-
+564-        let params = json!({
+565-            "textDocument": { "uri": file_uri.as_str() },
+566-            "position": {
+567-                "line": line.saturating_sub(1),       // Convert 1-indexed → 0-indexed
+568-                "character": column.saturating_sub(1)
+569-            }
+570-        });
+571-
+572-        let response = match self
+573-            .request(
+574-                language_id,
+575-                "textDocument/definition",
+576-                params,
+577-                Duration::from_secs(10),
+578-            )
+579-            .await
+580-        {
+581-            Ok(res) => res,
+582-            Err(e) => {
+583-                tracing::error!(tool = "goto_definition", language = language_id, error = %e, "textDocument/definition failed");
+584-                return Err(e);
+585-            }
+586-        };
+587-
+588-        self.touch(language_id).await;
+589-
+590-        let elapsed = start.elapsed().as_millis();
+591-        tracing::info!(
+592-            tool = "get_definition",
+593-            language = language_id,
+594-            elapsed_ms = elapsed,
+595-            "textDocument/definition complete"
+596-        );
+597-
+598-        parse_definition_response(response)
+599-    }
+600-
+601-    async fn call_hierarchy_prepare(
+602-        &self,
+603-        workspace_root: &Path,
+604-        file_path: &Path,
+605-        line: u32,
+606-        column: u32,
+607-    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+608-        let start = Instant::now();
+609-        tracing::info!(tool = "call_hierarchy_prepare", file = %file_path.display(), "LSP operation started");
+610-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+611-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+612-        self.ensure_process(language_id).await?;
+613-
+614-        let caps = self.capabilities_for(language_id).await?;
+615-        if !caps.call_hierarchy_provider {
+616-            return Err(LspError::UnsupportedCapability {
+617-                capability: "callHierarchyProvider".to_owned(),
+618-            });
+619-        }
+620-
+621-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+622-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+623-
+624-        let params = json!({
+625-            "textDocument": { "uri": file_uri.as_str() },
+626-            "position": {
+627-                "line": line.saturating_sub(1),
+628-                "character": column.saturating_sub(1)
+629-            }
+630-        });
+631-
+632-        let response = match self
+633-            .request(
+634-                language_id,
+635-                "textDocument/prepareCallHierarchy",
+636-                params,
+637-                Duration::from_secs(10),
+638-            )
+639-            .await
+640-        {
+641-            Ok(res) => res,
+642-            Err(e) => {
+643-                tracing::error!(tool = "call_hierarchy_prepare", language = language_id, error = %e, "textDocument/prepareCallHierarchy failed");
+644-                return Err(e);
+645-            }
+646-        };
+647-
+648-        self.touch(language_id).await;
+649-
+650-        let elapsed = start.elapsed().as_millis();
+651-        tracing::info!(
+652-            language = language_id,
+653-            elapsed_ms = elapsed,
+654-            "textDocument/prepareCallHierarchy complete"
+655-        );
+656-
+657-        parse_call_hierarchy_prepare_response(&response, workspace_root)
+658-    }
+659-
+660-    async fn call_hierarchy_incoming(
+661-        &self,
+662-        workspace_root: &Path,
+663-        item: &CallHierarchyItem,
+664-    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+665-        self.call_hierarchy_request(
+666-            workspace_root,
+667-            item,
+668-            "call_hierarchy_incoming",
+669-            "callHierarchy/incomingCalls",
+670-            "from",
+671-            "fromRanges",
+672-        )
+673-        .await
+674-    }
+675-
+676-    async fn call_hierarchy_outgoing(
+677-        &self,
+678-        workspace_root: &Path,
+679-        item: &CallHierarchyItem,
+680-    ) -> Result<Vec<CallHierarchyCall>, LspError> {
+681-        self.call_hierarchy_request(
+682-            workspace_root,
+683-            item,
+684-            "call_hierarchy_outgoing",
+685-            "callHierarchy/outgoingCalls",
+686-            "to",
+687-            "fromRanges",
+688-        )
+689-        .await
+690-    }
+691-
+692-    async fn did_open(
+693-        &self,
+694-        workspace_root: &Path,
+695-        file_path: &Path,
+696-        content: &str,
+697-    ) -> Result<(), LspError> {
+698-        tracing::info!(tool = "did_open", file = %file_path.display(), "LSP operation started");
+699-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+700-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+701-        self.ensure_process(language_id).await?;
+702-
+703-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+704-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+705-
+706-        let params = json!({
+707-            "textDocument": {
+708-                "uri": file_uri.as_str(),
+709-                "languageId": language_id,
+710-                "version": 1,
+711-                "text": content
+712-            }
+713-        });
+714-
+715-        if let Err(e) = self
+716-            .notify(language_id, "textDocument/didOpen", params)
+717-            .await
+718-        {
+719-            tracing::error!(tool = "did_open", language = language_id, error = %e, "textDocument/didOpen failed");
+720-            return Err(e);
+721-        }
+722-        self.touch(language_id).await;
+723-        Ok(())
+724-    }
+725-
+726-    async fn did_change(
+727-        &self,
+728-        workspace_root: &Path,
+729-        file_path: &Path,
+730-        content: &str,
+731-        version: i32,
+732-    ) -> Result<(), LspError> {
+733-        tracing::info!(tool = "did_change", file = %file_path.display(), "LSP operation started");
+734-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+735-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+736-        self.ensure_process(language_id).await?;
+737-
+738-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+739-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+740-
+741-        // Full content sync (TextDocumentSyncKind.Full = 1)
+742-        let params = json!({
+743-            "textDocument": {
+744-                "uri": file_uri.as_str(),
+745-                "version": version
+746-            },
+747-            "contentChanges": [{ "text": content }]
+748-        });
+749-
+750-        if let Err(e) = self
+751-            .notify(language_id, "textDocument/didChange", params)
+752-            .await
+753-        {
+754-            tracing::error!(tool = "did_change", language = language_id, error = %e, "textDocument/didChange failed");
+755-            return Err(e);
+756-        }
+757-        self.touch(language_id).await;
+758-        Ok(())
+759-    }
+760-
+761-    async fn did_close(&self, workspace_root: &Path, file_path: &Path) -> Result<(), LspError> {
+762-        tracing::info!(tool = "did_close", file = %file_path.display(), "LSP operation started");
+763-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+764-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+765-        self.ensure_process(language_id).await?;
+766-
+767-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+768-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+769-
+770-        let params = json!({
+771-            "textDocument": {
+772-                "uri": file_uri.as_str()
+773-            }
+774-        });
+775-
+776-        if let Err(e) = self
+777-            .notify(language_id, "textDocument/didClose", params)
+778-            .await
+779-        {
+780-            tracing::error!(tool = "did_close", language = language_id, error = %e, "textDocument/didClose failed");
+781-            return Err(e);
+782-        }
+783-        // Not touching `last_used` on close since this is a cleanup action.
+784-        Ok(())
+785-    }
+786-
+787-    async fn pull_diagnostics(
+788-        &self,
+789-        workspace_root: &Path,
+790-        file_path: &Path,
+791-    ) -> Result<Vec<LspDiagnostic>, LspError> {
+792-        let start = Instant::now();
+793-        tracing::info!(tool = "pull_diagnostics", file = %file_path.display(), "LSP operation started");
+794-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+795-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+796-        self.ensure_process(language_id).await?;
+797-
+798-        // Check capability before sending the request
+799-        let caps = self.capabilities_for(language_id).await?;
+800-        if !caps.diagnostic_provider {
+801-            return Err(LspError::UnsupportedCapability {
+802-                capability: "diagnosticProvider".to_owned(),
+803-            });
+804-        }
+805-
+806-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+807-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+808-
+809-        let params = json!({
+810-            "textDocument": { "uri": file_uri.as_str() }
+811-        });
+812-
+813-        let response = match self
+814-            .request(
+815-                language_id,
+816-                "textDocument/diagnostic",
+817-                params,
+818-                Duration::from_secs(30),
+819-            )
+820-            .await
+821-        {
+822-            Ok(res) => res,
+823-            Err(e) => {
+824-                tracing::error!(tool = "pull_diagnostics", language = language_id, error = %e, "textDocument/diagnostic failed");
+825-                return Err(e);
+826-            }
+827-        };
+828-
+829-        self.touch(language_id).await;
+830-
+831-        let elapsed = start.elapsed().as_millis();
+832-        tracing::debug!(
+833-            language = language_id,
+834-            elapsed_ms = elapsed,
+835-            "textDocument/diagnostic complete"
+836-        );
+837-
+838-        parse_diagnostic_response(&response, file_path)
+839-    }
+840-
+841-    async fn pull_workspace_diagnostics(
+842-        &self,
+843-        workspace_root: &Path,
+844-        file_path: &Path,
+845-    ) -> Result<Vec<LspDiagnostic>, LspError> {
+846-        let start = Instant::now();
+847-        tracing::info!(tool = "pull_workspace_diagnostics", file = %file_path.display(), "LSP operation started");
+848-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+849-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+850-        self.ensure_process(language_id).await?;
+851-
+852-        let caps = self.capabilities_for(language_id).await?;
+853-        if !caps.workspace_diagnostic_provider {
+854-            return Err(LspError::UnsupportedCapability {
+855-                capability: "workspaceDiagnosticProvider".to_owned(),
+856-            });
+857-        }
+858-
+859-        // The params for workspace diagnostics are typically quite minimal
+860-        let params = json!({});
+861-
+862-        let response = match self
+863-            .request(
+864-                language_id,
+865-                "workspace/diagnostic",
+866-                params,
+867-                Duration::from_secs(60), // Workspace diagnostics might take longer
+868-            )
+869-            .await
+870-        {
+871-            Ok(res) => res,
+872-            Err(e) => {
+873-                tracing::error!(tool = "pull_workspace_diagnostics", language = language_id, error = %e, "workspace/diagnostic failed");
+874-                return Err(e);
+875-            }
+876-        };
+877-
+878-        self.touch(language_id).await;
+879-
+880-        let elapsed = start.elapsed().as_millis();
+881-        tracing::debug!(
+882-            language = language_id,
+883-            elapsed_ms = elapsed,
+884-            "workspace/diagnostic complete"
+885-        );
+886-
+887-        parse_workspace_diagnostic_response(&response, workspace_root)
+888-    }
+889-
+890-    async fn range_formatting(
+891-        &self,
+892-        workspace_root: &Path,
+893-        file_path: &Path,
+894-        start_line: u32,
+895-        end_line: u32,
+896-    ) -> Result<Option<String>, LspError> {
+897-        tracing::info!(tool = "range_formatting", file = %file_path.display(), "LSP operation started");
+898-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+899-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+900-        self.ensure_process(language_id).await?;
+901-
+902-        // Check capability before sending the request
+903-        let caps = self.capabilities_for(language_id).await?;
+904-        if !caps.formatting_provider {
+905-            return Err(LspError::UnsupportedCapability {
+906-                capability: "documentFormattingProvider".to_owned(),
+907-            });
+908-        }
+909-
+910-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+911-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+912-
+913-        // LSP positions are 0-indexed, our API is 1-indexed
+914-        let params = json!({
+915-            "textDocument": { "uri": file_uri.as_str() },
+916-            "range": {
+917-                "start": { "line": start_line.saturating_sub(1), "character": 0 },
+918-                "end":   { "line": end_line.saturating_sub(1),   "character": 0 }
+919-            },
+920-            "options": { "tabSize": 4, "insertSpaces": true }
+921-        });
+922-
+923-        let response = match self
+924-            .request(
+925-                language_id,
+926-                "textDocument/rangeFormatting",
+927-                params,
+928-                Duration::from_secs(10),
+929-            )
+930-            .await
+931-        {
+932-            Ok(res) => res,
+933-            Err(e) => {
+934-                tracing::error!(tool = "range_formatting", language = language_id, error = %e, "textDocument/rangeFormatting failed");
+935-                return Err(e);
+936-            }
+937-        };
+938-
+939-        self.touch(language_id).await;
+940-
+941-        tracing::info!(
+942-            tool = "range_formatting",
+943-            language = language_id,
+944-            "textDocument/rangeFormatting complete"
+945-        );
+946-
+947-        if response.is_null() {
+948-            return Ok(None);
+949-        }
+950-
+951-        if let Some(edits) = response.as_array() {
+952-            tracing::debug!(
+953-                language = language_id,
+954-                edit_count = edits.len(),
+955-                "LSP returned range formatting edits (currently ignored)"
+956-            );
+957-        }
+958-
+959-        // response is an array of TextEdit objects; we currently don't apply them
+960-        // (we just signal availability). The Tree-sitter indentation pre-pass
+961-        // is sufficient. Return None to indicate "no formatted text substitution".
+962-        Ok(None)
+963-    }
+964-
+965-    async fn capability_status(&self) -> HashMap<String, crate::types::LspLanguageStatus> {
+966-        let mut status = HashMap::new();
+967-        for desc in self.descriptors.iter() {
+968-            let guard = self.processes.read().await;
+969-            let lang_status = match guard.get(&desc.language_id) {
+970-                Some(entry) => entry.to_validation_status(&desc.command),
+971-                None => crate::types::LspLanguageStatus {
+972-                    validation: true,
+973-                    reason: format!("{} available (lazy start)", desc.command),
+974-                },
+975-            };
+976-            status.insert(desc.language_id.clone(), lang_status);
+977-        }
+978-        status
+979-    }
+980-}
+981-
+982-/// Parse the `textDocument/diagnostic` response into a `Vec<LspDiagnostic>`.
+983-///
+984-/// The response shape is: `{ "kind": "full", "items": [Diagnostic, ...] }`
+985-/// or `{ "kind": "unchanged", "resultId": "..." }` for unchanged results.
+986-fn parse_diagnostic_response(
+987-    response: &serde_json::Value,
+988-    file_path: &Path,
+989-) -> Result<Vec<LspDiagnostic>, LspError> {
+990-    // "unchanged" kind means diagnostics have not changed since last pull
+991-    if response.get("kind").and_then(|k| k.as_str()) == Some("unchanged") {
+992-        return Ok(vec![]);
+993-    }
+994-
+995-    let items = match response.get("items") {
+996-        Some(serde_json::Value::Array(arr)) => arr,
+997-        Some(_) => {
+998-            return Err(LspError::Protocol(
+999-                "diagnostics 'items' is not an array".to_owned(),
+1000-            ))
+1001-        }
+1002-        // Some LSPs return flat arrays (not wrapped in {kind, items})
+1003-        None => {
+1004-            if let Some(arr) = response.as_array() {
+1005-                return Ok(parse_diagnostic_items(arr, file_path));
+1006-            }
+1007-            return Ok(vec![]);
+1008-        }
+1009-    };
+1010-
+1011-    Ok(parse_diagnostic_items(items, file_path))
+1012-}
+1013-
+1014-/// Parse the `workspace/diagnostic` response into a flat `Vec<LspDiagnostic>`.
+1015-///
+1016-/// Response shape: `{ "items": [ { "uri": "...", "kind": "full", "items": [Diagnostic, ...] } ] }`
+1017-fn parse_workspace_diagnostic_response(
+1018-    response: &serde_json::Value,
+1019-    workspace_root: &Path,
+1020-) -> Result<Vec<LspDiagnostic>, LspError> {
+1021-    let mut all_diags = Vec::new();
+1022-
+1023-    let items = response
+1024-        .get("items")
+1025-        .and_then(|i| i.as_array())
+1026-        .ok_or_else(|| {
+1027-            LspError::Protocol("workspace.diagnostic 'items' is missing or not an array".to_owned())
+1028-        })?;
+1029-
+1030-    for doc_report in items {
+1031-        if doc_report.get("kind").and_then(|k| k.as_str()) == Some("unchanged") {
+1032-            continue;
+1033-        }
+1034-
+1035-        let Some(uri_str) = doc_report.get("uri").and_then(|u| u.as_str()) else {
+1036-            continue;
+1037-        };
+1038-
+1039-        // Convert URI to relative file path using workspace_root
+1040-        let file_path = match Url::parse(uri_str) {
+1041-            Ok(url) => {
+1042-                if let Ok(path) = url.to_file_path() {
+1043-                    match path.strip_prefix(workspace_root) {
+1044-                        Ok(rel) => rel.to_path_buf(),
+1045-                        Err(_) => path, // Fallback to absolute if not in workspace
+1046-                    }
+1047-                } else {
+1048-                    continue;
+1049-                }
+1050-            }
+1051-            Err(_) => continue,
+1052-        };
+1053-
+1054-        if let Some(doc_items) = doc_report.get("items").and_then(|i| i.as_array()) {
+1055-            all_diags.extend(parse_diagnostic_items(doc_items, &file_path));
+1056-        }
+1057-    }
+1058-
+1059-    Ok(all_diags)
+1060-}
+1061-
+1062-/// Parse an array of LSP `Diagnostic` objects.
+1063-fn parse_diagnostic_items(items: &[serde_json::Value], file_path: &Path) -> Vec<LspDiagnostic> {
+1064-    let mut result = Vec::with_capacity(items.len());
+1065-    let file_str = file_path.to_string_lossy().into_owned();
+1066-
+1067-    for item in items {
+1068-        let severity = match item["severity"].as_u64().unwrap_or(1) {
+1069-            1 => LspDiagnosticSeverity::Error,
+1070-            2 => LspDiagnosticSeverity::Warning,
+1071-            3 => LspDiagnosticSeverity::Information,
+1072-            _ => LspDiagnosticSeverity::Hint,
+1073-        };
+1074-
+1075-        let message = item["message"].as_str().unwrap_or("").to_owned();
+1076-        if message.is_empty() {
+1077-            continue; // Skip diagnostics with no message
+1078-        }
+1079-
+1080-        let code = item.get("code").and_then(|c| match c {
+1081-            serde_json::Value::String(s) => Some(s.clone()),
+1082-            serde_json::Value::Number(n) => Some(n.to_string()),
+1083-            _ => None,
+1084-        });
+1085-
+1086-        let start_line = item["range"]["start"]["line"]
+1087-            .as_u64()
+1088-            .map_or(1, |l| u32::try_from(l + 1).unwrap_or(1));
+1089-        let end_line = item["range"]["end"]["line"]
+1090-            .as_u64()
+1091-            .map_or(start_line, |l| u32::try_from(l + 1).unwrap_or(1));
+1092-
+1093-        result.push(LspDiagnostic {
+1094-            severity,
+1095-            code,
+1096-            message,
+1097-            file: file_str.clone(),
+1098-            start_line,
+1099-            end_line,
+1100-        });
+1101-    }
+1102-
+1103-    result
+1104-}
+1105-
+1106-/// Parse the `textDocument/definition` response into a `DefinitionLocation`.
+1107-///
+1108-/// Returns `Ok(None)` for JSON `null` (no definition found).
+1109-fn parse_definition_response(
+1110-    response: serde_json::Value,
+1111-) -> Result<Option<DefinitionLocation>, LspError> {
+1112-    if response.is_null() {
+1113-        return Ok(None);
+1114-    }
+1115-
+1116-    // The response can be a single Location, a LocationLink, or an array
+1117-    let location = if response.is_array() {
+1118-        response
+1119-            .as_array()
+1120-            .and_then(|arr| arr.first())
+1121-            .cloned()
+1122-            .unwrap_or(serde_json::Value::Null)
+1123-    } else {
+1124-        response
+1125-    };
+1126-
+1127-    if location.is_null() {
+1128-        return Ok(None);
+1129-    }
+1130-
+1131-    // Location: { uri, range: { start: { line, character } } }
+1132-    // LocationLink: { targetUri, targetRange, ... }
+1133-    let (uri_str, start_line, start_char) = if location.get("targetUri").is_some() {
+1134-        // LocationLink
+1135-        (
+1136-            location["targetUri"].as_str().unwrap_or("").to_owned(),
+1137-            location["targetSelectionRange"]["start"]["line"]
+1138-                .as_u64()
+1139-                .unwrap_or(0),
+1140-            location["targetSelectionRange"]["start"]["character"]
+1141-                .as_u64()
+1142-                .unwrap_or(0),
+1143-        )
+1144-    } else {
+1145-        // Location
+1146-        (
+1147-            location["uri"].as_str().unwrap_or("").to_owned(),
+1148-            location["range"]["start"]["line"].as_u64().unwrap_or(0),
+1149-            location["range"]["start"]["character"]
+1150-                .as_u64()
+1151-                .unwrap_or(0),
+1152-        )
+1153-    };
+1154-
+1155-    if uri_str.is_empty() {
+1156-        return Err(LspError::Protocol(
+1157-            "definition response missing URI".to_owned(),
+1158-        ));
+1159-    }
+1160-
+1161-    // Convert URI to a relative file path string
+1162-    let file = Url::parse(&uri_str)
+1163-        .ok()
+1164-        .and_then(|u: Url| u.to_file_path().ok())
+1165-        .map(|p: std::path::PathBuf| p.to_string_lossy().into_owned())
+1166-        .unwrap_or(uri_str);
+1167-
+1168-    Ok(Some(DefinitionLocation {
+1169-        file,
+1170-        line: u32::try_from(start_line + 1).unwrap_or(1), // 0-indexed → 1-indexed
+1171-        column: u32::try_from(start_char + 1).unwrap_or(1),
+1172-        preview: String::new(), // Preview populated in future milestone
+1173-    }))
+1174-}
+1175-
+1176-/// Parse the `textDocument/prepareCallHierarchy` response into a `Vec<CallHierarchyItem>`.
+1177-fn parse_call_hierarchy_prepare_response(
+1178-    response: &serde_json::Value,
+1179-    workspace_root: &Path,
+1180-) -> Result<Vec<CallHierarchyItem>, LspError> {
+1181-    if response.is_null() {
+1182-        return Ok(Vec::new());
+1183-    }
+1184-
+1185-    let items = response
+1186-        .as_array()
+1187-        .ok_or_else(|| LspError::Protocol("expected array".to_owned()))?;
+1188-
+1189-    let mut result = Vec::with_capacity(items.len());
+1190-    for item in items {
+1191-        let uri_str = item["uri"].as_str().unwrap_or("");
+1192-        let file = Url::parse(uri_str)
+1193-            .ok()
+1194-            .and_then(|u| u.to_file_path().ok())
+1195-            .and_then(|p| {
+1196-                p.strip_prefix(workspace_root)
+1197-                    .map(std::path::Path::to_path_buf)
+1198-                    .ok()
+1199-            })
+1200-            .map_or_else(|| uri_str.to_owned(), |p| p.to_string_lossy().into_owned());
+1201-
+1202-        let line = u32::try_from(
+1203-            item["selectionRange"]["start"]["line"]
+1204-                .as_u64()
+1205-                .unwrap_or(0),
+1206-        )
+1207-        .unwrap_or(0)
+1208-            + 1;
+1209-        let column = u32::try_from(
+1210-            item["selectionRange"]["start"]["character"]
+1211-                .as_u64()
+1212-                .unwrap_or(0),
+1213-        )
+1214-        .unwrap_or(0)
+1215-            + 1;
+1216-
+1217-        let kind_int = item["kind"].as_u64().unwrap_or(0);
+1218-        let kind = match kind_int {
+1219-            5 => "class",
+1220-            6 => "method",
+1221-            11 => "interface",
+1222-            12 => "function",
+1223-            _ => "symbol",
+1224-        }
+1225-        .to_owned();
+1226-
+1227-        result.push(CallHierarchyItem {
+1228-            name: item["name"].as_str().unwrap_or("").to_owned(),
+1229-            kind,
+1230-            detail: item
+1231-                .get("detail")
+1232-                .and_then(|d| d.as_str())
+1233-                .map(ToOwned::to_owned),
+1234-            file,
+1235-            line,
+1236-            column,
+1237-            data: Some(item.clone()),
+1238-        });
+1239-    }
+1240-
+1241-    Ok(result)
+1242-}
+1243-
+1244-/// Parse the `callHierarchy/incomingCalls` or `outgoingCalls` response.
+1245-fn parse_call_hierarchy_calls_response(
+1246-    response: &serde_json::Value,
+1247-    workspace_root: &Path,
+1248-    item_key: &str,
+1249-    ranges_key: &str,
+1250-) -> Result<Vec<CallHierarchyCall>, LspError> {
+1251-    if response.is_null() {
+1252-        return Ok(Vec::new());
+1253-    }
+1254-
+1255-    let calls = response
+1256-        .as_array()
+1257-        .ok_or_else(|| LspError::Protocol("expected array".to_owned()))?;
+1258-
+1259-    let mut result = Vec::with_capacity(calls.len());
+1260-    for call in calls {
+1261-        let Some(item_val) = call.get(item_key) else {
+1262-            continue;
+1263-        };
+1264-        let mut parsed_items = parse_call_hierarchy_prepare_response(
+1265-            &serde_json::Value::Array(vec![item_val.clone()]),
+1266-            workspace_root,
+1267-        )?;
+1268-        if parsed_items.is_empty() {
+1269-            continue;
+1270-        }
+1271-        let item = parsed_items.remove(0);
+1272-
+1273-        let mut call_sites = Vec::new();
+1274-        if let Some(ranges) = call.get(ranges_key).and_then(|r| r.as_array()) {
+1275-            for range in ranges {
+1276-                if let Some(line) = range
+1277-                    .get("start")
+1278-                    .and_then(|s| s.get("line"))
+1279-                    .and_then(serde_json::Value::as_u64)
+1280-                {
+1281-                    call_sites.push(u32::try_from(line).unwrap_or(0) + 1);
+1282-                }
+1283-            }
+1284-        }
+1285-
+1286-        result.push(CallHierarchyCall { item, call_sites });
+1287-    }
+1288-
+1289-    Ok(result)
+1290-}
+1291-
+1292-/// Reader task supervisor: monitors the reader handle and cleans up on crash.
+1293-///
+1294-/// When the reader task exits (EOF or crash), this supervisor removes the
+1295-/// process entry from the map, allowing future requests to attempt recovery
+1296-/// via the cooldown mechanism.
+1297-async fn reader_supervisor_task(
+1298-    language_id: String,
+1299-    reader_handle: tokio::task::JoinHandle<()>,
+1300-    processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
+1301-) {
+1302-    match reader_handle.await {
+1303-        Ok(()) => {
+1304-            tracing::warn!(
+1305-                language = %language_id,
+1306-                "LSP: reader task exited normally (EOF), removing process entry"
+1307-            );
+1308-        }
+1309-        Err(e) => {
+1310-            tracing::error!(
+1311-                language = %language_id,
+1312-                error = %e,
+1313-                "LSP: reader task crashed (panic or abort), removing process entry"
+1314-            );
+1315-        }
+1316-    }
+1317-    // Remove the process entry — this allows future requests to retry
+1318-    // via the recovery cooldown mechanism in ensure_process()
+1319-    processes.write().await.remove(&language_id);
+1320-}
+1321-
+1322-/// Background task: check for idle processes and terminate them.
+1323-async fn idle_timeout_task(
+1324-    processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
+1325-    dispatcher: Arc<RequestDispatcher>,
+1326-) {
+1327-    loop {
+1328-        tokio::time::sleep(IDLE_CHECK_INTERVAL).await;
+1329-
+1330-        let mut guard = processes.write().await;
+1331-        let languages_to_remove: Vec<String> = guard
+1332-            .iter()
+1333-            .filter_map(|(lang, entry)| {
+1334-                if let ProcessEntry::Running(state) = entry {
+1335-                    // Only remove if idle timeout elapsed AND no in-flight requests
+1336-                    if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT
+1337-                        && state.process.in_flight.load(Ordering::Relaxed) == 0
+1338-                    {
+1339-                        Some(lang.clone())
+1340-                    } else {
+1341-                        None
+1342-                    }
+1343-                } else {
+1344-                    None
+1345-                }
+1346-            })
+1347-            .collect();
+1348-
+1349-        for lang in languages_to_remove {
+1350-            if let Some(ProcessEntry::Running(mut state)) = guard.remove(&lang) {
+1351-                tracing::info!(
+1352-                    language = %lang,
+1353-                    restarts = state.restart_count,
+1354-                    "LSP: idle timeout — terminating"
+1355-                );
+1356-                // Abort the supervisor task to prevent it from logging after cleanup
+1357-                state.reader_handle.abort();
+1358-                shutdown(&mut state.process, &dispatcher).await;
+1359-            }
+1360-        }
+1361-    }
+1362-}
+1363-
+1364-#[cfg(test)]
+1365-#[allow(clippy::expect_used, clippy::unwrap_used)]
+1366-mod tests {
+1367-    use super::*;
+1368-    use serde_json::json;
+1369-
+1370-    #[test]
+1371-    fn test_parse_definition_response_null() {
+1372-        let result = parse_definition_response(json!(null));
+1373-        assert!(result.expect("should not err").is_none());
+1374-    }
+1375-
+1376-    #[test]
+1377-    fn test_parse_definition_response_location() {
+1378-        let response = json!({
+1379-            "uri": "file:///home/user/project/src/auth.rs",
+1380-            "range": {
+1381-                "start": { "line": 41, "character": 4 },
+1382-                "end":   { "line": 41, "character": 9 }
+1383-            }
+1384-        });
+1385-        let result = parse_definition_response(response).expect("ok");
+1386-        let loc = result.expect("some location");
+1387-        assert_eq!(loc.line, 42); // 0-indexed → 1-indexed
+1388-        assert_eq!(loc.column, 5);
+1389-        assert!(loc.file.contains("auth.rs"));
+1390-    }
+1391-
+1392-    #[test]
+1393-    fn test_parse_definition_response_array() {
+1394-        let response = json!([{
+1395-            "uri": "file:///project/src/lib.rs",
+1396-            "range": {
+1397-                "start": { "line": 9, "character": 0 },
+1398-                "end":   { "line": 9, "character": 5 }
+1399-            }
+1400-        }]);
+1401-        let result = parse_definition_response(response).expect("ok");
+1402-        let loc = result.expect("some location");
+1403-        assert_eq!(loc.line, 10);
+1404-        assert!(loc.file.contains("lib.rs"));
+1405-    }
+1406-
+1407-    #[test]
+1408-    fn test_parse_definition_response_location_link() {
+1409-        let response = json!({
+1410-            "targetUri": "file:///project/src/types.rs",
+1411-            "targetRange": {
+1412-                "start": { "line": 19, "character": 0 },
+1413-                "end":   { "line": 25, "character": 1 }
+1414-            },
+1415-            "targetSelectionRange": {
+1416-                "start": { "line": 19, "character": 4 },
+1417-                "end":   { "line": 19, "character": 9 }
+1418-            }
+1419-        });
+1420-        let result = parse_definition_response(response).expect("ok");
+1421-        let loc = result.expect("some location");
+1422-        assert_eq!(loc.line, 20); // 0-indexed → 1-indexed
+1423-        assert!(loc.file.contains("types.rs"));
+1424-    }
+1425-
+1426-    #[test]
+1427-    fn test_parse_definition_empty_array() {
+1428-        let response = json!([]);
+1429-        let result = parse_definition_response(response).expect("ok");
+1430-        // Empty array → null first element → None
+1431-        assert!(result.is_none());
+1432-    }
+1433-}

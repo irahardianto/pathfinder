@@ -98,7 +98,7 @@ impl SupportedLanguage {
             },
             Self::Rust => &LanguageNodeTypes {
                 function_kinds: &["function_item"],
-                class_kinds: &["struct_item", "enum_item", "trait_item"],
+                class_kinds: &["struct_item", "enum_item", "trait_item", "type_item"],
                 method_kinds: &[],
                 // `impl_item` nodes contain associated functions — handled separately
                 // so that methods are grouped under the implementing type's name.

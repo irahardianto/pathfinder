@@ -6,6 +6,7 @@ use lru::LruCache;
 use pathfinder_common::types::VersionHash;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
 use tracing::instrument;
@@ -17,7 +18,7 @@ pub struct CacheEntry {
     /// The parsed AST tree.
     pub tree: Tree,
     /// The raw source code bytes.
-    pub source: Vec<u8>,
+    pub source: Arc<[u8]>,
     /// The content hash when parsed.
     pub content_hash: VersionHash,
     /// The language used for parsing.
@@ -92,7 +93,7 @@ impl AstCache {
         &self,
         path: &Path,
         lang: SupportedLanguage,
-    ) -> Result<(Tree, Vec<u8>), SurgeonError> {
+    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
         // --- Fast-path guard: single stat syscall ---
         let meta = tokio::fs::metadata(path).await?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -115,10 +116,11 @@ impl AstCache {
         // --- Slow path: full read + hash + parse ---
         let content = tokio::fs::read(path).await?;
         let current_hash = VersionHash::compute(&content);
+        let content_arc: Arc<[u8]> = Arc::from(content);
         // For Vue SFCs, preprocess extracts the <script> block before parsing.
         // The original `content` is kept for version hashing and OCC checks —
         // only the input to the AST parser uses the processed bytes.
-        let parse_input = lang.preprocess_source(&content);
+        let parse_input = lang.preprocess_source(&content_arc);
         let tree = AstParser::parse_source(path, lang, &parse_input)?;
 
         // Re-acquire the lock to insert/update.
@@ -132,14 +134,14 @@ impl AstCache {
             path.to_path_buf(),
             CacheEntry {
                 tree: tree.clone(),
-                source: content.clone(),
+                source: content_arc.clone(),
                 content_hash: current_hash,
                 lang,
                 mtime: current_mtime,
             },
         );
 
-        Ok((tree, content))
+        Ok((tree, content_arc))
     }
 
     /// Retrieve the multi-zone parse result for a Vue SFC.

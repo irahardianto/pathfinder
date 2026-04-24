@@ -298,7 +298,11 @@ impl PathfinderError {
                 }
                 serde_json::Value::Object(map)
             }
-            Self::TextNotFound { actual_content, closest_match, .. } => {
+            Self::TextNotFound {
+                actual_content,
+                closest_match,
+                ..
+            } => {
                 let mut map = serde_json::Map::new();
                 if let Some(content) = actual_content {
                     map.insert("actual_content".to_string(), serde_json::json!(content));
@@ -684,7 +688,9 @@ mod tests {
             actual_content: None,
             closest_match: Some("const x = 2;".to_owned()),
         };
-        let hint = err.hint().expect("TEXT_NOT_FOUND with closest_match should have a hint");
+        let hint = err
+            .hint()
+            .expect("TEXT_NOT_FOUND with closest_match should have a hint");
         assert!(
             hint.contains("const x = 2;"),
             "hint should include the closest match candidate: {hint}"

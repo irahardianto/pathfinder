@@ -540,6 +540,12 @@ impl LspClient {
 
 #[async_trait]
 impl Lawyer for LspClient {
+    async fn did_change_watched_files(
+        &self,
+        _changes: Vec<crate::types::FileEvent>,
+    ) -> Result<(), LspError> {
+        Ok(())
+    }
     async fn goto_definition(
         &self,
         workspace_root: &Path,
@@ -893,6 +899,7 @@ impl Lawyer for LspClient {
         file_path: &Path,
         start_line: u32,
         end_line: u32,
+        _original_content: &str,
     ) -> Result<Option<String>, LspError> {
         tracing::info!(tool = "range_formatting", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");

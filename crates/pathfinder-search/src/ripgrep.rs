@@ -36,6 +36,19 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
+/// Truncate a line to a maximum byte length, ensuring valid UTF-8 boundaries.
+/// Appends `... [TRUNCATED]` if the line was shortened.
+fn truncate_line(line: &str, limit: usize) -> String {
+    if line.len() <= limit {
+        return line.to_owned();
+    }
+    let mut split_at = limit;
+    while !line.is_char_boundary(split_at) && split_at > 0 {
+        split_at -= 1;
+    }
+    format!("{}... [TRUNCATED]", &line[..split_at])
+}
+
 // ── Sink implementation ──────────────────────────────────────────────
 
 /// A [`Sink`] that accumulates matches with surrounding context into a Vec.
@@ -154,6 +167,7 @@ impl Sink for MatchCollector<'_> {
             .trim_end_matches('\n')
             .trim_end_matches('\r')
             .to_owned();
+        let content = truncate_line(&content, 1000);
 
         // Column is 1-indexed per PRD §3.1.
         let mut column = 1_u64;
@@ -203,6 +217,7 @@ impl Sink for MatchCollector<'_> {
             .trim_end_matches('\n')
             .trim_end_matches('\r')
             .to_owned();
+        let line = truncate_line(&line, 1000);
 
         if self.context_lines > 0 {
             if self.context_before_buf.len() >= self.context_lines {
@@ -768,5 +783,36 @@ mod tests {
         assert_eq!(result.matches[2].line, 8);
         assert_eq!(result.matches[2].context_before, vec!["line6", "line7"]);
         assert_eq!(result.matches[2].context_after, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn test_search_line_truncation() {
+        let long_line = "a".repeat(2000);
+        let ws = make_workspace(&[(
+            "src/main.rs",
+            &format!("{long_line}\nmatch {long_line}\n{long_line}\n"),
+        )]);
+        let scout = RipgrepScout::new();
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "match".to_owned(),
+            context_lines: 1,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        let match_content = &result.matches[0].content;
+        let context_before = &result.matches[0].context_before[0];
+        let context_after = &result.matches[0].context_after[0];
+
+        assert!(match_content.ends_with("... [TRUNCATED]"));
+        assert!(match_content.len() < 1050); // 1000 + length of suffix
+
+        assert!(context_before.ends_with("... [TRUNCATED]"));
+        assert!(context_before.len() < 1050);
+
+        assert!(context_after.ends_with("... [TRUNCATED]"));
+        assert!(context_after.len() < 1050);
     }
 }

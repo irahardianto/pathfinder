@@ -6,7 +6,7 @@
 
 use crate::{
     error::LspError,
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, FileEvent, LspDiagnostic},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -157,10 +157,20 @@ pub trait Lawyer: Send + Sync {
         file_path: &Path,
         start_line: u32,
         end_line: u32,
+        original_content: &str,
     ) -> Result<Option<String>, LspError>;
 
     /// Retrieve the current LSP process status and capabilities per language.
     async fn capability_status(
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus>;
+
+    /// Notify all running LSP processes of a filesystem change.
+    ///
+    /// Broadcasts `workspace/didChangeWatchedFiles` to every running LSP process.
+    /// This is a notification (fire-and-forget). Broadcasting to all processes is
+    /// intentional: the LSP spec allows servers to ignore events for file patterns
+    /// they don't watch, and routing by extension is unreliable when files are
+    /// being created or deleted.
+    async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError>;
 }

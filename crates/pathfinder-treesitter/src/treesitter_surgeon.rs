@@ -38,7 +38,7 @@ impl TreeSitterSurgeon {
         (
             SupportedLanguage,
             tree_sitter::Tree,
-            Vec<u8>,
+            std::sync::Arc<[u8]>,
             pathfinder_common::types::VersionHash,
             Vec<ExtractedSymbol>,
         ),
@@ -387,7 +387,7 @@ impl Surgeon for TreeSitterSurgeon {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError> {
+    ) -> Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError> {
         let chain =
             semantic_path
                 .symbol_chain
@@ -451,7 +451,7 @@ impl Surgeon for TreeSitterSurgeon {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(FullRange, Vec<u8>, VersionHash), SurgeonError> {
+    ) -> Result<(FullRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError> {
         let chain =
             semantic_path
                 .symbol_chain
@@ -498,7 +498,7 @@ impl Surgeon for TreeSitterSurgeon {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError> {
+    ) -> Result<(SymbolRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError> {
         let (full_range, source, hash) = self
             .resolve_full_range(workspace_root, semantic_path)
             .await?;
@@ -520,8 +520,6 @@ impl Surgeon for TreeSitterSurgeon {
 }
 
 // ── Node-type classification helpers ───────────────────────────────────────
-
-
 
 /// Returns `true` if the tree-sitter node kind is a comment variant.
 ///

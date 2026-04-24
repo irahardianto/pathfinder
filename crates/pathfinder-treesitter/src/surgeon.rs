@@ -166,7 +166,7 @@ pub trait Surgeon: Send + Sync {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError>;
+    ) -> Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
 
     /// Read an entire source file and extract its symbols.
     ///
@@ -185,7 +185,7 @@ pub trait Surgeon: Send + Sync {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(FullRange, Vec<u8>, VersionHash), SurgeonError>;
+    ) -> Result<(FullRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
 
     /// Resolve the symbol byte range for insertion operations.
     ///
@@ -194,7 +194,7 @@ pub trait Surgeon: Send + Sync {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError>;
+    ) -> Result<(SymbolRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
 
     /// Evict `path` from the AST cache, forcing a full re-parse on the next read.
     ///
@@ -223,4 +223,3 @@ pub trait SurgeonCacheExt {
     /// on newly inserted symbols.
     fn invalidate_cache(&self, path: &std::path::Path);
 }
-

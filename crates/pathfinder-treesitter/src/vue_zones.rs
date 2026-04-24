@@ -14,6 +14,7 @@
 //! | `style`    | CSS           | CssSelector, CssAtRule               |
 
 use crate::error::SurgeonError;
+use std::sync::Arc;
 use tree_sitter::{Parser, Point, Range, Tree};
 
 // ─── Zone range types ─────────────────────────────────────────────────────────
@@ -62,7 +63,7 @@ pub struct MultiZoneTree {
     /// Original, unmodified SFC source bytes.
     ///
     /// Kept intact for version hashing, OCC, and symbol source extraction.
-    pub source: Vec<u8>,
+    pub source: Arc<[u8]>,
     /// `true` when HTML or CSS grammar was unavailable and the respective zone
     /// was skipped. Template / style symbols are absent; script symbols are unaffected.
     pub degraded: bool,
@@ -208,7 +209,7 @@ pub fn parse_vue_multizone(source: &[u8]) -> Result<MultiZoneTree, SurgeonError>
         template_tree,
         style_tree,
         zones,
-        source: source.to_vec(),
+        source: Arc::from(source),
         degraded,
     })
 }
@@ -405,7 +406,8 @@ function doThing() { count.value++ }
     fn test_parse_vue_multizone_source_preserved() {
         let result = parse_vue_multizone(BASIC_SFC).unwrap();
         assert_eq!(
-            result.source, BASIC_SFC,
+            result.source,
+            Arc::from(BASIC_SFC),
             "source bytes should be preserved unchanged"
         );
     }

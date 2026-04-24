@@ -8,6 +8,7 @@ use crate::server::types::{
 use crate::server::PathfinderServer;
 use pathfinder_common::error::{compute_lines_changed, PathfinderError};
 use pathfinder_common::types::VersionHash;
+use pathfinder_lsp::types::{FileChangeType, FileEvent};
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
@@ -157,6 +158,18 @@ impl PathfinderServer {
                 if let Err(e) = file.sync_all().await {
                     return Err(io_error_data(format!("failed to sync file: {e}")));
                 }
+
+                // Broadcast file creation to LSP processes
+                if let Ok(uri) = url::Url::from_file_path(&absolute_path) {
+                    let event = FileEvent {
+                        uri: uri.to_string(),
+                        change_type: FileChangeType::Created,
+                    };
+                    if let Err(e) = self.lawyer.did_change_watched_files(vec![event]).await {
+                        tracing::warn!(error = %e, "Failed to broadcast didChangeWatchedFiles on create");
+                    }
+                }
+
                 // Evict the new file from the AST cache so any prior stale entry
                 // (from a temp-path overlap) is cleared before the first read.
                 self.surgeon.invalidate_cache(relative_path);
@@ -258,6 +271,18 @@ impl PathfinderServer {
             tracing::warn!(tool = "delete_file", error = %e, "failed to delete file");
             return Err(io_error_data(format!("failed to delete file: {e}")));
         }
+
+        // Broadcast file deletion to LSP processes
+        if let Ok(uri) = url::Url::from_file_path(&absolute_path) {
+            let event = FileEvent {
+                uri: uri.to_string(),
+                change_type: FileChangeType::Deleted,
+            };
+            if let Err(e) = self.lawyer.did_change_watched_files(vec![event]).await {
+                tracing::warn!(error = %e, "Failed to broadcast didChangeWatchedFiles on delete");
+            }
+        }
+
         let io_ms = io_start.elapsed().as_millis();
 
         let duration_ms = start.elapsed().as_millis();
@@ -451,6 +476,18 @@ impl PathfinderServer {
             tracing::warn!(tool = "write_file", error = %e, "failed to write file");
             return Err(io_error_data(format!("failed to write file: {e}")));
         }
+
+        // Broadcast file change to LSP processes
+        if let Ok(uri) = url::Url::from_file_path(&absolute_path) {
+            let event = FileEvent {
+                uri: uri.to_string(),
+                change_type: FileChangeType::Changed,
+            };
+            if let Err(e) = self.lawyer.did_change_watched_files(vec![event]).await {
+                tracing::warn!(error = %e, "Failed to broadcast didChangeWatchedFiles on write_file");
+            }
+        }
+
         // Evict file from AST cache — write_file can be called on source files
         // (e.g., Dockerfile, YAML) and a stale cache would return old content
         // to any follow-up read_source_file or read_symbol_scope call.

@@ -86,3 +86,21 @@ impl LspDiagnostic {
         self.severity == LspDiagnosticSeverity::Error
     }
 }
+
+/// A single file system change event for `workspace/didChangeWatchedFiles`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEvent {
+    /// Absolute file URI (e.g., `file:///home/user/project/src/auth.ts`).
+    pub uri: String,
+    /// Nature of the change.
+    pub change_type: FileChangeType,
+}
+
+/// LSP `FileChangeType` values (§3.17.20 of the LSP spec).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum FileChangeType {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}

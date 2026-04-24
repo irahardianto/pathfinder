@@ -412,6 +412,8 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
     fn merge_recursive(syms: &mut Vec<ExtractedSymbol>) {
         let mut extracted_methods: std::collections::HashMap<String, Vec<ExtractedSymbol>> =
             std::collections::HashMap::new();
+        let mut impl_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         // 1. Remove all Impl blocks and extract their children
         syms.retain_mut(|s| {
@@ -438,7 +440,20 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                     }
                     entry.push(method);
                 }
-                false // remove Impl block completely
+
+                let clean_name = s.name.split('#').next().unwrap_or(&s.name);
+                let count = impl_counts.entry(clean_name.to_string()).or_insert(0);
+                *count += 1;
+
+                let suffix = if *count > 1 {
+                    format!("#{count}")
+                } else {
+                    String::new()
+                };
+
+                s.name = format!("impl {clean_name}{suffix}");
+                s.semantic_path = s.name.clone();
+                true // Keep Impl block so find_enclosing_symbol can find it
             } else {
                 true
             }
@@ -559,10 +574,11 @@ pub fn find_enclosing_symbol(symbols: &[ExtractedSymbol], row: usize) -> Option<
                 } else {
                     *best = Some(s);
                 }
-
-                // Recurse into children
-                search(&s.children, row, best);
             }
+
+            // Always recurse into children because Rust impl methods might be
+            // reparented under a struct whose line bounds do not contain them.
+            search(&s.children, row, best);
         }
     }
 
@@ -1488,13 +1504,17 @@ mod tests {
         .unwrap();
         let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
-        // Expect: one Class node holding the methods because rust Impl block methods are merged into the
-        // structural type symbol
-        assert_eq!(syms.len(), 1);
+        // Expect: one Class node holding the methods, and one Impl node kept for line tracking
+        assert_eq!(syms.len(), 2);
         let struct_sym = &syms[0];
         assert_eq!(struct_sym.name, "MyStruct");
         assert_eq!(struct_sym.semantic_path, "MyStruct");
         assert_eq!(struct_sym.children.len(), 2);
+
+        let impl_sym = &syms[1];
+        assert_eq!(impl_sym.name, "impl MyStruct");
+        assert_eq!(impl_sym.semantic_path, "impl MyStruct");
+        assert_eq!(impl_sym.children.len(), 0);
         assert_eq!(struct_sym.children[0].name, "foo");
         assert_eq!(struct_sym.children[0].kind, SymbolKind::Method);
         assert_eq!(struct_sym.children[0].semantic_path, "MyStruct.foo");

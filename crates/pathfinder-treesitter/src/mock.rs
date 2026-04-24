@@ -20,13 +20,13 @@ pub struct MockSurgeon {
     pub generate_skeleton_results: Mutex<Vec<Result<crate::repo_map::RepoMapResult, SurgeonError>>>,
     #[allow(clippy::type_complexity)]
     pub resolve_body_range_results:
-        Mutex<Vec<Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError>>>,
+        Mutex<Vec<Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>>>,
     #[allow(clippy::type_complexity)]
     pub resolve_full_range_results:
-        Mutex<Vec<Result<(FullRange, Vec<u8>, VersionHash), SurgeonError>>>,
+        Mutex<Vec<Result<(FullRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>>>,
     #[allow(clippy::type_complexity)]
     pub resolve_symbol_range_results:
-        Mutex<Vec<Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError>>>,
+        Mutex<Vec<Result<(SymbolRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>>>,
 
     /// Pre-configured return values for `node_type_at_position`.
     /// Each call pops the next value (FIFO). Defaults to returning `"code"` when empty.
@@ -198,7 +198,7 @@ impl Surgeon for MockSurgeon {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(BodyRange, Vec<u8>, VersionHash), SurgeonError> {
+    ) -> Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError> {
         Self::resolve_range_dispatch(
             &self.resolve_body_range_calls,
             &self.resolve_body_range_results,
@@ -212,7 +212,7 @@ impl Surgeon for MockSurgeon {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(FullRange, Vec<u8>, VersionHash), SurgeonError> {
+    ) -> Result<(FullRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError> {
         Self::resolve_range_dispatch(
             &self.resolve_full_range_calls,
             &self.resolve_full_range_results,
@@ -226,7 +226,7 @@ impl Surgeon for MockSurgeon {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(SymbolRange, Vec<u8>, VersionHash), SurgeonError> {
+    ) -> Result<(SymbolRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError> {
         Self::resolve_range_dispatch(
             &self.resolve_symbol_range_calls,
             &self.resolve_symbol_range_results,

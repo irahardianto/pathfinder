@@ -9,7 +9,7 @@
 use crate::{
     error::LspError,
     lawyer::Lawyer,
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, FileEvent, LspDiagnostic},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -105,6 +105,7 @@ impl Lawyer for NoOpLawyer {
         _file_path: &Path,
         _start_line: u32,
         _end_line: u32,
+        _original_content: &str,
     ) -> Result<Option<String>, LspError> {
         Err(LspError::NoLspAvailable)
     }
@@ -113,6 +114,10 @@ impl Lawyer for NoOpLawyer {
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
         std::collections::HashMap::new()
+    }
+
+    async fn did_change_watched_files(&self, _changes: Vec<FileEvent>) -> Result<(), LspError> {
+        Ok(())
     }
 }
 
@@ -212,7 +217,16 @@ mod tests {
     #[tokio::test]
     async fn test_no_op_lawyer_range_formatting_returns_no_lsp() {
         let lawyer = NoOpLawyer;
-        let result = lawyer.range_formatting(&workspace(), &file(), 1, 5).await;
+        let result = lawyer
+            .range_formatting(&workspace(), &file(), 1, 5, "")
+            .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_did_change_watched_files_returns_ok() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer.did_change_watched_files(vec![]).await;
+        assert!(result.is_ok());
     }
 }

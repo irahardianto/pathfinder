@@ -19,7 +19,7 @@
 use crate::{
     error::LspError,
     lawyer::Lawyer,
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, FileEvent, LspDiagnostic},
 };
 use async_trait::async_trait;
 use std::{
@@ -69,6 +69,10 @@ pub struct MockLawyer {
     // ── did_close ─────────────────────────────────────────────────────────────
     /// Number of `did_close` notifications received.
     pub did_close_calls: Arc<Mutex<Vec<String>>>,
+
+    // ── did_change_watched_files ──────────────────────────────────────────────
+    /// All file events passed to `did_change_watched_files`.
+    pub watched_file_changes: Arc<Mutex<Vec<FileEvent>>>,
 
     // ── pull_diagnostics ──────────────────────────────────────────────────────
     /// Queue of results for successive `pull_diagnostics` calls.
@@ -243,6 +247,15 @@ impl MockLawyer {
             .len()
     }
 
+    /// Returns the number of `did_change_watched_files` events recorded.
+    #[must_use]
+    pub fn watched_file_changes_count(&self) -> usize {
+        self.watched_file_changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     /// Set the result for `range_formatting`.
     ///
     /// Pass `Ok(Some(text))` for formatted output, `Ok(None)` for no edits, or `Err` for error.
@@ -386,6 +399,7 @@ impl Lawyer for MockLawyer {
         _file_path: &Path,
         _start_line: u32,
         _end_line: u32,
+        _original_content: &str,
     ) -> Result<Option<String>, LspError> {
         let next = {
             let mut guard = self
@@ -406,6 +420,14 @@ impl Lawyer for MockLawyer {
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
         std::collections::HashMap::new()
+    }
+
+    async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError> {
+        self.watched_file_changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(changes);
+        Ok(())
     }
 }
 
@@ -572,7 +594,7 @@ mod tests {
     async fn test_mock_range_formatting_defaults_to_none() {
         let mock = MockLawyer::default();
         let result = mock
-            .range_formatting(&workspace(), &file(), 1, 10)
+            .range_formatting(&workspace(), &file(), 1, 10, "")
             .await
             .expect("should succeed");
         assert!(result.is_none());
@@ -583,9 +605,24 @@ mod tests {
         let mock = MockLawyer::default();
         mock.set_range_formatting_result(Ok(Some("formatted_code".into())));
         let result = mock
-            .range_formatting(&workspace(), &file(), 1, 5)
+            .range_formatting(&workspace(), &file(), 1, 5, "")
             .await
             .expect("should succeed");
         assert_eq!(result, Some("formatted_code".into()));
+    }
+
+    #[tokio::test]
+    async fn test_mock_did_change_watched_files_records_calls() {
+        use crate::types::FileChangeType;
+        let mock = MockLawyer::default();
+        mock.did_change_watched_files(vec![FileEvent {
+            uri: "file:///test.rs".into(),
+            change_type: FileChangeType::Created,
+        }])
+        .await
+        .expect("should succeed");
+        assert_eq!(mock.watched_file_changes_count(), 1);
+        let calls = mock.watched_file_changes.lock().expect("lock");
+        assert_eq!(calls[0].uri, "file:///test.rs");
     }
 }
