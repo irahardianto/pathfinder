@@ -339,9 +339,8 @@ impl PathfinderServer {
             .map(|s| s.name.clone())
             .unwrap_or_default();
 
-        let pattern = format!(
-            r"(?:fn|def|func|class|struct|type|interface|const|let|var)\s+{symbol_name}"
-        );
+        let pattern =
+            format!(r"(?:fn|def|func|class|struct|type|interface|const|let|var)\s+{symbol_name}");
 
         let search_result = self
             .scout

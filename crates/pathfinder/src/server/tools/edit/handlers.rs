@@ -1,14 +1,13 @@
 use super::text_edit::{
-    is_whitespace_significant_file, normalize_blank_lines,
-    strip_orphaned_doc_comment,
+    is_whitespace_significant_file, normalize_blank_lines, strip_orphaned_doc_comment,
 };
 use super::{FinalizeEditParams, InsertEdge};
 use crate::server::helpers::{
     check_occ, check_sandbox_access, io_error_data, parse_semantic_path, require_symbol_target,
 };
 use crate::server::types::{
-    DeleteSymbolParams, EditResponse, InsertAfterParams, InsertBeforeParams,
-    ReplaceBodyParams, ReplaceFullParams, ValidateOnlyParams,
+    DeleteSymbolParams, EditResponse, InsertAfterParams, InsertBeforeParams, ReplaceBodyParams,
+    ReplaceFullParams, ValidateOnlyParams,
 };
 use pathfinder_common::indent::dedent_then_reindent;
 use pathfinder_common::normalize::normalize_for_full_replace;
@@ -325,12 +324,7 @@ impl crate::server::PathfinderServer {
         )?;
 
         let (source, current_hash, new_bytes) = self
-            .resolve_edit_content(
-                &semantic_path,
-                &params.semantic_path,
-                "delete",
-                None,
-            )
+            .resolve_edit_content(&semantic_path, &params.semantic_path, "delete", None)
             .await?;
 
         // P2-1: Cross-File Reference Warning.
@@ -382,17 +376,18 @@ impl crate::server::PathfinderServer {
                             }
 
                             if reference_count > 0 {
-                                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
-                                    semantic_path: params.semantic_path.clone(),
-                                    reason: format!(
-                                        "Symbol '{symbol_name}' is still referenced in \
+                                let err =
+                                    pathfinder_common::error::PathfinderError::InvalidTarget {
+                                        semantic_path: params.semantic_path.clone(),
+                                        reason: format!(
+                                            "Symbol '{symbol_name}' is still referenced in \
                                          {reference_count} other file(s). Delete or update \
                                          those references first, or pass \
                                          'ignore_validation_failures: true' to force deletion."
-                                    ),
-                                    edit_index: None,
-                                    valid_edit_types: None,
-                                };
+                                        ),
+                                        edit_index: None,
+                                        valid_edit_types: None,
+                                    };
                                 return Err(crate::server::helpers::pathfinder_to_error_data(&err));
                             }
                         }
@@ -468,12 +463,7 @@ impl crate::server::PathfinderServer {
         let original_str = std::str::from_utf8(&source).unwrap_or("");
         let new_str = std::str::from_utf8(&new_bytes).unwrap_or("");
         let validation_outcome = self
-            .run_lsp_validation(
-                &semantic_path.file_path,
-                original_str,
-                new_str,
-                false,
-            )
+            .run_lsp_validation(&semantic_path.file_path, original_str, new_str, false)
             .await;
 
         let duration_ms = start.elapsed().as_millis();
@@ -513,10 +503,14 @@ impl crate::server::PathfinderServer {
                     .resolve_body_range(self.workspace_root.path(), semantic_path)
                     .await
                     .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-                
+
                 let normalized = pathfinder_common::normalize::normalize_for_body_replace(new_code);
-                let indented = pathfinder_common::indent::dedent_then_reindent(&normalized, body_range.body_indent_column);
-                let new_content = super::text_edit::build_body_replacement(&source, &body_range, &indented)?;
+                let indented = pathfinder_common::indent::dedent_then_reindent(
+                    &normalized,
+                    body_range.body_indent_column,
+                );
+                let new_content =
+                    super::text_edit::build_body_replacement(&source, &body_range, &indented)?;
                 Ok((source, current_hash, new_content.as_bytes().to_vec()))
             }
             "replace_full" => {
@@ -530,9 +524,11 @@ impl crate::server::PathfinderServer {
                     let new_bytes = new_code.as_bytes().to_vec();
 
                     if let Ok(new_str) = std::str::from_utf8(&new_bytes) {
-                        if let Some(lang) = pathfinder_treesitter::language::SupportedLanguage::detect(
-                            &semantic_path.file_path,
-                        ) {
+                        if let Some(lang) =
+                            pathfinder_treesitter::language::SupportedLanguage::detect(
+                                &semantic_path.file_path,
+                            )
+                        {
                             match pathfinder_treesitter::parser::AstParser::parse_source(
                                 &semantic_path.file_path,
                                 lang,
@@ -566,7 +562,8 @@ impl crate::server::PathfinderServer {
                     let before = &source[..full_range.start_byte];
                     let after = &source[full_range.end_byte..];
 
-                    let mut new_bytes = Vec::with_capacity(before.len() + indented.len() + after.len());
+                    let mut new_bytes =
+                        Vec::with_capacity(before.len() + indented.len() + after.len());
                     new_bytes.extend_from_slice(before);
                     new_bytes.extend_from_slice(indented.as_bytes());
                     new_bytes.extend_from_slice(after);
@@ -611,7 +608,7 @@ impl crate::server::PathfinderServer {
                 if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
                     new_bytes = normalize_blank_lines(&new_bytes);
                 }
-                
+
                 Ok((source, current_hash, new_bytes))
             }
             "insert_after" => {
@@ -639,7 +636,11 @@ impl crate::server::PathfinderServer {
                 let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
 
                 let mut new_bytes = Vec::with_capacity(
-                    before.len() + before_sep.len() + indented.len() + after_sep.len() + after.len(),
+                    before.len()
+                        + before_sep.len()
+                        + indented.len()
+                        + after_sep.len()
+                        + after.len(),
                 );
                 new_bytes.extend_from_slice(before);
                 new_bytes.extend_from_slice(before_sep.as_bytes());

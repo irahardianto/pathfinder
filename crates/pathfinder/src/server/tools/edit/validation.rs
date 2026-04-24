@@ -11,7 +11,6 @@ use rmcp::model::ErrorData;
 use std::path::Path;
 
 impl crate::server::PathfinderServer {
-
     /// Run LSP Pull Diagnostics validation on a pending in-memory edit.
     ///
     /// # Flow
