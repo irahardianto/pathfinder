@@ -180,7 +180,7 @@ impl PathfinderServer {
             .map(|m| (m.file.clone(), m.line, m.column))
             .collect();
 
-        let enrichment: Vec<EnrichResult> = futures::stream::iter(snapshots.into_iter())
+        let enrichment: Vec<EnrichResult> = futures::stream::iter(snapshots)
             .map(|(file, line_u64, column_u64)| async move {
                 let file_path = Path::new(&file);
                 let line = usize::try_from(line_u64).unwrap_or(usize::MAX);

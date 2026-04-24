@@ -206,7 +206,7 @@ mod tests {
                 _target: &str,
             ) -> Result<Vec<u8>, std::io::Error> {
                 // Simulate a git process that hangs far longer than GIT_TIMEOUT.
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                tokio::time::sleep(Duration::from_hours(1)).await;
                 Ok(vec![])
             }
         }

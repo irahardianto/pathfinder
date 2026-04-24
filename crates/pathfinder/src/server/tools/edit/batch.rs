@@ -347,7 +347,7 @@ impl crate::server::PathfinderServer {
 
         let mut new_bytes = source.to_vec();
         for (_, _, edit) in resolved_edits {
-            new_bytes.splice(edit.start_byte..edit.end_byte, edit.replacement.into_iter());
+            new_bytes.splice(edit.start_byte..edit.end_byte, edit.replacement);
         }
 
         Ok(new_bytes)

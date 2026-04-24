@@ -301,9 +301,7 @@ pub(super) async fn shutdown(process: &mut ManagedProcess, dispatcher: &RequestD
 
 /// Convert a filesystem path to a `file://` URI string.
 async fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
-    let is_dir = tokio::fs::metadata(path)
-        .await
-        .is_ok_and(|m| m.is_dir());
+    let is_dir = tokio::fs::metadata(path).await.is_ok_and(|m| m.is_dir());
 
     let uri = if is_dir {
         url::Url::from_directory_path(path)
