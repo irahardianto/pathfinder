@@ -1,6 +1,6 @@
 use super::text_edit::build_validation_outcome;
 use super::{FinalizeEditParams, ValidationOutcome};
-use crate::server::helpers::{io_error_data, pathfinder_to_error_data, require_symbol_target};
+use crate::server::helpers::{io_error_data, pathfinder_to_error_data};
 use crate::server::types::{EditResponse, EditValidation};
 use pathfinder_common::error::{compute_lines_changed, PathfinderError};
 use pathfinder_common::types::{SemanticPath, VersionHash};
@@ -11,101 +11,6 @@ use rmcp::model::ErrorData;
 use std::path::Path;
 
 impl crate::server::PathfinderServer {
-    /// Read file and compute its version hash (for bare-file edit types).
-    pub(crate) async fn hash_file_content(
-        &self,
-        semantic_path: &SemanticPath,
-    ) -> Result<VersionHash, ErrorData> {
-        let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-        let bytes = tokio::fs::read(&absolute_path)
-            .await
-            .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-        Ok(VersionHash::compute(&bytes))
-    }
-
-    /// Resolve hash for bare-file or full-range semantic paths.
-    pub(crate) async fn resolve_hash_for_full_or_bare(
-        &self,
-        semantic_path: &SemanticPath,
-    ) -> Result<VersionHash, ErrorData> {
-        if semantic_path.is_bare_file() {
-            self.hash_file_content(semantic_path).await
-        } else {
-            let (_, _, hash) = self
-                .surgeon
-                .resolve_full_range(self.workspace_root.path(), semantic_path)
-                .await
-                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-            Ok(hash)
-        }
-    }
-
-    /// Resolve hash for symbol-range paths (`insert_before`/`insert_after`).
-    pub(crate) async fn resolve_hash_for_symbol_range(
-        &self,
-        semantic_path: &SemanticPath,
-    ) -> Result<VersionHash, ErrorData> {
-        if semantic_path.is_bare_file() {
-            self.hash_file_content(semantic_path).await
-        } else {
-            let (_, _, hash) = self
-                .surgeon
-                .resolve_symbol_range(self.workspace_root.path(), semantic_path)
-                .await
-                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-            Ok(hash)
-        }
-    }
-
-    /// Resolve the current on-disk `VersionHash` for the path targeted by a
-    /// `validate_only` call.
-    ///
-    /// Each edit type uses a different Surgeon method to locate the symbol,
-    /// so the resolution path differs. This helper centralises that dispatch
-    /// and returns the hash without performing the OCC comparison — that remains
-    /// the caller's responsibility.
-    pub(crate) async fn resolve_version_hash_for_edit_type(
-        &self,
-        semantic_path: &SemanticPath,
-        raw_path: &str,
-        edit_type: &str,
-    ) -> Result<VersionHash, ErrorData> {
-        match edit_type {
-            "replace_body" => {
-                require_symbol_target(semantic_path, raw_path)?;
-                let (_, _, hash) = self
-                    .surgeon
-                    .resolve_body_range(self.workspace_root.path(), semantic_path)
-                    .await
-                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-                Ok(hash)
-            }
-            "replace_full" => self.resolve_hash_for_full_or_bare(semantic_path).await,
-            "delete" => {
-                require_symbol_target(semantic_path, raw_path)?;
-                let (_, _, hash) = self
-                    .surgeon
-                    .resolve_full_range(self.workspace_root.path(), semantic_path)
-                    .await
-                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-                Ok(hash)
-            }
-            "insert_before" | "insert_after" => {
-                self.resolve_hash_for_symbol_range(semantic_path).await
-            }
-            unknown => {
-                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
-                    semantic_path: raw_path.to_owned(),
-                    reason: format!(
-                        "unsupported edit type: '{unknown}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
-                    ),
-                    edit_index: None,
-                    valid_edit_types: None,
-                };
-                Err(pathfinder_to_error_data(&err))
-            }
-        }
-    }
 
     /// Run LSP Pull Diagnostics validation on a pending in-memory edit.
     ///

@@ -682,3 +682,127 @@ async fn test_validate_only_real_parser_go() {
     let written = std::fs::read_to_string(&abs).unwrap();
     assert!(written.contains("func Login() {"));
 }
+
+// ── delete_symbol_bare_file_rejected ──────────────────────────────
+
+#[tokio::test]
+async fn test_delete_symbol_bare_file_rejected() {
+    // delete_symbol requires a symbol target — bare files must return INVALID_SEMANTIC_PATH.
+    // This exercises the require_symbol_target guard inside resolve_edit_content("delete").
+    let ws_dir = tempdir().expect("temp dir");
+    let server = make_server(&ws_dir, MockSurgeon::new());
+
+    let params = DeleteSymbolParams {
+        semantic_path: "src/auth.go".to_owned(), // no :: — bare file
+        base_version: "sha256:any".to_owned(),
+        ignore_validation_failures: false,
+    };
+
+    let result = server.delete_symbol(Parameters(params)).await;
+    let Err(err) = result else {
+        panic!("expected INVALID_SEMANTIC_PATH error for bare file");
+    };
+
+    let code = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(code, "INVALID_SEMANTIC_PATH", "got: {err:?}");
+}
+
+// ── delete_symbol_cross_file_reference_warning ────────────────────
+
+#[tokio::test]
+async fn test_delete_symbol_cross_file_reference_warning() {
+    // When `ignore_validation_failures: false` and `rg` detects the symbol name
+    // in another file, delete_symbol must return INVALID_TARGET.
+    //
+    // We set up two files:
+    //   src/auth.go   — defines `func Login() {}`
+    //   src/main.go   — references `Login` (causing a cross-file hit)
+    //
+    // NOTE: This test requires `rg` (ripgrep) on PATH. If absent the guard
+    // silently skips, so we check and early-return to avoid a misleading pass.
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        // rg not available — skip gracefully.
+        return;
+    }
+
+    let ws_dir = tempdir().expect("temp dir");
+
+    let auth_src = "package main\n\nfunc Login() {\n    // body\n}\n";
+    let main_src = "package main\n\nfunc main() {\n    Login()\n}\n";
+
+    let auth_path = "src/auth.go";
+    let main_path = "src/main.go";
+
+    let auth_abs = ws_dir.path().join(auth_path);
+    let main_abs = ws_dir.path().join(main_path);
+    std::fs::create_dir_all(auth_abs.parent().unwrap()).unwrap();
+    std::fs::write(&auth_abs, auth_src).unwrap();
+    std::fs::write(&main_abs, main_src).unwrap();
+
+    let hash = VersionHash::compute(auth_src.as_bytes());
+    let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+    let server = make_server_dyn(&ws_dir, real_surgeon);
+
+    // 1. Without override — should be blocked (Login is referenced in main.go)
+    let params = DeleteSymbolParams {
+        semantic_path: format!("{auth_path}::Login"),
+        base_version: hash.as_str().to_owned(),
+        ignore_validation_failures: false,
+    };
+
+    let result = server.delete_symbol(Parameters(params)).await;
+    let Err(err) = result else {
+        panic!("expected INVALID_TARGET: cross-file reference should block delete");
+    };
+
+    let code = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(code, "INVALID_TARGET", "got: {err:?}");
+    // The human-readable reason is in data["message"], not in err.message
+    // (err.message holds the MCP error code string, e.g. "INVALID_TARGET").
+    let reason = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        reason.contains("Login"),
+        "Error reason should name the symbol: {reason}"
+    );
+
+    // 2. With override — should succeed despite cross-file reference
+    let rehash = VersionHash::compute(auth_src.as_bytes());
+    let params_override = DeleteSymbolParams {
+        semantic_path: format!("{auth_path}::Login"),
+        base_version: rehash.as_str().to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result2 = server
+        .delete_symbol(Parameters(params_override))
+        .await
+        .expect("ignore_validation_failures:true should bypass reference check");
+    assert!(result2.0.success);
+
+    let written = std::fs::read_to_string(&auth_abs).unwrap();
+    assert!(!written.contains("func Login"), "written: {written}");
+
+    // main_abs exists to set up the cross-file reference; not read post-test.
+    let _ = main_abs;
+}

@@ -1,5 +1,5 @@
 use super::text_edit::{
-    build_body_replacement, is_whitespace_significant_file, normalize_blank_lines,
+    is_whitespace_significant_file, normalize_blank_lines,
     strip_orphaned_doc_comment,
 };
 use super::{FinalizeEditParams, InsertEdge};
@@ -7,11 +7,11 @@ use crate::server::helpers::{
     check_occ, check_sandbox_access, io_error_data, parse_semantic_path, require_symbol_target,
 };
 use crate::server::types::{
-    DeleteSymbolParams, EditResponse, EditValidation, InsertAfterParams, InsertBeforeParams,
+    DeleteSymbolParams, EditResponse, InsertAfterParams, InsertBeforeParams,
     ReplaceBodyParams, ReplaceFullParams, ValidateOnlyParams,
 };
 use pathfinder_common::indent::dedent_then_reindent;
-use pathfinder_common::normalize::{normalize_for_body_replace, normalize_for_full_replace};
+use pathfinder_common::normalize::normalize_for_full_replace;
 use pathfinder_common::types::VersionHash;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
@@ -48,7 +48,6 @@ impl crate::server::PathfinderServer {
 
         // ── Step 1: Parse semantic path ────────────────────────────────
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
-        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         // ── Step 2: Sandbox check ──────────────────────────────────────
         check_sandbox_access(
@@ -58,20 +57,14 @@ impl crate::server::PathfinderServer {
             &params.semantic_path,
         )?;
 
-        // ── Step 3: Resolve body range + read source ─────────────────
-        // The Surgeon reads the file, parses the AST, and returns the
-        // (open_brace, close_brace, indent_column) triple plus the raw source
-        // and the current version hash for OCC.
-        let (body_range, source, current_hash) = match self
-            .surgeon
-            .resolve_body_range(self.workspace_root.path(), &semantic_path)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(crate::server::helpers::treesitter_error_to_error_data(e));
-            }
-        };
+        let (source, current_hash, new_bytes) = self
+            .resolve_edit_content(
+                &semantic_path,
+                &params.semantic_path,
+                "replace_body",
+                Some(&params.new_code),
+            )
+            .await?;
 
         // ── Step 4: OCC check ─────────────────────────────────────────
         check_occ(
@@ -79,14 +72,6 @@ impl crate::server::PathfinderServer {
             &current_hash,
             semantic_path.file_path.clone(),
         )?;
-
-        // ── Step 5: Normalize new_code ────────────────────────────────
-        let normalized = normalize_for_body_replace(&params.new_code);
-
-        // ── Steps 6–7: Indent + splice ──────────────────────────────────
-        let indented = dedent_then_reindent(&normalized, body_range.body_indent_column);
-        let new_content = build_body_replacement(&source, &body_range, &indented)?;
-        let new_bytes = new_content.as_bytes();
 
         // ── Steps 8–11: Validate → TOCTOU → Write → Respond ────────────
         let resolve_ms = start.elapsed().as_millis();
@@ -96,7 +81,7 @@ impl crate::server::PathfinderServer {
             raw_semantic_path_str: &params.semantic_path,
             source: &source,
             original_hash: &current_hash,
-            new_content: new_bytes.to_vec(),
+            new_content: new_bytes,
             ignore_validation_failures: params.ignore_validation_failures,
             start_time: start,
             resolve_ms,
@@ -145,90 +130,20 @@ impl crate::server::PathfinderServer {
         // MITIGATION:
         // We perform an optional post-write tree-sitter parse check that logs a warning
         // (but does NOT block the write) to catch obvious syntax errors early.
-        let (source, current_hash, new_bytes) = if semantic_path.is_bare_file() {
-            let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-            let source = tokio::fs::read(&absolute_path)
-                .await
-                .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-            let current_hash = VersionHash::compute(&source);
+        let (source, current_hash, new_bytes) = self
+            .resolve_edit_content(
+                &semantic_path,
+                &params.semantic_path,
+                "replace_full",
+                Some(&params.new_code),
+            )
+            .await?;
 
-            check_occ(
-                &params.base_version,
-                &current_hash,
-                semantic_path.file_path.clone(),
-            )?;
-
-            // For bare file substitution, insert exactly as provided
-            let new_bytes = params.new_code.as_bytes().to_vec();
-
-            // C2: Optional tree-sitter parse check (logs warning but does not block)
-            // This catches obvious syntax errors without preventing the write
-            if let Ok(new_str) = std::str::from_utf8(&new_bytes) {
-                if let Some(lang) = pathfinder_treesitter::language::SupportedLanguage::detect(
-                    &semantic_path.file_path,
-                ) {
-                    match pathfinder_treesitter::parser::AstParser::parse_source(
-                        &semantic_path.file_path,
-                        lang,
-                        new_str.as_bytes(),
-                    ) {
-                        Ok(tree) => {
-                            if tree.root_node().has_error() {
-                                tracing::warn!(
-                                    file = %semantic_path.file_path.display(),
-                                    "replace_full: bare file content has parse errors (tree-sitter reported ERROR nodes)"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                file = %semantic_path.file_path.display(),
-                                error = %e,
-                                "replace_full: bare file content failed tree-sitter parse check - syntax errors likely"
-                            );
-                        }
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    file = %semantic_path.file_path.display(),
-                    "replace_full: bare file content is not valid UTF-8, skipping parse check"
-                );
-            }
-
-            (std::sync::Arc::from(source), current_hash, new_bytes)
-        } else {
-            let (full_range, source, current_hash) = match self
-                .surgeon
-                .resolve_full_range(self.workspace_root.path(), &semantic_path)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(crate::server::helpers::treesitter_error_to_error_data(e));
-                }
-            };
-
-            check_occ(
-                &params.base_version,
-                &current_hash,
-                semantic_path.file_path.clone(),
-            )?;
-
-            // Normalize and indent the new code
-            let normalized = normalize_for_full_replace(&params.new_code);
-            let indented = dedent_then_reindent(&normalized, full_range.indent_column);
-
-            let before = &source[..full_range.start_byte];
-            let after = &source[full_range.end_byte..];
-
-            let mut new_bytes = Vec::with_capacity(before.len() + indented.len() + after.len());
-            new_bytes.extend_from_slice(before);
-            new_bytes.extend_from_slice(indented.as_bytes());
-            new_bytes.extend_from_slice(after);
-
-            (source, current_hash, new_bytes)
-        };
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            semantic_path.file_path.clone(),
+        )?;
 
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(FinalizeEditParams {
@@ -266,8 +181,13 @@ impl crate::server::PathfinderServer {
             &params.semantic_path,
         )?;
 
-        let (insert_byte, indent_column, source, current_hash) = self
-            .resolve_insert_position(&semantic_path, InsertEdge::Before)
+        let (source, current_hash, new_bytes) = self
+            .resolve_edit_content(
+                &semantic_path,
+                &params.semantic_path,
+                "insert_before",
+                Some(&params.new_code),
+            )
             .await?;
 
         check_occ(
@@ -275,46 +195,6 @@ impl crate::server::PathfinderServer {
             &current_hash,
             semantic_path.file_path.clone(),
         )?;
-
-        let normalized = normalize_for_full_replace(&params.new_code);
-        let indented = dedent_then_reindent(&normalized, indent_column);
-
-        // Splice: insert at insert_byte with a double newline separator
-        let before = &source[..insert_byte];
-        let after = &source[insert_byte..];
-
-        // C9: Prevent double blank lines by checking both sides.
-        // No separator when the boundary already provides sufficient whitespace:
-        // - before ends with double newline, or
-        // - after starts with double newline, or
-        // - before ends with newline AND after starts with newline
-        // Otherwise use a single newline if after already has one, or double newline.
-        let sep = if before.ends_with(b"\n\n")
-            || after.starts_with(b"\n\n")
-            || (before.ends_with(b"\n") && after.starts_with(b"\n"))
-        {
-            ""
-        } else if after.starts_with(b"\n") {
-            "\n"
-        } else {
-            "\n\n"
-        };
-
-        // Also ensure the indented part has trailing newline if it doesn't
-        let trailing = if indented.ends_with('\n') { "" } else { "\n" };
-
-        let mut new_bytes = Vec::with_capacity(
-            before.len() + indented.len() + sep.len() + trailing.len() + after.len(),
-        );
-        new_bytes.extend_from_slice(before);
-        new_bytes.extend_from_slice(indented.as_bytes());
-        new_bytes.extend_from_slice(trailing.as_bytes());
-        new_bytes.extend_from_slice(sep.as_bytes());
-        new_bytes.extend_from_slice(after);
-
-        if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
-            new_bytes = normalize_blank_lines(&new_bytes);
-        }
 
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(FinalizeEditParams {
@@ -352,8 +232,13 @@ impl crate::server::PathfinderServer {
             &params.semantic_path,
         )?;
 
-        let (insert_byte, indent_column, source, current_hash) = self
-            .resolve_insert_position(&semantic_path, InsertEdge::After)
+        let (source, current_hash, new_bytes) = self
+            .resolve_edit_content(
+                &semantic_path,
+                &params.semantic_path,
+                "insert_after",
+                Some(&params.new_code),
+            )
             .await?;
 
         check_occ(
@@ -361,43 +246,6 @@ impl crate::server::PathfinderServer {
             &current_hash,
             semantic_path.file_path.clone(),
         )?;
-
-        let normalized = normalize_for_full_replace(&params.new_code);
-        let indented = dedent_then_reindent(&normalized, indent_column);
-
-        let before = &source[..insert_byte];
-        let after = &source[insert_byte..];
-
-        // C9: Prevent double blank lines by checking both sides.
-        // No separator when the boundary already provides sufficient whitespace:
-        // - before ends with double newline, or
-        // - after starts with double newline, or
-        // - before ends with newline AND after starts with newline
-        // Otherwise use a single newline if before has one, or double newline.
-        let before_sep = if before.ends_with(b"\n\n")
-            || after.starts_with(b"\n\n")
-            || (before.ends_with(b"\n") && after.starts_with(b"\n"))
-        {
-            ""
-        } else if before.ends_with(b"\n") {
-            "\n"
-        } else {
-            "\n\n"
-        };
-        let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
-
-        let mut new_bytes = Vec::with_capacity(
-            before.len() + before_sep.len() + indented.len() + after_sep.len() + after.len(),
-        );
-        new_bytes.extend_from_slice(before);
-        new_bytes.extend_from_slice(before_sep.as_bytes());
-        new_bytes.extend_from_slice(indented.as_bytes());
-        new_bytes.extend_from_slice(after_sep.as_bytes());
-        new_bytes.extend_from_slice(after);
-
-        if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
-            new_bytes = normalize_blank_lines(&new_bytes);
-        }
 
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(FinalizeEditParams {
@@ -468,7 +316,6 @@ impl crate::server::PathfinderServer {
         );
 
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
-        require_symbol_target(&semantic_path, &params.semantic_path)?;
 
         check_sandbox_access(
             &self.sandbox,
@@ -477,57 +324,88 @@ impl crate::server::PathfinderServer {
             &params.semantic_path,
         )?;
 
-        let (full_range, source, current_hash) = match self
-            .surgeon
-            .resolve_full_range(self.workspace_root.path(), &semantic_path)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(crate::server::helpers::treesitter_error_to_error_data(e));
+        let (source, current_hash, new_bytes) = self
+            .resolve_edit_content(
+                &semantic_path,
+                &params.semantic_path,
+                "delete",
+                None,
+            )
+            .await?;
+
+        // P2-1: Cross-File Reference Warning.
+        //
+        // Before deleting, check whether the symbol is still referenced elsewhere in the
+        // workspace. We use `rg -l -w <name>` as a fast heuristic. False positives are
+        // possible (e.g., identically-named symbols in unrelated code), but false negatives
+        // are not — which is the safe direction.
+        //
+        // The agent can bypass this check with `ignore_validation_failures: true`.
+        if !params.ignore_validation_failures {
+            if let Some(symbol_chain) = &semantic_path.symbol_chain {
+                if let Some(symbol) = symbol_chain.segments.last() {
+                    let symbol_name = &symbol.name;
+                    let workspace_path = self.workspace_root.path().to_string_lossy().to_string();
+
+                    // Resolve the target file to an absolute path so we can exclude it
+                    // from the rg results reliably (relative path suffix matching is fragile).
+                    let absolute_target = self
+                        .workspace_root
+                        .path()
+                        .join(&semantic_path.file_path)
+                        .to_string_lossy()
+                        .to_string();
+
+                    let mut cmd = tokio::process::Command::new("rg");
+                    cmd.arg("-l")
+                        .arg("-w")
+                        .arg(symbol_name)
+                        .arg(&workspace_path)
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::null());
+
+                    if let Ok(out) = cmd.output().await {
+                        if out.status.success() {
+                            let stdout = String::from_utf8_lossy(&out.stdout);
+                            let mut reference_count = 0u32;
+
+                            for line in stdout.lines() {
+                                let line = line.trim();
+                                if line.is_empty() {
+                                    continue;
+                                }
+                                // Exclude the file being deleted — its own definition
+                                // is not a "cross-file reference".
+                                if line != absolute_target {
+                                    reference_count += 1;
+                                }
+                            }
+
+                            if reference_count > 0 {
+                                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                                    semantic_path: params.semantic_path.clone(),
+                                    reason: format!(
+                                        "Symbol '{symbol_name}' is still referenced in \
+                                         {reference_count} other file(s). Delete or update \
+                                         those references first, or pass \
+                                         'ignore_validation_failures: true' to force deletion."
+                                    ),
+                                    edit_index: None,
+                                    valid_edit_types: None,
+                                };
+                                return Err(crate::server::helpers::pathfinder_to_error_data(&err));
+                            }
+                        }
+                    }
+                }
             }
-        };
+        }
 
         check_occ(
             &params.base_version,
             &current_hash,
             semantic_path.file_path.clone(),
         )?;
-
-        // Collapse whitespace: If deleting a symbol leaves more than one consecutive blank line, collapse it.
-        // Or simply: strip the symbol, then normalise the gap.
-        let before_end = full_range.start_byte;
-        let after_start = full_range.end_byte;
-
-        // Post-pass: strip any orphaned doc-comment fragment on the line immediately
-        // preceding the symbol.
-        let before_end = strip_orphaned_doc_comment(&source, before_end);
-
-        // Trim trailing whitespace (except newlines if we want, but trimming all is safer)
-        let mut b_end = before_end;
-        while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
-            b_end -= 1;
-        }
-
-        let mut a_start = after_start;
-        while a_start < source.len() && source[a_start].is_ascii_whitespace() {
-            a_start += 1;
-        }
-
-        let before = &source[..b_end];
-        let after = &source[a_start..];
-
-        // Insert exactly two newlines (one blank line) if neither is empty
-        let sep = if before.is_empty() || after.is_empty() {
-            b"\n" as &[u8]
-        } else {
-            b"\n\n"
-        };
-
-        let mut new_bytes = Vec::with_capacity(before.len() + sep.len() + after.len());
-        new_bytes.extend_from_slice(before);
-        new_bytes.extend_from_slice(sep);
-        new_bytes.extend_from_slice(after);
 
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(FinalizeEditParams {
@@ -571,12 +449,12 @@ impl crate::server::PathfinderServer {
             &params.semantic_path,
         )?;
 
-        // Resolve the current version hash for the target path+type and OCC-check it.
-        let current_hash = self
-            .resolve_version_hash_for_edit_type(
+        let (source, current_hash, new_bytes) = self
+            .resolve_edit_content(
                 &semantic_path,
                 &params.semantic_path,
-                params.edit_type.as_str(),
+                &params.edit_type,
+                params.new_code.as_deref(),
             )
             .await?;
 
@@ -586,16 +464,24 @@ impl crate::server::PathfinderServer {
             semantic_path.file_path.clone(),
         )?;
 
-        // validate_only: no disk write, so we skip actual LSP validation here.
-        // The OCC + Sandbox check is the primary purpose of this tool.
-        // A future enhancement could perform read-only LSP diagnostics.
+        // P1-1: Execute run_lsp_validation using the original source and new_bytes
+        let original_str = std::str::from_utf8(&source).unwrap_or("");
+        let new_str = std::str::from_utf8(&new_bytes).unwrap_or("");
+        let validation_outcome = self
+            .run_lsp_validation(
+                &semantic_path.file_path,
+                original_str,
+                new_str,
+                false,
+            )
+            .await;
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
             tool = "validate_only",
             semantic_path = %params.semantic_path,
             duration_ms,
-            engines_used = ?["tree-sitter"],
+            engines_used = ?if validation_outcome.skipped { vec!["tree-sitter"] } else { vec!["tree-sitter", "lsp"] },
             "validate_only: complete"
         );
 
@@ -603,12 +489,216 @@ impl crate::server::PathfinderServer {
             success: true,
             new_version_hash: None, // No file written
             formatted: false,
-            validation: EditValidation::skipped(),
-            validation_skipped: true,
-            // B5: Improved skip reason explaining why LSP validation is skipped
-            validation_skipped_reason: Some(
-                "validate_only mode: LSP validation requires writing to disk, which is not performed in validate-only mode. Tree-sitter structural validation was performed.".to_owned()
-            ),
+            validation: validation_outcome.validation,
+            validation_skipped: validation_outcome.skipped,
+            validation_skipped_reason: validation_outcome.skipped_reason,
         }))
+    }
+
+    /// Extracted helper to resolve the new source content without writing to disk.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn resolve_edit_content(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        raw_semantic_path: &str,
+        edit_type: &str,
+        new_code: Option<&str>,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        match edit_type {
+            "replace_body" => {
+                require_symbol_target(semantic_path, raw_semantic_path)?;
+                let new_code = new_code.unwrap_or_default();
+                let (body_range, source, current_hash) = self
+                    .surgeon
+                    .resolve_body_range(self.workspace_root.path(), semantic_path)
+                    .await
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+                
+                let normalized = pathfinder_common::normalize::normalize_for_body_replace(new_code);
+                let indented = pathfinder_common::indent::dedent_then_reindent(&normalized, body_range.body_indent_column);
+                let new_content = super::text_edit::build_body_replacement(&source, &body_range, &indented)?;
+                Ok((source, current_hash, new_content.as_bytes().to_vec()))
+            }
+            "replace_full" => {
+                let new_code = new_code.unwrap_or_default();
+                if semantic_path.is_bare_file() {
+                    let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+                    let source = tokio::fs::read(&absolute_path)
+                        .await
+                        .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+                    let current_hash = VersionHash::compute(&source);
+                    let new_bytes = new_code.as_bytes().to_vec();
+
+                    if let Ok(new_str) = std::str::from_utf8(&new_bytes) {
+                        if let Some(lang) = pathfinder_treesitter::language::SupportedLanguage::detect(
+                            &semantic_path.file_path,
+                        ) {
+                            match pathfinder_treesitter::parser::AstParser::parse_source(
+                                &semantic_path.file_path,
+                                lang,
+                                new_str.as_bytes(),
+                            ) {
+                                Ok(tree) => {
+                                    if tree.root_node().has_error() {
+                                        tracing::warn!(
+                                            file = %semantic_path.file_path.display(),
+                                            "replace_full: bare file content has parse errors"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "replace_full: tree-sitter error");
+                                }
+                            }
+                        }
+                    }
+                    Ok((std::sync::Arc::from(source), current_hash, new_bytes))
+                } else {
+                    let (full_range, source, current_hash) = self
+                        .surgeon
+                        .resolve_full_range(self.workspace_root.path(), semantic_path)
+                        .await
+                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                    let normalized = normalize_for_full_replace(new_code);
+                    let indented = dedent_then_reindent(&normalized, full_range.indent_column);
+
+                    let before = &source[..full_range.start_byte];
+                    let after = &source[full_range.end_byte..];
+
+                    let mut new_bytes = Vec::with_capacity(before.len() + indented.len() + after.len());
+                    new_bytes.extend_from_slice(before);
+                    new_bytes.extend_from_slice(indented.as_bytes());
+                    new_bytes.extend_from_slice(after);
+
+                    Ok((source, current_hash, new_bytes))
+                }
+            }
+            "insert_before" => {
+                let new_code = new_code.unwrap_or_default();
+                let (insert_byte, indent_column, source, current_hash) = self
+                    .resolve_insert_position(semantic_path, InsertEdge::Before)
+                    .await?;
+
+                let normalized = normalize_for_full_replace(new_code);
+                let indented = dedent_then_reindent(&normalized, indent_column);
+
+                let before = &source[..insert_byte];
+                let after = &source[insert_byte..];
+
+                let sep = if before.ends_with(b"\n\n")
+                    || after.starts_with(b"\n\n")
+                    || (before.ends_with(b"\n") && after.starts_with(b"\n"))
+                {
+                    ""
+                } else if after.starts_with(b"\n") {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+
+                let trailing = if indented.ends_with('\n') { "" } else { "\n" };
+
+                let mut new_bytes = Vec::with_capacity(
+                    before.len() + indented.len() + sep.len() + trailing.len() + after.len(),
+                );
+                new_bytes.extend_from_slice(before);
+                new_bytes.extend_from_slice(indented.as_bytes());
+                new_bytes.extend_from_slice(trailing.as_bytes());
+                new_bytes.extend_from_slice(sep.as_bytes());
+                new_bytes.extend_from_slice(after);
+
+                if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
+                    new_bytes = normalize_blank_lines(&new_bytes);
+                }
+                
+                Ok((source, current_hash, new_bytes))
+            }
+            "insert_after" => {
+                let new_code = new_code.unwrap_or_default();
+                let (insert_byte, indent_column, source, current_hash) = self
+                    .resolve_insert_position(semantic_path, InsertEdge::After)
+                    .await?;
+
+                let normalized = normalize_for_full_replace(new_code);
+                let indented = dedent_then_reindent(&normalized, indent_column);
+
+                let before = &source[..insert_byte];
+                let after = &source[insert_byte..];
+
+                let before_sep = if before.ends_with(b"\n\n")
+                    || after.starts_with(b"\n\n")
+                    || (before.ends_with(b"\n") && after.starts_with(b"\n"))
+                {
+                    ""
+                } else if before.ends_with(b"\n") {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+                let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
+
+                let mut new_bytes = Vec::with_capacity(
+                    before.len() + before_sep.len() + indented.len() + after_sep.len() + after.len(),
+                );
+                new_bytes.extend_from_slice(before);
+                new_bytes.extend_from_slice(before_sep.as_bytes());
+                new_bytes.extend_from_slice(indented.as_bytes());
+                new_bytes.extend_from_slice(after_sep.as_bytes());
+                new_bytes.extend_from_slice(after);
+
+                if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
+                    new_bytes = normalize_blank_lines(&new_bytes);
+                }
+
+                Ok((source, current_hash, new_bytes))
+            }
+            "delete" => {
+                require_symbol_target(semantic_path, raw_semantic_path)?;
+                let (full_range, source, current_hash) = self
+                    .surgeon
+                    .resolve_full_range(self.workspace_root.path(), semantic_path)
+                    .await
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+                let before_end = strip_orphaned_doc_comment(&source, full_range.start_byte);
+                let mut b_end = before_end;
+                while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
+                    b_end -= 1;
+                }
+
+                let mut a_start = full_range.end_byte;
+                while a_start < source.len() && source[a_start].is_ascii_whitespace() {
+                    a_start += 1;
+                }
+
+                let before = &source[..b_end];
+                let after = &source[a_start..];
+
+                let sep = if before.is_empty() || after.is_empty() {
+                    b"\n" as &[u8]
+                } else {
+                    b"\n\n"
+                };
+
+                let mut new_bytes = Vec::with_capacity(before.len() + sep.len() + after.len());
+                new_bytes.extend_from_slice(before);
+                new_bytes.extend_from_slice(sep);
+                new_bytes.extend_from_slice(after);
+
+                Ok((source, current_hash, new_bytes))
+            }
+            unknown => {
+                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                    semantic_path: raw_semantic_path.to_owned(),
+                    reason: format!(
+                        "unsupported edit type: '{unknown}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
+                    ),
+                    edit_index: None,
+                    valid_edit_types: None,
+                };
+                Err(crate::server::helpers::pathfinder_to_error_data(&err))
+            }
+        }
     }
 }

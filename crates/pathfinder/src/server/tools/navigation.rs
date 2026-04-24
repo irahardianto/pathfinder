@@ -147,6 +147,7 @@ impl PathfinderServer {
     /// definition location, and returns the result.
     ///
     /// **Degraded mode:** Returns a `LSP_REQUIRED` error when no LSP is configured.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn get_definition_impl(
         &self,
         params: GetDefinitionParams,
@@ -222,14 +223,43 @@ impl PathfinderServer {
                 }))
             }
             Ok(None) => {
-                // Symbol has no definition (e.g., built-in, external)
+                // Symbol has no definition (e.g., built-in, external) or LSP is still warming up.
                 tracing::info!(
                     tool = "get_definition",
                     semantic_path = %params.semantic_path,
                     tree_sitter_ms,
                     lsp_ms,
                     duration_ms,
-                    "get_definition: no definition found (built-in or external)"
+                    "get_definition: no definition found via LSP — attempting grep-based fallback"
+                );
+
+                if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
+                    def.degraded_reason = Some(
+                        "lsp_warmup_grep_fallback: LSP returned no result (likely warming up); \
+                         result from Ripgrep pattern search — may not be the canonical definition. \
+                         Verify with read_source_file."
+                            .to_owned(),
+                    );
+                    tracing::info!(
+                        tool = "get_definition",
+                        file = %def.file,
+                        line = def.line,
+                        duration_ms,
+                        degraded = true,
+                        degraded_reason = "lsp_warmup_grep_fallback",
+                        engines_used = ?["tree-sitter", "lsp", "ripgrep"],
+                        "get_definition: degraded complete (grep fallback after LSP None)"
+                    );
+                    return Ok(Json(def));
+                }
+
+                tracing::info!(
+                    tool = "get_definition",
+                    semantic_path = %params.semantic_path,
+                    tree_sitter_ms,
+                    lsp_ms,
+                    duration_ms,
+                    "get_definition: no definition found (LSP None, grep empty)"
                 );
                 Err(pathfinder_to_error_data(&PathfinderError::SymbolNotFound {
                     semantic_path: params.semantic_path,
@@ -247,74 +277,38 @@ impl PathfinderServer {
                     "get_definition: no LSP — attempting grep-based fallback"
                 );
 
-                let symbol_name = semantic_path
-                    .symbol_chain
-                    .as_ref()
-                    .and_then(|c| c.segments.last())
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-
-                // Search for common definition-like patterns across the workspace
-                let pattern = format!(
-                    r"(?:fn|def|func|class|struct|type|interface|const|let|var)\s+{symbol_name}"
-                );
-                let search_result = self
-                    .scout
-                    .search(&pathfinder_search::SearchParams {
-                        workspace_root: self.workspace_root.path().to_path_buf(),
-                        query: pattern,
-                        is_regex: true,
-                        max_results: 5,
-                        path_glob: "**/*".to_owned(),
-                        exclude_glob: String::new(),
-                        context_lines: 0,
-                    })
-                    .await;
-
-                let duration_ms = start.elapsed().as_millis();
-
-                match search_result {
-                    Ok(result) if !result.matches.is_empty() => {
-                        let m = &result.matches[0];
-                        tracing::info!(
-                            tool = "get_definition",
-                            file = %m.file,
-                            line = m.line,
-                            duration_ms,
-                            degraded = true,
-                            degraded_reason = "no_lsp_grep_fallback",
-                            engines_used = ?["tree-sitter", "ripgrep"],
-                            "get_definition: degraded complete (grep fallback)"
-                        );
-                        Ok(Json(GetDefinitionResponse {
-                            file: m.file.clone(),
-                            line: u32::try_from(m.line).unwrap_or(u32::MAX),
-                            column: u32::try_from(m.column).unwrap_or(1),
-                            preview: m.content.clone(),
-                            degraded: true,
-                            degraded_reason: Some(
-                                "no_lsp_grep_fallback: LSP unavailable; result from Ripgrep \
-                                 pattern search — may not be the canonical definition. \
-                                 Verify with read_source_file."
-                                    .to_owned(),
-                            ),
-                        }))
-                    }
-                    Ok(_) | Err(_) => {
-                        // No grep match either — return the original LSP error
-                        tracing::info!(
-                            tool = "get_definition",
-                            duration_ms,
-                            degraded = true,
-                            degraded_reason = "no_lsp",
-                            engines_used = ?["none"],
-                            "get_definition: degraded (no LSP, grep fallback also empty)"
-                        );
-                        Err(pathfinder_to_error_data(&PathfinderError::NoLspAvailable {
-                            language: symbol_scope.language,
-                        }))
-                    }
+                if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
+                    def.degraded_reason = Some(
+                        "no_lsp_grep_fallback: LSP unavailable; result from Ripgrep \
+                         pattern search — may not be the canonical definition. \
+                         Verify with read_source_file."
+                            .to_owned(),
+                    );
+                    tracing::info!(
+                        tool = "get_definition",
+                        file = %def.file,
+                        line = def.line,
+                        duration_ms,
+                        degraded = true,
+                        degraded_reason = "no_lsp_grep_fallback",
+                        engines_used = ?["tree-sitter", "ripgrep"],
+                        "get_definition: degraded complete (grep fallback)"
+                    );
+                    return Ok(Json(def));
                 }
+
+                // No grep match either — return the original LSP error
+                tracing::info!(
+                    tool = "get_definition",
+                    duration_ms,
+                    degraded = true,
+                    degraded_reason = "no_lsp",
+                    engines_used = ?["none"],
+                    "get_definition: degraded (no LSP, grep fallback also empty)"
+                );
+                Err(pathfinder_to_error_data(&PathfinderError::NoLspAvailable {
+                    language: symbol_scope.language,
+                }))
             }
             Err(e) => {
                 tracing::warn!(
@@ -331,6 +325,55 @@ impl PathfinderServer {
                 }))
             }
         }
+    }
+
+    /// Grep-based fallback for definition resolution when LSP is unavailable or warming up.
+    async fn fallback_definition_grep(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+    ) -> Option<GetDefinitionResponse> {
+        let symbol_name = semantic_path
+            .symbol_chain
+            .as_ref()
+            .and_then(|c| c.segments.last())
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+
+        let pattern = format!(
+            r"(?:fn|def|func|class|struct|type|interface|const|let|var)\s+{symbol_name}"
+        );
+
+        let search_result = self
+            .scout
+            .search(&pathfinder_search::SearchParams {
+                workspace_root: self.workspace_root.path().to_path_buf(),
+                query: pattern,
+                is_regex: true,
+                max_results: 5,
+                path_glob: "**/*".to_owned(),
+                exclude_glob: String::new(),
+                context_lines: 0,
+            })
+            .await;
+
+        if let Ok(result) = search_result {
+            if !result.matches.is_empty() {
+                let m = &result.matches[0];
+                return Some(GetDefinitionResponse {
+                    file: m.file.clone(),
+                    line: u32::try_from(m.line).unwrap_or(u32::MAX),
+                    column: u32::try_from(m.column).unwrap_or(1),
+                    preview: m.content.clone(),
+                    degraded: true,
+                    degraded_reason: Some(
+                        "grep_fallback: result from Ripgrep pattern search — \
+                         may not be the canonical definition. Verify with read_source_file."
+                            .to_owned(),
+                    ),
+                });
+            }
+        }
+        None
     }
 
     /// Core logic for the `read_with_deep_context` tool.
@@ -759,7 +802,7 @@ impl PathfinderServer {
         let mut text_parts = Vec::new();
         if degraded {
             text_parts.push(format!(
-                "Degraded analysis ({}) — results may be incomplete.",
+                "Degraded analysis ({}) — LSP unavailable — reference counts are UNRELIABLE. Do NOT trust zero as 'confirmed no callers'. Grep-based heuristic was used if available. Use search_codebase for manual verification.",
                 degraded_reason_cloned.as_deref().unwrap_or("unknown")
             ));
         }

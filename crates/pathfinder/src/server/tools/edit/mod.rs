@@ -19,12 +19,12 @@ use pathfinder_common::types::{SemanticPath, VersionHash};
 
 /// Result of the LSP validation step.
 pub(crate) struct ValidationOutcome {
-    validation: EditValidation,
-    skipped: bool,
-    skipped_reason: Option<String>,
+    pub(crate) validation: EditValidation,
+    pub(crate) skipped: bool,
+    pub(crate) skipped_reason: Option<String>,
     /// `true` when new errors were introduced and `ignore_validation_failures = false`.
     /// The caller must NOT write to disk in this case.
-    should_block: bool,
+    pub(crate) should_block: bool,
 }
 
 /// Parameter struct for [`finalize_edit`] to reduce parameter count from 9 to 2.

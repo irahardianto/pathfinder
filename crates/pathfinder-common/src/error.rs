@@ -299,11 +299,16 @@ impl PathfinderError {
                 serde_json::Value::Object(map)
             }
             Self::TextNotFound {
+                filepath,
+                old_text,
+                context_line,
                 actual_content,
                 closest_match,
-                ..
             } => {
                 let mut map = serde_json::Map::new();
+                map.insert("filepath".to_string(), serde_json::json!(filepath));
+                map.insert("old_text".to_string(), serde_json::json!(old_text));
+                map.insert("context_line".to_string(), serde_json::json!(context_line));
                 if let Some(content) = actual_content {
                     map.insert("actual_content".to_string(), serde_json::json!(content));
                 }
