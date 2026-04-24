@@ -1,0 +1,475 @@
+use super::text_edit::build_validation_outcome;
+use super::{FinalizeEditParams, ValidationOutcome};
+use crate::server::helpers::{io_error_data, pathfinder_to_error_data, require_symbol_target};
+use crate::server::types::{EditResponse, EditValidation};
+use pathfinder_common::error::{compute_lines_changed, PathfinderError};
+use pathfinder_common::types::{SemanticPath, VersionHash};
+use pathfinder_lsp::types::{FileChangeType, FileEvent};
+use pathfinder_lsp::LspError;
+use rmcp::handler::server::wrapper::Json;
+use rmcp::model::ErrorData;
+use std::path::Path;
+
+impl crate::server::PathfinderServer {
+    /// Read file and compute its version hash (for bare-file edit types).
+    pub(crate) async fn hash_file_content(
+        &self,
+        semantic_path: &SemanticPath,
+    ) -> Result<VersionHash, ErrorData> {
+        let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+        let bytes = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+        Ok(VersionHash::compute(&bytes))
+    }
+
+    /// Resolve hash for bare-file or full-range semantic paths.
+    pub(crate) async fn resolve_hash_for_full_or_bare(
+        &self,
+        semantic_path: &SemanticPath,
+    ) -> Result<VersionHash, ErrorData> {
+        if semantic_path.is_bare_file() {
+            self.hash_file_content(semantic_path).await
+        } else {
+            let (_, _, hash) = self
+                .surgeon
+                .resolve_full_range(self.workspace_root.path(), semantic_path)
+                .await
+                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+            Ok(hash)
+        }
+    }
+
+    /// Resolve hash for symbol-range paths (`insert_before`/`insert_after`).
+    pub(crate) async fn resolve_hash_for_symbol_range(
+        &self,
+        semantic_path: &SemanticPath,
+    ) -> Result<VersionHash, ErrorData> {
+        if semantic_path.is_bare_file() {
+            self.hash_file_content(semantic_path).await
+        } else {
+            let (_, _, hash) = self
+                .surgeon
+                .resolve_symbol_range(self.workspace_root.path(), semantic_path)
+                .await
+                .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+            Ok(hash)
+        }
+    }
+
+    /// Resolve the current on-disk `VersionHash` for the path targeted by a
+    /// `validate_only` call.
+    ///
+    /// Each edit type uses a different Surgeon method to locate the symbol,
+    /// so the resolution path differs. This helper centralises that dispatch
+    /// and returns the hash without performing the OCC comparison — that remains
+    /// the caller's responsibility.
+    pub(crate) async fn resolve_version_hash_for_edit_type(
+        &self,
+        semantic_path: &SemanticPath,
+        raw_path: &str,
+        edit_type: &str,
+    ) -> Result<VersionHash, ErrorData> {
+        match edit_type {
+            "replace_body" => {
+                require_symbol_target(semantic_path, raw_path)?;
+                let (_, _, hash) = self
+                    .surgeon
+                    .resolve_body_range(self.workspace_root.path(), semantic_path)
+                    .await
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+                Ok(hash)
+            }
+            "replace_full" => self.resolve_hash_for_full_or_bare(semantic_path).await,
+            "delete" => {
+                require_symbol_target(semantic_path, raw_path)?;
+                let (_, _, hash) = self
+                    .surgeon
+                    .resolve_full_range(self.workspace_root.path(), semantic_path)
+                    .await
+                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+                Ok(hash)
+            }
+            "insert_before" | "insert_after" => {
+                self.resolve_hash_for_symbol_range(semantic_path).await
+            }
+            unknown => {
+                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                    semantic_path: raw_path.to_owned(),
+                    reason: format!(
+                        "unsupported edit type: '{unknown}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
+                    ),
+                    edit_index: None,
+                    valid_edit_types: None,
+                };
+                Err(pathfinder_to_error_data(&err))
+            }
+        }
+    }
+
+    /// Run LSP Pull Diagnostics validation on a pending in-memory edit.
+    ///
+    /// # Flow
+    /// 1. Notify LSP of the original file via `didOpen`
+    /// 2. Snapshot pre-edit diagnostics via `textDocument/diagnostic`
+    /// 3. Notify LSP of the new content via `didChange`
+    /// 4. Snapshot post-edit diagnostics
+    /// 5. Diff pre vs post, returning introduced/resolved lists
+    ///
+    /// If `ignore_validation_failures = true`, always returns a non-blocking
+    /// `ValidationOutcome` even if new errors are introduced.
+    ///
+    /// Gracefully degrades to `validation_skipped` on all LSP errors.
+    pub(crate) fn lsp_error_to_skip_reason(e: &LspError) -> &'static str {
+        match e {
+            LspError::NoLspAvailable => "no_lsp",
+            LspError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
+                "lsp_not_on_path"
+            }
+            LspError::Io(_) => "lsp_start_failed",
+            LspError::ConnectionLost => "lsp_crash",
+            LspError::Timeout { .. } => "lsp_timeout",
+            LspError::UnsupportedCapability { .. } => "pull_diagnostics_unsupported",
+            LspError::Protocol(_) => "lsp_protocol_error",
+        }
+    }
+
+    /// Helper: Open LSP document and collect pre-edit diagnostics.
+    ///
+    /// Returns `Err` with a skip reason on any failure, calling `did_close` when needed.
+    pub(crate) async fn lsp_open_and_pre_diags(
+        &self,
+        workspace: &Path,
+        relative: &Path,
+        original_content: &str,
+    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, &'static str> {
+        // ── did_open (original content, version 1) ──
+        if let Err(e) = self
+            .lawyer
+            .did_open(workspace, relative, original_content)
+            .await
+        {
+            let skipped_reason = Self::lsp_error_to_skip_reason(&e);
+            let should_log = !matches!(
+                &e,
+                LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }
+            );
+
+            if should_log {
+                tracing::warn!(error = %e, "validation: did_open failed");
+            }
+            return Err(skipped_reason);
+        }
+
+        // ── pre-edit diagnostics ──
+        let mut pre_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
+            Ok(d) => d,
+            Err(LspError::UnsupportedCapability { .. }) => {
+                // LSP running but doesn't support Pull Diagnostics — close the document
+                let _ = self.lawyer.did_close(workspace, relative).await;
+                return Err("pull_diagnostics_unsupported");
+            }
+            Err(e) => {
+                let skipped_reason = Self::lsp_error_to_skip_reason(&e);
+                tracing::warn!(error = %e, "validation: pre-edit pull_diagnostics failed");
+                let _ = self.lawyer.did_close(workspace, relative).await;
+                return Err(skipped_reason);
+            }
+        };
+
+        // Attempt to augment with workspace diagnostics
+        match self
+            .lawyer
+            .pull_workspace_diagnostics(workspace, relative)
+            .await
+        {
+            Ok(workspace_diags) => pre_diags.extend(workspace_diags),
+            Err(LspError::UnsupportedCapability { .. } | LspError::NoLspAvailable) => {
+                // Ignore unsupported capabilities or no LSP and just proceed
+            }
+            Err(e) => {
+                // Timeout or protocol error pulling workspace diagnostics.
+                // It shouldn't block validation entirely if single-file passed,
+                // but we'll log it for observability.
+                tracing::warn!(error = %e, "validation: pre-edit pull_workspace_diagnostics failed, continuing with single-file diags");
+            }
+        }
+
+        Ok(pre_diags)
+    }
+
+    /// Helper: Apply LSP change and collect post-edit diagnostics.
+    ///
+    /// Returns `Err` with a skip reason on any failure, calling `did_close` when needed.
+    pub(crate) async fn lsp_change_and_post_diags(
+        &self,
+        workspace: &Path,
+        relative: &Path,
+        new_content: &str,
+    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, &'static str> {
+        // ── did_change (new content, version 2) ──
+        if let Err(e) = self
+            .lawyer
+            .did_change(workspace, relative, new_content, 2)
+            .await
+        {
+            let skipped_reason = Self::lsp_error_to_skip_reason(&e);
+            tracing::warn!(error = %e, "validation: did_change failed");
+            let _ = self.lawyer.did_close(workspace, relative).await;
+            return Err(skipped_reason);
+        }
+
+        // ── post-edit diagnostics ──
+        let mut post_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
+            Ok(d) => d,
+            Err(e) => {
+                let skipped_reason = Self::lsp_error_to_skip_reason(&e);
+                tracing::warn!(error = %e, "validation: post-edit pull_diagnostics failed");
+                let _ = self.lawyer.did_close(workspace, relative).await;
+                return Err(skipped_reason);
+            }
+        };
+
+        match self
+            .lawyer
+            .pull_workspace_diagnostics(workspace, relative)
+            .await
+        {
+            Ok(workspace_diags) => post_diags.extend(workspace_diags),
+            Err(LspError::UnsupportedCapability { .. } | LspError::NoLspAvailable) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "validation: post-edit pull_workspace_diagnostics failed, continuing with single-file diags");
+            }
+        }
+
+        Ok(post_diags)
+    }
+
+    /// Helper: Revert LSP state to original and close document (fire-and-forget).
+    pub(crate) async fn lsp_revert_and_close(
+        &self,
+        workspace: &Path,
+        relative: &Path,
+        original_content: &str,
+    ) {
+        // ── revert LSP state to original (fire-and-forget) ──
+        let _ = self
+            .lawyer
+            .did_change(workspace, relative, original_content, 3)
+            .await;
+
+        // ── close document to free LSP memory ──
+        let _ = self.lawyer.did_close(workspace, relative).await;
+    }
+
+    /// Run LSP Pull Diagnostics validation on a pending in-memory edit.
+    ///
+    /// # Flow
+    /// 1. Notify LSP of the original file via `didOpen`
+    /// 2. Snapshot pre-edit diagnostics via `textDocument/diagnostic`
+    /// 3. Notify LSP of the new content via `didChange`
+    /// 4. Snapshot post-edit diagnostics
+    /// 5. Diff pre vs post, returning introduced/resolved lists
+    ///
+    /// If `ignore_validation_failures = true`, always returns a non-blocking
+    /// `ValidationOutcome` even if new errors are introduced.
+    ///
+    /// Gracefully degrades to `validation_skipped` on all LSP errors.
+    pub(crate) async fn run_lsp_validation(
+        &self,
+        file_path: &Path,
+        original_content: &str,
+        new_content: &str,
+        ignore_validation_failures: bool,
+    ) -> ValidationOutcome {
+        let relative = file_path;
+        let workspace = self.workspace_root.path();
+
+        let return_skip = |reason: &str| -> ValidationOutcome {
+            let ext = relative.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let lang = pathfinder_lsp::client::language_id_for_extension(ext).unwrap_or("unknown");
+            tracing::debug!(
+                file = %relative.display(),
+                skip_reason = reason,
+                language = lang,
+                "validation skip"
+            );
+            ValidationOutcome {
+                validation: EditValidation::skipped(),
+                skipped: true,
+                skipped_reason: Some(reason.to_owned()),
+                should_block: false,
+            }
+        };
+
+        // Step 1: Open LSP document and collect pre-edit diagnostics
+        let pre_diags = match self
+            .lsp_open_and_pre_diags(workspace, relative, original_content)
+            .await
+        {
+            Ok(d) => d,
+            Err(reason) => return return_skip(reason),
+        };
+
+        // Step 2: Apply change and collect post-edit diagnostics
+        let post_diags = match self
+            .lsp_change_and_post_diags(workspace, relative, new_content)
+            .await
+        {
+            Ok(d) => d,
+            Err(reason) => {
+                // Clean up LSP state before returning
+                self.lsp_revert_and_close(workspace, relative, original_content)
+                    .await;
+                return return_skip(reason);
+            }
+        };
+
+        // Step 3: Revert LSP state to original and close document
+        self.lsp_revert_and_close(workspace, relative, original_content)
+            .await;
+
+        // ── diff diagnostics ──────────────────────
+        build_validation_outcome(
+            &pre_diags,
+            &post_diags,
+            ignore_validation_failures,
+            file_path,
+        )
+    }
+
+    /// Helper to perform the final TOCTOU check and write the modified file to disk.
+    /// Re-reads the file, ensures its current hash still matches `current_hash`,
+    /// then writes `new_bytes` to disk in-place.
+    pub(crate) async fn flush_edit_with_toctou(
+        &self,
+        semantic_path: &SemanticPath,
+        current_hash: &VersionHash,
+        source: &[u8],
+        new_bytes: &[u8],
+    ) -> Result<VersionHash, ErrorData> {
+        let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+
+        let disk_bytes = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("TOCTOU re-read failed: {e}")))?;
+        let disk_hash = VersionHash::compute(&disk_bytes);
+
+        if disk_hash != *current_hash {
+            let prior_str = String::from_utf8_lossy(source);
+            let late_str = String::from_utf8_lossy(&disk_bytes);
+            let delta = compute_lines_changed(&prior_str, &late_str);
+            let err = PathfinderError::VersionMismatch {
+                path: semantic_path.file_path.clone(),
+                current_version_hash: disk_hash.as_str().to_owned(),
+                lines_changed: Some(delta),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        // Use `tokio::fs::write` for in-place write (preserves inode, avoids
+        // rename-swap artifacts that would confuse file watchers).
+        tokio::fs::write(&absolute_path, new_bytes)
+            .await
+            .map_err(|e| io_error_data(format!("write failed: {e}")))?;
+
+        // Broadcast file change to LSP processes
+        if let Ok(uri) = url::Url::from_file_path(&absolute_path) {
+            let event = FileEvent {
+                uri: uri.to_string(),
+                change_type: FileChangeType::Changed,
+            };
+            if let Err(e) = self.lawyer.did_change_watched_files(vec![event]).await {
+                tracing::warn!(error = %e, "Failed to broadcast didChangeWatchedFiles on edit");
+            }
+        }
+
+        // Immediately evict this file from the AST cache so the next read
+        // re-parses from disk rather than returning the stale pre-edit AST.
+        // Without this, a sub-second write+read pair would still see the old
+        // symbol tree, causing SYMBOL_NOT_FOUND for newly inserted symbols.
+        self.surgeon.invalidate_cache(&semantic_path.file_path);
+
+        Ok(VersionHash::compute(new_bytes))
+    }
+
+    /// Helper function to perform LSP validation, TOCTOU check, and disk write.
+    /// This dries up the tail end of the edit tools.
+    pub(crate) async fn finalize_edit(
+        &self,
+        params: FinalizeEditParams<'_>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        let validate_start = std::time::Instant::now();
+        let original_str = std::str::from_utf8(params.source);
+        let new_str = std::str::from_utf8(&params.new_content);
+        let validation_outcome = match (original_str, new_str) {
+            (Ok(orig), Ok(new)) => {
+                self.run_lsp_validation(
+                    &params.semantic_path.file_path,
+                    orig,
+                    new,
+                    params.ignore_validation_failures,
+                )
+                .await
+            }
+            _ => ValidationOutcome {
+                validation: EditValidation::skipped(),
+                skipped: true,
+                skipped_reason: Some("utf8_error".to_owned()),
+                should_block: false,
+            },
+        };
+        let validate_ms = validate_start.elapsed().as_millis();
+
+        if validation_outcome.should_block {
+            let introduced = validation_outcome.validation.introduced_errors.clone();
+            let err = PathfinderError::ValidationFailed {
+                count: introduced.len(),
+                introduced_errors: introduced,
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        let flush_start = std::time::Instant::now();
+        let new_hash = self
+            .flush_edit_with_toctou(
+                params.semantic_path,
+                params.original_hash,
+                params.source,
+                &params.new_content,
+            )
+            .await?;
+        let flush_ms = flush_start.elapsed().as_millis();
+
+        // C6: Compute engines_used based on whether validation was actually performed
+        let engines_used = if validation_outcome.skipped {
+            vec!["tree-sitter"]
+        } else {
+            vec!["tree-sitter", "lsp"]
+        };
+
+        let duration_ms = params.start_time.elapsed().as_millis();
+        tracing::info!(
+            tool = params.tool_name,
+            semantic_path = %params.raw_semantic_path_str,
+            duration_ms,
+            resolve_ms = params.resolve_ms,
+            validate_ms,
+            flush_ms,
+            new_version_hash = new_hash.as_str(),
+            engines_used = ?engines_used,
+            ignore_validation_failures = params.ignore_validation_failures,
+            "{}: complete",
+            params.tool_name
+        );
+
+        Ok(Json(EditResponse {
+            success: true,
+            new_version_hash: Some(new_hash.as_str().to_owned()),
+            formatted: false,
+            validation: validation_outcome.validation,
+            validation_skipped: validation_outcome.skipped,
+            validation_skipped_reason: validation_outcome.skipped_reason,
+        }))
+    }
+}
