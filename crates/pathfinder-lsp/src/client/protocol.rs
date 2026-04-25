@@ -194,4 +194,88 @@ mod tests {
         dispatcher.cancel_all();
         assert!(dispatcher.pending.lock().unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn test_sequential_ids() {
+        let dispatcher = RequestDispatcher::new();
+        let (id1, _rx1) = dispatcher.register();
+        let (id2, _rx2) = dispatcher.register();
+        let (id3, _rx3) = dispatcher.register();
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+    }
+
+    #[test]
+    fn test_make_request_structure() {
+        let msg = RequestDispatcher::make_request(42, "textDocument/definition", &json!({"key": "val"}));
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert_eq!(msg["id"], 42);
+        assert_eq!(msg["method"], "textDocument/definition");
+        assert_eq!(msg["params"]["key"], "val");
+    }
+
+    #[test]
+    fn test_make_notification_structure() {
+        let msg = RequestDispatcher::make_notification("initialized", &json!({}));
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert!(msg.get("id").is_none(), "notifications must not have id");
+        assert_eq!(msg["method"], "initialized");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unmatched_id_ignored() {
+        let dispatcher = RequestDispatcher::new();
+        let (_id, mut rx) = dispatcher.register();
+
+        // Dispatch a response with a different ID
+        let response = json!({"jsonrpc": "2.0", "id": 999, "result": "wrong"});
+        dispatcher.dispatch_response(&response);
+
+        // The original pending entry should still be there
+        assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
+        // The receiver should not have been fulfilled
+        assert!(rx.try_recv().is_err(), "unmatched id should not deliver");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_all_sends_connection_lost() {
+        let dispatcher = RequestDispatcher::new();
+        let (_id1, rx1) = dispatcher.register();
+        let (_id2, rx2) = dispatcher.register();
+
+        dispatcher.cancel_all();
+
+        let result1 = rx1.await.expect("should receive");
+        let result2 = rx2.await.expect("should receive");
+        assert!(matches!(result1, Err(LspError::ConnectionLost)));
+        assert!(matches!(result2, Err(LspError::ConnectionLost)));
+    }
+
+    #[tokio::test]
+    async fn test_remove_drops_pending() {
+        let dispatcher = RequestDispatcher::new();
+        let (id, rx) = dispatcher.register();
+        assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
+
+        dispatcher.remove(id);
+        assert!(dispatcher.pending.lock().unwrap().is_empty());
+
+        // Receiver should error (sender dropped)
+        assert!(rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_string_id_ignored() {
+        let dispatcher = RequestDispatcher::new();
+        let (_id, mut rx) = dispatcher.register();
+
+        // LSP spec says IDs can be strings, but our implementation uses u64
+        let response = json!({"jsonrpc": "2.0", "id": "string-id", "result": null});
+        dispatcher.dispatch_response(&response);
+
+        // Should not match — our ID is numeric
+        assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
+        assert!(rx.try_recv().is_err());
+    }
 }

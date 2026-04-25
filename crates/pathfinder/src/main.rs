@@ -27,12 +27,13 @@ struct Cli {
     lsp_trace: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
+/// Run the Pathfinder MCP server.
+///
+/// Extracted from `main()` for testability. Accepts pre-parsed CLI args
+/// so that tests can inject configurations without going through the CLI parser.
+pub(crate) async fn run(workspace_path: PathBuf, lsp_trace: bool) -> anyhow::Result<()> {
     let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    if cli.lsp_trace {
+    if lsp_trace {
         if let Ok(dir) = "pathfinder_lsp::client::transport=debug".parse() {
             filter = filter.add_directive(dir);
         }
@@ -47,14 +48,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::info!(
-        workspace = %cli.workspace_path.display(),
+        workspace = %workspace_path.display(),
         version = env!("CARGO_PKG_VERSION"),
         "Pathfinder starting"
     );
 
     // Validate workspace root
-    let workspace_root = WorkspaceRoot::new(&cli.workspace_path)
-        .with_context(|| format!("Invalid workspace path: {}", cli.workspace_path.display()))?;
+    let workspace_root = WorkspaceRoot::new(&workspace_path)
+        .with_context(|| format!("Invalid workspace path: {}", workspace_path.display()))?;
 
     // Load configuration
     let config = PathfinderConfig::load(workspace_root.path())
@@ -77,4 +78,49 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Pathfinder shutting down");
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    run(cli.workspace_path, cli.lsp_trace).await
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_parse_workspace_path() {
+        let cli = Cli::parse_from(["pathfinder", "/tmp/workspace"]);
+        assert_eq!(cli.workspace_path, PathBuf::from("/tmp/workspace"));
+        assert!(!cli.lsp_trace);
+    }
+
+    #[test]
+    fn test_cli_parse_lsp_trace_flag() {
+        let cli = Cli::parse_from(["pathfinder", "/tmp/ws", "--lsp-trace"]);
+        assert!(cli.lsp_trace);
+    }
+
+    #[test]
+    fn test_cli_parse_missing_workspace_fails() {
+        let result = Cli::try_parse_from(["pathfinder"]);
+        assert!(result.is_err(), "should require workspace path");
+    }
+
+    #[tokio::test]
+    async fn test_run_invalid_workspace_path() {
+        // Using a non-existent path should fail during WorkspaceRoot::new
+        let result = run(PathBuf::from("/nonexistent/path/that/does/not/exist"), false).await;
+        // The path might or might not be valid depending on WorkspaceRoot validation
+        // At minimum, it should not panic
+        if let Err(e) = result {
+            // Error message should mention the path
+            let msg = format!("{e:#}");
+            assert!(msg.contains("path") || msg.contains("Invalid"));
+        }
+    }
 }

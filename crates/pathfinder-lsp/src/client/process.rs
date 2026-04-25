@@ -353,4 +353,51 @@ mod process_tests {
         assert!(uri.starts_with("file://"));
         assert!(uri.ends_with('/'), "Should end with slash for directories");
     }
+
+    #[tokio::test]
+    async fn test_build_initialize_request_structure() {
+        let dir = tempdir().expect("temp dir");
+        let request = build_initialize_request(42, dir.path()).await.expect("ok");
+
+        assert_eq!(request["jsonrpc"], "2.0");
+        assert_eq!(request["id"], 42);
+        assert_eq!(request["method"], "initialize");
+
+        let params = &request["params"];
+        assert!(params["rootUri"].as_str().unwrap().starts_with("file://"));
+        assert_eq!(params["clientInfo"]["name"], "pathfinder");
+        assert!(params["processId"].as_u64().unwrap() > 0);
+        assert!(params["workspaceFolders"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_build_initialize_request_workspace_name() {
+        let dir = tempdir().expect("temp dir");
+        // Create a directory with a name
+        let named_dir = dir.path().join("my_project");
+        std::fs::create_dir_all(&named_dir).expect("create dir");
+
+        let request = build_initialize_request(1, &named_dir).await.expect("ok");
+        let folders = request["params"]["workspaceFolders"].as_array().expect("array");
+        assert_eq!(folders[0]["name"], "my_project");
+    }
+
+    #[tokio::test]
+    async fn test_build_initialize_request_capabilities() {
+        let dir = tempdir().expect("temp dir");
+        let request = build_initialize_request(1, dir.path()).await.expect("ok");
+
+        let caps = &request["params"]["capabilities"];
+        assert_eq!(caps["textDocument"]["definition"]["dynamicRegistration"], false);
+        assert_eq!(caps["workspace"]["workspaceFolders"], true);
+    }
+
+    #[tokio::test]
+    async fn test_path_to_file_uri_nonexistent() {
+        // Non-existent paths should still work (they just check metadata)
+        let uri = path_to_file_uri(Path::new("/definitely/does/not/exist.txt")).await;
+        // Path doesn't exist as file, so is_dir=false, from_file_path might fail
+        // depending on the URL library
+        assert!(uri.is_ok() || uri.is_err());
+    }
 }

@@ -1200,4 +1200,351 @@ mod tests {
         assert_eq!(outgoing.len(), 1);
         assert_eq!(outgoing[0].file, "src/token.rs");
     }
+
+    // ── get_definition LSP error path ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_definition_lsp_error_returns_lsp_error() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Simulate an LSP protocol error (not NoLspAvailable, not None)
+        lawyer.set_goto_definition_result(Err("LSP protocol error".to_string()));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+
+        let result = server.get_definition_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected error but got Ok");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "LSP_ERROR");
+    }
+
+    #[tokio::test]
+    async fn test_get_definition_lsp_none_no_grep_fallback_returns_symbol_not_found() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // Default MockLawyer returns Ok(None) for goto_definition.
+        // MockScout returns empty results → no grep fallback.
+        let lawyer = Arc::new(MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected error but got Ok");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "SYMBOL_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_get_definition_grep_fallback_with_mock_scout() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // MockLawyer returns Ok(None) — triggers grep fallback
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // Use NoOpLawyer (NoLspAvailable path) + MockScout with results
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Write a file so search can find it
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/other.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/other.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn login() -> bool { true }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Ok(res) = result else {
+            panic!("expected Ok with grep fallback, got Err");
+        };
+        // Should return degraded result from grep
+        assert!(res.0.degraded);
+        assert_eq!(res.0.file, "src/other.rs");
+        assert!(res
+            .0
+            .degraded_reason
+            .as_ref()
+            .unwrap()
+            .contains("grep_fallback"));
+    }
+
+    // ── analyze_impact with empty hierarchy (confirmed zero callers) ───────
+
+    #[tokio::test]
+    async fn test_analyze_impact_empty_hierarchy_confirmed_zero() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Return empty items — LSP confirmed zero callers
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // NOT degraded — LSP was available and confirmed zero
+        assert!(!val.degraded);
+        assert_eq!(val.degraded_reason, None);
+        let incoming = val.incoming.as_ref().expect("must be Some");
+        let outgoing = val.outgoing.as_ref().expect("must be Some");
+        assert!(incoming.is_empty(), "confirmed zero callers");
+        assert!(outgoing.is_empty(), "confirmed zero callees");
+    }
+
+    // ── analyze_impact with LSP error on call_hierarchy_prepare ────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_lsp_error_degrades() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Simulate LSP protocol error
+        lawyer.push_prepare_call_hierarchy_result(Err("LSP crashed".to_string()));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Degraded due to LSP error
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
+    }
+
+    // ── read_with_deep_context with outgoing call error ───────────────────
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_outgoing_error_degrades() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        // Prepare succeeds
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        // But outgoing call fails
+        lawyer.push_outgoing_call_result(Err("outgoing failed".to_string()));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Degraded because outgoing call failed
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
+        assert!(val.dependencies.is_empty());
+    }
+
+    // ── read_with_deep_context with empty hierarchy (confirmed zero deps) ──
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_empty_hierarchy_zero_deps() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty items = LSP confirmed zero deps
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // NOT degraded — LSP confirmed zero
+        assert!(!val.degraded);
+        assert_eq!(val.degraded_reason, None);
+        assert!(val.dependencies.is_empty());
+    }
+
+    // ── analyze_impact BFS depth limiting ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_respects_max_depth() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Incoming: one caller that itself has a caller (depth 2 chain)
+        let caller_item = CallHierarchyItem {
+            name: "caller".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/caller.rs".into(),
+            line: 5,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: caller_item.clone(),
+            call_sites: vec![9],
+        }]));
+        // Second level incoming (would only be reached if max_depth > 1)
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "top_level".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/main.rs".into(),
+                line: 1,
+                column: 0,
+                data: None,
+            },
+            call_sites: vec![5],
+        }]));
+
+        // Outgoing: empty
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1, // Should stop after first level
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        let _incoming = val.incoming.as_ref().expect("must be Some");
+        // With max_depth=1, BFS processes the initial item at depth 0, finds caller at depth 1,
+        // but the second-level caller (depth 2) should NOT be included
+        // However depth_reached should be 1
+        assert_eq!(val.depth_reached, 1);
+    }
 }

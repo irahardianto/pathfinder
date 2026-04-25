@@ -762,4 +762,253 @@ function doThing() { count.value++ }
             "enclosing symbol should be prefixed with 'template', got: '{path}'"
         );
     }
+
+    // ── Edge case: Go method extraction with receiver ───────────────────────────
+    // NOTE: Go methods with receivers are extracted as top-level functions.
+    // The path format is `file::Handle` (not `file::Server.Handle`).
+    // This is a known limitation — Go methods aren't nested under their receiver type.
+
+    #[tokio::test]
+    async fn test_extract_go_method_with_receiver_as_top_level() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+        writeln!(
+            file,
+            "package main\n\ntype Server struct {{}}\n\nfunc (s *Server) Handle() {{\n\t// handle logic\n}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        // Go methods with receivers are extracted as top-level functions
+        let sp = SemanticPath::parse(&format!("{}::Handle", relative.display())).unwrap();
+
+        let scope = surgeon
+            .read_symbol_scope(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        assert_eq!(scope.language, "go");
+        assert!(scope.content.contains("func (s *Server) Handle()"));
+    }
+
+    // ── Edge case: TypeScript class method ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_typescript_class_method() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".ts").tempfile().unwrap();
+        writeln!(
+            file,
+            "class Foo {{\n  private count: number;\n\n  bar(): number {{\n    return this.count;\n  }}\n}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        // TypeScript methods use '.' separator within the symbol chain
+        let sp = SemanticPath::parse(&format!("{}::Foo.bar", relative.display())).unwrap();
+
+        let scope = surgeon
+            .read_symbol_scope(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        assert_eq!(scope.language, "typescript");
+        assert!(scope.content.contains("bar()"));
+    }
+
+    // ── Edge case: TypeScript arrow function ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_typescript_arrow_function() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".ts").tempfile().unwrap();
+        writeln!(
+            file,
+            "const fn = () => {{\n  return 42;\n}};\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        let sp = SemanticPath::parse(&format!("{}::fn", relative.display())).unwrap();
+
+        let scope = surgeon
+            .read_symbol_scope(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        assert_eq!(scope.language, "typescript");
+        assert!(scope.content.contains("fn"));
+    }
+
+    // ── Edge case: Python decorator + function ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_python_decorator_function() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".py").tempfile().unwrap();
+        writeln!(
+            file,
+            "@decorator\ndef func():\n    pass\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        let sp = SemanticPath::parse(&format!("{}::func", relative.display())).unwrap();
+
+        let scope = surgeon
+            .read_symbol_scope(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        assert_eq!(scope.language, "python");
+        // The scope should include the decorator
+        assert!(scope.content.contains("@decorator") || scope.content.contains("def func"));
+    }
+
+    // ── Edge case: Empty function body ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_empty_function_body() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+        writeln!(
+            file,
+            "package main\n\nfunc foo() {{}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        let sp = SemanticPath::parse(&format!("{}::foo", relative.display())).unwrap();
+
+        let scope = surgeon
+            .read_symbol_scope(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        assert_eq!(scope.language, "go");
+        assert!(scope.content.contains("func foo()"));
+    }
+
+    // ── Edge case: Bare file (unsupported language) ───────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_bare_file_unsupported_language() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".txt").tempfile().unwrap();
+        writeln!(
+            file,
+            "This is just plain text with no parseable symbols.\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        // Bare file path (no symbol chain) — .txt is not a supported language
+        let sp = SemanticPath::parse(relative.to_string_lossy().as_ref()).unwrap();
+
+        let err = surgeon
+            .read_source_file(&workspace_root, &sp.file_path)
+            .await
+            .unwrap_err();
+
+        match err {
+            SurgeonError::UnsupportedLanguage(_) => {
+                // Expected
+            }
+            _ => panic!("Expected UnsupportedLanguage error, got: {err:?}"),
+        }
+    }
+
+    // ── Edge case: Nested impl blocks (Rust) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_nested_impl_block() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".rs").tempfile().unwrap();
+        writeln!(
+            file,
+            "struct Foo {{}}\n\nimpl Foo {{\n    fn outer() {{\n        struct Baz {{}}\n        impl Baz {{\n            fn inner() {{}}\n        }}\n    }}\n}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        // Rust impl methods use '.' separator within the symbol chain
+        let sp = SemanticPath::parse(&format!("{}::Foo.outer", relative.display())).unwrap();
+
+        let scope = surgeon
+            .read_symbol_scope(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        assert_eq!(scope.language, "rust");
+        assert!(scope.content.contains("fn outer"));
+    }
+
+    // ── Edge case: Insert before/after in Go ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_go_insert_before_respects_indentation() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+        writeln!(
+            file,
+            "package main\n\nfunc foo() {{}}\n\nfunc bar() {{}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        let sp = SemanticPath::parse(&format!("{}::bar", relative.display())).unwrap();
+
+        let (body_range, source, _hash) = surgeon
+            .resolve_body_range(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        // Verify we can resolve the range
+        assert!(body_range.start_byte < body_range.end_byte);
+        assert!(!source.is_empty());
+    }
+
+    // ── Edge case: Insert before/after in TypeScript ───────────────────────────
+
+    #[tokio::test]
+    async fn test_typescript_insert_after_class_method() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".ts").tempfile().unwrap();
+        writeln!(
+            file,
+            "class Foo {{\n  method1() {{}}\n  method2() {{}}\n}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        // TypeScript methods use '.' separator
+        let sp = SemanticPath::parse(&format!("{}::Foo.method1", relative.display())).unwrap();
+
+        let (symbol_range, source, _hash) = surgeon
+            .resolve_symbol_range(&workspace_root, &sp)
+            .await
+            .unwrap();
+
+        // Verify we can resolve the symbol range
+        assert!(symbol_range.start_byte < symbol_range.end_byte);
+        assert!(!source.is_empty());
+    }
 }

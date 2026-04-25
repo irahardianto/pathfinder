@@ -815,4 +815,142 @@ mod tests {
         assert!(context_after.ends_with("... [TRUNCATED]"));
         assert!(context_after.len() < 1050);
     }
+
+    // ── Additional edge-case tests for coverage gaps ─────────────
+
+    #[tokio::test]
+    async fn test_search_column_offset() {
+        // Verify that the column field reflects the match position, not just 1
+        let ws = make_workspace(&[(
+            "src/main.rs",
+            "    pub fn hello() -> i32 { 42 }\n",
+        )]);
+        let scout = RipgrepScout::new();
+        let result = scout
+            .search(&params_for(&ws, "hello"))
+            .await
+            .expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        let m = &result.matches[0];
+        // "    pub fn hello" — 'hello' starts at column 12 (1-indexed)
+        assert_eq!(m.column, 12, "column should be 1-indexed position of match");
+    }
+
+    #[tokio::test]
+    async fn test_search_default_impl() {
+        // RipgrepScout::default() should behave identically to new()
+        let scout = RipgrepScout::default();
+        let ws = make_workspace(&[("src/main.rs", "find_default\n")]);
+        let result = scout
+            .search(&params_for(&ws, "find_default"))
+            .await
+            .expect("search should succeed");
+        assert_eq!(result.total_matches, 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_match_column_for_first_char() {
+        // Match at the very beginning of a line
+        let ws = make_workspace(&[("src/lib.rs", "fn main() {}\n")]);
+        let scout = RipgrepScout::new();
+        let result = scout
+            .search(&params_for(&ws, "fn main"))
+            .await
+            .expect("search should succeed");
+
+        assert_eq!(result.matches[0].column, 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_zero_context_lines() {
+        let ws = make_workspace(&[("src/main.rs", "line1\ntarget\nline3\n")]);
+        let scout = RipgrepScout::new();
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "target".to_owned(),
+            context_lines: 0,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        assert!(result.matches[0].context_before.is_empty());
+        assert!(result.matches[0].context_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_match_count_exceeds_max_across_files() {
+        // total_matches should reflect ALL matches found before truncation
+        let ws = make_workspace(&[
+            ("a.rs", "needle\nneedle\n"),
+            ("b.rs", "needle\nneedle\n"),
+            ("c.rs", "needle\nneedle\n"),
+        ]);
+        let scout = RipgrepScout::new();
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "needle".to_owned(),
+            max_results: 2,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 2, "should cap at max_results");
+        assert!(
+            result.total_matches >= 2,
+            "total_matches should reflect all found: {}",
+            result.total_matches
+        );
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn test_truncate_line_short() {
+        // Short lines should not be truncated
+        let result = truncate_line("hello", 1000);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_truncate_line_exact_boundary() {
+        // Line exactly at limit should not be truncated
+        let line = "a".repeat(1000);
+        let result = truncate_line(&line, 1000);
+        assert_eq!(result, line);
+    }
+
+    #[test]
+    fn test_truncate_line_over_boundary() {
+        let line = "a".repeat(1001);
+        let result = truncate_line(&line, 1000);
+        assert!(result.ends_with("... [TRUNCATED]"));
+        // The truncated portion should be at most 1000 chars + suffix
+        assert!(result.len() < line.len() + 20);
+        // The original content portion should be at most 1000 chars
+        let without_suffix = result.trim_end_matches("... [TRUNCATED]");
+        assert!(without_suffix.len() <= 1000);
+    }
+
+    #[test]
+    fn test_truncate_line_multibyte_char_boundary() {
+        // Ensure truncation respects UTF-8 char boundaries
+        let line = format!("{}{}", "x".repeat(999), "Ä".repeat(10)); // Ä is 2 bytes
+        let result = truncate_line(&line, 1000);
+        assert!(result.ends_with("... [TRUNCATED]"));
+        // Should not panic on char boundary
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_search_known_field_default_false() {
+        let ws = make_workspace(&[("src/main.rs", "find_known\n")]);
+        let scout = RipgrepScout::new();
+        let result = scout
+            .search(&params_for(&ws, "find_known"))
+            .await
+            .expect("search should succeed");
+
+        assert_eq!(result.matches[0].known, None);
+    }
 }

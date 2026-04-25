@@ -203,4 +203,85 @@ mod tests {
             other => panic!("expected Protocol error, got: {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn test_case_insensitive_content_length() {
+        // lowercase "content-length" header should also work
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "result": null});
+        let body = serde_json::to_vec(&msg).unwrap();
+        let framed = format!("content-length: {}\r\n\r\n", body.len());
+        let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+        buf.extend_from_slice(&body);
+
+        let mut reader = BufReader::new(buf.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_ok(), "lowercase header should parse: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_extra_headers_ignored() {
+        // Content-Type and other headers should be silently ignored
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "result": 42});
+        let body = serde_json::to_vec(&msg).unwrap();
+        let framed = format!(
+            "Content-Length: {}\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n",
+            body.len()
+        );
+        let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+        buf.extend_from_slice(&body);
+
+        let mut reader = BufReader::new(buf.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["result"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_content_length_value() {
+        let bad = b"Content-Length: not_a_number\r\n\r\n";
+        let mut reader = BufReader::new(bad.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Protocol(msg)) => {
+                assert!(msg.contains("invalid Content-Length"), "got: {msg}")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_json_body() {
+        let body = b"{not valid json}";
+        let framed = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+        buf.extend_from_slice(body);
+
+        let mut reader = BufReader::new(buf.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Protocol(msg)) => assert!(msg.contains("invalid JSON")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_message_format() {
+        // Verify the wire format produced by write_message
+        let mut writer: Vec<u8> = Vec::new();
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "test"});
+        write_message(&mut writer, &msg).await.expect("vec write should succeed");
+
+        // Should start with Content-Length header
+        let written = String::from_utf8(writer.clone()).expect("valid utf8");
+        assert!(written.starts_with("Content-Length: "));
+        // Should contain the double CRLF separator
+        assert!(written.contains("\r\n\r\n"));
+        // After the separator, should be valid JSON
+        let body_start = written.find("\r\n\r\n").unwrap() + 4;
+        let body: serde_json::Value =
+            serde_json::from_str(&written[body_start..]).expect("valid json body");
+        assert_eq!(body["id"], 1);
+    }
 }

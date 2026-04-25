@@ -1580,4 +1580,314 @@ mod tests {
             "exclude_glob must be forwarded to the scout"
         );
     }
+
+    // ── Server constructor tests (WP-5) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_with_all_engines_constructs_functional_server() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            Arc::new(pathfinder_lsp::MockLawyer::default()),
+        );
+
+        // Verify server functions — get_info should work
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "pathfinder");
+    }
+
+    #[tokio::test]
+    async fn test_with_engines_uses_no_op_lawyer() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a Rust file for surgeon to read
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/lib.rs"),
+            "fn hello() -> i32 { 1 }",
+        )
+        .unwrap();
+
+        let mock_surgeon = Arc::new(MockSurgeon::new());
+        mock_surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(pathfinder_common::types::SymbolScope {
+                content: "fn hello() -> i32 { 1 }".to_owned(),
+                start_line: 0,
+                end_line: 0,
+                version_hash: VersionHash::compute(b"fn hello() -> i32 { 1 }"),
+                language: "rust".to_owned(),
+            }));
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            mock_surgeon,
+        );
+
+        // Navigation with NoOpLawyer should degrade gracefully
+        let params = crate::server::types::GetDefinitionParams {
+            semantic_path: "src/lib.rs::hello".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        // Should fail because NoOpLawyer returns NoLspAvailable and no grep fallback match
+        assert!(result.is_err());
+    }
+
+    // ── file_ops edge case tests (WP-6) ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_file_broadcasts_watched_file_event() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            lawyer.clone(),
+        );
+
+        let params = crate::server::types::CreateFileParams {
+            filepath: "src/new_file.rs".to_owned(),
+            content: "fn new() {}".to_owned(),
+        };
+        let result = server.create_file_impl(params).await;
+        let res = result.expect("should succeed");
+        assert!(res.0.success);
+
+        // Verify the file was created
+        assert!(ws_dir.path().join("src/new_file.rs").exists());
+
+        // Verify watched file event was broadcast
+        assert_eq!(lawyer.watched_file_changes_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_file_broadcasts_watched_file_event() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+
+        // Create a file to delete
+        std::fs::write(ws_dir.path().join("to_delete.txt"), "content").unwrap();
+        let hash = VersionHash::compute(b"content");
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            lawyer.clone(),
+        );
+
+        let params = crate::server::types::DeleteFileParams {
+            filepath: "to_delete.txt".to_owned(),
+            base_version: hash.as_str().to_owned(),
+        };
+        let result = server.delete_file_impl(params).await;
+        let res = result.expect("should succeed");
+        assert!(res.0.success);
+
+        // Verify the file was deleted
+        assert!(!ws_dir.path().join("to_delete.txt").exists());
+
+        // Verify watched file event was broadcast
+        assert_eq!(lawyer.watched_file_changes_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_file_not_found() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            Arc::new(pathfinder_lsp::MockLawyer::default()),
+        );
+
+        let params = crate::server::types::DeleteFileParams {
+            filepath: "nonexistent.txt".to_owned(),
+            base_version: "sha256:any".to_owned(),
+        };
+        let result = server.delete_file_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected error");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "FILE_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_not_found() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            Arc::new(pathfinder_lsp::MockLawyer::default()),
+        );
+
+        let params = crate::server::types::ReadFileParams {
+            filepath: "missing.txt".to_owned(),
+            start_line: 1,
+            max_lines: 100,
+        };
+        let result = server.read_file_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected error");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "FILE_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_broadcasts_watched_file_event() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Write initial file
+        let initial_content = "initial content";
+        std::fs::write(ws_dir.path().join("config.toml"), initial_content).unwrap();
+        let hash = VersionHash::compute(initial_content.as_bytes());
+
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            lawyer.clone(),
+        );
+
+        let params = crate::server::types::WriteFileParams {
+            filepath: "config.toml".to_owned(),
+            base_version: hash.as_str().to_owned(),
+            content: Some("updated content".to_owned()),
+            replacements: None,
+        };
+        let result = server.write_file_impl(params).await;
+        assert!(result.is_ok(), "write should succeed");
+
+        // Verify content updated
+        let written = std::fs::read_to_string(ws_dir.path().join("config.toml")).unwrap();
+        assert_eq!(written, "updated content");
+
+        // Verify watched file event was broadcast
+        assert_eq!(lawyer.watched_file_changes_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_write_file_invalid_params_both_modes() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::write(ws_dir.path().join("test.txt"), "content").unwrap();
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            Arc::new(pathfinder_lsp::MockLawyer::default()),
+        );
+
+        // Both content and replacements set — invalid
+        let hash = VersionHash::compute(b"content");
+        let params = crate::server::types::WriteFileParams {
+            filepath: "test.txt".to_owned(),
+            base_version: hash.as_str().to_owned(),
+            content: Some("new".to_owned()),
+            replacements: Some(vec![crate::server::types::Replacement {
+                old_text: "a".to_string(),
+                new_text: "b".to_string(),
+            }]),
+        };
+        let result = server.write_file_impl(params).await;
+        assert!(result.is_err(), "should reject both modes");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_invalid_params_neither_mode() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::write(ws_dir.path().join("test.txt"), "content").unwrap();
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+            Arc::new(pathfinder_lsp::MockLawyer::default()),
+        );
+
+        // Neither content nor replacements — invalid
+        let hash = VersionHash::compute(b"content");
+        let params = crate::server::types::WriteFileParams {
+            filepath: "test.txt".to_owned(),
+            base_version: hash.as_str().to_owned(),
+            content: None,
+            replacements: None,
+        };
+        let result = server.write_file_impl(params).await;
+        assert!(result.is_err(), "should reject neither mode");
+    }
 }

@@ -296,4 +296,67 @@ mod tests {
         assert_eq!(full.len(), 1);
         assert_eq!(full[0].children.len(), 1, "Full should keep children");
     }
+
+    #[test]
+    fn test_render_symbol_tree_single_symbol() {
+        let syms = vec![SourceSymbol {
+            name: "main".to_string(),
+            semantic_path: "src/main.rs::main".to_string(),
+            kind: "Function".to_string(),
+            start_line: 1,
+            end_line: 45,
+            children: vec![],
+        }];
+        let tree = render_symbol_tree(&syms, "src/main.rs");
+        assert!(tree.contains("src/main.rs (1 symbols)"));
+        assert!(tree.contains("main [Function] L1-L45"));
+        assert!(tree.contains("src/main.rs::main"));
+    }
+
+    #[test]
+    fn test_render_symbol_tree_nested() {
+        let syms = vec![SourceSymbol {
+            name: "Config".to_string(),
+            semantic_path: "src/lib.rs::Config".to_string(),
+            kind: "Struct".to_string(),
+            start_line: 10,
+            end_line: 20,
+            children: vec![
+                SourceSymbol {
+                    name: "name".to_string(),
+                    semantic_path: "src/lib.rs::Config.name".to_string(),
+                    kind: "Field".to_string(),
+                    start_line: 11,
+                    end_line: 11,
+                    children: vec![],
+                },
+                SourceSymbol {
+                    name: "parse".to_string(),
+                    semantic_path: "src/lib.rs::Config.parse".to_string(),
+                    kind: "Method".to_string(),
+                    start_line: 13,
+                    end_line: 19,
+                    children: vec![],
+                },
+            ],
+        }];
+        let tree = render_symbol_tree(&syms, "src/lib.rs");
+        assert!(tree.contains("Config [Struct] L10-L20"));
+        assert!(tree.contains("name [Field] L11-L11"));
+        assert!(tree.contains("parse [Method] L13-L19"));
+    }
+
+    #[test]
+    fn test_truncate_content_no_truncation() {
+        let content = "line 1\nline 2\nline 3";
+        let result = truncate_content(content, 1, None);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_truncate_content_single_line() {
+        let content = "only line";
+        let result = truncate_content(content, 1, Some(1));
+        assert_eq!(result, "only line");
+    }
 }
