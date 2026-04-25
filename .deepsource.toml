@@ -1,0 +1,63 @@
+version = 1
+
+name = "pathfinder"
+
+# ──────────────────────────────────────────────
+# Analyzers
+# ──────────────────────────────────────────────
+
+[[analyzers]]
+name = "rust"
+enabled = true
+
+  [analyzers.meta]
+  # No need to set cargo_toml_path — workspace root Cargo.toml is at repo root,
+  # which is the default location DeepSource expects.
+  #
+  # If you ever add a non-standard layout, uncomment:
+  # cargo_toml_path = "./Cargo.toml"
+
+  # DeepSource's Rust analyzer runs its own static analysis (Rust-specific issues
+  # beyond what Clippy catches: anti-patterns, performance issues, type-safety).
+  # CI already enforces:
+  #   - cargo fmt --check
+  #   - cargo clippy -D warnings (with pedantic + unwrap_used = deny)
+  #   - cargo-deny (licenses, advisories, bans)
+  #   - CodeQL (Rust + Actions)
+  #   - OSV Scanner
+  #
+  # DeepSource complements these with different (often broader) checks.
+  # Initial run will likely surface duplicates — tune after first report.
+
+[[analyzers]]
+name = "test-coverage"
+enabled = true
+
+  [analyzers.meta]
+  # Required for the coverage upload step in CI:
+  #   ./bin/deepsource report --analyzer test-coverage --key rust --value-file lcov.info
+  # Without this analyzer enabled, uploaded coverage data is silently ignored.
+  language = "rust"
+
+# ──────────────────────────────────────────────
+# Transformers — auto-fix / auto-format tools
+# ──────────────────────────────────────────────
+
+# rustfmt disabled: CI already enforces formatting via `cargo fmt --all -- --check`.
+# Enabling the transformer would let DeepSource open format-only PRs that
+# conflict with the existing lint gate and developer workflow.
+[[transformers]]
+name = "rustfmt"
+enabled = false
+
+# ──────────────────────────────────────────────
+# Exclude patterns — paths to skip during analysis
+# ──────────────────────────────────────────────
+
+# target/ is auto-excluded by DeepSource for Rust projects, but be explicit
+# about other non-source directories.
+exclude_patterns = [
+  ".pi/**",
+  "docs/**",
+  "banner.jpeg",
+]
