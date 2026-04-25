@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// A standardized error type for Pathfinder operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PathfinderError {
     /// File path doesn't exist.
@@ -331,8 +332,11 @@ impl PathfinderError {
 /// Standard MCP error response format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
+    /// Error code identifying the type of error.
     pub error: String,
+    /// Human-readable message describing the error.
     pub message: String,
+    /// Additional details about the error in JSON format.
     pub details: serde_json::Value,
     /// Actionable recovery hint for the agent. Present on most error variants.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,9 +362,13 @@ pub fn compute_lines_changed(old_content: &str, new_content: &str) -> String {
 /// A diagnostic error reported by the LSP.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DiagnosticError {
+    /// The severity level of the diagnostic error.
     pub severity: u8,
+    /// The diagnostic error code.
     pub code: String,
+    /// The error message describing the diagnostic.
     pub message: String,
+    /// The file path related to the diagnostic.
     pub file: String,
 }
 

@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 /// as the authoritative signal for the current edit operation's actual LSP status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LspLanguageStatus {
+    /// Whether validation is enabled.
     pub validation: bool,
+    /// Reason explaining the validation status.
     pub reason: String,
 }
 
@@ -60,22 +62,31 @@ pub struct LspDiagnostic {
 /// A node in the call hierarchy (e.g. a function or method).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallHierarchyItem {
+    /// The name of the item (e.g., function or method).
     pub name: String,
+    /// The kind of the item (e.g., "function", "method").
     pub kind: String, // "function", "method", etc.
+    /// Additional details for the item.
     pub detail: Option<String>,
+    /// Relative file path representation.
     pub file: String, // Relative path representation
+    /// 1-indexed line where the item is located.
     pub line: u32,    // 1-indexed
+    /// 1-indexed column where the item is located.
     pub column: u32,  // 1-indexed
 
     // Internal generic LSP data needed for incoming/outgoing requests
     #[serde(default)]
+    /// Optional raw data for LSP call hierarchy requests.
     pub data: Option<serde_json::Value>,
 }
 
 /// Represents an incoming or outgoing call in the hierarchy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallHierarchyCall {
+    /// The call hierarchy item (caller or callee).
     pub item: CallHierarchyItem, // Caller (if incoming) or Callee (if outgoing)
+    /// Lines where calls occur (1-indexed).
     pub call_sites: Vec<u32>,    // 1-indexed lines where calls occur
 }
 
@@ -100,7 +111,10 @@ pub struct FileEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum FileChangeType {
+    /// File was created.
     Created = 1,
+    /// File was changed.
     Changed = 2,
+    /// File was deleted.
     Deleted = 3,
 }

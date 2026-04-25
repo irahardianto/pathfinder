@@ -80,6 +80,7 @@ impl fmt::Display for SemanticPath {
 /// Example: `AuthService.login` → `["AuthService", "login"]`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolChain {
+    /// The segments that make up the symbol chain.
     pub segments: Vec<Symbol>,
 }
 
@@ -113,7 +114,9 @@ impl fmt::Display for SymbolChain {
 /// Example: `login` or `login#2`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Symbol {
+    /// The name of the symbol.
     pub name: String,
+    /// The optional overload index of the symbol.
     pub overload_index: Option<u32>,
 }
 

@@ -318,7 +318,6 @@ pub struct BatchEdit {
     pub context_line: Option<u32>,
     /// Replacement text when using text targeting. Required when `old_text` is set.
     pub replacement_text: Option<String>,
-
     // ── Shared options ─────────────────────────────────────────────────────
     /// When `true`, collapses `\s+` to a single space before matching `old_text`.
     /// Useful for HTML/template contexts where indentation may be inconsistent.
@@ -346,8 +345,11 @@ pub struct ReplaceBatchParams {
 /// The response for `search_codebase`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SearchCodebaseResponse {
+    /// List of search matches.
     pub matches: Vec<pathfinder_search::SearchMatch>,
+    /// Total number of matches found.
     pub total_matches: usize,
+    /// Indicates if the match list was truncated.
     pub truncated: bool,
     /// Grouped output — populated when `group_by_file: true`.
     ///
@@ -355,8 +357,10 @@ pub struct SearchCodebaseResponse {
     /// unknown files) or minimal matches (for files in `known_files`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_groups: Option<Vec<SearchResultGroup>>,
+    /// Whether the search response is degraded.
     #[serde(default)]
     pub degraded: bool,
+    /// Reason for degradation, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
 }
@@ -397,11 +401,10 @@ pub struct SearchResultGroup {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub known_matches: Vec<GroupedKnownMatch>,
 }
-
 /// A single match within a `SearchResultGroup`.
 ///
 /// Omits `file` and `version_hash` (deduplicated at group level) to reduce
-/// token usage when many matches belong to the same file.
+'token usage when many matches belong to the same file.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct GroupedMatch {
     /// 1-indexed line number of the match.
@@ -424,11 +427,17 @@ pub struct GroupedMatch {
 /// The metadata embedded in `structured_content` for `get_repo_map`.
 #[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetRepoMapMetadata {
+    /// Technology stack of the repository.
     pub tech_stack: Vec<String>,
+    /// Number of files scanned.
     pub files_scanned: usize,
+    /// Number of files truncated.
     pub files_truncated: usize,
+    /// Number of files within the configured scope.
     pub files_in_scope: usize,
+    /// Percentage of files covered by the search.
     pub coverage_percent: u8,
+    /// Map of file paths to their version hashes.
     pub version_hashes: std::collections::HashMap<String, String>,
     /// Always `true` while visibility filtering is not yet implemented.
     /// Agents should treat all symbols as public regardless of `visibility` param.
@@ -473,30 +482,45 @@ pub struct ReadSymbolScopeMetadata {
     /// agents consuming `structured_content` directly have the full source
     /// without needing to inspect the main content array.
     pub content: String,
+    /// Starting line number of the symbol in the source.
     pub start_line: usize,
+    /// Ending line number of the symbol in the source.
     pub end_line: usize,
+    /// Version hash of the file containing the symbol.
     pub version_hash: String,
+    /// Programming language of the source symbol.
     pub language: String,
 }
 
 /// The response for `read_symbol_scope`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ReadSymbolScopeResponse {
+    /// The extracted symbol source code.
     pub content: String,
+    /// Starting line number of the symbol in the source.
     pub start_line: usize,
+    /// Ending line number of the symbol in the source.
     pub end_line: usize,
+    /// Version hash of the file containing the symbol.
     pub version_hash: String,
+    /// Programming language of the source symbol.
     pub language: String,
 }
 
 /// A symbol output for `read_source_file`.
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SourceSymbol {
+    /// Name of the symbol.
     pub name: String,
+    /// Semantic path of the symbol.
     pub semantic_path: String,
+    /// Kind of the symbol (e.g., function, struct).
     pub kind: String,
+    /// Starting line number of the symbol in the source.
     pub start_line: usize,
+    /// Ending line number of the symbol in the source.
     pub end_line: usize,
+    /// Child symbols nested within this symbol.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<SourceSymbol>,
 }
@@ -504,8 +528,11 @@ pub struct SourceSymbol {
 /// The metadata embedded in `structured_content` for `read_source_file`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSourceFileMetadata {
+    /// Version hash of the source file.
     pub version_hash: String,
+    /// Programming language of the source file.
     pub language: String,
+    /// Symbols extracted from the source file.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub symbols: Vec<SourceSymbol>,
 }
@@ -527,6 +554,7 @@ pub struct EditResponse {
     /// `true` when LSP validation was skipped (no language server available).
     #[serde(default)]
     pub validation_skipped: bool,
+}
     /// Machine-readable reason why validation was skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation_skipped_reason: Option<String>,
@@ -558,39 +586,53 @@ impl EditValidation {
 /// The response for `create_file`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CreateFileResponse {
+    /// Whether the file creation succeeded.
     pub success: bool,
+    /// Hash of the file version after creation.
     pub version_hash: String,
+    /// Results of validation after file creation.
     pub validation: ValidationResult,
 }
 
 /// The response for `delete_file`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct DeleteFileResponse {
+    /// Whether the file deletion succeeded.
     pub success: bool,
 }
 
 /// The metadata embedded in `structured_content` for `read_file`.
 #[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadFileMetadata {
+    /// First line number returned from the file.
     pub start_line: u32,
+    /// Number of lines returned.
     pub lines_returned: u32,
+    /// Total number of lines in the file.
     pub total_lines: u32,
+    /// Whether the output was truncated.
     pub truncated: bool,
+    /// Version hash of the file.
     pub version_hash: String,
+    /// Detected language of the file.
     pub language: String,
 }
 
 /// The metadata embedded in `structured_content` for `write_file`.
 #[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct WriteFileMetadata {
+    /// Whether the write operation succeeded.
     pub success: bool,
+    /// New version hash after writing.
     pub new_version_hash: String,
 }
 
 /// Validation result for edits.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ValidationResult {
+    /// Status of the validation (`"passed"`, `"failed"`, or `"skipped"`).
     pub status: String,
+    /// Errors that were introduced in the edits.
     pub introduced_errors: Vec<pathfinder_common::error::DiagnosticError>,
 }
 

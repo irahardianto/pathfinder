@@ -4,24 +4,34 @@ use tree_sitter::Language;
 /// Language node types used for extracting symbols from the AST.
 #[derive(Debug)]
 pub struct LanguageNodeTypes {
+    /// Node kinds that represent functions.
     pub function_kinds: &'static [&'static str],
+    /// Node kinds that represent classes.
     pub class_kinds: &'static [&'static str],
+    /// Node kinds that represent methods.
     pub method_kinds: &'static [&'static str],
     /// Node kinds that represent impl blocks (e.g. `impl_item` in Rust).
     /// When non-empty, the extractor will descent into these nodes and extract
     /// their child function items as `SymbolKind::Method` under the impl type.
     pub impl_kinds: &'static [&'static str],
+    /// Node kinds that represent constants.
     pub constant_kinds: &'static [&'static str],
 }
 
 /// The programming languages natively supported by the Surgeon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SupportedLanguage {
+    /// The Go programming language.
     Go,
+    /// The TypeScript programming language.
     TypeScript,
+    /// The TSX (TypeScript + JSX) file extension.
     Tsx,
+    /// The JavaScript programming language.
     JavaScript,
+    /// The Python programming language.
     Python,
+    /// The Rust programming language.
     Rust,
     /// Vue Single-File Component (Phase 1: <script> block parsed as TypeScript).
     Vue,
