@@ -19,6 +19,8 @@ pub mod error;
 /// Module for legal functionalities.
 /// The `lawyer` module providing legal-related functionality.
 pub mod lawyer;
+/// Mock implementation for testing.
+pub mod mock;
 /// The `no_op` module provides no-operation stub implementations.
 pub mod no_op;
 /// Module containing type definitions for the language server protocol.
