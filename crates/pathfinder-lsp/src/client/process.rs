@@ -15,7 +15,7 @@
 //!    child process blocks on its next log write — deadlocking the entire server.
 //!    Redirecting to null is the only safe option since we never consume LSP stderr.
 //!
-//! 2. **`prctl(PR_SET_PDEATHSIG, SIGKILL)` (Unix only)**: This asks the Linux
+//! 2. **`prctl(PR_SET_PDEATHSIG, SIGKILL)` (Linux only)**: This asks the Linux
 //!    kernel to deliver `SIGKILL` to the LSP child the instant Pathfinder's process
 //!    exits — for *any* reason including `SIGKILL`. Because `SIGKILL` cannot be
 //!    caught or deferred, Rust `Drop` handlers (including `kill_on_drop`) are *not*
@@ -167,7 +167,10 @@ fn spawn_lsp_child(
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
 
-    #[cfg(unix)]
+    // prctl(PR_SET_PDEATHSIG) is Linux-only — not available on macOS/BSD even
+    // though they are also "unix". Gate strictly on linux to avoid link errors
+    // when cross-compiling for aarch64-apple-darwin / x86_64-apple-darwin.
+    #[cfg(target_os = "linux")]
     unsafe {
         cmd.pre_exec(|| {
             let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
