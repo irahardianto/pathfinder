@@ -13,10 +13,7 @@ all-features = true
 # Vulnerabilities are denied by default in v0.19+
 # ──────────────────────────────────────────────
 [advisories]
-# Unmaintained crates: fail only for direct workspace deps
-unmaintained = "warn"
-# Unsound crates: fail only for direct workspace deps
-unsound = "warn"
+
 ignore = []
 
 # ──────────────────────────────────────────────
