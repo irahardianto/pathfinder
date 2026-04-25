@@ -170,13 +170,7 @@ fn spawn_lsp_child(
     // prctl(PR_SET_PDEATHSIG) is Linux-only — not available on macOS/BSD even
     // though they are also "unix". Gate strictly on linux to avoid link errors
     // when cross-compiling for aarch64-apple-darwin / x86_64-apple-darwin.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        cmd.pre_exec(|| {
-            let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            Ok(())
-        });
-    }
+    apply_linux_process_hardening(&mut cmd);
 
     let mut child_group = cmd.group_spawn().map_err(|e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -314,6 +308,23 @@ async fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
     .map_err(|()| LspError::Protocol(format!("cannot convert path to URI: {}", path.display())))?;
 
     Ok(uri.to_string())
+}
+
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn apply_linux_process_hardening(cmd: &mut tokio::process::Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_linux_process_hardening(_cmd: &mut tokio::process::Command) {
+    // prctl(PR_SET_PDEATHSIG) is Linux-only.
 }
 
 #[cfg(test)]
