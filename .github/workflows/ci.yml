@@ -153,7 +153,12 @@ jobs:
   # Detects whether the HEAD commit bumped any crate versions (i.e., the
   # release PR was just merged) and, if so, publishes to crates.io in
   # dependency order and creates a GitHub Release with an auto-generated
-  # changelog.  The GitHub Release creation is what triggers release-binaries.yml.
+  # changelog.
+  #
+  # IMPORTANT: GITHUB_TOKEN cannot trigger downstream workflow runs — releases
+  # created by GITHUB_TOKEN do NOT fire the on:release webhook.  We use
+  # RELEASE_GITHUB_TOKEN (a PAT with repo scope) so that the release event
+  # is attributed to a real user and release-binaries.yml is triggered.
   #
   # NOTE: this job does NOT depend on release-pr — they are sibling steps that
   # both run after tests pass.  release-pr creates the PR; release-publish acts
@@ -185,5 +190,5 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
