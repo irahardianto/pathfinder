@@ -6,12 +6,34 @@ on:
   release:
     types: [created]
 
-permissions:
-  contents: write
-
+# Only run for the main pathfinder-mcp crate release, not sub-crate releases.
+# release-plz tags sub-crates as "pathfinder-mcp-lsp-v*", "pathfinder-mcp-search-v*", etc.
+# We only want to build binaries for the top-level "pathfinder-mcp-v*" release.
 jobs:
+  check-tag:
+    name: Check Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+    steps:
+      - name: Check if this is a pathfinder-mcp release
+        id: check
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [[ "$TAG" == pathfinder-mcp-v* ]] && [[ "$TAG" != pathfinder-mcp-lsp-v* ]] && \
+             [[ "$TAG" != pathfinder-mcp-search-v* ]] && [[ "$TAG" != pathfinder-mcp-treesitter-v* ]] && \
+             [[ "$TAG" != pathfinder-mcp-common-v* ]]; then
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should-run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   upload-binaries:
     name: Upload Binaries
+    needs: check-tag
+    if: needs.check-tag.outputs.should-run == 'true'
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -43,7 +65,8 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew Tap
-    needs: upload-binaries
+    needs: [check-tag, upload-binaries]
+    if: needs.check-tag.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Homebrew Tap
@@ -60,14 +83,7 @@ jobs:
           set -euo pipefail
 
           # release-plz tags workspaces as "<crate-name>-v<semver>", e.g. pathfinder-mcp-v0.2.0
-          # Fall back to bare "v<semver>" or raw tag for manually-created releases.
-          if [[ "$TAG_NAME" == pathfinder-mcp-v* ]]; then
-            VERSION=${TAG_NAME#pathfinder-mcp-v}
-          elif [[ "$TAG_NAME" == v* ]]; then
-            VERSION=${TAG_NAME#v}
-          else
-            VERSION=$TAG_NAME
-          fi
+          VERSION=${TAG_NAME#pathfinder-mcp-v}
 
           URL_BASE="https://github.com/irahardianto/pathfinder/releases/download/${TAG_NAME}"
 
@@ -89,36 +105,35 @@ jobs:
 
           mkdir -p tap/Formula
 
-          # Use an unindented heredoc so the Ruby file has no leading whitespace.
-          cat > tap/Formula/pathfinder-mcp.rb << EOF
-class PathfinderMcp < Formula
-  desc "Pathfinder MCP Server"
-  homepage "https://github.com/irahardianto/pathfinder"
-  version "${VERSION}"
-
-  on_macos do
-    on_intel do
-      url "${URL_BASE}/pathfinder-mcp-x86_64-apple-darwin.tar.gz"
-      sha256 "${MAC_INTEL_SHA}"
-    end
-    on_arm do
-      url "${URL_BASE}/pathfinder-mcp-aarch64-apple-darwin.tar.gz"
-      sha256 "${MAC_ARM_SHA}"
-    end
-  end
-
-  on_linux do
-    on_intel do
-      url "${URL_BASE}/pathfinder-mcp-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "${LINUX_INTEL_SHA}"
-    end
-  end
-
-  def install
-    bin.install "pathfinder-mcp"
-  end
-end
-EOF
+          # Write the Ruby formula using printf to avoid heredoc YAML parsing issues.
+          # shellcheck disable=SC2016
+          printf 'class PathfinderMcp < Formula\n' > tap/Formula/pathfinder-mcp.rb
+          printf '  desc "Pathfinder MCP Server"\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  homepage "https://github.com/irahardianto/pathfinder"\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  version "%s"\n' "$VERSION" >> tap/Formula/pathfinder-mcp.rb
+          printf '\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  on_macos do\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '    on_intel do\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '      url "%s/pathfinder-mcp-x86_64-apple-darwin.tar.gz"\n' "$URL_BASE" >> tap/Formula/pathfinder-mcp.rb
+          printf '      sha256 "%s"\n' "$MAC_INTEL_SHA" >> tap/Formula/pathfinder-mcp.rb
+          printf '    end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '    on_arm do\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '      url "%s/pathfinder-mcp-aarch64-apple-darwin.tar.gz"\n' "$URL_BASE" >> tap/Formula/pathfinder-mcp.rb
+          printf '      sha256 "%s"\n' "$MAC_ARM_SHA" >> tap/Formula/pathfinder-mcp.rb
+          printf '    end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  on_linux do\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '    on_intel do\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '      url "%s/pathfinder-mcp-x86_64-unknown-linux-gnu.tar.gz"\n' "$URL_BASE" >> tap/Formula/pathfinder-mcp.rb
+          printf '      sha256 "%s"\n' "$LINUX_INTEL_SHA" >> tap/Formula/pathfinder-mcp.rb
+          printf '    end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  def install\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '    bin.install "pathfinder-mcp"\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf 'end\n' >> tap/Formula/pathfinder-mcp.rb
 
           cd tap
           git config user.name "github-actions[bot]"
