@@ -21,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
+      tag: ${{ steps.check.outputs.tag }}
     steps:
       - name: Check if this is a pathfinder-mcp release
         id: check
@@ -33,6 +34,7 @@ jobs:
           else
             echo "should-run=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
   upload-binaries:
     name: Upload Binaries
@@ -52,6 +54,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-tag.outputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -68,6 +72,7 @@ jobs:
           target: ${{ matrix.target }}
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.check-tag.outputs.tag }}
 
   update-homebrew:
     name: Update Homebrew Tap
