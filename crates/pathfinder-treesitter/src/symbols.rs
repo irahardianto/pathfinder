@@ -120,7 +120,7 @@ impl<'a> SymbolExtractionContext<'a> {
         let path = self.build_path(&unique_name, &suffix);
 
         let mut symbol = ExtractedSymbol {
-            name: unique_name.clone(),
+            name: unique_name,
             semantic_path: path.clone(),
             kind: sk,
             byte_range: child.byte_range(),

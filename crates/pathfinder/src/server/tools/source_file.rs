@@ -174,8 +174,8 @@ impl PathfinderServer {
                         let tree_text = render_symbol_tree(&syms, &params.filepath);
                         (Some(tree_text), syms)
                     }
-                    "full" => (Some(content.clone()), map_symbols(symbols)),
-                    _ => (Some(content.clone()), map_symbols_compact(symbols)), // "compact"
+                    "full" => (Some(content), map_symbols(symbols)),
+                    _ => (Some(content), map_symbols_compact(symbols)), // "compact"
                 };
 
                 let duration_ms = start.elapsed().as_millis();
