@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 # Intra-workspace
-pathfinder-common = { path = "../pathfinder-common", package = "pathfinder-mcp-common" }
+pathfinder-common = { version = "0.1.0", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
 
 # Tree-sitter core
 tree-sitter = "0.24"
