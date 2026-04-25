@@ -1,9 +1,12 @@
 [package]
-name = "pathfinder-common"
+name = "pathfinder-mcp-common"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 description = "Shared types, errors, and infrastructure for Pathfinder MCP server"
+
+[lib]
+name = "pathfinder_common"
 
 [lints]
 workspace = true

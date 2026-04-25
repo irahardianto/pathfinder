@@ -1080,17 +1080,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
 
 [[package]]
-name = "pathfinder"
+name = "pathfinder-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "clap",
  "futures",
- "pathfinder-common",
- "pathfinder-lsp",
- "pathfinder-search",
- "pathfinder-treesitter",
+ "pathfinder-mcp-common",
+ "pathfinder-mcp-lsp",
+ "pathfinder-mcp-search",
+ "pathfinder-mcp-treesitter",
  "rmcp",
  "schemars",
  "serde",
@@ -1103,7 +1103,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pathfinder-common"
+name = "pathfinder-mcp-common"
 version = "0.1.0"
 dependencies = [
  "ignore",
@@ -1120,13 +1120,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "pathfinder-lsp"
+name = "pathfinder-mcp-lsp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "command-group",
  "libc",
- "pathfinder-common",
+ "pathfinder-mcp-common",
  "schemars",
  "serde",
  "serde_json",
@@ -1139,7 +1139,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pathfinder-search"
+name = "pathfinder-mcp-search"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -1148,7 +1148,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
- "pathfinder-common",
+ "pathfinder-mcp-common",
  "regex",
  "schemars",
  "serde",
@@ -1159,13 +1159,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "pathfinder-treesitter"
+name = "pathfinder-mcp-treesitter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "ignore",
  "lru",
- "pathfinder-common",
+ "pathfinder-mcp-common",
  "strsim",
  "tempfile",
  "thiserror",
