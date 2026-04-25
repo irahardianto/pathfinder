@@ -56,7 +56,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.check-tag.outputs.tag }}
 
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Homebrew Tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: irahardianto/homebrew-pathfinder
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
