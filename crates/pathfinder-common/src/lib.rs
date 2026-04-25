@@ -21,6 +21,7 @@ pub mod git;
 pub mod indent;
 /// Module for normalization utilities.
 pub mod normalize;
-/// Module for sandbox functionality.
 /// Sandbox module.
 pub mod sandbox;
+/// Domain types used across Pathfinder crates.
+pub mod types;
