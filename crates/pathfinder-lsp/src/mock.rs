@@ -307,7 +307,7 @@ impl Lawyer for MockLawyer {
         _line: u32,
         _column: u32,
     ) -> Result<Vec<CallHierarchyItem>, LspError> {
-        Self::pop_queued_result(&self.prepare_call_hierarchy_results).unwrap_or(Ok(vec![]))
+        Self::pop_queued_result(&self.prepare_call_hierarchy_results).unwrap_or_else(|| Ok(vec![]))
     }
 
     async fn call_hierarchy_incoming(
@@ -315,7 +315,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
-        Self::pop_queued_result(&self.incoming_call_results).unwrap_or(Ok(vec![]))
+        Self::pop_queued_result(&self.incoming_call_results).unwrap_or_else(|| Ok(vec![]))
     }
 
     async fn call_hierarchy_outgoing(
@@ -323,7 +323,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
-        Self::pop_queued_result(&self.outgoing_call_results).unwrap_or(Ok(vec![]))
+        Self::pop_queued_result(&self.outgoing_call_results).unwrap_or_else(|| Ok(vec![]))
     }
 
     async fn did_open(
@@ -382,7 +382,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Self::pop_queued_result(&self.pull_diagnostics_results).unwrap_or(Ok(vec![]))
+        Self::pop_queued_result(&self.pull_diagnostics_results).unwrap_or_else(|| Ok(vec![]))
     }
 
     async fn pull_workspace_diagnostics(
@@ -390,7 +390,7 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Self::pop_queued_result(&self.pull_workspace_diagnostics_results).unwrap_or(Ok(vec![]))
+        Self::pop_queued_result(&self.pull_workspace_diagnostics_results).unwrap_or_else(|| Ok(vec![]))
     }
 
     async fn range_formatting(
