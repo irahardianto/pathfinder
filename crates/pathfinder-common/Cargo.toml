@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 description = "Shared types, errors, and infrastructure for Pathfinder MCP server"
+repository = "https://github.com/irahardianto/pathfinder"
+homepage = "https://github.com/irahardianto/pathfinder"
+documentation = "https://docs.rs/pathfinder-mcp-common"
+keywords = ["mcp", "ai", "lsp", "code-intelligence"]
+categories = ["development-tools"]
 
 [lib]
 name = "pathfinder_common"

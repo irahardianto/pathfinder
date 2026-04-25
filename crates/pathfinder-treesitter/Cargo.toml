@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 description = "The Surgeon — Tree-sitter engine for AST-aware operations in Pathfinder"
+repository = "https://github.com/irahardianto/pathfinder"
+homepage = "https://github.com/irahardianto/pathfinder"
+documentation = "https://docs.rs/pathfinder-mcp-treesitter"
+keywords = ["mcp", "ai", "tree-sitter", "ast", "code-intelligence"]
+categories = ["development-tools", "parsing"]
 
 [lib]
 name = "pathfinder_treesitter"

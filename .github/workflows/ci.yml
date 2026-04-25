@@ -107,10 +107,17 @@ jobs:
         ./
 
   # ──────────────────────────────────────────────
-  # Release (main branch only)
+  # Release — Step 1: Open/update the release PR
+  #
+  # Runs only on pushes to main (not on PRs).
+  # Reads Git log since the last tag, bumps versions per Conventional Commits,
+  # and opens/refreshes a "release PR" for human review.
+  #
+  # The concurrency group serialises concurrent main-branch pushes so two
+  # release-plz runs never race against each other.
   # ──────────────────────────────────────────────
-  release:
-    name: Release
+  release-pr:
+    name: Open Release PR
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: [test, cargo-deny, osv-scanner]
     runs-on: ubuntu-latest
@@ -131,7 +138,7 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Run release-plz
+      - name: Run release-plz (release-pr)
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release-pr
@@ -139,6 +146,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+  # ──────────────────────────────────────────────
+  # Release — Step 2: Publish to crates.io + create GitHub Release
+  #
+  # Runs only on pushes to main (not on PRs).
+  # Detects whether the HEAD commit bumped any crate versions (i.e., the
+  # release PR was just merged) and, if so, publishes to crates.io in
+  # dependency order and creates a GitHub Release with an auto-generated
+  # changelog.  The GitHub Release creation is what triggers release-binaries.yml.
+  #
+  # NOTE: this job does NOT depend on release-pr — they are sibling steps that
+  # both run after tests pass.  release-pr creates the PR; release-publish acts
+  # on the PR once it is merged (a subsequent push to main).
+  # ──────────────────────────────────────────────
   release-publish:
     name: Publish Release
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -146,6 +166,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: release-plz-publish-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -157,7 +180,7 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Run release-plz
+      - name: Run release-plz (release)
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release

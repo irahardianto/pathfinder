@@ -1,0 +1,19 @@
+# release-plz configuration
+# https://release-plz.dev/docs/config
+#
+# release-plz processes the workspace and publishes crates in dependency order
+# automatically. This file adds per-crate overrides and global defaults.
+
+[workspace]
+# Allow release-plz to create/update the release PR and publish releases.
+# All crates in the workspace are published to crates.io unless overridden below.
+
+# Use Conventional Commits to determine version bumps:
+#   fix:             → patch bump  (0.1.0 → 0.1.1)
+#   feat:            → minor bump  (0.1.0 → 0.2.0)
+#   BREAKING CHANGE: → major bump  (0.1.0 → 1.0.0)
+git_release_enable = true
+git_tag_enable = true
+
+# Include a changelog in each GitHub Release body.
+release_commits = "conventional_commits"
