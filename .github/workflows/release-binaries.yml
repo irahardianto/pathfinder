@@ -5,6 +5,12 @@ name: Release Binaries
 on:
   release:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to build (e.g. pathfinder-mcp-v0.1.1)"
+        required: true
+        type: string
 
 # Only run for the main pathfinder-mcp crate release, not sub-crate releases.
 # release-plz tags sub-crates as "pathfinder-mcp-lsp-v*", "pathfinder-mcp-search-v*", etc.
@@ -19,7 +25,7 @@ jobs:
       - name: Check if this is a pathfinder-mcp release
         id: check
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ github.event.release.tag_name || inputs.tag_name }}"
           if [[ "$TAG" == pathfinder-mcp-v* ]] && [[ "$TAG" != pathfinder-mcp-lsp-v* ]] && \
              [[ "$TAG" != pathfinder-mcp-search-v* ]] && [[ "$TAG" != pathfinder-mcp-treesitter-v* ]] && \
              [[ "$TAG" != pathfinder-mcp-common-v* ]]; then
@@ -78,7 +84,7 @@ jobs:
 
       - name: Generate and Push Formula
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.tag_name }}
         run: |
           set -euo pipefail
 
