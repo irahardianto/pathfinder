@@ -12,6 +12,9 @@ on:
         required: true
         type: string
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 # Only run for the main pathfinder-mcp crate release, not sub-crate releases.
 # release-plz tags sub-crates as "pathfinder-mcp-lsp-v*", "pathfinder-mcp-search-v*", etc.
 # We only want to build binaries for the top-level "pathfinder-mcp-v*" release.
