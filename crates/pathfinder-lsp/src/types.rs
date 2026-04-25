@@ -71,9 +71,9 @@ pub struct CallHierarchyItem {
     /// Relative file path representation.
     pub file: String, // Relative path representation
     /// 1-indexed line where the item is located.
-    pub line: u32,    // 1-indexed
+    pub line: u32, // 1-indexed
     /// 1-indexed column where the item is located.
-    pub column: u32,  // 1-indexed
+    pub column: u32, // 1-indexed
 
     // Internal generic LSP data needed for incoming/outgoing requests
     #[serde(default)]
@@ -87,7 +87,7 @@ pub struct CallHierarchyCall {
     /// The call hierarchy item (caller or callee).
     pub item: CallHierarchyItem, // Caller (if incoming) or Callee (if outgoing)
     /// Lines where calls occur (1-indexed).
-    pub call_sites: Vec<u32>,    // 1-indexed lines where calls occur
+    pub call_sites: Vec<u32>, // 1-indexed lines where calls occur
 }
 
 impl LspDiagnostic {
