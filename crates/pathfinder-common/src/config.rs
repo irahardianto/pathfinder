@@ -188,12 +188,14 @@ impl Default for ValidationConfig {
 /// Configuration loading errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// Error when reading the configuration file fails.
     #[error("failed to read config file {}: {source}", path.display())]
     ReadFailed {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
 
+    /// Error when parsing the configuration file fails.
     #[error("failed to parse config file {}: {source}", path.display())]
     ParseFailed {
         path: std::path::PathBuf,
@@ -211,6 +213,7 @@ fn default_idle_timeout() -> u64 {
 
 fn default_max_results() -> usize {
     50
+}
 }
 
 fn default_filter_mode() -> String {

@@ -9,9 +9,13 @@
 //! - [`MockScout`] — test double for unit testing consumers
 //! - [`types`] — `SearchParams`, `SearchMatch`, `SearchResult`
 
+/// Mock module for testing purposes
 pub mod mock;
+/// The `ripgrep` module provides functionality for fast text searching using the ripgrep engine.
 pub mod ripgrep;
+/// Public module for searcher functionality.
 pub mod searcher;
+/// Module containing type definitions
 pub mod types;
 
 pub use mock::MockScout;

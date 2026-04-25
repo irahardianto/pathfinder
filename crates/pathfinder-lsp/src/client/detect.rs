@@ -112,6 +112,7 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
     None
 }
 
+/// Detect available language servers for the given workspace root and configuration.
 #[allow(clippy::missing_errors_doc)]
 pub async fn detect_languages(
     workspace_root: &Path,

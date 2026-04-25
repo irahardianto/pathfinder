@@ -12,11 +12,16 @@
 //! - [`mock`]   — `MockLawyer` test double
 //! - [`no_op`]  — `NoOpLawyer` for graceful degradation when no LSP is configured
 
+/// Client module.
 pub mod client;
+/// Module for error handling and definitions.
 pub mod error;
+/// Module for legal functionalities.
+/// The `lawyer` module providing legal-related functionality.
 pub mod lawyer;
-pub mod mock;
+/// The `no_op` module provides no-operation stub implementations.
 pub mod no_op;
+/// Module containing type definitions for the language server protocol.
 pub mod types;
 
 pub use client::LspClient;

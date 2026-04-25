@@ -71,16 +71,23 @@ impl<'a> SkeletonConfig<'a> {
 /// The result of a `get_repo_map` generation.
 #[derive(Debug, Clone)]
 pub struct RepoMapResult {
+    /// The repository skeleton representation.
     pub skeleton: String,
+    /// List of technologies used in the repository.
     pub tech_stack: Vec<String>,
+    /// Number of files scanned during repository mapping.
     pub files_scanned: usize,
+    /// Number of files truncated during processing.
     pub files_truncated: usize,
+    /// Number of files considered in scope.
     pub files_in_scope: usize,
+    /// Percentage of files covered in the mapping process.
     pub coverage_percent: u8,
+    /// Mapping of version identifiers to their corresponding hashes.
     pub version_hashes: HashMap<String, String>,
 }
 
-/// Token counting heuristic
+/// Estimate the number of tokens for the given text.
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,

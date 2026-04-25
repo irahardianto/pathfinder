@@ -24,13 +24,21 @@ pub struct ExtractedSymbol {
 /// The type of an AST symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
+    /// A standalone function.
     Function,
+    /// A method associated with a class or impl block.
     Method,
+    /// A class declaration.
     Class,
+    /// A struct declaration.
     Struct,
+    /// An implementation block (`impl`).
     Impl,
+    /// A constant value.
     Constant,
+    /// An interface declaration.
     Interface,
+    /// An enumeration.
     Enum,
     /// A Vue SFC zone container (`template` or `style`).
     ///

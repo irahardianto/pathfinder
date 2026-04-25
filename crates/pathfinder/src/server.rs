@@ -14,8 +14,8 @@
 
 mod helpers;
 mod tools;
+/// Module containing type definitions.
 pub mod types;
-
 #[allow(clippy::wildcard_imports)]
 use types::*;
 

@@ -11,23 +11,38 @@ use std::sync::Mutex;
 /// Records method calls and returns pre-configured results.
 #[derive(Debug, Default)]
 pub struct MockSurgeon {
+    /// Pre-configured return values for reading symbol scopes.
+    /// Each call pops the next result in sequence.
     pub read_symbol_scope_results: Mutex<Vec<Result<SymbolScope, SurgeonError>>>,
     #[allow(clippy::type_complexity)]
+    /// Pre-configured return values for reading source files.
+    /// Each call pops the next result in sequence.
     pub read_source_file_results:
         Mutex<Vec<Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError>>>,
+    /// Pre-configured return values for extracting symbols.
+    /// Each call pops the next result in sequence.
     pub extract_symbols_results: Mutex<Vec<Result<Vec<ExtractedSymbol>, SurgeonError>>>,
+    /// Pre-configured return values for finding enclosing symbols.
+    /// Each call pops the next result in sequence.
     pub enclosing_symbol_results: Mutex<Vec<Result<Option<String>, SurgeonError>>>,
+    /// Pre-configured return values for generating repository skeletons.
+    /// Each call pops the next result in sequence.
     pub generate_skeleton_results: Mutex<Vec<Result<crate::repo_map::RepoMapResult, SurgeonError>>>,
     #[allow(clippy::type_complexity)]
+    /// Pre-configured return values for resolving body ranges.
+    /// Each call pops the next result in sequence.
     pub resolve_body_range_results:
         Mutex<Vec<Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>>>,
     #[allow(clippy::type_complexity)]
+    /// Pre-configured return values for resolving full ranges.
+    /// Each call pops the next result in sequence.
     pub resolve_full_range_results:
         Mutex<Vec<Result<(FullRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>>>,
     #[allow(clippy::type_complexity)]
+    /// Pre-configured return values for resolving symbol ranges.
+    /// Each call pops the next result in sequence.
     pub resolve_symbol_range_results:
         Mutex<Vec<Result<(SymbolRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>>>,
-
     /// Pre-configured return values for `node_type_at_position`.
     /// Each call pops the next value (FIFO). Defaults to returning `"code"` when empty.
     pub node_type_at_position_results: Mutex<Vec<Result<String, SurgeonError>>>,
@@ -47,6 +62,7 @@ pub struct MockSurgeon {
 }
 
 impl MockSurgeon {
+    /// Creates a new `MockSurgeon`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
