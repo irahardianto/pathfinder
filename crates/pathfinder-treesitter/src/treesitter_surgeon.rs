@@ -163,7 +163,7 @@ impl TreeSitterSurgeon {
 
             if let Some(line_bytes) = source.get(line_start..end_byte) {
                 if let Ok(full_str) = std::str::from_utf8(line_bytes) {
-                    if let Some(line) = full_str.lines().next() {
+                    if let Some(line) = full_str.split('\n').next() {
                         return line.len() - line.trim_start().len();
                     }
                 }

@@ -117,12 +117,12 @@ impl MockLawyer {
         let mut guard = mutex
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.first() {
-            Some(_) => match guard.remove(0) {
-                Ok(item) => Some(Ok(item)),
-                Err(msg) => Some(Err(LspError::Protocol(msg))),
-            },
-            None => None,
+        if guard.is_empty() {
+            return None;
+        }
+        match guard.remove(0) {
+            Ok(item) => Some(Ok(item)),
+            Err(msg) => Some(Err(LspError::Protocol(msg))),
         }
     }
 

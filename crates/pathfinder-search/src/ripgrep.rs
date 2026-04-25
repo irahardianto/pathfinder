@@ -359,7 +359,7 @@ impl RipgrepScout {
 
 impl Default for RipgrepScout {
     fn default() -> Self {
-        Self::new()
+        Self
     }
 }
 

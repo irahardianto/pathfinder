@@ -33,9 +33,7 @@ pub fn strip_markdown_fences(input: &str) -> &str {
     }
 
     // Strip the optional language tag on the opening line
-    let after_lang = after_open
-        .find('\n')
-        .map_or("", |pos| &after_open[pos + 1..]);
+    let after_lang = after_open.split_once('\n').map_or("", |(_, rest)| rest);
 
     // Strip the closing ```
     let Some(body) = after_lang.strip_suffix("```") else {

@@ -86,11 +86,11 @@ impl Scout for MockScout {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn params() -> SearchParams {
+        let temp = tempfile::tempdir().expect("create tempdir");
         SearchParams {
-            workspace_root: PathBuf::from("/tmp"),
+            workspace_root: temp.path().to_path_buf(),
             query: "test".to_owned(),
             ..Default::default()
         }

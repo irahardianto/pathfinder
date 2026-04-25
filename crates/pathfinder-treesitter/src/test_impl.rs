@@ -10,6 +10,5 @@ fn test_enclosing_symbol_rust_impl() {
     let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
     
     let found = find_enclosing_symbol(&syms, 4); // "        // here\n"
-    println!("found: {:?}", found);
     assert_eq!(found.as_deref(), Some("MyStruct.method"));
 }
