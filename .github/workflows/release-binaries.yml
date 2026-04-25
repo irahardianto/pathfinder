@@ -72,7 +72,7 @@ jobs:
           target: ${{ matrix.target }}
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ needs.check-tag.outputs.tag }}
+          ref: refs/tags/${{ needs.check-tag.outputs.tag }}
 
   update-homebrew:
     name: Update Homebrew Tap
