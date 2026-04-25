@@ -404,7 +404,7 @@ pub struct SearchResultGroup {
 /// A single match within a `SearchResultGroup`.
 ///
 /// Omits `file` and `version_hash` (deduplicated at group level) to reduce
-'token usage when many matches belong to the same file.
+/// token usage when many matches belong to the same file.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct GroupedMatch {
     /// 1-indexed line number of the match.
@@ -554,7 +554,6 @@ pub struct EditResponse {
     /// `true` when LSP validation was skipped (no language server available).
     #[serde(default)]
     pub validation_skipped: bool,
-}
     /// Machine-readable reason why validation was skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation_skipped_reason: Option<String>,

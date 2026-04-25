@@ -214,7 +214,6 @@ fn default_idle_timeout() -> u64 {
 fn default_max_results() -> usize {
     50
 }
-}
 
 fn default_filter_mode() -> String {
     "code_only".to_owned()
