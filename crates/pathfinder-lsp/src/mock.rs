@@ -390,7 +390,8 @@ impl Lawyer for MockLawyer {
         _workspace_root: &Path,
         _file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Self::pop_queued_result(&self.pull_workspace_diagnostics_results).unwrap_or_else(|| Ok(vec![]))
+        Self::pop_queued_result(&self.pull_workspace_diagnostics_results)
+            .unwrap_or_else(|| Ok(vec![]))
     }
 
     async fn range_formatting(

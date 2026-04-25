@@ -310,7 +310,6 @@ async fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
     Ok(uri.to_string())
 }
 
-
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn apply_linux_process_hardening(cmd: &mut tokio::process::Command) {
