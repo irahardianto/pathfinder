@@ -1163,6 +1163,7 @@ name = "pathfinder-mcp-treesitter"
 version = "0.1.1"
 dependencies = [
  "async-trait",
+ "futures",
  "ignore",
  "lru",
  "pathfinder-mcp-common",
