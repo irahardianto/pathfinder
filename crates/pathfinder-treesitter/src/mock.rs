@@ -47,17 +47,26 @@ pub struct MockSurgeon {
     /// Each call pops the next value (FIFO). Defaults to returning `"code"` when empty.
     pub node_type_at_position_results: Mutex<Vec<Result<String, SurgeonError>>>,
 
-    // Call history
+    // ── Call history (for assertions in tests) ──────────────────
+    /// Recorded `(workspace_root, semantic_path)` arguments for each `read_symbol_scope` call.
     pub read_symbol_scope_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    /// Recorded `(workspace_root, file_path)` arguments for each `read_source_file` call.
     pub read_source_file_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
+    /// Recorded `(workspace_root, file_path)` arguments for each `extract_symbols` call.
     pub extract_symbols_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
+    /// Recorded `(workspace_root, file_path, line)` arguments for each `enclosing_symbol` call.
     pub enclosing_symbol_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
+    /// Recorded arguments for each `generate_skeleton` call.
     #[allow(clippy::type_complexity)]
     pub generate_skeleton_calls:
         Mutex<Vec<(PathBuf, PathBuf, crate::repo_map::SkeletonConfig<'static>)>>,
+    /// Recorded `(workspace_root, semantic_path)` arguments for each `resolve_body_range` call.
     pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    /// Recorded `(workspace_root, semantic_path)` arguments for each `resolve_full_range` call.
     pub resolve_full_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    /// Recorded `(workspace_root, semantic_path)` arguments for each `resolve_symbol_range` call.
     pub resolve_symbol_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    /// Recorded `(workspace_root, file_path, line, column)` arguments for each `node_type_at_position` call.
     pub node_type_at_position_calls: Mutex<Vec<(PathBuf, PathBuf, usize, usize)>>,
 }
 
