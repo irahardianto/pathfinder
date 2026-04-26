@@ -44,6 +44,7 @@ pub(crate) struct FinalizeEditParams<'a> {
 ///
 /// Passed to [`PathfinderServer::resolve_insert_position`] to distinguish
 /// `insert_before` (start of symbol) from `insert_after` (end of symbol).
+#[derive(Clone, Copy)]
 pub(crate) enum InsertEdge {
     /// Insert at `symbol_range.start_byte` (before the symbol) or file offset 0.
     Before,

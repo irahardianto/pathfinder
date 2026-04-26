@@ -486,6 +486,8 @@ impl crate::server::PathfinderServer {
     }
 
     /// Extracted helper to resolve the new source content without writing to disk.
+    ///
+    /// Dispatches to specialized handlers per edit type to keep cyclomatic complexity low.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn resolve_edit_content(
         &self,
@@ -495,211 +497,278 @@ impl crate::server::PathfinderServer {
         new_code: Option<&str>,
     ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
         match edit_type {
-            "replace_body" => {
-                require_symbol_target(semantic_path, raw_semantic_path)?;
-                let new_code = new_code.unwrap_or_default();
-                let (body_range, source, current_hash) = self
-                    .surgeon
-                    .resolve_body_range(self.workspace_root.path(), semantic_path)
-                    .await
-                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+            "replace_body" => self.resolve_replace_body(semantic_path, raw_semantic_path, new_code).await,
+            "replace_full" => self.resolve_replace_full(semantic_path, new_code).await,
+            "insert_before" => self.resolve_insert(semantic_path, new_code, InsertEdge::Before).await,
+            "insert_after" => self.resolve_insert(semantic_path, new_code, InsertEdge::After).await,
+            "delete" => self.resolve_delete(semantic_path, raw_semantic_path).await,
+            unknown => Err(Self::unsupported_edit_type_error(raw_semantic_path, unknown)),
+        }
+    }
 
-                let normalized = pathfinder_common::normalize::normalize_for_body_replace(new_code);
-                let indented = pathfinder_common::indent::dedent_then_reindent(
-                    &normalized,
-                    body_range.body_indent_column,
-                );
-                let new_content =
-                    super::text_edit::build_body_replacement(&source, &body_range, &indented)?;
-                Ok((source, current_hash, new_content.as_bytes().to_vec()))
-            }
-            "replace_full" => {
-                let new_code = new_code.unwrap_or_default();
-                if semantic_path.is_bare_file() {
-                    let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
-                    let source = tokio::fs::read(&absolute_path)
-                        .await
-                        .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
-                    let current_hash = VersionHash::compute(&source);
-                    let new_bytes = new_code.as_bytes().to_vec();
+    /// Resolve a `replace_body` edit.
+    async fn resolve_replace_body(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        raw_semantic_path: &str,
+        new_code: Option<&str>,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        require_symbol_target(semantic_path, raw_semantic_path)?;
+        let new_code = new_code.unwrap_or_default();
+        let (body_range, source, current_hash) = self
+            .surgeon
+            .resolve_body_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
 
-                    if let Ok(new_str) = std::str::from_utf8(&new_bytes) {
-                        if let Some(lang) =
-                            pathfinder_treesitter::language::SupportedLanguage::detect(
-                                &semantic_path.file_path,
-                            )
-                        {
-                            match pathfinder_treesitter::parser::AstParser::parse_source(
-                                &semantic_path.file_path,
-                                lang,
-                                new_str.as_bytes(),
-                            ) {
-                                Ok(tree) => {
-                                    if tree.root_node().has_error() {
-                                        tracing::warn!(
-                                            file = %semantic_path.file_path.display(),
-                                            "replace_full: bare file content has parse errors"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "replace_full: tree-sitter error");
-                                }
-                            }
+        let normalized = pathfinder_common::normalize::normalize_for_body_replace(new_code);
+        let indented = pathfinder_common::indent::dedent_then_reindent(
+            &normalized,
+            body_range.body_indent_column,
+        );
+        let new_content =
+            super::text_edit::build_body_replacement(&source, &body_range, &indented)?;
+        Ok((source, current_hash, new_content.as_bytes().to_vec()))
+    }
+
+    /// Resolve a `replace_full` edit.
+    async fn resolve_replace_full(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        new_code: Option<&str>,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        let new_code = new_code.unwrap_or_default();
+        if semantic_path.is_bare_file() {
+            self.resolve_replace_full_bare_file(semantic_path, new_code).await
+        } else {
+            self.resolve_replace_full_symbol(semantic_path, new_code).await
+        }
+    }
+
+    /// Bare-file path for `replace_full`: reads file directly, no AST validation.
+    async fn resolve_replace_full_bare_file(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        new_code: &str,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        let absolute_path = self.workspace_root.resolve(&semantic_path.file_path);
+        let source = tokio::fs::read(&absolute_path)
+            .await
+            .map_err(|e| io_error_data(format!("failed to read file: {e}")))?;
+        let current_hash = VersionHash::compute(&source);
+        let new_bytes = new_code.as_bytes().to_vec();
+
+        if let Ok(new_str) = std::str::from_utf8(&new_bytes) {
+            if let Some(lang) =
+                pathfinder_treesitter::language::SupportedLanguage::detect(&semantic_path.file_path)
+            {
+                match pathfinder_treesitter::parser::AstParser::parse_source(
+                    &semantic_path.file_path,
+                    lang,
+                    new_str.as_bytes(),
+                ) {
+                    Ok(tree) => {
+                        if tree.root_node().has_error() {
+                            tracing::warn!(
+                                file = %semantic_path.file_path.display(),
+                                "replace_full: bare file content has parse errors"
+                            );
                         }
                     }
-                    Ok((std::sync::Arc::from(source), current_hash, new_bytes))
-                } else {
-                    let (full_range, source, current_hash) = self
-                        .surgeon
-                        .resolve_full_range(self.workspace_root.path(), semantic_path)
-                        .await
-                        .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                    let normalized = normalize_for_full_replace(new_code);
-                    let indented = dedent_then_reindent(&normalized, full_range.indent_column);
-
-                    let before = &source[..full_range.start_byte];
-                    let after = &source[full_range.end_byte..];
-
-                    let mut new_bytes =
-                        Vec::with_capacity(before.len() + indented.len() + after.len());
-                    new_bytes.extend_from_slice(before);
-                    new_bytes.extend_from_slice(indented.as_bytes());
-                    new_bytes.extend_from_slice(after);
-
-                    Ok((source, current_hash, new_bytes))
+                    Err(e) => {
+                        tracing::warn!(error = %e, "replace_full: tree-sitter error");
+                    }
                 }
-            }
-            "insert_before" => {
-                let new_code = new_code.unwrap_or_default();
-                let (insert_byte, indent_column, source, current_hash) = self
-                    .resolve_insert_position(semantic_path, InsertEdge::Before)
-                    .await?;
-
-                let normalized = normalize_for_full_replace(new_code);
-                let indented = dedent_then_reindent(&normalized, indent_column);
-
-                let before = &source[..insert_byte];
-                let after = &source[insert_byte..];
-
-                let sep = if before.ends_with(b"\n\n")
-                    || after.starts_with(b"\n\n")
-                    || (before.ends_with(b"\n") && after.starts_with(b"\n"))
-                {
-                    ""
-                } else if after.starts_with(b"\n") {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
-
-                let trailing = if indented.ends_with('\n') { "" } else { "\n" };
-
-                let mut new_bytes = Vec::with_capacity(
-                    before.len() + indented.len() + sep.len() + trailing.len() + after.len(),
-                );
-                new_bytes.extend_from_slice(before);
-                new_bytes.extend_from_slice(indented.as_bytes());
-                new_bytes.extend_from_slice(trailing.as_bytes());
-                new_bytes.extend_from_slice(sep.as_bytes());
-                new_bytes.extend_from_slice(after);
-
-                if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
-                    new_bytes = normalize_blank_lines(&new_bytes);
-                }
-
-                Ok((source, current_hash, new_bytes))
-            }
-            "insert_after" => {
-                let new_code = new_code.unwrap_or_default();
-                let (insert_byte, indent_column, source, current_hash) = self
-                    .resolve_insert_position(semantic_path, InsertEdge::After)
-                    .await?;
-
-                let normalized = normalize_for_full_replace(new_code);
-                let indented = dedent_then_reindent(&normalized, indent_column);
-
-                let before = &source[..insert_byte];
-                let after = &source[insert_byte..];
-
-                let before_sep = if before.ends_with(b"\n\n")
-                    || after.starts_with(b"\n\n")
-                    || (before.ends_with(b"\n") && after.starts_with(b"\n"))
-                {
-                    ""
-                } else if before.ends_with(b"\n") {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
-                let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
-
-                let mut new_bytes = Vec::with_capacity(
-                    before.len()
-                        + before_sep.len()
-                        + indented.len()
-                        + after_sep.len()
-                        + after.len(),
-                );
-                new_bytes.extend_from_slice(before);
-                new_bytes.extend_from_slice(before_sep.as_bytes());
-                new_bytes.extend_from_slice(indented.as_bytes());
-                new_bytes.extend_from_slice(after_sep.as_bytes());
-                new_bytes.extend_from_slice(after);
-
-                if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
-                    new_bytes = normalize_blank_lines(&new_bytes);
-                }
-
-                Ok((source, current_hash, new_bytes))
-            }
-            "delete" => {
-                require_symbol_target(semantic_path, raw_semantic_path)?;
-                let (full_range, source, current_hash) = self
-                    .surgeon
-                    .resolve_full_range(self.workspace_root.path(), semantic_path)
-                    .await
-                    .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
-
-                let before_end = strip_orphaned_doc_comment(&source, full_range.start_byte);
-                let mut b_end = before_end;
-                while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
-                    b_end -= 1;
-                }
-
-                let mut a_start = full_range.end_byte;
-                while a_start < source.len() && source[a_start].is_ascii_whitespace() {
-                    a_start += 1;
-                }
-
-                let before = &source[..b_end];
-                let after = &source[a_start..];
-
-                let sep = if before.is_empty() || after.is_empty() {
-                    b"\n" as &[u8]
-                } else {
-                    b"\n\n"
-                };
-
-                let mut new_bytes = Vec::with_capacity(before.len() + sep.len() + after.len());
-                new_bytes.extend_from_slice(before);
-                new_bytes.extend_from_slice(sep);
-                new_bytes.extend_from_slice(after);
-
-                Ok((source, current_hash, new_bytes))
-            }
-            unknown => {
-                let err = pathfinder_common::error::PathfinderError::InvalidTarget {
-                    semantic_path: raw_semantic_path.to_owned(),
-                    reason: format!(
-                        "unsupported edit type: '{unknown}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
-                    ),
-                    edit_index: None,
-                    valid_edit_types: None,
-                };
-                Err(crate::server::helpers::pathfinder_to_error_data(&err))
             }
         }
+        Ok((std::sync::Arc::from(source), current_hash, new_bytes))
+    }
+
+    /// Symbol-targeted path for `replace_full`: uses AST-aware range resolution.
+    async fn resolve_replace_full_symbol(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        new_code: &str,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        let (full_range, source, current_hash) = self
+            .surgeon
+            .resolve_full_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+        let normalized = normalize_for_full_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, full_range.indent_column);
+
+        let before = &source[..full_range.start_byte];
+        let after = &source[full_range.end_byte..];
+
+        let mut new_bytes = Vec::with_capacity(before.len() + indented.len() + after.len());
+        new_bytes.extend_from_slice(before);
+        new_bytes.extend_from_slice(indented.as_bytes());
+        new_bytes.extend_from_slice(after);
+
+        Ok((source, current_hash, new_bytes))
+    }
+
+    /// Resolve an `insert_before` or `insert_after` edit.
+    async fn resolve_insert(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        new_code: Option<&str>,
+        edge: InsertEdge,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        match edge {
+            InsertEdge::Before => self.resolve_insert_before(semantic_path, new_code).await,
+            InsertEdge::After => self.resolve_insert_after(semantic_path, new_code).await,
+        }
+    }
+
+    /// Resolve an `insert_before` edit.
+    async fn resolve_insert_before(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        new_code: Option<&str>,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        let new_code = new_code.unwrap_or_default();
+        let (insert_byte, indent_column, source, current_hash) = self
+            .resolve_insert_position(semantic_path, InsertEdge::Before)
+            .await?;
+
+        let normalized = normalize_for_full_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, indent_column);
+
+        let before = &source[..insert_byte];
+        let after = &source[insert_byte..];
+
+        let sep = if before.ends_with(b"\n\n")
+            || after.starts_with(b"\n\n")
+            || (before.ends_with(b"\n") && after.starts_with(b"\n"))
+        {
+            ""
+        } else if after.starts_with(b"\n") {
+            "\n"
+        } else {
+            "\n\n"
+        };
+
+        let trailing = if indented.ends_with('\n') { "" } else { "\n" };
+
+        let mut new_bytes = Vec::with_capacity(
+            before.len() + indented.len() + sep.len() + trailing.len() + after.len(),
+        );
+        new_bytes.extend_from_slice(before);
+        new_bytes.extend_from_slice(indented.as_bytes());
+        new_bytes.extend_from_slice(trailing.as_bytes());
+        new_bytes.extend_from_slice(sep.as_bytes());
+        new_bytes.extend_from_slice(after);
+
+        if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
+            new_bytes = normalize_blank_lines(&new_bytes);
+        }
+
+        Ok((source, current_hash, new_bytes))
+    }
+
+    /// Resolve an `insert_after` edit.
+    async fn resolve_insert_after(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        new_code: Option<&str>,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        let new_code = new_code.unwrap_or_default();
+        let (insert_byte, indent_column, source, current_hash) = self
+            .resolve_insert_position(semantic_path, InsertEdge::After)
+            .await?;
+
+        let normalized = normalize_for_full_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, indent_column);
+
+        let before = &source[..insert_byte];
+        let after = &source[insert_byte..];
+
+        let before_sep = if before.ends_with(b"\n\n")
+            || after.starts_with(b"\n\n")
+            || (before.ends_with(b"\n") && after.starts_with(b"\n"))
+        {
+            ""
+        } else if before.ends_with(b"\n") {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
+
+        let mut new_bytes = Vec::with_capacity(
+            before.len()
+                + before_sep.len()
+                + indented.len()
+                + after_sep.len()
+                + after.len(),
+        );
+        new_bytes.extend_from_slice(before);
+        new_bytes.extend_from_slice(before_sep.as_bytes());
+        new_bytes.extend_from_slice(indented.as_bytes());
+        new_bytes.extend_from_slice(after_sep.as_bytes());
+        new_bytes.extend_from_slice(after);
+
+        if !is_whitespace_significant_file(std::path::Path::new(&semantic_path.file_path)) {
+            new_bytes = normalize_blank_lines(&new_bytes);
+        }
+
+        Ok((source, current_hash, new_bytes))
+    }
+
+    /// Resolve a `delete` edit.
+    async fn resolve_delete(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        raw_semantic_path: &str,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        require_symbol_target(semantic_path, raw_semantic_path)?;
+        let (full_range, source, current_hash) = self
+            .surgeon
+            .resolve_full_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+        let before_end = strip_orphaned_doc_comment(&source, full_range.start_byte);
+        let mut b_end = before_end;
+        while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
+            b_end -= 1;
+        }
+
+        let mut a_start = full_range.end_byte;
+        while a_start < source.len() && source[a_start].is_ascii_whitespace() {
+            a_start += 1;
+        }
+
+        let before = &source[..b_end];
+        let after = &source[a_start..];
+
+        let sep = if before.is_empty() || after.is_empty() {
+            b"\n" as &[u8]
+        } else {
+            b"\n\n"
+        };
+
+        let mut new_bytes = Vec::with_capacity(before.len() + sep.len() + after.len());
+        new_bytes.extend_from_slice(before);
+        new_bytes.extend_from_slice(sep);
+        new_bytes.extend_from_slice(after);
+
+        Ok((source, current_hash, new_bytes))
+    }
+
+    /// Build an `InvalidTarget` error for an unsupported edit type.
+    fn unsupported_edit_type_error(raw_semantic_path: &str, edit_type: &str) -> ErrorData {
+        let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+            semantic_path: raw_semantic_path.to_owned(),
+            reason: format!(
+                "unsupported edit type: '{edit_type}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
+            ),
+            edit_index: None,
+            valid_edit_types: None,
+        };
+        crate::server::helpers::pathfinder_to_error_data(&err)
     }
 }
