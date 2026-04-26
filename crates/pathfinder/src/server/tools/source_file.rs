@@ -359,4 +359,48 @@ mod tests {
         let result = truncate_content(content, 1, Some(1));
         assert_eq!(result, "only line");
     }
+
+    // ── CG-3: sandbox check error in read_source_file ────────────────────
+
+    #[tokio::test]
+    async fn test_read_source_file_rejects_sandbox_denied_path() {
+        use pathfinder_common::config::PathfinderConfig;
+        use pathfinder_common::sandbox::Sandbox;
+        use pathfinder_common::types::WorkspaceRoot;
+        use pathfinder_search::MockScout;
+        use pathfinder_treesitter::mock::MockSurgeon;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::default()),
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = ReadSourceFileParams {
+            filepath: ".git/HEAD".to_owned(),
+            start_line: 1,
+            end_line: None,
+            detail_level: "full".to_owned(),
+        };
+        let result = server.read_source_file_impl(params).await;
+        assert!(result.is_err(), "sandbox should deny .git paths");
+        let err = result.unwrap_err();
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "ACCESS_DENIED");
+    }
 }

@@ -1547,4 +1547,182 @@ mod tests {
         // However depth_reached should be 1
         assert_eq!(val.depth_reached, 1);
     }
+
+    // ── CG-3: sandbox check error in analyze_impact ──────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_rejects_sandbox_denied_path() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: ".git/objects/abc::def".to_owned(),
+            max_depth: 2,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected error but got Ok");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "ACCESS_DENIED");
+    }
+
+    // ── CG-4: Tree-sitter error in analyze_impact ──────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_tree_sitter_error() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        // Push an error result
+        surgeon.read_symbol_scope_results.lock().unwrap().push(Err(
+            pathfinder_treesitter::SurgeonError::ParseError {
+                path: std::path::PathBuf::from("src/auth.rs"),
+                reason: "parse failed".to_string(),
+            },
+        ));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        assert!(result.is_err(), "tree-sitter error should propagate");
+    }
+
+    // ── CG-5: LSP error during BFS traversal ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_lsp_error_graceful_partial_graph() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        // Incoming succeeds with one caller
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "caller".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+        // Outgoing fails with LSP error
+        lawyer.push_outgoing_call_result(Err("LSP crashed during outgoing".to_string()));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed despite partial failure");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // NOT degraded — prepare succeeded, incoming succeeded, only outgoing had error
+        assert!(!val.degraded);
+        let incoming = val.incoming.as_ref().expect("incoming must be Some");
+        assert_eq!(incoming.len(), 1, "incoming caller should be present");
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert!(outgoing.is_empty(), "outgoing should be empty due to error");
+    }
+
+    // ── CG-1: Grep fallback path in analyze_impact ─────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_grep_fallback_with_mock_scout() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a file so the version hash computation has something to read
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn login() -> bool { true }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp_grep_fallback"));
+        let incoming = val.incoming.as_ref().expect("must be Some from grep");
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].file, "src/auth.rs");
+        assert_eq!(incoming[0].direction, "incoming_heuristic");
+        // Version hashes should include the target file and the match file
+        assert!(
+            val.version_hashes.contains_key("src/auth.rs"),
+            "version_hashes must include the referenced file"
+        );
+    }
 }

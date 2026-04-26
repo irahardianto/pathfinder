@@ -950,4 +950,11 @@ mod tests {
 
         assert_eq!(result.matches[0].known, None);
     }
+
+    // ── CG-7: trivial constructor coverage ───────────────────────────────
+
+    #[test]
+    fn test_ripgrep_scout_new() {
+        let _scout = RipgrepScout::new();
+    }
 }
