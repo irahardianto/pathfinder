@@ -310,6 +310,17 @@ async fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
     Ok(uri.to_string())
 }
 
+// SAFETY:
+// - `prctl(PR_SET_PDEATHSIG, SIGKILL)` is a well-documented Linux syscall that sets
+//   the parent-death signal. When the parent process dies, the kernel sends SIGKILL to
+//   the child process, preventing orphaned LSP servers.
+// - The closure returns `io::Result<()>` and doesn't access any borrowed data from the
+//   enclosing scope, so there are no lifetime or data race concerns.
+// - This runs in the child process between fork() and exec(), so it doesn't affect
+//   the parent process state.
+// - Failure is ignored (`let _ =`) as this is a best-effort hardening measure; the
+//   worst case is the child survives as an orphan (which the idle timeout task will
+//   eventually clean up).
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn apply_linux_process_hardening(cmd: &mut tokio::process::Command) {
@@ -378,7 +389,9 @@ mod process_tests {
         std::fs::create_dir_all(&named_dir).expect("create dir");
 
         let request = build_initialize_request(1, &named_dir).await.expect("ok");
-        let folders = request["params"]["workspaceFolders"].as_array().expect("array");
+        let folders = request["params"]["workspaceFolders"]
+            .as_array()
+            .expect("array");
         assert_eq!(folders[0]["name"], "my_project");
     }
 
@@ -388,7 +401,10 @@ mod process_tests {
         let request = build_initialize_request(1, dir.path()).await.expect("ok");
 
         let caps = &request["params"]["capabilities"];
-        assert_eq!(caps["textDocument"]["definition"]["dynamicRegistration"], false);
+        assert_eq!(
+            caps["textDocument"]["definition"]["dynamicRegistration"],
+            false
+        );
         assert_eq!(caps["workspace"]["workspaceFolders"], true);
     }
 
