@@ -16,10 +16,37 @@ env:
 
 jobs:
   # ──────────────────────────────────────────────
+  # Detect whether source code actually changed.
+  # When only workflow files, docs, or configs change,
+  # we skip the expensive lint/test/security pipeline.
+  # ──────────────────────────────────────────────
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - 'rust-toolchain.toml'
+
+  # ──────────────────────────────────────────────
   # Stage 1: Lint (cheapest check — fail fast)
+  # Skipped when no code files changed.
   # ──────────────────────────────────────────────
   lint:
     name: Lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -40,6 +67,7 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Stage 2: Test + Coverage
+  # Skipped when no code files changed.
   # ──────────────────────────────────────────────
   test:
     name: Test + Coverage
@@ -80,6 +108,7 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Stage 3: Security — Dependency audit
+  # Skipped when no code files changed.
   # ──────────────────────────────────────────────
   cargo-deny:
     name: Cargo Deny
@@ -93,6 +122,7 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Stage 3: Security — Vulnerability scan
+  # Skipped when no code files changed.
   # ──────────────────────────────────────────────
   osv-scanner:
     name: OSV Scanner
@@ -110,17 +140,37 @@ jobs:
   # ──────────────────────────────────────────────
   # Release — Step 1: Open/update the release PR
   #
-  # Runs only on pushes to main (not on PRs).
-  # Reads Git log since the last tag, bumps versions per Conventional Commits,
-  # and opens/refreshes a "release PR" for human review.
+  # Runs ONLY on pushes to main (not PRs).
+  # Reads the git log since the last tag, bumps versions per Conventional
+  # Commits, and opens (or updates) a "release PR" containing:
+  #   - Bumped Cargo.toml versions for each affected crate
+  #   - Updated CHANGELOG.md entries
   #
-  # The concurrency group serialises concurrent main-branch pushes so two
-  # release-plz runs never race against each other.
+  # This job runs when EITHER:
+  #   (a) No code changed — release-plz will no-op safely, OR
+  #   (b) All CI stages passed successfully.
+  #
+  # IMPORTANT: Uses RELEASE_GITHUB_TOKEN (a PAT) — not GITHUB_TOKEN.
+  # The default GITHUB_TOKEN causes 403 "not permitted to create pull
+  # requests" errors in many repo configurations. The PAT also ensures
+  # that when the release PR is merged, the resulting push fires
+  # downstream workflows correctly.
+  #
+  # The concurrency group serialises concurrent main-branch pushes so
+  # two release-plz runs never race against each other.
   # ──────────────────────────────────────────────
   release-pr:
     name: Open Release PR
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: [test, cargo-deny, osv-scanner]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      (needs.changes.outputs.code == 'false' || (
+        needs.test.result == 'success' &&
+        needs.cargo-deny.result == 'success' &&
+        needs.osv-scanner.result == 'success'
+      ))
+    needs: [changes, test, cargo-deny, osv-scanner]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,31 +194,43 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # ──────────────────────────────────────────────
   # Release — Step 2: Publish to crates.io + create GitHub Release
   #
-  # Runs only on pushes to main (not on PRs).
+  # Runs ONLY on pushes to main (not PRs).
   # Detects whether the HEAD commit bumped any crate versions (i.e., the
   # release PR was just merged) and, if so, publishes to crates.io in
-  # dependency order and creates a GitHub Release with an auto-generated
-  # changelog.
+  # workspace dependency order and creates a GitHub Release.
   #
-  # IMPORTANT: GITHUB_TOKEN cannot trigger downstream workflow runs — releases
-  # created by GITHUB_TOKEN do NOT fire the on:release webhook.  We use
-  # RELEASE_GITHUB_TOKEN (a PAT with repo scope) so that the release event
-  # is attributed to a real user and release-binaries.yml is triggered.
+  # This job runs when EITHER:
+  #   (a) No code changed — release-plz will no-op safely, OR
+  #   (b) All CI stages passed successfully.
   #
-  # NOTE: this job does NOT depend on release-pr — they are sibling steps that
-  # both run after tests pass.  release-pr creates the PR; release-publish acts
-  # on the PR once it is merged (a subsequent push to main).
+  # IMPORTANT: Uses RELEASE_GITHUB_TOKEN (a PAT) so that the GitHub
+  # Release event fires the on:release webhook — this triggers
+  # release-binaries.yml and slsa-provenance.yml downstream.
+  # GITHUB_TOKEN-created releases do NOT fire this webhook.
+  #
+  # NOTE: release-pr and release are SIBLINGS, not sequential.
+  # Both run after CI passes. release-pr opens the PR; release publishes
+  # on a subsequent push (when the PR is merged). On a normal code push,
+  # release sees nothing new to publish and no-ops.
   # ──────────────────────────────────────────────
-  release-publish:
-    name: Publish Release
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: [test, cargo-deny, osv-scanner]
+  release:
+    name: Release
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      (needs.changes.outputs.code == 'false' || (
+        needs.test.result == 'success' &&
+        needs.cargo-deny.result == 'success' &&
+        needs.osv-scanner.result == 'success'
+      ))
+    needs: [changes, test, cargo-deny, osv-scanner]
     runs-on: ubuntu-latest
     permissions:
       contents: write

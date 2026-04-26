@@ -3,21 +3,60 @@
 #
 # release-plz processes the workspace and publishes crates in dependency order
 # automatically. This file adds per-crate overrides and global defaults.
+#
+# Strategy:
+#   - Each sub-crate versions independently based on its own changes.
+#   - Only pathfinder-mcp (the main binary) creates a GitHub release.
+#   - The GitHub release aggregates changelogs from all sub-crates.
+#   - Sub-crate tags remain for crates.io version tracking but produce
+#     no GitHub release, keeping the releases page clean.
 
 [workspace]
-# Allow release-plz to create/update the release PR and publish releases.
-# All crates in the workspace are published to crates.io unless overridden below.
-
 # Only trigger a release when at least one commit matches conventional commit
 # prefixes (feat|fix|perf|refactor|revert). Chore, docs, style, test, ci
 # commits do NOT trigger a release on their own.
 # This is a regex matched against the full first line of each commit message.
 release_commits = "^(feat|fix|perf|refactor|revert)(\\(|:)"
 
-# Always attempt to open a release PR when there are qualifying commits,
-# even if the version bump would be zero. This ensures release-plz keeps
-# running after each merge to main, rather than silently skipping.
+# Only release when the release PR is merged (i.e. version bumps are present).
 release_always = false
 
-git_release_enable = true
+# All crates get tags (needed for crates.io version tracking).
 git_tag_enable = true
+
+# Disable GitHub releases at workspace level — only pathfinder-mcp creates one.
+git_release_enable = false
+
+# ─── pathfinder-mcp (main binary) ───────────────────────────────────────────
+# This is the user-facing crate. It creates the single GitHub release
+# with a clean "v0.1.4" title, and its changelog includes all sub-crate
+# changes so users see the full picture in one place.
+[[package]]
+name = "pathfinder-mcp"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+git_tag_name = "v{{ version }}"
+git_release_latest = true
+changelog_include = [
+    "pathfinder-mcp-common",
+    "pathfinder-mcp-lsp",
+    "pathfinder-mcp-search",
+    "pathfinder-mcp-treesitter",
+]
+
+# ─── Sub-crates (libraries) ─────────────────────────────────────────────────
+# Each sub-crate versions independently. Tags use the default
+# "{{ package }}-v{{ version }}" format for crates.io tracking.
+# No GitHub release is created (inherits git_release_enable = false).
+
+[[package]]
+name = "pathfinder-mcp-common"
+
+[[package]]
+name = "pathfinder-mcp-lsp"
+
+[[package]]
+name = "pathfinder-mcp-search"
+
+[[package]]
+name = "pathfinder-mcp-treesitter"
