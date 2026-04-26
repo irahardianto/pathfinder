@@ -238,7 +238,7 @@ impl WorkspaceRoot {
             );
         }
 
-        let mut normalized = PathBuf::new();
+        let mut normalized = PathBuf::default();
         for comp in relative.components() {
             if matches!(
                 comp,

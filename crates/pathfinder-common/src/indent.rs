@@ -88,7 +88,7 @@ pub fn reindent(code: &str, target_column: usize) -> String {
     code.lines()
         .map(|line| {
             if line.trim().is_empty() {
-                String::new() // preserve clean blank lines
+                String::default() // preserve clean blank lines
             } else {
                 format!("{prefix}{line}")
             }

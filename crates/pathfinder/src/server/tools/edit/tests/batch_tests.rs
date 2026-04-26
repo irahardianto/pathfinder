@@ -42,9 +42,9 @@ fn make_text_edit(
     normalize: bool,
 ) -> BatchEdit {
     BatchEdit {
-        semantic_path: String::new(),
+        semantic_path: String::default(),
         old_text: Some(old_text),
-        edit_type: String::new(),
+        edit_type: String::default(),
         new_code: None,
         replacement_text: Some(replacement),
         context_line: Some(context_line),
@@ -339,7 +339,7 @@ async fn test_batch_large_multi_edit() {
     let ws_dir = tempdir().expect("temp dir");
 
     // Write a file with 10 functions
-    let mut source = String::new();
+    let mut source = String::default();
     for i in 0..10 {
         source.push_str(&format!("fn func{i}() -> i32 {{ {i} }}\n"));
     }
@@ -352,10 +352,10 @@ async fn test_batch_large_multi_edit() {
     let src_bytes = source.as_bytes();
     let hash = VersionHash::compute(src_bytes);
 
-    let mock_surgeon = MockSurgeon::new();
+    let mock_surgeon = MockSurgeon::default();
 
     // Create 5 edits (every other function)
-    let mut edits = Vec::new();
+    let mut edits = Vec::default();
     for i in (0..10).step_by(2) {
         let func_start = source.find(&format!("fn func{i}")).unwrap();
         let open = source[func_start..].find('{').unwrap() + func_start;

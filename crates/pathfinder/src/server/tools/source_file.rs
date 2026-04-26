@@ -117,7 +117,7 @@ fn truncate_content(content: &str, start_line: u32, end_line: Option<u32>) -> St
         if start_idx < lines.len() && start_idx < end_idx {
             lines[start_idx..end_idx].concat()
         } else {
-            String::new()
+            String::default()
         }
     } else {
         content.to_string()

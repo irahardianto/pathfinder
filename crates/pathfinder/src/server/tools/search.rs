@@ -110,7 +110,7 @@ impl PathfinderServer {
                     .into_iter()
                     .map(|mut m| {
                         if known_set.contains(&normalize_path(&m.file)) {
-                            m.content = String::new();
+                            m.content = String::default();
                             m.context_before = vec![];
                             m.context_after = vec![];
                             m.known = Some(true);
