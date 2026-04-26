@@ -422,7 +422,7 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 for mut method in std::mem::take(&mut s.children) {
                     // Update method's semantic path to be under the struct instead of the Impl
                     // Impl blocks have `#` suffix, we want it under the Struct which doesn't
-                    if let Some((method_name, parent_path)) = method.semantic_path.rsplit_once('.')
+                    if let Some((parent_path, method_name)) = method.semantic_path.rsplit_once('.')
                     {
                         // strip #[0-9]+ from the end of the parent path
                         let clean_parent = match parent_path.rfind('#') {
