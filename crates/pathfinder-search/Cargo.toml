@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder-mcp-search"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license.workspace = true
 description = "The Scout — Ripgrep-powered text search engine for Pathfinder"
@@ -17,7 +17,7 @@ name = "pathfinder_search"
 workspace = true
 
 [dependencies]
-pathfinder-common = { version = "0.1.1", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
+pathfinder-common = { version = "0.1.2", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"

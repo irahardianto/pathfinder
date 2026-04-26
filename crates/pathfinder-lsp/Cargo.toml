@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder-mcp-lsp"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license.workspace = true
 description = "Pathfinder LSP client — the Lawyer engine"
@@ -17,7 +17,7 @@ name = "pathfinder_lsp"
 workspace = true
 
 [dependencies]
-pathfinder-common = { version = "0.1.1", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
+pathfinder-common = { version = "0.1.2", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
 async-trait = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
