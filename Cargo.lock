@@ -1081,7 +1081,7 @@ checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
 
 [[package]]
 name = "pathfinder-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "pathfinder-mcp-common"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ignore",
  "mockall",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "pathfinder-mcp-lsp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "command-group",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "pathfinder-mcp-search"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "globset",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "pathfinder-mcp-treesitter"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "futures",
