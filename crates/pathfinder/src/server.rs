@@ -1613,11 +1613,7 @@ mod tests {
 
         // Create a Rust file for surgeon to read
         std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
-        std::fs::write(
-            ws_dir.path().join("src/lib.rs"),
-            "fn hello() -> i32 { 1 }",
-        )
-        .unwrap();
+        std::fs::write(ws_dir.path().join("src/lib.rs"), "fn hello() -> i32 { 1 }").unwrap();
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
         mock_surgeon

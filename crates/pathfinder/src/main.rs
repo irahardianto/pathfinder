@@ -114,7 +114,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_invalid_workspace_path() {
         // Using a non-existent path should fail during WorkspaceRoot::new
-        let result = run(PathBuf::from("/nonexistent/path/that/does/not/exist"), false).await;
+        let result = run(
+            PathBuf::from("/nonexistent/path/that/does/not/exist"),
+            false,
+        )
+        .await;
         // The path might or might not be valid depending on WorkspaceRoot validation
         // At minimum, it should not panic
         if let Err(e) = result {

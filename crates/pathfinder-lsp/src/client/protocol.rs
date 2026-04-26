@@ -208,7 +208,8 @@ mod tests {
 
     #[test]
     fn test_make_request_structure() {
-        let msg = RequestDispatcher::make_request(42, "textDocument/definition", &json!({"key": "val"}));
+        let msg =
+            RequestDispatcher::make_request(42, "textDocument/definition", &json!({"key": "val"}));
         assert_eq!(msg["jsonrpc"], "2.0");
         assert_eq!(msg["id"], 42);
         assert_eq!(msg["method"], "textDocument/definition");

@@ -1274,7 +1274,7 @@ mod tests {
             .push(Ok(make_scope()));
 
         // MockLawyer returns Ok(None) — triggers grep fallback
-        let lawyer = Arc::new(MockLawyer::default());
+        let _lawyer = Arc::new(MockLawyer::default());
 
         // Use NoOpLawyer (NoLspAvailable path) + MockScout with results
         let ws_dir = tempdir().expect("temp dir");

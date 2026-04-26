@@ -821,10 +821,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_column_offset() {
         // Verify that the column field reflects the match position, not just 1
-        let ws = make_workspace(&[(
-            "src/main.rs",
-            "    pub fn hello() -> i32 { 42 }\n",
-        )]);
+        let ws = make_workspace(&[("src/main.rs", "    pub fn hello() -> i32 { 42 }\n")]);
         let scout = RipgrepScout::new();
         let result = scout
             .search(&params_for(&ws, "hello"))

@@ -826,11 +826,7 @@ function doThing() { count.value++ }
     async fn test_extract_typescript_arrow_function() {
         let surgeon = TreeSitterSurgeon::new(2);
         let mut file = Builder::new().suffix(".ts").tempfile().unwrap();
-        writeln!(
-            file,
-            "const fn = () => {{\n  return 42;\n}};\n"
-        )
-        .unwrap();
+        writeln!(file, "const fn = () => {{\n  return 42;\n}};\n").unwrap();
         let path = file.path().to_path_buf();
         let workspace_root = PathBuf::from("/");
         let relative = path.strip_prefix("/").unwrap();
@@ -852,11 +848,7 @@ function doThing() { count.value++ }
     async fn test_extract_python_decorator_function() {
         let surgeon = TreeSitterSurgeon::new(2);
         let mut file = Builder::new().suffix(".py").tempfile().unwrap();
-        writeln!(
-            file,
-            "@decorator\ndef func():\n    pass\n"
-        )
-        .unwrap();
+        writeln!(file, "@decorator\ndef func():\n    pass\n").unwrap();
         let path = file.path().to_path_buf();
         let workspace_root = PathBuf::from("/");
         let relative = path.strip_prefix("/").unwrap();
@@ -879,11 +871,7 @@ function doThing() { count.value++ }
     async fn test_extract_empty_function_body() {
         let surgeon = TreeSitterSurgeon::new(2);
         let mut file = Builder::new().suffix(".go").tempfile().unwrap();
-        writeln!(
-            file,
-            "package main\n\nfunc foo() {{}}\n"
-        )
-        .unwrap();
+        writeln!(file, "package main\n\nfunc foo() {{}}\n").unwrap();
         let path = file.path().to_path_buf();
         let workspace_root = PathBuf::from("/");
         let relative = path.strip_prefix("/").unwrap();
@@ -905,11 +893,7 @@ function doThing() { count.value++ }
     async fn test_extract_bare_file_unsupported_language() {
         let surgeon = TreeSitterSurgeon::new(2);
         let mut file = Builder::new().suffix(".txt").tempfile().unwrap();
-        writeln!(
-            file,
-            "This is just plain text with no parseable symbols.\n"
-        )
-        .unwrap();
+        writeln!(file, "This is just plain text with no parseable symbols.\n").unwrap();
         let path = file.path().to_path_buf();
         let workspace_root = PathBuf::from("/");
         let relative = path.strip_prefix("/").unwrap();
@@ -963,11 +947,7 @@ function doThing() { count.value++ }
     async fn test_go_insert_before_respects_indentation() {
         let surgeon = TreeSitterSurgeon::new(2);
         let mut file = Builder::new().suffix(".go").tempfile().unwrap();
-        writeln!(
-            file,
-            "package main\n\nfunc foo() {{}}\n\nfunc bar() {{}}\n"
-        )
-        .unwrap();
+        writeln!(file, "package main\n\nfunc foo() {{}}\n\nfunc bar() {{}}\n").unwrap();
         let path = file.path().to_path_buf();
         let workspace_root = PathBuf::from("/");
         let relative = path.strip_prefix("/").unwrap();

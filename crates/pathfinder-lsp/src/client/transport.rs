@@ -271,7 +271,9 @@ mod tests {
         // Verify the wire format produced by write_message
         let mut writer: Vec<u8> = Vec::new();
         let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "test"});
-        write_message(&mut writer, &msg).await.expect("vec write should succeed");
+        write_message(&mut writer, &msg)
+            .await
+            .expect("vec write should succeed");
 
         // Should start with Content-Length header
         let written = String::from_utf8(writer.clone()).expect("valid utf8");
