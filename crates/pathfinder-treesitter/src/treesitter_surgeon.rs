@@ -163,7 +163,7 @@ impl TreeSitterSurgeon {
 
             if let Some(line_bytes) = source.get(line_start..end_byte) {
                 if let Ok(full_str) = std::str::from_utf8(line_bytes) {
-                    if let Some(line) = full_str.split('\n').next() {
+                    if let Some(line) = full_str.lines().next() {
                         return line.len() - line.trim_start().len();
                     }
                 }
@@ -182,7 +182,7 @@ impl TreeSitterSurgeon {
         };
 
         // Find the first line that is purely inside the block and not on the same line as `{`
-        let mut lines = block_str.split('\n');
+        let mut lines = block_str.lines();
         let _same_line_as_brace = lines.next();
 
         for line in lines {
@@ -341,7 +341,7 @@ impl Surgeon for TreeSitterSurgeon {
         line: usize,
         column: usize,
     ) -> Result<String, SurgeonError> {
-        let (_, tree, _, _, _) = self.cached_parse(workspace_root, file_path).await?;
+        let (_, tree, ..) = self.cached_parse(workspace_root, file_path).await?;
 
         // Convert 1-indexed line to 0-indexed row for Tree-sitter
         let row = line.saturating_sub(1);

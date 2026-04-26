@@ -1619,7 +1619,7 @@ mod tests {
     #[test]
     fn test_parse_workspace_diagnostic_response_missing_items() {
         let response = json!({});
-        let result = parse_workspace_diagnostic_response(&response, Path::new("/tmp"));
+        let result = parse_workspace_diagnostic_response(&response, &std::env::temp_dir());
         assert!(result.is_err());
     }
 
@@ -1644,7 +1644,7 @@ mod tests {
                 "items": [{"severity": 1, "message": "err", "range": {"start": {"line": 0}, "end": {"line": 0}}}]
             }]
         });
-        let result = parse_workspace_diagnostic_response(&response, Path::new("/tmp")).expect("ok");
+        let result = parse_workspace_diagnostic_response(&response, &std::env::temp_dir()).expect("ok");
         assert!(result.is_empty(), "entry without URI should be skipped");
     }
 

@@ -87,7 +87,7 @@ impl crate::server::PathfinderServer {
         new_code: &str,
         source: &[u8],
     ) -> Result<ResolvedEdit, ErrorData> {
-        let (body_range, _, _) = self
+        let (body_range, ..) = self
             .surgeon
             .resolve_body_range(self.workspace_root.path(), semantic_path)
             .await
@@ -145,7 +145,7 @@ impl crate::server::PathfinderServer {
             });
         }
 
-        let (full_range, _, _) = self
+        let (full_range, ..) = self
             .surgeon
             .resolve_full_range(self.workspace_root.path(), semantic_path)
             .await
@@ -171,7 +171,7 @@ impl crate::server::PathfinderServer {
         let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
             (0, 0)
         } else {
-            let (symbol_range, _, _) = self
+            let (symbol_range, ..) = self
                 .surgeon
                 .resolve_symbol_range(self.workspace_root.path(), semantic_path)
                 .await
@@ -209,7 +209,7 @@ impl crate::server::PathfinderServer {
         let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
             (source.len(), 0)
         } else {
-            let (symbol_range, _, _) = self
+            let (symbol_range, ..) = self
                 .surgeon
                 .resolve_symbol_range(self.workspace_root.path(), semantic_path)
                 .await
@@ -243,7 +243,7 @@ impl crate::server::PathfinderServer {
         semantic_path: &SemanticPath,
         source: &[u8],
     ) -> Result<ResolvedEdit, ErrorData> {
-        let (full_range, _, _) = self
+        let (full_range, ..) = self
             .surgeon
             .resolve_full_range(self.workspace_root.path(), semantic_path)
             .await

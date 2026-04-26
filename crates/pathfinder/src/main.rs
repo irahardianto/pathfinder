@@ -94,14 +94,16 @@ mod tests {
 
     #[test]
     fn test_cli_parse_workspace_path() {
-        let cli = Cli::parse_from(["pathfinder", "/tmp/workspace"]);
-        assert_eq!(cli.workspace_path, PathBuf::from("/tmp/workspace"));
+        let test_path = std::env::temp_dir().join("workspace");
+        let cli = Cli::parse_from(["pathfinder", test_path.to_str().unwrap()]);
+        assert_eq!(cli.workspace_path, test_path);
         assert!(!cli.lsp_trace);
     }
 
     #[test]
     fn test_cli_parse_lsp_trace_flag() {
-        let cli = Cli::parse_from(["pathfinder", "/tmp/ws", "--lsp-trace"]);
+        let test_path = std::env::temp_dir().join("ws");
+        let cli = Cli::parse_from(["pathfinder", test_path.to_str().unwrap(), "--lsp-trace"]);
         assert!(cli.lsp_trace);
     }
 

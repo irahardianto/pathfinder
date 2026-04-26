@@ -16,7 +16,6 @@ mod helpers;
 mod tools;
 /// Module containing type definitions.
 pub mod types;
-#[allow(clippy::wildcard_imports)]
 use types::*;
 
 use pathfinder_common::config::PathfinderConfig;
