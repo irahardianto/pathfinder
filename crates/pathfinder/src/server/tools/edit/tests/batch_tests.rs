@@ -28,7 +28,12 @@ fn make_replace_body_edit(semantic_path: String, new_code: String) -> BatchEdit 
 }
 
 /// Helper to create a text-based edit.
-fn make_text_edit(old_text: String, replacement: String, context_line: u32, normalize: bool) -> BatchEdit {
+fn make_text_edit(
+    old_text: String,
+    replacement: String,
+    context_line: u32,
+    normalize: bool,
+) -> BatchEdit {
     BatchEdit {
         semantic_path: String::new(),
         old_text: Some(old_text),
@@ -670,4 +675,330 @@ fn baz() -> i32 {
     assert!(!written.contains("fn bar"));
     assert!(written.contains("fn foo"));
     assert!(written.contains("fn baz"));
+}
+
+/// Test that overlapping edits are detected and rejected.
+///
+/// This test creates two edits with overlapping byte ranges:
+/// - Edit 1 targets func_a (lines 1-3)
+/// - Edit 2 targets func_b (lines 3-5)
+///
+/// Since these ranges overlap, the batch should fail with an INVALID_TARGET error.
+#[tokio::test]
+async fn test_batch_detects_overlapping_edits() {
+    let ws_dir = tempdir().expect("temp dir");
+
+    let source = r#"
+fn func_a() -> i32 {
+    1
+}
+
+fn func_b() -> i32 {
+    2
+}
+
+fn func_c() -> i32 {
+    3
+}
+"#;
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, source).unwrap();
+
+    let src_bytes = source.as_bytes();
+    let hash = VersionHash::compute(src_bytes);
+
+    let mock_surgeon = MockSurgeon::new();
+
+    // Mock func_a body range (lines 1-3, bytes ~10-40)
+    let func_a_start = source.find("fn func_a").unwrap();
+    let func_a_open = source[func_a_start..].find('{').unwrap() + func_a_start;
+    let func_a_close = source.find('}').unwrap() + 1;
+
+    // Mock func_b body range (lines 5-7, bytes ~40-70)
+    let func_b_start = source.find("fn func_b").unwrap();
+    let func_b_open = source[func_b_start..].find('{').unwrap() + func_b_start;
+    let func_b_close = source[func_b_start..].find('}').unwrap() + func_b_start + 1;
+
+    // Intentionally make the ranges overlap by setting func_a_close > func_b_open
+    // This simulates a scenario where the AST parser returns overlapping ranges
+    mock_surgeon
+        .resolve_body_range_results
+        .lock()
+        .unwrap()
+        .push(Ok((
+            make_body_range(func_a_open, func_b_open + 5, 0, 4), // Overlap with func_b
+            Arc::from(src_bytes),
+            hash.clone(),
+        )));
+
+    mock_surgeon
+        .resolve_body_range_results
+        .lock()
+        .unwrap()
+        .push(Ok((
+            make_body_range(func_b_open, func_b_close, 0, 4),
+            Arc::from(src_bytes),
+            hash.clone(),
+        )));
+
+    let server = make_server(&ws_dir, mock_surgeon);
+
+    let result = server
+        .replace_batch(Parameters(crate::server::types::ReplaceBatchParams {
+            filepath: filepath.to_owned(),
+            base_version: hash.as_str().to_owned(),
+            edits: vec![
+                make_replace_body_edit(format!("{filepath}::func_a"), "    42".to_string()),
+                make_replace_body_edit(format!("{filepath}::func_b"), "    99".to_string()),
+            ],
+            ignore_validation_failures: false,
+        }))
+        .await;
+
+    // Should fail with overlap error
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    // The error code is in err.message, not in data
+    let code = err.message;
+    // The detailed error info is in data["error"] and data["message"]
+    let error_field = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let message_field = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(error_field, "INVALID_TARGET");
+    assert!(message_field.contains("overlapping"));
+
+    // Verify file was NOT modified
+    let written = std::fs::read_to_string(&abs).unwrap();
+    assert_eq!(written, source);
+}
+
+/// Test that adjacent (non-overlapping) edits are allowed.
+///
+/// This test verifies that edits with non-overlapping byte ranges
+/// are applied successfully without triggering overlap detection.
+#[tokio::test]
+async fn test_batch_adjacent_edits_allowed() {
+    let ws_dir = tempdir().expect("temp dir");
+
+    // Create a simple source with clearly separated positions
+    let source = "AAA BBB CCC DDD EEE";
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, source).unwrap();
+
+    let src_bytes = source.as_bytes();
+    let hash = VersionHash::compute(src_bytes);
+
+    let mock_surgeon = MockSurgeon::new();
+
+    // Target clearly non-overlapping positions: "AAA" (0-3) and "CCC" (8-11)
+    let pos_a = 0;
+    let pos_c = 8;
+
+    mock_surgeon
+        .resolve_body_range_results
+        .lock()
+        .unwrap()
+        .push(Ok((
+            make_body_range(pos_a, pos_a + 3, 0, 0),
+            Arc::from(src_bytes),
+            hash.clone(),
+        )));
+
+    mock_surgeon
+        .resolve_body_range_results
+        .lock()
+        .unwrap()
+        .push(Ok((
+            make_body_range(pos_c, pos_c + 3, 0, 0),
+            Arc::from(src_bytes),
+            hash.clone(),
+        )));
+
+    let server = make_server(&ws_dir, mock_surgeon);
+
+    let result = server
+        .replace_batch(Parameters(crate::server::types::ReplaceBatchParams {
+            filepath: filepath.to_owned(),
+            base_version: hash.as_str().to_owned(),
+            edits: vec![
+                make_replace_body_edit(format!("{filepath}::func_a"), "XXX".to_string()),
+                make_replace_body_edit(format!("{filepath}::func_c"), "YYY".to_string()),
+            ],
+            ignore_validation_failures: false,
+        }))
+        .await
+        .expect("should succeed");
+
+    assert!(result.0.success);
+    let written = std::fs::read_to_string(&abs).unwrap();
+    assert!(written.contains("XXX"));
+    assert!(written.contains("YYY"));
+    assert!(!written.contains("AAA"));
+    assert!(!written.contains("CCC"));
+    // BBB and DDD should remain unchanged
+    assert!(written.contains("BBB"));
+    assert!(written.contains("DDD"));
+}
+
+/// Test that many edits don't cause byte overflow issues.
+///
+/// This test creates a large number of edits and verifies that
+/// the byte arithmetic doesn't overflow and that all edits are applied correctly.
+#[tokio::test]
+async fn test_batch_many_edits_no_overflow() {
+    let ws_dir = tempdir().expect("temp dir");
+
+    // Write a simple file with 10 distinct numbers
+    let source = "0 1 2 3 4 5 6 7 8 9";
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, source).unwrap();
+
+    let src_bytes = source.as_bytes();
+    let hash = VersionHash::compute(src_bytes);
+
+    let mock_surgeon = MockSurgeon::new();
+
+    // Create 5 edits targeting non-overlapping positions
+    let mut edits = Vec::new();
+    for i in [0, 2, 4, 6, 8] {
+        let pos = source.find(&i.to_string()).unwrap();
+        mock_surgeon
+            .resolve_body_range_results
+            .lock()
+            .unwrap()
+            .push(Ok((
+                make_body_range(pos, pos + 1, 0, 0),
+                Arc::from(src_bytes),
+                hash.clone(),
+            )));
+
+        edits.push(make_replace_body_edit(
+            format!("{filepath}::func_{i}"),
+            format!("{}", i * 10),
+        ));
+    }
+
+    let server = make_server(&ws_dir, mock_surgeon);
+
+    let result = server
+        .replace_batch(Parameters(crate::server::types::ReplaceBatchParams {
+            filepath: filepath.to_owned(),
+            base_version: hash.as_str().to_owned(),
+            edits,
+            ignore_validation_failures: false,
+        }))
+        .await
+        .expect("should succeed");
+
+    assert!(result.0.success);
+    let written = std::fs::read_to_string(&abs).unwrap();
+
+    // Verify edited numbers
+    for i in [0, 2, 4, 6, 8] {
+        assert!(written.contains(&format!("{}", i * 10)));
+    }
+    // Verify unedited numbers remain
+    for i in [1, 3, 5, 7, 9] {
+        assert!(written.contains(&i.to_string()));
+    }
+}
+
+/// Test that the error message includes the edit indices for overlapping edits.
+///
+/// This verifies that when overlap is detected, the error message
+/// clearly indicates which edits conflicted (e.g., "edit 1 overlaps with edit 0").
+#[tokio::test]
+async fn test_batch_overlap_error_includes_indices() {
+    let ws_dir = tempdir().expect("temp dir");
+
+    let source = r#"
+fn func_a() -> i32 { 1 }
+fn func_b() -> i32 { 2 }
+"#;
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, source).unwrap();
+
+    let src_bytes = source.as_bytes();
+    let hash = VersionHash::compute(src_bytes);
+
+    let mock_surgeon = MockSurgeon::new();
+
+    // Create overlapping ranges
+    let func_a_open = source.find('{').unwrap();
+    let func_a_close = source.find('}').unwrap() + 1;
+    let func_b_start = source.find("fn func_b").unwrap();
+    let func_b_open = source[func_b_start..].find('{').unwrap() + func_b_start;
+
+    // Make func_a's range extend into func_b's range
+    mock_surgeon
+        .resolve_body_range_results
+        .lock()
+        .unwrap()
+        .push(Ok((
+            make_body_range(func_a_open, func_b_open + 5, 0, 0),
+            Arc::from(src_bytes),
+            hash.clone(),
+        )));
+
+    mock_surgeon
+        .resolve_body_range_results
+        .lock()
+        .unwrap()
+        .push(Ok((
+            make_body_range(func_b_open, source.len(), 0, 0),
+            Arc::from(src_bytes),
+            hash.clone(),
+        )));
+
+    let server = make_server(&ws_dir, mock_surgeon);
+
+    let result = server
+        .replace_batch(Parameters(crate::server::types::ReplaceBatchParams {
+            filepath: filepath.to_owned(),
+            base_version: hash.as_str().to_owned(),
+            edits: vec![
+                make_replace_body_edit(format!("{filepath}::func_a"), "42".to_string()),
+                make_replace_body_edit(format!("{filepath}::func_b"), "99".to_string()),
+            ],
+            ignore_validation_failures: false,
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+
+    // Verify error message contains edit indices
+    let msg = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(msg.contains("edit"), "Error message should mention 'edit'");
+    // The actual indices depend on sorting order, so we just check for digits
+    assert!(
+        msg.contains(char::is_numeric),
+        "Error message should contain edit indices"
+    );
+
+    // Verify file was NOT modified
+    let written = std::fs::read_to_string(&abs).unwrap();
+    assert_eq!(written, source);
 }
