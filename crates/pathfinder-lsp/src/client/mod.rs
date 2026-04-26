@@ -30,7 +30,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use url::Url;
 
 /// Default idle timeout: 15 minutes for standard LSPs.
@@ -120,6 +120,8 @@ pub struct LspClient {
     init_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Shared JSON-RPC request/response dispatcher.
     dispatcher: Arc<RequestDispatcher>,
+    /// Broadcast channel for shutdown signals.
+    shutdown_tx: Arc<broadcast::Sender<()>>,
 }
 
 impl LspClient {
@@ -144,17 +146,22 @@ impl LspClient {
             "LspClient: language detection complete"
         );
 
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
+        let shutdown_tx = Arc::new(shutdown_tx);
+
         let client = Self {
             descriptors: Arc::new(descriptors),
             processes: Arc::new(RwLock::new(HashMap::new())),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
+            shutdown_tx: Arc::clone(&shutdown_tx),
         };
 
         // Spawn idle-timeout background task
         let processes = Arc::clone(&client.processes);
         let dispatcher = Arc::clone(&client.dispatcher);
-        tokio::spawn(idle_timeout_task(processes, dispatcher));
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(idle_timeout_task(processes, dispatcher, shutdown_rx));
 
         Ok(client)
     }
@@ -202,6 +209,20 @@ impl LspClient {
                 }
             });
         }
+    }
+
+    /// Gracefully shut down all LSP processes.
+    ///
+    /// Sends a shutdown signal to the idle timeout task, which will then
+    /// gracefully terminate all LSP processes. This should be called during
+    /// server shutdown to prevent orphaned child processes.
+    ///
+    /// This method is fire-and-forget: it signals the background task to
+    /// shut down but does not wait for completion. The actual shutdown
+    /// happens asynchronously in the background task.
+    pub fn shutdown(&self) {
+        tracing::info!("LspClient: shutdown requested");
+        let _ = self.shutdown_tx.send(());
     }
 
     /// Ensure an LSP process is running for `language_id`, starting it if needed.
@@ -1330,39 +1351,57 @@ async fn reader_supervisor_task(
 async fn idle_timeout_task(
     processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
     dispatcher: Arc<RequestDispatcher>,
+    mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     loop {
-        tokio::time::sleep(IDLE_CHECK_INTERVAL).await;
-
-        let mut guard = processes.write().await;
-        let languages_to_remove: Vec<String> = guard
-            .iter()
-            .filter_map(|(lang, entry)| {
-                if let ProcessEntry::Running(state) = entry {
-                    // Only remove if idle timeout elapsed AND no in-flight requests
-                    if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT
-                        && state.process.in_flight.load(Ordering::Relaxed) == 0
-                    {
-                        Some(lang.clone())
-                    } else {
-                        None
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                // Shutdown signal received - gracefully terminate all LSP processes
+                tracing::info!("LSP: shutdown signal received, terminating all processes");
+                let mut guard = processes.write().await;
+                for (lang, entry) in guard.drain() {
+                    if let ProcessEntry::Running(mut state) = entry {
+                        tracing::debug!(language = %lang, "LSP: shutting down process");
+                        state.reader_handle.abort();
+                        shutdown(&mut state.process, &dispatcher).await;
                     }
-                } else {
-                    None
                 }
-            })
-            .collect();
+                tracing::info!("LSP: all processes terminated");
+                break;
+            }
+            _ = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
+                // Check for idle processes
+                let mut guard = processes.write().await;
+                let languages_to_remove: Vec<String> = guard
+                    .iter()
+                    .filter_map(|(lang, entry)| {
+                        if let ProcessEntry::Running(state) = entry {
+                            // Only remove if idle timeout elapsed AND no in-flight requests
+                            if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT
+                                && state.process.in_flight.load(Ordering::Relaxed) == 0
+                            {
+                                Some(lang.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
 
-        for lang in languages_to_remove {
-            if let Some(ProcessEntry::Running(mut state)) = guard.remove(&lang) {
-                tracing::info!(
-                    language = %lang,
-                    restarts = state.restart_count,
-                    "LSP: idle timeout — terminating"
-                );
-                // Abort the supervisor task to prevent it from logging after cleanup
-                state.reader_handle.abort();
-                shutdown(&mut state.process, &dispatcher).await;
+                for lang in languages_to_remove {
+                    if let Some(ProcessEntry::Running(mut state)) = guard.remove(&lang) {
+                        tracing::info!(
+                            language = %lang,
+                            restarts = state.restart_count,
+                            "LSP: idle timeout — terminating"
+                        );
+                        // Abort the supervisor task to prevent it from logging after cleanup
+                        state.reader_handle.abort();
+                        shutdown(&mut state.process, &dispatcher).await;
+                    }
+                }
             }
         }
     }
@@ -1456,8 +1495,7 @@ mod tests {
                 }
             ]
         });
-        let result =
-            parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
+        let result = parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].severity, LspDiagnosticSeverity::Error);
         assert_eq!(result[0].message, "type mismatch");
@@ -1469,8 +1507,7 @@ mod tests {
     #[test]
     fn test_parse_diagnostic_response_unchanged() {
         let response = json!({"kind": "unchanged", "resultId": "abc"});
-        let result =
-            parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
+        let result = parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
         assert!(result.is_empty());
     }
 
@@ -1487,8 +1524,7 @@ mod tests {
                 }
             }
         ]);
-        let result =
-            parse_diagnostic_response(&response, Path::new("src/lib.rs")).expect("ok");
+        let result = parse_diagnostic_response(&response, Path::new("src/lib.rs")).expect("ok");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].severity, LspDiagnosticSeverity::Warning);
     }
@@ -1496,8 +1532,7 @@ mod tests {
     #[test]
     fn test_parse_diagnostic_response_empty_object() {
         let response = json!({});
-        let result =
-            parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
+        let result = parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
         assert!(result.is_empty());
     }
 
@@ -1609,8 +1644,7 @@ mod tests {
                 "items": [{"severity": 1, "message": "err", "range": {"start": {"line": 0}, "end": {"line": 0}}}]
             }]
         });
-        let result =
-            parse_workspace_diagnostic_response(&response, Path::new("/tmp")).expect("ok");
+        let result = parse_workspace_diagnostic_response(&response, Path::new("/tmp")).expect("ok");
         assert!(result.is_empty(), "entry without URI should be skipped");
     }
 
@@ -1618,8 +1652,7 @@ mod tests {
 
     #[test]
     fn test_parse_call_hierarchy_prepare_null() {
-        let result =
-            parse_call_hierarchy_prepare_response(&json!(null), Path::new("/workspace"));
+        let result = parse_call_hierarchy_prepare_response(&json!(null), Path::new("/workspace"));
         assert!(result.expect("ok").is_empty());
     }
 
@@ -1658,9 +1691,17 @@ mod tests {
     #[test]
     fn test_parse_call_hierarchy_prepare_kind_mapping() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let file_uri = Url::from_file_path(temp.path().join("test.rs")).unwrap().to_string();
+        let file_uri = Url::from_file_path(temp.path().join("test.rs"))
+            .unwrap()
+            .to_string();
         // Kind 5 = class, 6 = method, 11 = interface, 12 = function, other = symbol
-        for (kind_int, expected) in [(5, "class"), (6, "method"), (11, "interface"), (12, "function"), (99, "symbol")] {
+        for (kind_int, expected) in [
+            (5, "class"),
+            (6, "method"),
+            (11, "interface"),
+            (12, "function"),
+            (99, "symbol"),
+        ] {
             let response = json!([{
                 "name": "item",
                 "kind": kind_int,
@@ -1671,13 +1712,17 @@ mod tests {
                 }
             }]);
             let result = parse_call_hierarchy_prepare_response(&response, temp.path()).expect("ok");
-            assert_eq!(result[0].kind, expected, "kind {kind_int} should map to {expected}");
+            assert_eq!(
+                result[0].kind, expected,
+                "kind {kind_int} should map to {expected}"
+            );
         }
     }
 
     #[test]
     fn test_parse_call_hierarchy_prepare_not_array() {
-        let result = parse_call_hierarchy_prepare_response(&json!({"foo": "bar"}), Path::new("/workspace"));
+        let result =
+            parse_call_hierarchy_prepare_response(&json!({"foo": "bar"}), Path::new("/workspace"));
         assert!(result.is_err());
     }
 
@@ -1718,13 +1763,8 @@ mod tests {
             ]
         }]);
 
-        let result = parse_call_hierarchy_calls_response(
-            &response,
-            &temp,
-            "from",
-            "fromRanges",
-        )
-        .expect("ok");
+        let result = parse_call_hierarchy_calls_response(&response, &temp, "from", "fromRanges")
+            .expect("ok");
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].item.name, "caller");
@@ -1757,13 +1797,8 @@ mod tests {
             ]
         }]);
 
-        let result = parse_call_hierarchy_calls_response(
-            &response,
-            &temp,
-            "to",
-            "fromRanges",
-        )
-        .expect("ok");
+        let result =
+            parse_call_hierarchy_calls_response(&response, &temp, "to", "fromRanges").expect("ok");
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].item.name, "callee");
@@ -1800,7 +1835,10 @@ mod tests {
             "fromRanges",
         )
         .expect("ok");
-        assert!(result.is_empty(), "entry without 'from' key should be skipped");
+        assert!(
+            result.is_empty(),
+            "entry without 'from' key should be skipped"
+        );
     }
 
     // ── ProcessEntry::to_validation_status tests ──────────────────
@@ -1854,11 +1892,13 @@ mod tests {
     /// Useful for testing error paths where ensure_process returns NoLspAvailable
     /// because no descriptor was found.
     fn client_no_languages() -> LspClient {
+        let (shutdown_tx, _) = broadcast::channel(1);
         LspClient {
             descriptors: Arc::new(Vec::new()),
             processes: Arc::new(RwLock::new(HashMap::new())),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
+            shutdown_tx: Arc::new(shutdown_tx),
         }
     }
 
@@ -1879,11 +1919,13 @@ mod tests {
             })
             .collect();
 
+        let (shutdown_tx, _) = broadcast::channel(1);
         LspClient {
             descriptors: Arc::new(descriptors),
             processes: Arc::new(RwLock::new(processes)),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
+            shutdown_tx: Arc::new(shutdown_tx),
         }
     }
 
@@ -1946,7 +1988,12 @@ mod tests {
     async fn test_request_no_process_returns_no_lsp() {
         let client = client_no_languages();
         let result = client
-            .request("rust", "textDocument/definition", json!({}), Duration::from_secs(5))
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
             .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
@@ -1961,7 +2008,12 @@ mod tests {
         )]);
         let client = client_with_descriptors(vec!["rust"], processes);
         let result = client
-            .request("rust", "textDocument/definition", json!({}), Duration::from_secs(5))
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
             .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
@@ -2109,7 +2161,11 @@ mod tests {
     async fn test_lawyer_did_open_no_lsp() {
         let client = client_no_languages();
         let result = client
-            .did_open(Path::new("/workspace"), Path::new("src/main.rs"), "fn main() {}")
+            .did_open(
+                Path::new("/workspace"),
+                Path::new("src/main.rs"),
+                "fn main() {}",
+            )
             .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
@@ -2174,9 +2230,7 @@ mod tests {
     async fn test_lawyer_did_change_watched_files_is_noop() {
         // did_change_watched_files on LspClient is currently a no-op
         let client = client_no_languages();
-        let result = client
-            .did_change_watched_files(vec![])
-            .await;
+        let result = client.did_change_watched_files(vec![]).await;
         assert!(result.is_ok());
     }
 
@@ -2215,7 +2269,7 @@ mod tests {
     async fn test_warm_start_no_languages_is_noop() {
         let client = client_no_languages();
         client.warm_start(); // Should not panic
-        // Give spawned tasks a chance to run
+                             // Give spawned tasks a chance to run
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
