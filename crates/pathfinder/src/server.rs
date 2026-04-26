@@ -16,6 +16,9 @@ mod helpers;
 mod tools;
 /// Module containing type definitions.
 pub mod types;
+
+// Internal wildcard import is justified for ergonomics: all types in this module are
+// used throughout the file, and the module is co-located with server.rs.
 #[allow(clippy::wildcard_imports)]
 use types::*;
 

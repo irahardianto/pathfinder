@@ -386,9 +386,9 @@ pub async fn generate_skeleton_text(
         if current_tokens + file_skeleton_tokens > config.max_tokens {
             if current_tokens + 50 <= config.max_tokens {
                 use std::fmt::Write;
-                let _ = write!(
+                let _ = writeln!(
                     skeleton_out,
-                    "\n// [... Omitted {} due to token budget]\n",
+                    "\n// [... Omitted {} due to token budget]",
                     rel_path.display()
                 );
             }
