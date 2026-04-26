@@ -1961,9 +1961,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                unavailable_since: Instant::now()
-                    .checked_sub(Duration::from_mins(10))
-                    .unwrap(),
+                unavailable_since: Instant::now().checked_sub(Duration::from_mins(10)).unwrap(),
             }),
         )]);
         let client = client_with_descriptors(vec!["rust"], processes);

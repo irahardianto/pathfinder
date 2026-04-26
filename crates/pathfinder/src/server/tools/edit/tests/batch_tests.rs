@@ -10,7 +10,7 @@
     clippy::needless_return,
     clippy::similar_names,
     clippy::single_char_pattern,
-    clippy::format_push_string,
+    clippy::format_push_string
 )]
 
 use super::helpers::{make_body_range, make_server};
