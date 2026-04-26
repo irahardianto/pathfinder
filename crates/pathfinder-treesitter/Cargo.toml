@@ -46,3 +46,4 @@ lru = "0.16.3"
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
+futures = "0.3"

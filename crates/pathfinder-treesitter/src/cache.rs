@@ -4,11 +4,13 @@ use crate::parser::AstParser;
 use crate::vue_zones::{parse_vue_multizone, MultiZoneTree};
 use lru::LruCache;
 use pathfinder_common::types::VersionHash;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
+use tokio::sync::OnceCell;
 use tracing::instrument;
 use tree_sitter::Tree;
 
@@ -52,18 +54,22 @@ pub struct MultiZoneEntry {
 /// obtain the file's mtime before touching the cache. If the mtime is unchanged
 /// the cached entry is returned immediately — no disk read, no hashing.
 ///
-/// ## Concurrency note
+/// ## Singleflight deduplication
 ///
-/// // NOTE: Concurrent requests for the same file may race through the slow path
-/// // simultaneously, resulting in redundant parsing work. For v1 (local MCP
-/// // server, low concurrency) this is acceptable. A singleflight /
-/// // `tokio::sync::OnceCell` approach would eliminate it if contention becomes
-/// // measurable.
+/// When multiple concurrent requests arrive for the same uncached file, only one
+/// parse operation is performed. The other requests wait and receive the same
+/// result, eliminating redundant I/O and CPU work.
 #[derive(Debug)]
 pub struct AstCache {
     entries: Mutex<LruCache<PathBuf, CacheEntry>>,
     /// Separate LRU cache for Vue SFC multi-zone parse results.
     vue_entries: Mutex<LruCache<PathBuf, MultiZoneEntry>>,
+    /// Singleflight locks for in-flight parses to prevent redundant work.
+    /// Maps path -> OnceCell containing the parse result.
+    in_flight: Mutex<HashMap<PathBuf, Arc<OnceCell<Result<(Tree, Arc<[u8]>), SurgeonError>>>>>,
+    /// Singleflight locks for Vue parses.
+    vue_in_flight:
+        Mutex<HashMap<PathBuf, Arc<OnceCell<Result<(MultiZoneTree, VersionHash), SurgeonError>>>>>,
 }
 
 impl AstCache {
@@ -76,6 +82,8 @@ impl AstCache {
         Self {
             entries: Mutex::new(LruCache::new(cap)),
             vue_entries: Mutex::new(LruCache::new(cap)),
+            in_flight: Mutex::new(HashMap::new()),
+            vue_in_flight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -113,35 +121,81 @@ impl AstCache {
             }
         } // lock released here — safe to await below
 
-        // --- Slow path: full read + hash + parse ---
-        let content = tokio::fs::read(path).await?;
-        let current_hash = VersionHash::compute(&content);
-        let content_arc: Arc<[u8]> = Arc::from(content);
-        // For Vue SFCs, preprocess extracts the <script> block before parsing.
-        // The original `content` is kept for version hashing and OCC checks —
-        // only the input to the AST parser uses the processed bytes.
-        let parse_input = lang.preprocess_source(&content_arc);
-        let tree = AstParser::parse_source(path, lang, &parse_input)?;
+        // --- Singleflight: check if another request is already parsing this file ---
+        let cell = {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .map_err(|_| SurgeonError::ParseError {
+                    path: path.to_path_buf(),
+                    reason: "In-flight lock poisoned".into(),
+                })?;
+            in_flight
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
 
-        // Re-acquire the lock to insert/update.
-        let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
-            path: path.to_path_buf(),
-            reason: "Lock poisoned".into(),
-        })?;
+        // Use get_or_init to ensure only one parse happens per file
+        let result = cell
+            .get_or_init(|| async {
+                // --- Slow path: full read + hash + parse ---
+                let content =
+                    tokio::fs::read(path)
+                        .await
+                        .map_err(|e| SurgeonError::ParseError {
+                            path: path.to_path_buf(),
+                            reason: format!("Failed to read file: {e}"),
+                        })?;
+                let current_hash = VersionHash::compute(&content);
+                let content_arc: Arc<[u8]> = Arc::from(content);
+                // For Vue SFCs, preprocess extracts the <script> block before parsing.
+                // The original `content` is kept for version hashing and OCC checks —
+                // only the input to the AST parser uses the processed bytes.
+                let parse_input = lang.preprocess_source(&content_arc);
+                let tree = AstParser::parse_source(path, lang, &parse_input)?;
 
-        // LruCache automatically evicts the least recently used item if capacity is reached
-        lock.put(
-            path.to_path_buf(),
-            CacheEntry {
-                tree: tree.clone(),
-                source: content_arc.clone(),
-                content_hash: current_hash,
-                lang,
-                mtime: current_mtime,
-            },
-        );
+                // Re-acquire the lock to insert/update.
+                let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
+                    path: path.to_path_buf(),
+                    reason: "Lock poisoned".into(),
+                })?;
 
-        Ok((tree, content_arc))
+                // LruCache automatically evicts the least recently used item if capacity is reached
+                lock.put(
+                    path.to_path_buf(),
+                    CacheEntry {
+                        tree: tree.clone(),
+                        source: content_arc.clone(),
+                        content_hash: current_hash,
+                        lang,
+                        mtime: current_mtime,
+                    },
+                );
+
+                Ok::<_, SurgeonError>((tree.clone(), content_arc.clone()))
+            })
+            .await;
+
+        // Clean up the in-flight entry now that parsing is complete
+        {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .map_err(|_| SurgeonError::ParseError {
+                    path: path.to_path_buf(),
+                    reason: "In-flight lock poisoned".into(),
+                })?;
+            in_flight.remove(path);
+        }
+
+        match result.as_ref() {
+            Ok((tree, source)) => Ok((tree.clone(), source.clone())),
+            Err(e) => Err(SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!("Parse failed: {e}"),
+            }),
+        }
     }
 
     /// Retrieve the multi-zone parse result for a Vue SFC.
@@ -187,41 +241,88 @@ impl AstCache {
             }
         } // lock released
 
-        // --- Slow path ---
-        let content = tokio::fs::read(path).await?;
-        let content_hash = VersionHash::compute(&content);
-        let multi = parse_vue_multizone(&content).map_err(|e| SurgeonError::ParseError {
-            path: path.to_path_buf(),
-            reason: format!("Vue multi-zone parse failed: {e}"),
-        })?;
-
-        let mut lock = self
-            .vue_entries
-            .lock()
-            .map_err(|_| SurgeonError::ParseError {
-                path: path.to_path_buf(),
-                reason: "Vue cache lock poisoned".into(),
-            })?;
-
-        let cached_multi = MultiZoneTree {
-            script_tree: multi.script_tree.clone(),
-            template_tree: multi.template_tree.clone(),
-            style_tree: multi.style_tree.clone(),
-            zones: multi.zones.clone(),
-            source: multi.source.clone(),
-            degraded: multi.degraded,
+        // --- Singleflight: check if another request is already parsing this Vue file ---
+        let cell = {
+            let mut vue_in_flight =
+                self.vue_in_flight
+                    .lock()
+                    .map_err(|_| SurgeonError::ParseError {
+                        path: path.to_path_buf(),
+                        reason: "Vue in-flight lock poisoned".into(),
+                    })?;
+            vue_in_flight
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
         };
 
-        lock.put(
-            path.to_path_buf(),
-            MultiZoneEntry {
-                multi: cached_multi,
-                content_hash: content_hash.clone(),
-                mtime: current_mtime,
-            },
-        );
+        // Use get_or_init to ensure only one parse happens per file
+        let result = cell
+            .get_or_init(|| async {
+                // --- Slow path ---
+                let content =
+                    tokio::fs::read(path)
+                        .await
+                        .map_err(|e| SurgeonError::ParseError {
+                            path: path.to_path_buf(),
+                            reason: format!("Failed to read file: {e}"),
+                        })?;
+                let content_hash = VersionHash::compute(&content);
+                let multi =
+                    parse_vue_multizone(&content).map_err(|e| SurgeonError::ParseError {
+                        path: path.to_path_buf(),
+                        reason: format!("Vue multi-zone parse failed: {e}"),
+                    })?;
 
-        Ok((multi, content_hash))
+                let mut lock = self
+                    .vue_entries
+                    .lock()
+                    .map_err(|_| SurgeonError::ParseError {
+                        path: path.to_path_buf(),
+                        reason: "Vue cache lock poisoned".into(),
+                    })?;
+
+                let cached_multi = MultiZoneTree {
+                    script_tree: multi.script_tree.clone(),
+                    template_tree: multi.template_tree.clone(),
+                    style_tree: multi.style_tree.clone(),
+                    zones: multi.zones.clone(),
+                    source: multi.source.clone(),
+                    degraded: multi.degraded,
+                };
+
+                lock.put(
+                    path.to_path_buf(),
+                    MultiZoneEntry {
+                        multi: cached_multi,
+                        content_hash: content_hash.clone(),
+                        mtime: current_mtime,
+                    },
+                );
+
+                Ok::<_, SurgeonError>((multi.clone(), content_hash.clone()))
+            })
+            .await;
+
+        // Clean up the in-flight entry now that parsing is complete
+        {
+            let mut vue_in_flight =
+                self.vue_in_flight
+                    .lock()
+                    .map_err(|_| SurgeonError::ParseError {
+                        path: path.to_path_buf(),
+                        reason: "Vue in-flight lock poisoned".into(),
+                    })?;
+            vue_in_flight.remove(path);
+        }
+
+        match result.as_ref() {
+            Ok((multi, hash)) => Ok((multi.clone(), hash.clone())),
+            Err(e) => Err(SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!("Parse failed: {e}"),
+            }),
+        }
     }
 
     /// Remove a file from the cache, forcing a re-parse on next access.
@@ -418,5 +519,78 @@ mod tests {
         );
         // Non-Vue entry must not be disturbed
         assert_eq!(cache.entries.lock().unwrap().len(), 1, "Go entry untouched");
+    }
+
+    /// Test that singleflight prevents redundant parsing when multiple
+    /// concurrent requests target the same uncached file.
+    #[tokio::test]
+    async fn test_singleflight_prevents_redundant_parsing() {
+        let cache = AstCache::new(10);
+
+        // Create a file that takes some time to read/parse
+        let mut file = NamedTempFile::new().unwrap();
+        let content = "package main\n".repeat(1000); // Large enough to take some time
+        file.write_all(content.as_bytes()).unwrap();
+        let path = Arc::new(file.path().to_path_buf());
+
+        // Launch multiple concurrent requests for the same uncached file
+        let cache = Arc::new(cache);
+        let handles = (0..5).map(|_| {
+            let cache = Arc::clone(&cache);
+            let path = Arc::clone(&path);
+            tokio::spawn(async move { cache.get_or_parse(&path, SupportedLanguage::Go).await })
+        });
+
+        // All requests should complete successfully
+        let results: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap().unwrap())
+            .collect();
+
+        // All results should be identical (same tree and source)
+        for result in &results[1..] {
+            assert_eq!(
+                results[0].0.root_node().child_count(),
+                result.0.root_node().child_count()
+            );
+            assert_eq!(results[0].1.len(), result.1.len());
+        }
+
+        // Only one entry should be in the cache (not 5)
+        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+    }
+
+    /// Test that singleflight works correctly for Vue SFC parsing as well.
+    #[tokio::test]
+    async fn test_singleflight_vue() {
+        let cache = AstCache::new(10);
+
+        let sfc = b"<template><div/></template>\n<script>const x = 1;</script>\n";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(sfc).unwrap();
+        let path = Arc::new(file.path().to_path_buf());
+
+        // Launch multiple concurrent requests for the same Vue file
+        let cache = Arc::new(cache);
+        let handles = (0..3).map(|_| {
+            let cache = Arc::clone(&cache);
+            let path = Arc::clone(&path);
+            tokio::spawn(async move { cache.get_or_parse_vue(&path).await })
+        });
+
+        let results: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap().unwrap())
+            .collect();
+
+        // All results should have the same hash
+        for result in &results[1..] {
+            assert_eq!(results[0].1, result.1);
+        }
+
+        // Only one entry should be in the Vue cache
+        assert_eq!(cache.vue_entries.lock().unwrap().len(), 1);
     }
 }

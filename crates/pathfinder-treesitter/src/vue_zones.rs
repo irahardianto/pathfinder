@@ -50,7 +50,7 @@ pub struct VueZones {
 // ─── Multi-zone parse result ──────────────────────────────────────────────────
 
 /// Parsed AST trees for all three zones of a Vue SFC.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MultiZoneTree {
     /// TypeScript AST for the `<script>` block (if present).
     pub script_tree: Option<Tree>,
