@@ -25,12 +25,13 @@ use detect::LanguageLsp as LspDescriptor;
 use process::{send, shutdown, spawn_and_initialize, ManagedProcess};
 use protocol::RequestDispatcher;
 use serde_json::json;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use url::Url;
 
 /// Default idle timeout: 15 minutes for standard LSPs.
@@ -115,7 +116,7 @@ pub struct LspClient {
     /// Known language descriptors (from Zero-Config detection).
     descriptors: Arc<Vec<LspDescriptor>>,
     /// Running processes keyed by language id.
-    processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
+    processes: Arc<DashMap<String, ProcessEntry>>,
     /// Locks for concurrent initialization to prevent duplicate spawns.
     init_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Shared JSON-RPC request/response dispatcher.
@@ -151,7 +152,7 @@ impl LspClient {
 
         let client = Self {
             descriptors: Arc::new(descriptors),
-            processes: Arc::new(RwLock::new(HashMap::new())),
+            processes: Arc::new(DashMap::new()),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::clone(&shutdown_tx),
@@ -232,31 +233,27 @@ impl LspClient {
     /// - The language has been marked unavailable after repeated crashes
     async fn ensure_process(&self, language_id: &str) -> Result<(), LspError> {
         // Fast path: already running
-        {
-            let guard = self.processes.read().await;
-            if let Some(entry) = guard.get(language_id) {
-                return match entry {
-                    ProcessEntry::Running(_) => Ok(()),
-                    ProcessEntry::Unavailable(state) => {
-                        // Check if cooldown has elapsed for recovery
-                        let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
-                        if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
-                            // Attempt recovery: remove unavailable entry and proceed to spawn
-                            drop(guard);
-                            tracing::info!(
-                                language = %language_id,
-                                cooldown_elapsed_secs,
-                                "LSP: recovery cooldown elapsed, attempting restart"
-                            );
-                            let mut guard = self.processes.write().await;
-                            guard.remove(language_id);
-                            Ok(())
-                        } else {
-                            Err(LspError::NoLspAvailable)
-                        }
+        if let Some(entry) = self.processes.get(language_id) {
+            return match entry.value() {
+                ProcessEntry::Running(_) => Ok(()),
+                ProcessEntry::Unavailable(state) => {
+                    // Check if cooldown has elapsed for recovery
+                    let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
+                    if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
+                        // Attempt recovery: remove unavailable entry and proceed to spawn
+                        drop(entry);
+                        tracing::info!(
+                            language = %language_id,
+                            cooldown_elapsed_secs,
+                            "LSP: recovery cooldown elapsed, attempting restart"
+                        );
+                        self.processes.remove(language_id);
+                        Ok(())
+                    } else {
+                        Err(LspError::NoLspAvailable)
                     }
-                };
-            }
+                }
+            };
         }
 
         // Acquire the init lock for this language to prevent duplicate spawn races
@@ -270,31 +267,27 @@ impl LspClient {
         let _guard = init_lock.lock().await;
 
         // Double-check after acquiring lock
-        {
-            let guard = self.processes.read().await;
-            if let Some(entry) = guard.get(language_id) {
-                return match entry {
-                    ProcessEntry::Running(_) => Ok(()),
-                    ProcessEntry::Unavailable(state) => {
-                        // Check if cooldown has elapsed for recovery
-                        let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
-                        if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
-                            // Attempt recovery: remove unavailable entry and proceed to spawn
-                            drop(guard);
-                            tracing::info!(
-                                language = %language_id,
-                                cooldown_elapsed_secs,
-                                "LSP: recovery cooldown elapsed, attempting restart"
-                            );
-                            let mut guard = self.processes.write().await;
-                            guard.remove(language_id);
-                            Ok(())
-                        } else {
-                            Err(LspError::NoLspAvailable)
-                        }
+        if let Some(entry) = self.processes.get(language_id) {
+            return match entry.value() {
+                ProcessEntry::Running(_) => Ok(()),
+                ProcessEntry::Unavailable(state) => {
+                    // Check if cooldown has elapsed for recovery
+                    let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
+                    if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
+                        // Attempt recovery: remove unavailable entry and proceed to spawn
+                        drop(entry);
+                        tracing::info!(
+                            language = %language_id,
+                            cooldown_elapsed_secs,
+                            "LSP: recovery cooldown elapsed, attempting restart"
+                        );
+                        self.processes.remove(language_id);
+                        Ok(())
+                    } else {
+                        Err(LspError::NoLspAvailable)
                     }
-                };
-            }
+                }
+            };
         }
 
         // Find the descriptor for this language
@@ -318,7 +311,7 @@ impl LspClient {
                 language = %language_id,
                 "LSP: max restart attempts reached, marking unavailable"
             );
-            self.processes.write().await.insert(
+            self.processes.insert(
                 language_id.clone(),
                 ProcessEntry::Unavailable(UnavailableState {
                     unavailable_since: Instant::now(),
@@ -366,13 +359,14 @@ impl LspClient {
                 );
                 // On recovery failure (attempt > 0), reset the unavailable_since timestamp
                 if attempt > 0 {
-                    let mut guard = self.processes.write().await;
-                    if let Some(ProcessEntry::Unavailable(state)) = guard.get_mut(&language_id) {
-                        state.unavailable_since = Instant::now();
-                        tracing::info!(
-                            language = %language_id,
-                            "LSP: recovery failed, cooldown reset"
-                        );
+                    if let Some(mut entry) = self.processes.get_mut(&language_id) {
+                        if let ProcessEntry::Unavailable(state) = entry.value_mut() {
+                            state.unavailable_since = Instant::now();
+                            tracing::info!(
+                                language = %language_id,
+                                "LSP: recovery failed, cooldown reset"
+                            );
+                        }
                     }
                 }
                 // Recurse with attempt+1; the guard at the top of this function handles
@@ -398,7 +392,7 @@ impl LspClient {
             );
         }
 
-        self.processes.write().await.insert(
+        self.processes.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
                 process,
@@ -412,9 +406,10 @@ impl LspClient {
 
     /// Update `last_used` for a language (called after each successful request).
     async fn touch(&self, language_id: &str) {
-        let mut guard = self.processes.write().await;
-        if let Some(ProcessEntry::Running(state)) = guard.get_mut(language_id) {
-            state.process.last_used = Instant::now();
+        if let Some(mut entry) = self.processes.get_mut(language_id) {
+            if let ProcessEntry::Running(state) = entry.value_mut() {
+                state.process.last_used = Instant::now();
+            }
         }
     }
 
@@ -434,10 +429,13 @@ impl LspClient {
 
         // Increment in-flight counter (decremented on drop) and health check
         let _in_flight_guard = {
-            let guard = self.processes.read().await;
-            let state = match guard.get(language_id) {
-                Some(ProcessEntry::Running(s)) => s,
-                Some(ProcessEntry::Unavailable(_)) | None => return Err(LspError::NoLspAvailable),
+            let entry = match self.processes.get(language_id) {
+                Some(e) => e,
+                None => return Err(LspError::NoLspAvailable),
+            };
+            let state = match entry.value() {
+                ProcessEntry::Running(s) => s,
+                ProcessEntry::Unavailable(_) => return Err(LspError::NoLspAvailable),
             };
             // Health check: verify reader task is still alive
             if state.reader_handle.is_finished() {
@@ -453,10 +451,13 @@ impl LspClient {
 
         // Write the request to stdin
         {
-            let guard = self.processes.read().await;
-            let state = match guard.get(language_id) {
-                Some(ProcessEntry::Running(s)) => s,
-                Some(ProcessEntry::Unavailable(_)) | None => return Err(LspError::NoLspAvailable),
+            let entry = match self.processes.get(language_id) {
+                Some(e) => e,
+                None => return Err(LspError::NoLspAvailable),
+            };
+            let state = match entry.value() {
+                ProcessEntry::Running(s) => s,
+                ProcessEntry::Unavailable(_) => return Err(LspError::NoLspAvailable),
             };
             send(&state.process, &message).await?;
         }
@@ -485,10 +486,12 @@ impl LspClient {
         params: serde_json::Value,
     ) -> Result<(), LspError> {
         let message = RequestDispatcher::make_notification(method, &params);
-        let guard = self.processes.read().await;
-        match guard.get(language_id) {
-            Some(ProcessEntry::Running(state)) => send(&state.process, &message).await,
-            Some(ProcessEntry::Unavailable(_)) | None => Err(LspError::NoLspAvailable),
+        match self.processes.get(language_id) {
+            Some(entry) => match entry.value() {
+                ProcessEntry::Running(state) => send(&state.process, &message).await,
+                ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
+            },
+            None => Err(LspError::NoLspAvailable),
         }
     }
 
@@ -496,10 +499,12 @@ impl LspClient {
     ///
     /// Returns `Ok(caps)` when the process is running, else `NoLspAvailable`.
     async fn capabilities_for(&self, language_id: &str) -> Result<DetectedCapabilities, LspError> {
-        let guard = self.processes.read().await;
-        match guard.get(language_id) {
-            Some(ProcessEntry::Running(state)) => Ok(state.process.capabilities.clone()),
-            Some(ProcessEntry::Unavailable(_)) | None => Err(LspError::NoLspAvailable),
+        match self.processes.get(language_id) {
+            Some(entry) => match entry.value() {
+                ProcessEntry::Running(state) => Ok(state.process.capabilities.clone()),
+                ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
+            },
+            None => Err(LspError::NoLspAvailable),
         }
     }
 
@@ -993,8 +998,7 @@ impl Lawyer for LspClient {
     async fn capability_status(&self) -> HashMap<String, crate::types::LspLanguageStatus> {
         let mut status = HashMap::new();
         for desc in self.descriptors.iter() {
-            let guard = self.processes.read().await;
-            let lang_status = match guard.get(&desc.language_id) {
+            let lang_status = match self.processes.get(&desc.language_id) {
                 Some(entry) => entry.to_validation_status(&desc.command),
                 None => crate::types::LspLanguageStatus {
                     validation: true,
@@ -1325,7 +1329,7 @@ fn parse_call_hierarchy_calls_response(
 async fn reader_supervisor_task(
     language_id: String,
     reader_handle: tokio::task::JoinHandle<()>,
-    processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
+    processes: Arc<DashMap<String, ProcessEntry>>,
 ) {
     match reader_handle.await {
         Ok(()) => {
@@ -1344,12 +1348,12 @@ async fn reader_supervisor_task(
     }
     // Remove the process entry — this allows future requests to retry
     // via the recovery cooldown mechanism in ensure_process()
-    processes.write().await.remove(&language_id);
+    processes.remove(&language_id);
 }
 
 /// Background task: check for idle processes and terminate them.
 async fn idle_timeout_task(
-    processes: Arc<RwLock<HashMap<String, ProcessEntry>>>,
+    processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
@@ -1358,9 +1362,9 @@ async fn idle_timeout_task(
             _ = shutdown_rx.recv() => {
                 // Shutdown signal received - gracefully terminate all LSP processes
                 tracing::info!("LSP: shutdown signal received, terminating all processes");
-                let mut guard = processes.write().await;
-                for (lang, entry) in guard.drain() {
-                    if let ProcessEntry::Running(mut state) = entry {
+                let keys: Vec<String> = processes.iter().map(|e| e.key().clone()).collect();
+                for lang in keys {
+                    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&lang) {
                         tracing::debug!(language = %lang, "LSP: shutting down process");
                         state.reader_handle.abort();
                         shutdown(&mut state.process, &dispatcher).await;
@@ -1371,11 +1375,11 @@ async fn idle_timeout_task(
             }
             () = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
                 // Check for idle processes
-                let mut guard = processes.write().await;
-                let languages_to_remove: Vec<String> = guard
+                let languages_to_remove: Vec<String> = processes
                     .iter()
-                    .filter_map(|(lang, entry)| {
-                        if let ProcessEntry::Running(state) = entry {
+                    .filter_map(|entry| {
+                        let lang = entry.key();
+                        if let ProcessEntry::Running(state) = entry.value() {
                             // Only remove if idle timeout elapsed AND no in-flight requests
                             if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT
                                 && state.process.in_flight.load(Ordering::Relaxed) == 0
@@ -1391,7 +1395,7 @@ async fn idle_timeout_task(
                     .collect();
 
                 for lang in languages_to_remove {
-                    if let Some(ProcessEntry::Running(mut state)) = guard.remove(&lang) {
+                    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&lang) {
                         tracing::info!(
                             language = %lang,
                             restarts = state.restart_count,
@@ -1895,7 +1899,7 @@ mod tests {
         let (shutdown_tx, _) = broadcast::channel(1);
         LspClient {
             descriptors: Arc::new(Vec::new()),
-            processes: Arc::new(RwLock::new(HashMap::new())),
+            processes: Arc::new(DashMap::new()),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
@@ -1919,10 +1923,15 @@ mod tests {
             })
             .collect();
 
+        let processes_dashmap = DashMap::new();
+        for (k, v) in processes {
+            processes_dashmap.insert(k, v);
+        }
+
         let (shutdown_tx, _) = broadcast::channel(1);
         LspClient {
             descriptors: Arc::new(descriptors),
-            processes: Arc::new(RwLock::new(processes)),
+            processes: Arc::new(processes_dashmap),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
@@ -1975,9 +1984,8 @@ mod tests {
         );
 
         // The unavailable entry should have been removed
-        let guard = client.processes.read().await;
         assert!(
-            guard.get("rust").is_none(),
+            client.processes.get("rust").is_none(),
             "entry should be removed after cooldown-elapsed path"
         );
     }
