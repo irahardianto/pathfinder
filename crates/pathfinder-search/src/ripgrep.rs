@@ -493,7 +493,7 @@ mod tests {
                 "// Library code\npub fn add(a: i32, b: i32) -> i32 { a + b }\n",
             ),
         ]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "hello world"))
             .await
@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_literal_not_found() {
         let ws = make_workspace(&[("src/main.rs", "fn main() {}\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "NONEXISTENT_PATTERN_XYZ"))
             .await
@@ -524,8 +524,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_regex_pattern() {
-        let ws = make_workspace(&[("src/auth.rs", "pub fn login() {}\npub fn logout() {}\n")] );
-        let scout = RipgrepScout::default();
+        let ws = make_workspace(&[("src/auth.rs", "pub fn login() {}\npub fn logout() {}\n")]);
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: r"pub fn log(in|out)\(\)".to_owned(),
@@ -543,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_invalid_regex_returns_error() {
         let ws = make_workspace(&[("src/main.rs", "fn main() {}\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "[invalid regex".to_owned(),
@@ -564,7 +564,7 @@ mod tests {
             ("docs/README.md", "find_me\n"),
             ("src/auth.rs", "find_me\n"),
         ]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "find_me".to_owned(),
@@ -603,7 +603,7 @@ mod tests {
             ("d.rs", "needle\n"),
             ("e.rs", "needle\n"),
         ]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "needle".to_owned(),
@@ -625,7 +625,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_context_lines() {
         let ws = make_workspace(&[("src/main.rs", "line1\nline2\ntarget_line\nline4\nline5\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "target_line".to_owned(),
@@ -649,7 +649,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_match_has_version_hash() {
         let ws = make_workspace(&[("src/main.rs", "fn main() { /* marker */ }\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "marker"))
             .await
@@ -669,7 +669,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_enclosing_semantic_path_is_null() {
         let ws = make_workspace(&[("src/main.rs", "find_this\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "find_this"))
             .await
@@ -691,7 +691,7 @@ mod tests {
             ("src/main.test.rs", "needle\n"),
             ("src/auth.rs", "needle\n"),
         ]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "needle".to_owned(),
@@ -716,7 +716,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_multiple_matches_in_one_file() {
         let ws = make_workspace(&[("src/auth.rs", "token\nlogin\ntoken\nlogout\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "token"))
             .await
@@ -730,7 +730,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_invalid_glob_returns_error() {
         let ws = make_workspace(&[("src/main.rs", "fn main() {}\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "main".to_owned(),
@@ -754,11 +754,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_context_lines_overlap() {
-        let ws = make_workspace(&[(            
+        let ws = make_workspace(&[(
             "src/main.rs",
             "line1\nline2\nmatch\nline4\nmatch\nline6\nline7\nmatch\n",
         )]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "match".to_owned(),
@@ -788,11 +788,11 @@ mod tests {
     #[tokio::test]
     async fn test_search_line_truncation() {
         let long_line = "a".repeat(2000);
-        let ws = make_workspace(&[(  
+        let ws = make_workspace(&[(
             "src/main.rs",
             &format!("{long_line}\nmatch {long_line}\n{long_line}\n"),
         )]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "match".to_owned(),
@@ -822,7 +822,7 @@ mod tests {
     async fn test_search_column_offset() {
         // Verify that the column field reflects the match position, not just 1
         let ws = make_workspace(&[("src/main.rs", "    pub fn hello() -> i32 { 42 }\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "hello"))
             .await
@@ -836,7 +836,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_default_impl() {
-        // RipgrepScout::default() should behave identically to new()
+        // RipgrepScout should behave identically to new()
         let scout = RipgrepScout;
         let ws = make_workspace(&[("src/main.rs", "find_default\n")]);
         let result = scout
@@ -849,8 +849,8 @@ mod tests {
     #[tokio::test]
     async fn test_search_match_column_for_first_char() {
         // Match at the very beginning of a line
-        let ws = make_workspace(&[("src/lib.rs", "fn main() {}\n")] );
-        let scout = RipgrepScout::default();
+        let ws = make_workspace(&[("src/lib.rs", "fn main() {}\n")]);
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "fn main"))
             .await
@@ -862,7 +862,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_zero_context_lines() {
         let ws = make_workspace(&[("src/main.rs", "line1\ntarget\nline3\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "target".to_owned(),
@@ -884,7 +884,7 @@ mod tests {
             ("b.rs", "needle\nneedle\n"),
             ("c.rs", "needle\nneedle\n"),
         ]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let params = SearchParams {
             workspace_root: ws.path().to_path_buf(),
             query: "needle".to_owned(),
@@ -942,7 +942,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_known_field_default_false() {
         let ws = make_workspace(&[("src/main.rs", "find_known\n")]);
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let result = scout
             .search(&params_for(&ws, "find_known"))
             .await
