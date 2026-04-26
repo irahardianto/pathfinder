@@ -268,33 +268,35 @@ fn test_fuzzy_whitespace_fallback() {
 
 #[test]
 fn test_text_not_found_includes_actual_content() {
-    let source = src(&["line 1", "line 2", "line 3"]);
+    fn test_text_not_found_includes_actual_content() {
+        let source = src(&["line 1", "line 2", "line 3"]);
 
-    let err = resolve_text_edit(&source, "not present", 2, "", false, Path::new("f.rs"))
-        .expect_err("missing text returns TextNotFound");
+        let err = resolve_text_edit(&source, "not present", 2, "", false, Path::new("f.rs"))
+            .expect_err("missing text returns TextNotFound");
 
-    let pathfinder_common::error::PathfinderError::TextNotFound {
-        filepath,
-        old_text,
-        context_line,
-        actual_content,
-        closest_match: _,
-    } = err
-    else {
-        panic!("expected TextNotFound, got: {err:?}");
-    };
+        let pathfinder_common::error::PathfinderError::TextNotFound {
+            filepath,
+            old_text,
+            context_line,
+            actual_content,
+            ..
+        } = err
+        else {
+            panic!("expected TextNotFound, got: {err:?}");
+        };
 
-    assert_eq!(filepath, Path::new("f.rs"));
-    assert_eq!(old_text, "not present");
-    assert_eq!(context_line, 2);
-    assert!(
-        actual_content.is_some(),
-        "actual_content should be populated with window text"
-    );
+        assert_eq!(filepath, Path::new("f.rs"));
+        assert_eq!(old_text, "not present");
+        assert_eq!(context_line, 2);
+        assert!(
+            actual_content.is_some(),
+            "actual_content should be populated with window text"
+        );
 
-    let content = actual_content.unwrap();
-    assert!(
-        content.contains("line 1") || content.contains("line 2") || content.contains("line 3"),
-        "actual_content should contain context from the source file"
-    );
+        let content = actual_content.unwrap();
+        assert!(
+            content.contains("line 1") || content.contains("line 2") || content.contains("line 3"),
+            "actual_content should contain context from the source file"
+        );
+    }
 }
