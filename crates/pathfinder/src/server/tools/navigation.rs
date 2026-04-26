@@ -350,7 +350,7 @@ impl PathfinderServer {
                 is_regex: true,
                 max_results: 5,
                 path_glob: "**/*".to_owned(),
-                exclude_glob: String::new(),
+                exclude_glob: String::default(),
                 context_lines: 0,
             })
             .await;
@@ -528,7 +528,7 @@ impl PathfinderServer {
                                 snippet: referenced_item
                                     .detail
                                     .unwrap_or_else(|| referenced_item.name.clone()),
-                                version_hash: String::new(), // Populated at higher layer if needed
+                                version_hash: String::default(), // Populated at higher layer if needed
                                 direction: match direction {
                                     CallDirection::Incoming => "incoming".to_owned(),
                                     CallDirection::Outgoing => "outgoing".to_owned(),
@@ -703,7 +703,7 @@ impl PathfinderServer {
                         is_regex: false,
                         max_results: 50,
                         path_glob: "**/*".to_owned(),
-                        exclude_glob: String::new(),
+                        exclude_glob: String::default(),
                         context_lines: 0,
                     })
                     .await;
@@ -720,7 +720,7 @@ impl PathfinderServer {
                                     file: m.file,
                                     line: usize::try_from(m.line).unwrap_or(usize::MAX),
                                     snippet: m.content,
-                                    version_hash: String::new(),
+                                    version_hash: String::default(),
                                     // Grep fallback: heuristic, direction is assumed incoming
                                     direction: "incoming_heuristic".to_owned(),
                                     depth: 0,
@@ -940,12 +940,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_definition_rejects_empty_semantic_path() {
-        let surgeon = Arc::new(MockSurgeon::new());
+        let surgeon = Arc::new(MockSurgeon::default());
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         let params = GetDefinitionParams {
-            semantic_path: String::new(), // empty is truly invalid
+            semantic_path: String::default(), // empty is truly invalid
         };
         let result = server.get_definition_impl(params).await;
         assert!(result.is_err());

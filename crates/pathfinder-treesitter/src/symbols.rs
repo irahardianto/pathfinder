@@ -262,7 +262,7 @@ fn make_unique_name(
     let suffix = if *count > 1 {
         format!("#{count}")
     } else {
-        String::new()
+        String::default()
     };
     (name, suffix)
 }
@@ -448,7 +448,7 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 let suffix = if *count > 1 {
                     format!("#{count}")
                 } else {
-                    String::new()
+                    String::default()
                 };
 
                 s.name = format!("impl {clean_name}{suffix}");

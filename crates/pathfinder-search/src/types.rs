@@ -28,10 +28,10 @@ impl Default for SearchParams {
     fn default() -> Self {
         Self {
             workspace_root: PathBuf::from("."),
-            query: String::new(),
+            query: String::default(),
             is_regex: false,
             path_glob: "**/*".to_owned(),
-            exclude_glob: String::new(),
+            exclude_glob: String::default(),
             max_results: 50,
             context_lines: 2,
         }

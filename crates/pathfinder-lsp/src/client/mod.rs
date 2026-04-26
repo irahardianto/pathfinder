@@ -1197,7 +1197,7 @@ fn parse_definition_response(
         file,
         line: u32::try_from(start_line + 1).unwrap_or(1), // 0-indexed → 1-indexed
         column: u32::try_from(start_char + 1).unwrap_or(1),
-        preview: String::new(), // Preview populated in future milestone
+        preview: String::default(), // Preview populated in future milestone
     }))
 }
 

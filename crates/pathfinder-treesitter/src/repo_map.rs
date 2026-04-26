@@ -178,7 +178,7 @@ fn filter_by_visibility(
 /// is available.
 #[must_use]
 pub fn render_file_skeleton(symbols: &[ExtractedSymbol], max_tokens_per_file: u32) -> String {
-    let mut out = String::new();
+    let mut out = String::default();
     render_symbols_recursive(symbols, 0, &mut out);
 
     // Check if the file is too large
@@ -221,7 +221,7 @@ fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut
 
 /// A fallback rendering that only preserves top-level class/struct names and method counts.
 fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
-    let mut out = String::new();
+    let mut out = String::default();
     for sym in symbols {
         use crate::surgeon::SymbolKind;
         if sym.kind == SymbolKind::Class || sym.kind == SymbolKind::Struct {
@@ -279,12 +279,12 @@ pub async fn generate_skeleton_text(
 
     let walker = builder.build();
 
-    let mut skeleton_out = String::new();
+    let mut skeleton_out = String::default();
     let mut files_scanned = 0;
     let mut files_in_scope = 0;
     let mut files_truncated = 0;
-    let mut version_hashes = HashMap::new();
-    let mut tech_stack: Vec<crate::language::SupportedLanguage> = Vec::new();
+    let mut version_hashes = HashMap::default();
+    let mut tech_stack: Vec<crate::language::SupportedLanguage> = Vec::default();
 
     for result in walker {
         let Ok(entry) = result else { continue };
@@ -528,7 +528,7 @@ mod tests {
         // Construct massive nested symbol structure that exceeds token limits.
         // At the new 2_000-token threshold (~8 KB), we need 200 long method names to
         // generate ~12 000 chars (~3 000 tokens), which reliably triggers truncation.
-        let mut methods = Vec::new();
+        let mut methods = Vec::default();
         for i in 0..200 {
             methods.push(ExtractedSymbol {
                 name: format!("massive_method_{i}"),
@@ -552,7 +552,7 @@ mod tests {
             children: methods,
         }];
 
-        render_symbols_recursive(&symbols, 0, &mut String::new());
+        render_symbols_recursive(&symbols, 0, &mut String::default());
         // To properly test, let's call `render_file_skeleton` which calls the truncated version internally
         let output = render_file_skeleton(&symbols, MAX_TOKENS_PER_FILE);
         assert!(output.contains("[TRUNCATED DUE TO SIZE]"));
@@ -572,7 +572,7 @@ mod tests {
             end_line: 0,
             children: vec![],
         }];
-        let mut out = String::new();
+        let mut out = String::default();
         render_symbols_recursive(&symbols, 0, &mut out);
         assert_eq!(out, "func Foo // Foo\n");
     }

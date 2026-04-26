@@ -386,7 +386,7 @@ mod tests {
                 files_truncated: 0,
                 files_in_scope: 1,
                 coverage_percent: 100,
-                version_hashes: std::collections::HashMap::new(),
+                version_hashes: std::collections::HashMap::default(),
             }));
 
         let server = PathfinderServer::with_engines(
@@ -403,7 +403,7 @@ mod tests {
             depth: 3,
             visibility: pathfinder_common::types::Visibility::Public,
             max_tokens_per_file: 2000,
-            changed_since: String::new(),
+            changed_since: String::default(),
             include_extensions: vec![],
             exclude_extensions: vec![],
             include_imports: pathfinder_common::types::IncludeImports::None,
@@ -440,13 +440,13 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(pathfinder_treesitter::repo_map::RepoMapResult {
-                skeleton: String::new(),
+                skeleton: String::default(),
                 tech_stack: vec![],
                 files_scanned: 0,
                 files_truncated: 0,
                 files_in_scope: 0,
                 coverage_percent: 100,
-                version_hashes: std::collections::HashMap::new(),
+                version_hashes: std::collections::HashMap::default(),
             }));
 
         let server = PathfinderServer::with_engines(
@@ -811,13 +811,13 @@ mod tests {
             matches: vec![
                 make_search_match("src/c.go", 1, "code"),
                 make_search_match("src/c.go", 2, "// comment"),
-                make_search_match("src/c.go", 3, r#""string""#),
+                make_search_match("src/c.go", 3, r#"\"string\""#),
             ],
             total_matches: 3,
             truncated: false,
         }));
 
-        let mock_surgeon = Arc::new(MockSurgeon::new());
+        let mock_surgeon = Arc::new(MockSurgeon::default());
         // enclosing_symbol: all return None
         mock_surgeon
             .enclosing_symbol_results
@@ -832,7 +832,7 @@ mod tests {
             PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
 
         let params = SearchCodebaseParams {
-            query: String::new(),
+            query: String::default(),
             filter_mode: FilterMode::All,
             ..Default::default()
         };

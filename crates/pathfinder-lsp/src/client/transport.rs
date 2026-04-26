@@ -34,7 +34,7 @@ where
     let mut content_length: Option<usize> = None;
 
     loop {
-        let mut line = String::new();
+        let mut line = String::default();
         let n = reader.read_line(&mut line).await.map_err(|e| {
             LspError::Io(std::io::Error::new(
                 e.kind(),
