@@ -109,10 +109,10 @@ jobs:
           # Fetch checksums produced by the upload-binaries job above.
           # Use -f so curl fails (non-zero exit) if the file is missing — catching
           # races or naming mismatches before they silently produce an empty SHA.
-          curl -fsSL "${URL_BASE}/pathfinder-mcp-x86_64-apple-darwin.tar.gz.sha256"      > mac_intel.sha256
-          curl -fsSL "${URL_BASE}/pathfinder-mcp-aarch64-apple-darwin.tar.gz.sha256"     > mac_arm.sha256
-          curl -fsSL "${URL_BASE}/pathfinder-mcp-x86_64-unknown-linux-gnu.tar.gz.sha256" > linux_intel.sha256
-          curl -fsSL "${URL_BASE}/pathfinder-mcp-aarch64-unknown-linux-gnu.tar.gz.sha256" > linux_arm.sha256
+          curl -fsSL "${URL_BASE}/pathfinder-mcp-x86_64-apple-darwin.sha256"      > mac_intel.sha256
+          curl -fsSL "${URL_BASE}/pathfinder-mcp-aarch64-apple-darwin.sha256"     > mac_arm.sha256
+          curl -fsSL "${URL_BASE}/pathfinder-mcp-x86_64-unknown-linux-gnu.sha256" > linux_intel.sha256
+          curl -fsSL "${URL_BASE}/pathfinder-mcp-aarch64-unknown-linux-gnu.sha256" > linux_arm.sha256
 
           MAC_INTEL_SHA=$(awk '{print $1}' mac_intel.sha256)
           MAC_ARM_SHA=$(awk '{print $1}'   mac_arm.sha256)
