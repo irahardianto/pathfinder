@@ -308,6 +308,7 @@ impl crate::server::PathfinderServer {
         let new_str = std::str::from_utf8(&params.new_content);
         let validation_outcome = match (original_str, new_str) {
             (Ok(orig), Ok(new)) => {
+                // Both valid UTF-8 - proceed with LSP validation
                 self.run_lsp_validation(
                     &params.semantic_path.file_path,
                     orig,
@@ -316,12 +317,43 @@ impl crate::server::PathfinderServer {
                 )
                 .await
             }
-            _ => ValidationOutcome {
-                validation: EditValidation::skipped(),
-                skipped: true,
-                skipped_reason: Some("utf8_error".to_owned()),
-                should_block: false,
-            },
+            (Err(_), Ok(_)) => {
+                // Original was invalid UTF-8 but new content is valid -
+                // this fixes a corrupted file, so we allow it.
+                tracing::warn!(
+                    filepath = %params.semantic_path.file_path.display(),
+                    "original content was invalid UTF-8 but new content is valid - proceeding with edit to fix corruption"
+                );
+                ValidationOutcome {
+                    validation: EditValidation::skipped(),
+                    skipped: true,
+                    skipped_reason: Some("original_invalid_utf8_fixed".to_owned()),
+                    should_block: false,
+                }
+            }
+            (Ok(_), Err(_)) => {
+                // Original was valid but new content is invalid UTF-8 -
+                // this would introduce corruption, so we block it.
+                let err = PathfinderError::IoError {
+                    message: "new content contains invalid UTF-8 - cannot write corrupted data"
+                        .to_owned(),
+                };
+                return Err(pathfinder_to_error_data(&err));
+            }
+            (Err(_), Err(_)) => {
+                // Both are invalid UTF-8 - skip validation but allow the edit
+                // (the agent is presumably fixing corruption in a controlled way).
+                tracing::warn!(
+                    filepath = %params.semantic_path.file_path.display(),
+                    "both original and new content are invalid UTF-8 - proceeding without validation"
+                );
+                ValidationOutcome {
+                    validation: EditValidation::skipped(),
+                    skipped: true,
+                    skipped_reason: Some("both_invalid_utf8".to_owned()),
+                    should_block: false,
+                }
+            }
         };
         let validate_ms = validate_start.elapsed().as_millis();
 
