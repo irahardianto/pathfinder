@@ -14,6 +14,19 @@ use tokio::sync::OnceCell;
 use tracing::instrument;
 use tree_sitter::Tree;
 
+/// Type alias for in-flight parse operations.
+/// Represents an `Arc` wrapping a `OnceCell` that will contain the parse result.
+type InFlightParse = Arc<OnceCell<Result<(Tree, Arc<[u8]>), SurgeonError>>>;
+
+/// Type alias for in-flight Vue parse operations.
+type InFlightVueParse = Arc<OnceCell<Result<(MultiZoneTree, VersionHash), SurgeonError>>>;
+
+/// Type alias for the in-flight parse map.
+type InFlightParseMap = HashMap<PathBuf, InFlightParse>;
+
+/// Type alias for the in-flight Vue parse map.
+type InFlightVueParseMap = HashMap<PathBuf, InFlightVueParse>;
+
 /// Contains the cached parsing result for a file.
 #[derive(Debug)]
 pub struct CacheEntry {
@@ -65,11 +78,10 @@ pub struct AstCache {
     /// Separate LRU cache for Vue SFC multi-zone parse results.
     vue_entries: Mutex<LruCache<PathBuf, MultiZoneEntry>>,
     /// Singleflight locks for in-flight parses to prevent redundant work.
-    /// Maps path -> OnceCell containing the parse result.
-    in_flight: Mutex<HashMap<PathBuf, Arc<OnceCell<Result<(Tree, Arc<[u8]>), SurgeonError>>>>>,
+    /// Maps path -> `OnceCell` containing the parse result.
+    in_flight: Mutex<InFlightParseMap>,
     /// Singleflight locks for Vue parses.
-    vue_in_flight:
-        Mutex<HashMap<PathBuf, Arc<OnceCell<Result<(MultiZoneTree, VersionHash), SurgeonError>>>>>,
+    vue_in_flight: Mutex<InFlightVueParseMap>,
 }
 
 impl AstCache {

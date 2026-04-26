@@ -1369,7 +1369,7 @@ async fn idle_timeout_task(
                 tracing::info!("LSP: all processes terminated");
                 break;
             }
-            _ = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
+            () = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
                 // Check for idle processes
                 let mut guard = processes.write().await;
                 let languages_to_remove: Vec<String> = guard
@@ -1887,9 +1887,9 @@ mod tests {
     // spawning real LSP child processes. We use a test-only constructor that
     // injects pre-configured process map entries.
 
-    /// Create a test LspClient with empty descriptors (no languages detected).
+    /// Create a test `LspClient` with empty descriptors (no languages detected).
     ///
-    /// Useful for testing error paths where ensure_process returns NoLspAvailable
+    /// Useful for testing error paths where `ensure_process` returns `NoLspAvailable`
     /// because no descriptor was found.
     fn client_no_languages() -> LspClient {
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -1902,7 +1902,7 @@ mod tests {
         }
     }
 
-    /// Create a test LspClient with descriptors for specific languages but no
+    /// Create a test `LspClient` with descriptors for specific languages but no
     /// running processes. The `processes` map can be pre-populated by the caller.
     fn client_with_descriptors(
         languages: Vec<&str>,
@@ -1961,7 +1961,9 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                unavailable_since: Instant::now() - Duration::from_mins(10),
+                unavailable_since: Instant::now()
+                    .checked_sub(Duration::from_mins(10))
+                    .unwrap(),
             }),
         )]);
         let client = client_with_descriptors(vec!["rust"], processes);

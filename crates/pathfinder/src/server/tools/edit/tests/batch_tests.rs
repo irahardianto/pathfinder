@@ -4,7 +4,14 @@
 //! to the same file, including proper OCC validation, rollback on failure,
 //! and mixed semantic/text targeting.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_return)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::needless_return,
+    clippy::similar_names,
+    clippy::single_char_pattern,
+    clippy::format_push_string,
+)]
 
 use super::helpers::{make_body_range, make_server};
 use crate::server::types::BatchEdit;
@@ -14,7 +21,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-/// Helper to create a BatchEdit for replace_body.
+/// Helper to create a `BatchEdit` for `replace_body`.
 fn make_replace_body_edit(semantic_path: String, new_code: String) -> BatchEdit {
     BatchEdit {
         semantic_path,
@@ -50,11 +57,11 @@ async fn test_batch_replace_body_single() {
     let ws_dir = tempdir().expect("temp dir");
 
     // Write a Rust file with one function
-    let source = r#"
+    let source = r"
 fn foo() -> i32 {
     1
 }
-"#;
+";
     let filepath = "src/lib.rs";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -103,7 +110,7 @@ async fn test_batch_replace_body_multi_atomic() {
     let ws_dir = tempdir().expect("temp dir");
 
     // Write a Rust file with 3 functions
-    let source = r#"
+    let source = r"
 fn foo() -> i32 {
     1
 }
@@ -115,7 +122,7 @@ fn bar() -> i32 {
 fn baz() -> i32 {
     3
 }
-"#;
+";
     let filepath = "src/lib.rs";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -292,11 +299,11 @@ async fn test_batch_text_targeting() {
     let ws_dir = tempdir().expect("temp dir");
 
     // Write a file with identifiable text
-    let source = r#"
+    let source = r"
 <div>
     <p>Old content</p>
 </div>
-"#;
+";
     let filepath = "index.html";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -334,7 +341,7 @@ async fn test_batch_large_multi_edit() {
     // Write a file with 10 functions
     let mut source = String::new();
     for i in 0..10 {
-        source.push_str(&format!("fn func{i}() -> i32 {{ {} }}\n", i));
+        source.push_str(&format!("fn func{i}() -> i32 {{ {i} }}\n"));
     }
 
     let filepath = "src/lib.rs";
@@ -387,12 +394,13 @@ async fn test_batch_large_multi_edit() {
 
     // Verify edited functions
     for i in (0..10).step_by(2) {
-        assert!(written.contains(&format!("{}", i * 10)));
+        let value = i * 10;
+        assert!(written.contains(&format!("{value}")));
     }
 
     // Verify unedited functions remain
     for i in (1..10).step_by(2) {
-        assert!(written.contains(&format!("{{ {} }}", i)));
+        assert!(written.contains(&format!("{{ {i} }}")));
     }
 }
 
@@ -477,7 +485,7 @@ async fn test_batch_normalize_whitespace() {
 async fn test_batch_insert_before() {
     let ws_dir = tempdir().expect("temp dir");
 
-    let source = r#"
+    let source = r"
 fn foo() -> i32 {
     1
 }
@@ -485,7 +493,7 @@ fn foo() -> i32 {
 fn bar() -> i32 {
     2
 }
-"#;
+";
     let filepath = "src/lib.rs";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -544,7 +552,7 @@ fn bar() -> i32 {
 async fn test_batch_insert_after() {
     let ws_dir = tempdir().expect("temp dir");
 
-    let source = r#"
+    let source = r"
 fn foo() -> i32 {
     1
 }
@@ -552,7 +560,7 @@ fn foo() -> i32 {
 fn bar() -> i32 {
     2
 }
-"#;
+";
     let filepath = "src/lib.rs";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -611,7 +619,7 @@ fn bar() -> i32 {
 async fn test_batch_delete() {
     let ws_dir = tempdir().expect("temp dir");
 
-    let source = r#"
+    let source = r"
 fn foo() -> i32 {
     1
 }
@@ -623,7 +631,7 @@ fn bar() -> i32 {
 fn baz() -> i32 {
     3
 }
-"#;
+";
     let filepath = "src/lib.rs";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -680,15 +688,15 @@ fn baz() -> i32 {
 /// Test that overlapping edits are detected and rejected.
 ///
 /// This test creates two edits with overlapping byte ranges:
-/// - Edit 1 targets func_a (lines 1-3)
-/// - Edit 2 targets func_b (lines 3-5)
+/// - Edit 1 targets `func_a` (lines 1-3)
+/// - Edit 2 targets `func_b` (lines 3-5)
 ///
-/// Since these ranges overlap, the batch should fail with an INVALID_TARGET error.
+/// Since these ranges overlap, the batch should fail with an `INVALID_TARGET` error.
 #[tokio::test]
 async fn test_batch_detects_overlapping_edits() {
     let ws_dir = tempdir().expect("temp dir");
 
-    let source = r#"
+    let source = r"
 fn func_a() -> i32 {
     1
 }
@@ -700,7 +708,7 @@ fn func_b() -> i32 {
 fn func_c() -> i32 {
     3
 }
-"#;
+";
     let filepath = "src/lib.rs";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -714,7 +722,7 @@ fn func_c() -> i32 {
     // Mock func_a body range (lines 1-3, bytes ~10-40)
     let func_a_start = source.find("fn func_a").unwrap();
     let func_a_open = source[func_a_start..].find('{').unwrap() + func_a_start;
-    let func_a_close = source.find('}').unwrap() + 1;
+    let _func_a_close = source.find('}').unwrap() + 1;
 
     // Mock func_b body range (lines 5-7, bytes ~40-70)
     let func_b_start = source.find("fn func_b").unwrap();
@@ -760,8 +768,7 @@ fn func_c() -> i32 {
     // Should fail with overlap error
     assert!(result.is_err());
     let err = result.err().unwrap();
-    // The error code is in err.message, not in data
-    let code = err.message;
+    // The error code is in err.message, not in data.
     // The detailed error info is in data["error"] and data["message"]
     let error_field = err
         .data
@@ -926,10 +933,10 @@ async fn test_batch_many_edits_no_overflow() {
 async fn test_batch_overlap_error_includes_indices() {
     let ws_dir = tempdir().expect("temp dir");
 
-    let source = r#"
+    let source = r"
 fn func_a() -> i32 { 1 }
 fn func_b() -> i32 { 2 }
-"#;
+";
     let filepath = "src/lib.rs";
     let abs = ws_dir.path().join(filepath);
     std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
@@ -942,7 +949,7 @@ fn func_b() -> i32 { 2 }
 
     // Create overlapping ranges
     let func_a_open = source.find('{').unwrap();
-    let func_a_close = source.find('}').unwrap() + 1;
+    let _func_a_close = source.find('}').unwrap() + 1;
     let func_b_start = source.find("fn func_b").unwrap();
     let func_b_open = source[func_b_start..].find('{').unwrap() + func_b_start;
 

@@ -56,7 +56,7 @@ impl FileWatcher {
                                 "file event dispatched"
                             );
                             // Log if the send fails (receiver dropped)
-                            if let Err(_) = tx.send(fe) {
+                            if tx.send(fe).is_err() {
                                 tracing::warn!(
                                     path = %path.display(),
                                     "file watcher: channel send failed - receiver dropped, cache may be stale"

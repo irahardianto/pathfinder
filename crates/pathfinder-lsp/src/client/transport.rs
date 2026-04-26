@@ -244,7 +244,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(LspError::Protocol(msg)) => {
-                assert!(msg.contains("invalid Content-Length"), "got: {msg}")
+                assert!(msg.contains("invalid Content-Length"), "got: {msg}");
             }
             other => panic!("unexpected: {other:?}"),
         }

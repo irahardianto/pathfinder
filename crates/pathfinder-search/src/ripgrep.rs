@@ -837,7 +837,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_default_impl() {
         // RipgrepScout::default() should behave identically to new()
-        let scout = RipgrepScout::default();
+        let scout = RipgrepScout;
         let ws = make_workspace(&[("src/main.rs", "find_default\n")]);
         let result = scout
             .search(&params_for(&ws, "find_default"))

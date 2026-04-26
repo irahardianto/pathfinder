@@ -375,9 +375,9 @@ mod process_tests {
         assert_eq!(request["method"], "initialize");
 
         let params = &request["params"];
-        assert!(params["rootUri"].as_str().unwrap().starts_with("file://"));
+        assert!(params["rootUri"].as_str().expect("rootUri should be a string").starts_with("file://"));
         assert_eq!(params["clientInfo"]["name"], "pathfinder");
-        assert!(params["processId"].as_u64().unwrap() > 0);
+        assert!(params["processId"].as_u64().expect("processId should be a u64") > 0);
         assert!(params["workspaceFolders"].is_array());
     }
 
