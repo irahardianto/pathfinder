@@ -55,8 +55,13 @@ impl FileWatcher {
                                 kind = ?event.kind,
                                 "file event dispatched"
                             );
-                            // Best-effort send — if receiver is dropped, we stop
-                            let _ = tx.send(fe);
+                            // Log if the send fails (receiver dropped)
+                            if let Err(_) = tx.send(fe) {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    "file watcher: channel send failed - receiver dropped, cache may be stale"
+                                );
+                            }
                         }
                     }
                 }
