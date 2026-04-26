@@ -405,16 +405,16 @@ mod process_tests {
 
     #[tokio::test]
     async fn test_build_initialize_request_capabilities() {
-        async fn test_build_initialize_request_capabilities() {
-                let dir = tempdir().expect("temp dir");
-                let request = build_initialize_request(1, dir.path()).await.expect("ok");
+        let dir = tempdir().expect("temp dir");
+        let request = build_initialize_request(1, dir.path()).await.expect("ok");
 
-                let caps = &request["params"]["capabilities"];
-                assert!(!caps["textDocument"]["definition"]["dynamicRegistration"]
-                    .as_bool()
-                    .unwrap_or(true));
-                assert!(caps["workspace"]["workspaceFolders"].as_bool().unwrap_or(false));
-            }
+        let caps = &request["params"]["capabilities"];
+        assert!(!caps["textDocument"]["definition"]["dynamicRegistration"]
+            .as_bool()
+            .unwrap_or(true));
+        assert!(caps["workspace"]["workspaceFolders"]
+            .as_bool()
+            .unwrap_or(false));
     }
 
     #[tokio::test]

@@ -488,7 +488,6 @@ impl crate::server::PathfinderServer {
     /// Extracted helper to resolve the new source content without writing to disk.
     ///
     /// Dispatches to specialized handlers per edit type to keep cyclomatic complexity low.
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn resolve_edit_content(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
@@ -497,12 +496,24 @@ impl crate::server::PathfinderServer {
         new_code: Option<&str>,
     ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
         match edit_type {
-            "replace_body" => self.resolve_replace_body(semantic_path, raw_semantic_path, new_code).await,
+            "replace_body" => {
+                self.resolve_replace_body(semantic_path, raw_semantic_path, new_code)
+                    .await
+            }
             "replace_full" => self.resolve_replace_full(semantic_path, new_code).await,
-            "insert_before" => self.resolve_insert(semantic_path, new_code, InsertEdge::Before).await,
-            "insert_after" => self.resolve_insert(semantic_path, new_code, InsertEdge::After).await,
+            "insert_before" => {
+                self.resolve_insert(semantic_path, new_code, InsertEdge::Before)
+                    .await
+            }
+            "insert_after" => {
+                self.resolve_insert(semantic_path, new_code, InsertEdge::After)
+                    .await
+            }
             "delete" => self.resolve_delete(semantic_path, raw_semantic_path).await,
-            unknown => Err(Self::unsupported_edit_type_error(raw_semantic_path, unknown)),
+            unknown => Err(Self::unsupported_edit_type_error(
+                raw_semantic_path,
+                unknown,
+            )),
         }
     }
 
@@ -539,9 +550,11 @@ impl crate::server::PathfinderServer {
     ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
         let new_code = new_code.unwrap_or_default();
         if semantic_path.is_bare_file() {
-            self.resolve_replace_full_bare_file(semantic_path, new_code).await
+            self.resolve_replace_full_bare_file(semantic_path, new_code)
+                .await
         } else {
-            self.resolve_replace_full_symbol(semantic_path, new_code).await
+            self.resolve_replace_full_symbol(semantic_path, new_code)
+                .await
         }
     }
 
@@ -699,11 +712,7 @@ impl crate::server::PathfinderServer {
         let after_sep = if indented.ends_with('\n') { "" } else { "\n" };
 
         let mut new_bytes = Vec::with_capacity(
-            before.len()
-                + before_sep.len()
-                + indented.len()
-                + after_sep.len()
-                + after.len(),
+            before.len() + before_sep.len() + indented.len() + after_sep.len() + after.len(),
         );
         new_bytes.extend_from_slice(before);
         new_bytes.extend_from_slice(before_sep.as_bytes());

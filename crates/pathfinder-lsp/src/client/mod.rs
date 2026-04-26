@@ -21,11 +21,11 @@ pub use detect::{detect_languages, language_id_for_extension, LanguageLsp};
 use crate::types::{CallHierarchyCall, CallHierarchyItem, LspDiagnostic, LspDiagnosticSeverity};
 use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use detect::LanguageLsp as LspDescriptor;
 use process::{send, shutdown, spawn_and_initialize, ManagedProcess};
 use protocol::RequestDispatcher;
 use serde_json::json;
-use dashmap::DashMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -405,7 +405,7 @@ impl LspClient {
     }
 
     /// Update `last_used` for a language (called after each successful request).
-    async fn touch(&self, language_id: &str) {
+    fn touch(&self, language_id: &str) {
         if let Some(mut entry) = self.processes.get_mut(language_id) {
             if let ProcessEntry::Running(state) = entry.value_mut() {
                 state.process.last_used = Instant::now();
@@ -429,13 +429,11 @@ impl LspClient {
 
         // Increment in-flight counter (decremented on drop) and health check
         let _in_flight_guard = {
-            let entry = match self.processes.get(language_id) {
-                Some(e) => e,
-                None => return Err(LspError::NoLspAvailable),
+            let Some(entry) = self.processes.get(language_id) else {
+                return Err(LspError::NoLspAvailable);
             };
-            let state = match entry.value() {
-                ProcessEntry::Running(s) => s,
-                ProcessEntry::Unavailable(_) => return Err(LspError::NoLspAvailable),
+            let ProcessEntry::Running(state) = entry.value() else {
+                return Err(LspError::NoLspAvailable);
             };
             // Health check: verify reader task is still alive
             if state.reader_handle.is_finished() {
@@ -451,13 +449,11 @@ impl LspClient {
 
         // Write the request to stdin
         {
-            let entry = match self.processes.get(language_id) {
-                Some(e) => e,
-                None => return Err(LspError::NoLspAvailable),
+            let Some(entry) = self.processes.get(language_id) else {
+                return Err(LspError::NoLspAvailable);
             };
-            let state = match entry.value() {
-                ProcessEntry::Running(s) => s,
-                ProcessEntry::Unavailable(_) => return Err(LspError::NoLspAvailable),
+            let ProcessEntry::Running(state) = entry.value() else {
+                return Err(LspError::NoLspAvailable);
             };
             send(&state.process, &message).await?;
         }
@@ -498,13 +494,13 @@ impl LspClient {
     /// Retrieve the detected capabilities for a language.
     ///
     /// Returns `Ok(caps)` when the process is running, else `NoLspAvailable`.
-    async fn capabilities_for(&self, language_id: &str) -> Result<DetectedCapabilities, LspError> {
-        match self.processes.get(language_id) {
-            Some(entry) => match entry.value() {
-                ProcessEntry::Running(state) => Ok(state.process.capabilities.clone()),
-                ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
-            },
-            None => Err(LspError::NoLspAvailable),
+    fn capabilities_for(&self, language_id: &str) -> Result<DetectedCapabilities, LspError> {
+        let Some(entry) = self.processes.get(language_id) else {
+            return Err(LspError::NoLspAvailable);
+        };
+        match entry.value() {
+            ProcessEntry::Running(state) => Ok(state.process.capabilities.clone()),
+            ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
         }
     }
 
@@ -550,7 +546,7 @@ impl LspClient {
             }
         };
 
-        self.touch(language_id).await;
+        self.touch(language_id);
 
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
@@ -617,7 +613,7 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id).await;
+        self.touch(language_id);
 
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
@@ -643,7 +639,7 @@ impl Lawyer for LspClient {
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id).await?;
+        let caps = self.capabilities_for(language_id)?;
         if !caps.call_hierarchy_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "callHierarchyProvider".to_owned(),
@@ -677,7 +673,7 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id).await;
+        self.touch(language_id);
 
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
@@ -751,7 +747,7 @@ impl Lawyer for LspClient {
             tracing::error!(tool = "did_open", language = language_id, error = %e, "textDocument/didOpen failed");
             return Err(e);
         }
-        self.touch(language_id).await;
+        self.touch(language_id);
         Ok(())
     }
 
@@ -786,7 +782,7 @@ impl Lawyer for LspClient {
             tracing::error!(tool = "did_change", language = language_id, error = %e, "textDocument/didChange failed");
             return Err(e);
         }
-        self.touch(language_id).await;
+        self.touch(language_id);
         Ok(())
     }
 
@@ -828,7 +824,7 @@ impl Lawyer for LspClient {
         self.ensure_process(language_id).await?;
 
         // Check capability before sending the request
-        let caps = self.capabilities_for(language_id).await?;
+        let caps = self.capabilities_for(language_id)?;
         if !caps.diagnostic_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "diagnosticProvider".to_owned(),
@@ -858,7 +854,7 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id).await;
+        self.touch(language_id);
 
         let elapsed = start.elapsed().as_millis();
         tracing::debug!(
@@ -881,7 +877,7 @@ impl Lawyer for LspClient {
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id).await?;
+        let caps = self.capabilities_for(language_id)?;
         if !caps.workspace_diagnostic_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "workspaceDiagnosticProvider".to_owned(),
@@ -907,7 +903,7 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id).await;
+        self.touch(language_id);
 
         let elapsed = start.elapsed().as_millis();
         tracing::debug!(
@@ -933,7 +929,7 @@ impl Lawyer for LspClient {
         self.ensure_process(language_id).await?;
 
         // Check capability before sending the request
-        let caps = self.capabilities_for(language_id).await?;
+        let caps = self.capabilities_for(language_id)?;
         if !caps.formatting_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "documentFormattingProvider".to_owned(),
@@ -969,7 +965,7 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id).await;
+        self.touch(language_id);
 
         tracing::info!(
             tool = "range_formatting",
@@ -1648,7 +1644,8 @@ mod tests {
                 "items": [{"severity": 1, "message": "err", "range": {"start": {"line": 0}, "end": {"line": 0}}}]
             }]
         });
-        let result = parse_workspace_diagnostic_response(&response, &std::env::temp_dir()).expect("ok");
+        let result =
+            parse_workspace_diagnostic_response(&response, &std::env::temp_dir()).expect("ok");
         assert!(result.is_empty(), "entry without URI should be skipped");
     }
 
@@ -2055,7 +2052,7 @@ mod tests {
     #[tokio::test]
     async fn test_capabilities_for_no_process_returns_no_lsp() {
         let client = client_no_languages();
-        let result = client.capabilities_for("rust").await;
+        let result = client.capabilities_for("rust");
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
 
@@ -2068,7 +2065,7 @@ mod tests {
             }),
         )]);
         let client = client_with_descriptors(vec!["rust"], processes);
-        let result = client.capabilities_for("rust").await;
+        let result = client.capabilities_for("rust");
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
 
@@ -2248,7 +2245,7 @@ mod tests {
     async fn test_touch_no_process_is_noop() {
         // touch should not panic when no process exists
         let client = client_no_languages();
-        client.touch("rust").await; // Should not panic
+        client.touch("rust"); // Should not panic
     }
 
     // ── InFlightGuard tests ──────────────────────────────────────
