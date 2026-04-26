@@ -16,7 +16,7 @@ use server::PathfinderServer;
 
 /// Pathfinder — The Headless IDE MCP Server for AI Coding Agents.
 #[derive(Parser, Debug)]
-#[command(name = "pathfinder", version, about)]
+#[command(name = "pathfinder-mcp", version, about)]
 struct Cli {
     /// Path to the workspace root directory.
     #[arg(value_name = "WORKSPACE_PATH")]

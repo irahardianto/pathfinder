@@ -62,25 +62,33 @@ Pathfinder solves these problems by providing:
 
 ### Installation
 
-> **Note:** Pre-built binaries are planned for future releases. For now, you need to build from source.
+Choose one of the following methods:
+
+**Homebrew (macOS & Linux):**
+
+```sh
+brew install irahardianto/tap/pathfinder-mcp
+```
+
+**cargo install from crates.io:**
+
+```sh
+cargo install pathfinder-mcp
+```
 
 **Build from source:**
 
 ```sh
-# Clone the repository
 git clone https://github.com/irahardianto/pathfinder.git
 cd pathfinder
-
-# Build in release mode
 cargo build --release
-
-# The binary will be at target/release/pathfinder
+# The binary will be at target/release/pathfinder-mcp
 ```
 
 **Verify the installation:**
 
 ```sh
-./target/release/pathfinder --help
+pathfinder-mcp --help
 ```
 
 ### Configuration
@@ -95,7 +103,7 @@ Add Pathfinder to your MCP client's server configuration. The exact format depen
 {
   "mcpServers": {
     "pathfinder": {
-      "command": "/path/to/pathfinder",
+      "command": "pathfinder-mcp",
       "args": ["/path/to/your/workspace"]
     }
   }
@@ -108,7 +116,7 @@ Add Pathfinder to your MCP client's server configuration. The exact format depen
 {
   "mcpServers": {
     "pathfinder": {
-      "command": "/path/to/pathfinder",
+      "command": "pathfinder-mcp",
       "args": ["--lsp-trace", "/path/to/your/workspace"]
     }
   }
@@ -118,7 +126,7 @@ Add Pathfinder to your MCP client's server configuration. The exact format depen
 #### CLI Usage
 
 ```
-pathfinder [OPTIONS] <WORKSPACE_PATH>
+pathfinder-mcp [OPTIONS] <WORKSPACE_PATH>
 
 Arguments:
   <WORKSPACE_PATH>  Path to the workspace root directory
@@ -401,7 +409,7 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] Per-engine observability and telemetry
 - [x] `get_repo_map` temporal filtering (`changed_since`) and extension filters (E6)
 - [x] `read_source_file` with compact/symbols/full detail modes and line range filtering (E2)
-- [ ] Pre-built binaries for easy installation
+- [x] Pre-built binaries via Homebrew tap and cargo install
 - [ ] Additional language support (Java, C/C++, C#, etc.)
 - [ ] Custom LSP server command overrides via configuration file
 

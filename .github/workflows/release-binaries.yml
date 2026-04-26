@@ -50,6 +50,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -107,15 +109,18 @@ jobs:
           curl -fsSL "${URL_BASE}/pathfinder-mcp-x86_64-apple-darwin.tar.gz.sha256"      > mac_intel.sha256
           curl -fsSL "${URL_BASE}/pathfinder-mcp-aarch64-apple-darwin.tar.gz.sha256"     > mac_arm.sha256
           curl -fsSL "${URL_BASE}/pathfinder-mcp-x86_64-unknown-linux-gnu.tar.gz.sha256" > linux_intel.sha256
+          curl -fsSL "${URL_BASE}/pathfinder-mcp-aarch64-unknown-linux-gnu.tar.gz.sha256" > linux_arm.sha256
 
           MAC_INTEL_SHA=$(awk '{print $1}' mac_intel.sha256)
           MAC_ARM_SHA=$(awk '{print $1}'   mac_arm.sha256)
           LINUX_INTEL_SHA=$(awk '{print $1}' linux_intel.sha256)
+          LINUX_ARM_SHA=$(awk '{print $1}'  linux_arm.sha256)
 
           # Guard: abort if any SHA is empty (e.g. curl returned an HTML error page).
           : "${MAC_INTEL_SHA:?mac_intel SHA is empty — binary upload may have failed}"
           : "${MAC_ARM_SHA:?mac_arm SHA is empty — binary upload may have failed}"
           : "${LINUX_INTEL_SHA:?linux_intel SHA is empty — binary upload may have failed}"
+          : "${LINUX_ARM_SHA:?linux_arm SHA is empty — binary upload may have failed}"
 
           mkdir -p tap/Formula
 
@@ -142,10 +147,18 @@ jobs:
           printf '      url "%s/pathfinder-mcp-x86_64-unknown-linux-gnu.tar.gz"\n' "$URL_BASE" >> tap/Formula/pathfinder-mcp.rb
           printf '      sha256 "%s"\n' "$LINUX_INTEL_SHA" >> tap/Formula/pathfinder-mcp.rb
           printf '    end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '    on_arm do\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '      url "%s/pathfinder-mcp-aarch64-unknown-linux-gnu.tar.gz"\n' "$URL_BASE" >> tap/Formula/pathfinder-mcp.rb
+          printf '      sha256 "%s"\n' "$LINUX_ARM_SHA" >> tap/Formula/pathfinder-mcp.rb
+          printf '    end\n' >> tap/Formula/pathfinder-mcp.rb
           printf '  end\n' >> tap/Formula/pathfinder-mcp.rb
           printf '\n' >> tap/Formula/pathfinder-mcp.rb
           printf '  def install\n' >> tap/Formula/pathfinder-mcp.rb
           printf '    bin.install "pathfinder-mcp"\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  end\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '  test do\n' >> tap/Formula/pathfinder-mcp.rb
+          printf '    assert_match version, shell_output("#{bin}/pathfinder-mcp --version")\n' >> tap/Formula/pathfinder-mcp.rb
           printf '  end\n' >> tap/Formula/pathfinder-mcp.rb
           printf 'end\n' >> tap/Formula/pathfinder-mcp.rb
 

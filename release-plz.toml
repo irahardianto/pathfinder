@@ -8,12 +8,16 @@
 # Allow release-plz to create/update the release PR and publish releases.
 # All crates in the workspace are published to crates.io unless overridden below.
 
-# Use Conventional Commits to determine version bumps:
-#   fix:             → patch bump  (0.1.0 → 0.1.1)
-#   feat:            → minor bump  (0.1.0 → 0.2.0)
-#   BREAKING CHANGE: → major bump  (0.1.0 → 1.0.0)
+# Only trigger a release when at least one commit matches conventional commit
+# prefixes (feat|fix|perf|refactor|revert). Chore, docs, style, test, ci
+# commits do NOT trigger a release on their own.
+# This is a regex matched against the full first line of each commit message.
+release_commits = "^(feat|fix|perf|refactor|revert)(\\(|:)"
+
+# Always attempt to open a release PR when there are qualifying commits,
+# even if the version bump would be zero. This ensures release-plz keeps
+# running after each merge to main, rather than silently skipping.
+release_always = false
+
 git_release_enable = true
 git_tag_enable = true
-
-# Include a changelog in each GitHub Release body.
-release_commits = "conventional_commits"
