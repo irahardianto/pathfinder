@@ -19,6 +19,12 @@ on:
   schedule:
     - cron: '37 0 * * 1'
 
+permissions:
+  contents: read
+  security-events: write
+  packages: read
+  actions: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 

@@ -1,41 +1,36 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
 # Generates SLSA Level 3 provenance for the pathfinder-mcp binary.
 # The provenance file can be verified using:
 #   https://github.com/slsa-framework/slsa-verifier
 #
-# IMPORTANT: This workflow MUST remain separate from release-binaries.yml.
-# The SLSA generator uses a reusable workflow call (`uses:`) for the provenance
-# job, which requires it to control the entire job graph — this cannot be
-# embedded inside another workflow without breaking the L3 trust boundary.
-#
 # This workflow runs in parallel with release-binaries.yml on every release,
-# building the Linux binary independently and generating a signed attestation
-# (.intoto.jsonl) that is uploaded to the same GitHub Release.
+# building the Linux x86_64 binary independently and generating a signed
+# attestation (.intoto.jsonl) that is uploaded to the same GitHub Release.
 
 name: SLSA Provenance
 
 on:
+  release:
+    types: [created]
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag to attest (e.g. pathfinder-mcp-v0.1.1)"
+        description: "Release tag to attest (e.g. pathfinder-mcp-v0.1.2)"
         required: true
         type: string
-  release:
-    types: [created]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # Guard: only generate provenance for the top-level pathfinder-mcp release,
-  # not for sub-crate releases (pathfinder-mcp-lsp-v*, pathfinder-mcp-search-v*, etc.)
   check-tag:
     name: Check Release Tag
     runs-on: ubuntu-latest
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
+      tag: ${{ steps.check.outputs.tag }}
     steps:
       - name: Check if this is a pathfinder-mcp release
         id: check
@@ -48,11 +43,8 @@ jobs:
           else
             echo "should-run=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-  # Build the Linux binary and compute sha256 hashes as provenance subjects.
-  # SLSA L3 requires this workflow to independently build the artifacts —
-  # it cannot reuse binaries from release-binaries.yml without breaking the
-  # integrity guarantee.
   build:
     name: Build Linux Binary
     needs: check-tag
@@ -60,11 +52,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       digests: ${{ steps.hash.outputs.digests }}
-
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag_name }}
+          ref: ${{ needs.check-tag.outputs.tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -77,8 +68,6 @@ jobs:
       - name: Build release binary
         run: |
           cargo build --release --bin pathfinder-mcp
-          # Stage the binary with a release-friendly name so the provenance
-          # subject matches the artifact name in the release.
           cp target/release/pathfinder-mcp pathfinder-mcp-x86_64-unknown-linux-gnu
 
       - name: Generate provenance subjects
@@ -87,16 +76,16 @@ jobs:
           set -euo pipefail
           echo "hashes=$(sha256sum pathfinder-mcp-x86_64-unknown-linux-gnu | base64 -w0)" >> "${GITHUB_OUTPUT}"
 
-  # Calls the SLSA generator as a reusable workflow — generates a signed
-  # .intoto.jsonl attestation and uploads it to the GitHub Release.
   provenance:
-    needs: [build]
+    name: Generate Provenance
+    needs: [check-tag, build]
     if: needs.build.result == 'success'
     permissions:
-      actions: read   # To read the workflow path.
-      id-token: write # To sign the provenance via Sigstore.
-      contents: write # To upload the attestation to the release.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: "${{ needs.build.outputs.digests }}"
       upload-assets: true
+      upload-tag-name: "${{ needs.check-tag.outputs.tag }}"
