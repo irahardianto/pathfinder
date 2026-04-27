@@ -731,4 +731,66 @@ mod tests {
         assert_eq!(response.details["path"], "../../etc/passwd");
         assert_eq!(response.details["workspace_root"], "/workspace");
     }
+
+    // ── InvalidTarget coverage ──────────────────────────────────────
+
+    #[test]
+    fn test_invalid_target_hint_with_valid_edit_types() {
+        let err = PathfinderError::InvalidTarget {
+            semantic_path: "src/lib.rs::MY_CONST".into(),
+            reason: "missing edit_type".into(),
+            edit_index: Some(0),
+            valid_edit_types: Some(vec!["replace_full".into(), "delete".into()]),
+        };
+        let hint = err
+            .hint()
+            .expect("should have hint when valid_edit_types is Some");
+        assert!(
+            hint.contains("replace_body"),
+            "hint should list valid edit types: {hint}"
+        );
+        assert!(
+            hint.contains("old_text"),
+            "hint should mention text-based targeting: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_target_hint_without_valid_edit_types() {
+        let err = PathfinderError::InvalidTarget {
+            semantic_path: "src/lib.rs::MY_CONST".into(),
+            reason: "not a block construct".into(),
+            edit_index: None,
+            valid_edit_types: None,
+        };
+        let hint = err
+            .hint()
+            .expect("should have hint when valid_edit_types is None");
+        assert!(
+            hint.contains("replace_body requires"),
+            "hint should explain replace_body limitation: {hint}"
+        );
+        assert!(
+            hint.contains("replace_full"),
+            "hint should suggest replace_full: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_target_details_with_edit_index_and_types() {
+        let err = PathfinderError::InvalidTarget {
+            semantic_path: "src/lib.rs::func".into(),
+            reason: "bad edit_type".into(),
+            edit_index: Some(2),
+            valid_edit_types: Some(vec!["replace_full".into(), "delete".into()]),
+        };
+        let details = err.to_details();
+        assert_eq!(details["edit_index"], 2, "edit_index should be present");
+        let types = details["valid_edit_types"]
+            .as_array()
+            .expect("valid_edit_types should be an array");
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0], "replace_full");
+        assert_eq!(types[1], "delete");
+    }
 }
