@@ -17,6 +17,12 @@ pub struct ExtractedSymbol {
     pub start_line: usize,
     /// The zero-indexed ending line.
     pub end_line: usize,
+    /// Whether this symbol is publicly visible.
+    ///
+    /// - For Rust modules: `true` when declared `pub mod`, `false` for bare `mod`.
+    /// - For all other symbols: defaults to `true` (visibility determined by
+    ///   name-convention heuristics in `repo_map::is_symbol_public`).
+    pub is_public: bool,
     /// Nested child symbols (e.g., methods within a class).
     pub children: Vec<ExtractedSymbol>,
 }

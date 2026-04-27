@@ -118,26 +118,26 @@ that are NOT covered by PATCH-002:
 
 ### TypeScript namespace (`internal_module`)
 
-- [ ] Add `"internal_module"` to `module_kinds` in TypeScript `LanguageNodeTypes`
-- [ ] Verify Tree-sitter field names: confirm `name` and `body` fields exist on `internal_module`
+- [x] Add `"internal_module"` to `module_kinds` in TypeScript `LanguageNodeTypes`
+- [x] Verify Tree-sitter field names: confirm `name` and `body` fields exist on `internal_module`
       (run `tree-sitter parse` on a sample namespace file and inspect the AST)
-- [ ] Add test: `test_extract_typescript_namespace_with_members`
-- [ ] Add test: `test_resolve_typescript_namespace_member_via_chain`
-- [ ] Update tool description in `get_repo_map`: add TypeScript namespaces to the module note
+- [x] Add test: `test_extract_typescript_namespace_with_members`
+- [x] Add test: `test_resolve_typescript_namespace_member_via_chain`
+- [x] Update tool description in `get_repo_map`: add TypeScript namespaces to the module note
 
 ### Rust `pub mod` visibility
 
-- [ ] Detect `visibility_modifier` child on `mod_item` node
-- [ ] Expose public modules in `visibility: "public"` repo maps
-- [ ] Add test: `test_pub_mod_appears_in_public_visibility`
-- [ ] Add test: `test_private_mod_hidden_in_public_visibility`
+- [x] Detect `visibility_modifier` child on `mod_item` node
+- [x] Expose public modules in `visibility: "public"` repo maps
+- [x] Add test: `test_pub_mod_appears_in_public_visibility`
+- [x] Add test: `test_private_mod_hidden_in_public_visibility`
 
 ---
 
 ## Acceptance Criteria for TypeScript Namespace (when implemented)
 
-- [ ] `file.ts::Auth::login` resolves for TypeScript namespace members
-- [ ] Namespace members appear in `read_source_file(detail_level="symbols")` as nested children
-- [ ] Namespace members only appear in `get_repo_map(visibility="all")` if `namespace` (not `export namespace`)
-- [ ] `export namespace` members appear in `visibility: "public"`
-- [ ] All new tests pass, no regressions
+- [x] `file.ts::Auth::login` resolves for TypeScript namespace members
+- [x] Namespace members appear in `read_source_file(detail_level="symbols")` as nested children
+- [x] Namespace members only appear in `get_repo_map(visibility="all")` if `namespace` (not `export namespace`)
+- [x] `export namespace` members appear in `visibility: "public"`
+- [x] All new tests pass, no regressions

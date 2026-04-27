@@ -144,10 +144,9 @@ fn is_symbol_public(sym: &ExtractedSymbol, lang_is_go: bool) -> bool {
         return name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     }
 
-    // Module blocks are private unless explicitly `pub mod`
-    // For now, conservatively treat all modules as private (visibility: "all" only)
+    // Module blocks: use AST-detected visibility (`pub mod` vs `mod`)
     if sym.kind == SymbolKind::Module {
-        return false;
+        return sym.is_public;
     }
 
     true
@@ -447,6 +446,7 @@ mod tests {
             byte_range: 0..1,
             start_line: 0,
             end_line: 1,
+            is_public: true,
             children: vec![],
         }
     }
@@ -515,6 +515,7 @@ mod tests {
             byte_range: 0..10,
             start_line: 0,
             end_line: 10,
+            is_public: true,
             children: vec![ExtractedSymbol {
                 name: "my_method".to_string(),
                 semantic_path: "MyClass.my_method".to_string(),
@@ -522,6 +523,7 @@ mod tests {
                 byte_range: 5..8,
                 start_line: 5,
                 end_line: 8,
+                is_public: true,
                 children: vec![],
             }],
         }];
@@ -545,6 +547,7 @@ mod tests {
                 byte_range: 0..0,
                 start_line: 0,
                 end_line: 0,
+                is_public: true,
                 children: vec![],
             });
         }
@@ -557,6 +560,7 @@ mod tests {
             byte_range: 0..0,
             start_line: 0,
             end_line: 0,
+            is_public: true,
             children: methods,
         }];
 
@@ -578,6 +582,7 @@ mod tests {
             byte_range: 0..0,
             start_line: 0,
             end_line: 0,
+            is_public: true,
             children: vec![],
         }];
         let mut out = String::default();
@@ -626,6 +631,7 @@ mod tests {
                 byte_range: 0..29,
                 start_line: 0,
                 end_line: 0,
+                is_public: true,
                 children: vec![],
             }]));
 
@@ -767,5 +773,87 @@ mod tests {
 
         assert_eq!(calls[0].1, std::path::PathBuf::from("src/lib.rs"));
         assert_eq!(calls[1].1, std::path::PathBuf::from("src/lib.rs"));
+    }
+
+    // ---------------------------------------------------------------
+    // PATCH-005-C3: pub mod visibility filter tests
+    // ---------------------------------------------------------------
+
+    /// PATCH-005-C3: `pub mod` appears in visibility="public" repo map
+    #[test]
+    fn test_pub_mod_appears_in_public_visibility() {
+        let module = ExtractedSymbol {
+            name: "types".to_string(),
+            semantic_path: "types".to_string(),
+            kind: SymbolKind::Module,
+            byte_range: 0..30,
+            start_line: 0,
+            end_line: 5,
+            is_public: true,
+            children: vec![ExtractedSymbol {
+                name: "foo".to_string(),
+                semantic_path: "types.foo".to_string(),
+                kind: SymbolKind::Function,
+                byte_range: 5..25,
+                start_line: 1,
+                end_line: 3,
+                is_public: true,
+                children: vec![],
+            }],
+        };
+        let filtered = filter_by_visibility(vec![module], "public", false);
+        assert_eq!(filtered.len(), 1, "pub mod should be visible in public map");
+        assert_eq!(filtered[0].name, "types");
+        assert_eq!(
+            filtered[0].children.len(),
+            1,
+            "pub mod children should also be visible"
+        );
+    }
+
+    /// PATCH-005-C3: Bare `mod` is hidden in visibility="public" repo map
+    #[test]
+    fn test_private_mod_hidden_in_public_visibility() {
+        let module = ExtractedSymbol {
+            name: "internal".to_string(),
+            semantic_path: "internal".to_string(),
+            kind: SymbolKind::Module,
+            byte_range: 0..30,
+            start_line: 0,
+            end_line: 5,
+            is_public: false,
+            children: vec![ExtractedSymbol {
+                name: "helper".to_string(),
+                semantic_path: "internal.helper".to_string(),
+                kind: SymbolKind::Function,
+                byte_range: 5..25,
+                start_line: 1,
+                end_line: 3,
+                is_public: true,
+                children: vec![],
+            }],
+        };
+        let filtered = filter_by_visibility(vec![module], "public", false);
+        assert!(
+            filtered.is_empty(),
+            "bare mod should be hidden in public map"
+        );
+    }
+
+    /// PATCH-005-C3: `mod` visible in visibility="all" (no filtering)
+    #[test]
+    fn test_private_mod_visible_in_all_visibility() {
+        let module = ExtractedSymbol {
+            name: "tests".to_string(),
+            semantic_path: "tests".to_string(),
+            kind: SymbolKind::Module,
+            byte_range: 0..30,
+            start_line: 0,
+            end_line: 5,
+            is_public: false,
+            children: vec![],
+        };
+        let filtered = filter_by_visibility(vec![module], "all", false);
+        assert_eq!(filtered.len(), 1, "mod should be visible in visibility=all");
     }
 }

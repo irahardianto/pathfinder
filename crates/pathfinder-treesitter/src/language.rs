@@ -99,11 +99,17 @@ impl SupportedLanguage {
             },
             Self::TypeScript | Self::Tsx | Self::JavaScript | Self::Vue => &LanguageNodeTypes {
                 function_kinds: &["function_declaration", "generator_function_declaration"],
-                class_kinds: &["class_declaration", "interface_declaration"],
+                class_kinds: &[
+                    "class_declaration",
+                    "interface_declaration",
+                    "enum_declaration",
+                    "abstract_class_declaration",
+                    "type_alias_declaration",
+                ],
                 method_kinds: &["method_definition"],
                 impl_kinds: &[],
                 constant_kinds: &["lexical_declaration", "variable_declaration"],
-                module_kinds: &[],
+                module_kinds: &["internal_module"],
             },
             Self::Python => &LanguageNodeTypes {
                 function_kinds: &["function_definition", "decorated_definition"],

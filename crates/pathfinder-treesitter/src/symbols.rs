@@ -131,6 +131,7 @@ impl<'a> SymbolExtractionContext<'a> {
             byte_range: child.byte_range(),
             start_line: child.start_position().row,
             end_line: child.end_position().row,
+            is_public: true,
             children: Vec::new(),
         };
 
@@ -195,8 +196,10 @@ impl<'a> SymbolExtractionContext<'a> {
             );
         }
 
-        // Determine visibility: `pub mod` → public, `mod` → private
-        // (for use by is_symbol_public in repo_map.rs)
+        // Determine visibility: `pub mod` → public, `mod` → private.
+        // `visibility_modifier` is a named child (not a field) of `mod_item` in the
+        // Rust tree-sitter grammar. Its presence indicates `pub` (or `pub(crate)`, etc).
+        let is_public = has_visibility_modifier(child);
         self.out.push(ExtractedSymbol {
             name: unique_name,
             semantic_path: module_path,
@@ -204,6 +207,7 @@ impl<'a> SymbolExtractionContext<'a> {
             byte_range: child.byte_range(),
             start_line: child.start_position().row,
             end_line: child.end_position().row,
+            is_public,
             children,
         });
     }
@@ -262,8 +266,16 @@ fn extract_symbols_recursive(
     ctx.process_children();
 }
 
-/// Refine Go `type_spec` to precise kind (Interface/Struct/Class).
+/// Refine `class_kinds` match to precise kind.
+///
+/// - Go `type_spec`: checks `type` field for `interface_type`/`struct_type`.
+/// - TS `enum_declaration` → `SymbolKind::Enum`.
+/// - TS `type_alias_declaration` → `SymbolKind::Class` (type alias).
+/// - All others → `SymbolKind::Class`.
 fn refine_class_kind(node: Node) -> SymbolKind {
+    if node.kind() == "enum_declaration" {
+        return SymbolKind::Enum;
+    }
     node.child_by_field_name("type")
         .map_or(SymbolKind::Class, |type_node| match type_node.kind() {
             "interface_type" => SymbolKind::Interface,
@@ -309,6 +321,35 @@ fn find_variable_declarator_name(node: Node) -> Option<Node> {
         }
     }
     None
+}
+
+/// Check if a tree-sitter node has a `visibility_modifier` named child.
+///
+/// In the Rust grammar, `pub`, `pub(crate)`, `pub(super)`, etc. produce a
+/// `visibility_modifier` child on items like `mod_item`, `fn_item`, etc.
+/// This child is a named child (not a named field), so we must iterate.
+fn has_visibility_modifier(node: Node) -> bool {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            return true;
+        }
+    }
+
+    // For TypeScript/JS, exported items are wrapped in an `export_statement`
+    let mut current = node.parent();
+    while let Some(p) = current {
+        if p.kind() == "export_statement" {
+            return true;
+        }
+        // If we hit a block or program, stop climbing
+        if p.kind() == "program" || p.kind() == "statement_block" {
+            break;
+        }
+        current = p.parent();
+    }
+
+    false
 }
 
 /// Generate unique name with suffix for duplicate symbols.
@@ -391,6 +432,7 @@ fn extract_impl_block(
                 byte_range: item.byte_range(),
                 start_line: item.start_position().row,
                 end_line: item.end_position().row,
+                is_public: true,
                 children: Vec::new(),
             });
         }
@@ -404,6 +446,7 @@ fn extract_impl_block(
             byte_range: node.byte_range(),
             start_line: node.start_position().row,
             end_line: node.end_position().row,
+            is_public: false,
             children: methods,
         });
     }
@@ -540,6 +583,7 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 byte_range: 0..0,
                 start_line: 0,
                 end_line: 0,
+                is_public: false,
                 children: methods,
             });
         }
@@ -666,6 +710,7 @@ fn push_zone_symbol(
         byte_range,
         start_line,
         end_line,
+        is_public: true,
         children,
     });
 }
@@ -783,6 +828,7 @@ fn walk_html_elements_flat(
                 byte_range: child.byte_range(),
                 start_line: child.start_position().row,
                 end_line: child.end_position().row,
+                is_public: true,
                 children: Vec::new(), // Always flat
             });
 
@@ -995,6 +1041,7 @@ fn emit_jsx_symbol(
             byte_range: node.byte_range(),
             start_line: node.start_position().row,
             end_line: node.end_position().row,
+            is_public: true,
             children: Vec::new(), // JSX children are flat, not nested
         });
     }
@@ -1100,6 +1147,7 @@ fn walk_css_rules(
                     byte_range: child.byte_range(),
                     start_line: child.start_position().row,
                     end_line: child.end_position().row,
+                    is_public: true,
                     children: Vec::new(),
                 });
             }
@@ -1199,6 +1247,7 @@ fn extract_css_rule_set(
                 byte_range: node.byte_range(), // whole rule_set for read_symbol_scope
                 start_line: node.start_position().row,
                 end_line: node.end_position().row,
+                is_public: true,
                 children: Vec::new(),
             });
         }
@@ -1845,6 +1894,7 @@ mod helpers {
             byte_range: 0..20,
             start_line: 0,
             end_line: 1,
+            is_public: true,
             children: vec![
                 ExtractedSymbol {
                     name: "login".to_string(),
@@ -1853,6 +1903,7 @@ mod helpers {
                     byte_range: 0..10,
                     start_line: 0,
                     end_line: 0,
+                    is_public: true,
                     children: vec![],
                 },
                 ExtractedSymbol {
@@ -1862,6 +1913,7 @@ mod helpers {
                     byte_range: 10..20,
                     start_line: 1,
                     end_line: 1,
+                    is_public: true,
                     children: vec![],
                 },
             ],
@@ -2122,5 +2174,176 @@ mod helpers {
             syms[0].children.is_empty(),
             "non-JSX function should have no JSX children"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // PATCH-005: Rust pub mod visibility + TypeScript missing node types
+    // ---------------------------------------------------------------
+
+    /// PATCH-005-C2: `pub mod` is detected as public (`is_public` = true)
+    #[test]
+    fn test_extract_rust_pub_mod_is_public() {
+        let source = r"
+pub mod types {
+    pub fn foo() {}
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        let module = symbols
+            .iter()
+            .find(|s| s.name == "types")
+            .expect("types module not found");
+        assert_eq!(module.kind, SymbolKind::Module);
+        assert!(module.is_public, "pub mod should have is_public = true");
+    }
+
+    /// PATCH-005-C2: Bare `mod` is private (`is_public` = false)
+    #[test]
+    fn test_extract_rust_private_mod_is_not_public() {
+        let source = r"
+mod internal {
+    fn helper() {}
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        let module = symbols
+            .iter()
+            .find(|s| s.name == "internal")
+            .expect("internal module not found");
+        assert_eq!(module.kind, SymbolKind::Module);
+        assert!(!module.is_public, "bare mod should have is_public = false");
+    }
+
+    /// PATCH-005-C2: `pub(crate) mod` is detected as public
+    #[test]
+    fn test_extract_rust_pub_crate_mod_is_public() {
+        let source = r"
+pub(crate) mod types {
+    fn foo() {}
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        let module = symbols
+            .iter()
+            .find(|s| s.name == "types")
+            .expect("types module not found");
+        assert_eq!(module.kind, SymbolKind::Module);
+        assert!(
+            module.is_public,
+            "pub(crate) mod should have is_public = true"
+        );
+    }
+
+    /// PATCH-005-C4: TypeScript enum is extracted as `SymbolKind::Enum`
+    #[test]
+    fn test_extract_typescript_enum() {
+        let source = b"enum Direction { Up, Down, Left, Right }";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dir.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "Direction");
+        assert_eq!(syms[0].kind, SymbolKind::Enum);
+    }
+
+    /// PATCH-005-C4: TypeScript abstract class is extracted as `SymbolKind::Class`
+    #[test]
+    fn test_extract_typescript_abstract_class() {
+        let source = b"abstract class Base { abstract doWork(): void; }";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("base.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "Base");
+        assert_eq!(syms[0].kind, SymbolKind::Class);
+    }
+
+    /// PATCH-005-C4: TypeScript type alias is extracted as `SymbolKind::Class`
+    #[test]
+    fn test_extract_typescript_type_alias() {
+        let source = b"type Props = { name: string; age: number; }";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("props.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "Props");
+        assert_eq!(syms[0].kind, SymbolKind::Class);
+    }
+
+    /// PATCH-005: TypeScript namespace is extracted as `SymbolKind::Module`
+    #[test]
+    fn test_extract_typescript_namespace() {
+        let source = "namespace Auth { export function login() {} }";
+        let symbols = parse_and_extract(source, SupportedLanguage::TypeScript);
+
+        assert_eq!(symbols.len(), 1);
+        let ns = &symbols[0];
+        assert_eq!(ns.name, "Auth");
+        assert_eq!(ns.kind, SymbolKind::Module);
+        assert_eq!(ns.children.len(), 1);
+
+        let login = &ns.children[0];
+        assert_eq!(login.name, "login");
+        assert_eq!(login.kind, SymbolKind::Function);
+        assert_eq!(login.semantic_path, "Auth.login");
+    }
+
+    /// PATCH-005: TypeScript export namespace is extracted as `SymbolKind::Module`
+    #[test]
+    fn test_extract_typescript_export_namespace() {
+        let source = "export namespace Auth { export function login() {} }";
+        let symbols = parse_and_extract(source, SupportedLanguage::TypeScript);
+
+        assert_eq!(symbols.len(), 1);
+        let ns = &symbols[0];
+        assert_eq!(ns.name, "Auth");
+        assert_eq!(ns.kind, SymbolKind::Module);
+        assert_eq!(ns.children.len(), 1);
+        assert!(ns.is_public);
+
+        let login = &ns.children[0];
+        assert_eq!(login.name, "login");
+        assert_eq!(login.kind, SymbolKind::Function);
+        assert_eq!(login.semantic_path, "Auth.login");
+    }
+    #[test]
+    fn test_extract_typescript_export_declare_namespace() {
+        let source = "export declare namespace Auth { export function login() {} }";
+        let symbols = parse_and_extract(source, SupportedLanguage::TypeScript);
+
+        assert_eq!(symbols.len(), 1);
+        let ns = &symbols[0];
+        assert_eq!(ns.name, "Auth");
+        assert_eq!(ns.kind, SymbolKind::Module);
+        assert_eq!(ns.children.len(), 1);
+        assert!(ns.is_public);
+    }
+
+    /// PATCH-005-C4: TSX enum is also extracted (verify cross-extension support)
+    #[test]
+    fn test_extract_tsx_enum() {
+        let source = b"export enum Status { Active, Inactive }";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("status.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Tsx);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "Status");
+        assert_eq!(syms[0].kind, SymbolKind::Enum);
     }
 }
