@@ -309,4 +309,24 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp);
     }
+
+    #[tokio::test]
+    async fn test_load_valid_config_from_file() {
+        let temp = tempdir().expect("create tempdir");
+        let config_json = r#"{ "log_level": "trace", "idle_timeout": 30 }"#;
+        std::fs::write(temp.path().join("pathfinder.config.json"), config_json)
+            .expect("should write config");
+
+        let config = PathfinderConfig::load(temp.path())
+            .await
+            .expect("should load valid config");
+        assert_eq!(config.log_level, "trace");
+        // Fields not in the JSON should retain defaults
+        assert_eq!(config.search.max_results, 50);
+    }
+
+    #[test]
+    fn test_default_idle_timeout_value() {
+        assert_eq!(default_idle_timeout(), 15);
+    }
 }
