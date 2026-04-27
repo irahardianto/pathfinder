@@ -954,7 +954,9 @@ mod tests {
     // ── CG-7: trivial constructor coverage ───────────────────────────────
 
     #[test]
+    #[allow(clippy::default_constructed_unit_structs)]
     fn test_ripgrep_scout_new() {
         let _scout = RipgrepScout::default();
+        let _scout2 = RipgrepScout::new();
     }
 }
