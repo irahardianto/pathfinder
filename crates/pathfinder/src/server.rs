@@ -17,10 +17,14 @@ mod tools;
 /// Module containing type definitions.
 pub mod types;
 
-// Internal wildcard import is justified for ergonomics: all types in this module are
-// used throughout the file, and the module is co-located with server.rs.
-#[allow(clippy::wildcard_imports)]
-use types::*;
+use types::{
+    AnalyzeImpactParams, CreateFileParams, CreateFileResponse, DeleteFileParams,
+    DeleteFileResponse, DeleteSymbolParams, EditResponse, GetDefinitionParams,
+    GetDefinitionResponse, GetRepoMapParams, InsertAfterParams, InsertBeforeParams, ReadFileParams,
+    ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams, ReplaceBodyParams,
+    ReplaceFullParams, SearchCodebaseParams, SearchCodebaseResponse, ValidateOnlyParams,
+    WriteFileParams,
+};
 
 use pathfinder_common::config::PathfinderConfig;
 use pathfinder_common::sandbox::Sandbox;
@@ -363,6 +367,7 @@ impl ServerHandler for PathfinderServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::server::types::Replacement;
     use pathfinder_common::types::{FilterMode, VersionHash};
     use pathfinder_search::{MockScout, SearchMatch, SearchResult};
     use pathfinder_treesitter::mock::MockSurgeon;
