@@ -444,6 +444,142 @@ async fn test_insert_after_bare_file() {
     assert!(written.contains("package main\n\nfunc append() {}"));
 }
 
+// ── insert_into tests ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_insert_into_mod_tests_appends_inside() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    let src = "mod tests {\n    fn test_a() {}\n}\n";
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+    let server = make_server_dyn(&ws_dir, real_surgeon);
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::tests"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "fn test_b() {}".to_owned(),
+        ignore_validation_failures: false,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("should succeed");
+    assert!(result.0.success);
+
+    let written = std::fs::read_to_string(&abs).unwrap();
+    assert!(written.contains("fn test_b() {}"));
+    assert!(written.ends_with("}\n"));
+    assert!(written.find("fn test_b() {}").unwrap() > written.find("fn test_a() {}").unwrap());
+    assert!(written.find("fn test_b() {}").unwrap() < written.rfind('}').unwrap());
+}
+
+#[tokio::test]
+async fn test_insert_into_bare_file_is_rejected() {
+    let ws_dir = tempdir().expect("temp dir");
+    let server = make_server(&ws_dir, MockSurgeon::new());
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: "src/lib.rs".to_owned(),
+        base_version: "sha256:any".to_owned(),
+        new_code: "fn b() {}".to_owned(),
+        ignore_validation_failures: false,
+    };
+
+    let result = server.insert_into(Parameters(params)).await;
+    let Err(err) = result else {
+        panic!("expected error");
+    };
+
+    let code = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(code, "INVALID_SEMANTIC_PATH");
+}
+
+#[tokio::test]
+async fn test_insert_into_function_symbol_is_rejected() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    let src = "fn test_a() {}\n";
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+    let server = make_server_dyn(&ws_dir, real_surgeon);
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::test_a"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "let x = 1;".to_owned(),
+        ignore_validation_failures: false,
+    };
+
+    let result = server.insert_into(Parameters(params)).await;
+    let Err(err) = result else {
+        panic!("expected INVALID_TARGET error");
+    };
+
+    let code = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(code, "INVALID_TARGET");
+}
+
+#[tokio::test]
+async fn test_insert_into_occ_mismatch() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    let src = "mod tests {}\n";
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+    let server = make_server_dyn(&ws_dir, real_surgeon);
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::tests"),
+        base_version: "sha256:stale000".to_owned(),
+        new_code: "fn test_b() {}".to_owned(),
+        ignore_validation_failures: false,
+    };
+
+    let result = server.insert_into(Parameters(params)).await;
+    let Err(err) = result else {
+        panic!("expected VERSION_MISMATCH error");
+    };
+
+    let code = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(code, "VERSION_MISMATCH");
+}
+
 #[tokio::test]
 async fn test_delete_symbol_real_parser_go() {
     use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;

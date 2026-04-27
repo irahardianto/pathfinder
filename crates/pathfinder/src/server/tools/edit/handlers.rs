@@ -261,6 +261,58 @@ impl crate::server::PathfinderServer {
         .await
     }
 
+    /// Core logic for the `insert_into` tool (PRD Epic 5, Story 5.5).
+    #[instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
+    pub(crate) async fn insert_into_impl(
+        &self,
+        params: crate::server::types::InsertIntoParams,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        let start = std::time::Instant::now();
+        tracing::info!(
+            tool = "insert_into",
+            semantic_path = %params.semantic_path,
+            "insert_into: start"
+        );
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
+
+        check_sandbox_access(
+            &self.sandbox,
+            &semantic_path.file_path,
+            "insert_into",
+            &params.semantic_path,
+        )?;
+
+        let (source, current_hash, new_bytes) = self
+            .resolve_edit_content(
+                &semantic_path,
+                &params.semantic_path,
+                "insert_into",
+                Some(&params.new_code),
+            )
+            .await?;
+
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            semantic_path.file_path.clone(),
+        )?;
+
+        let resolve_ms = start.elapsed().as_millis();
+        self.finalize_edit(FinalizeEditParams {
+            tool_name: "insert_into",
+            semantic_path: &semantic_path,
+            raw_semantic_path_str: &params.semantic_path,
+            source: &source,
+            original_hash: &current_hash,
+            new_content: new_bytes,
+            ignore_validation_failures: params.ignore_validation_failures,
+            start_time: start,
+            resolve_ms,
+        })
+        .await
+    }
+
     /// Resolve the byte offset, indentation column, file source, and current version hash
     /// for an insertion operation.
     ///
@@ -509,6 +561,7 @@ impl crate::server::PathfinderServer {
                 self.resolve_insert(semantic_path, new_code, InsertEdge::After)
                     .await
             }
+            "insert_into" => self.resolve_insert_into(semantic_path, new_code).await,
             "delete" => self.resolve_delete(semantic_path, raw_semantic_path).await,
             unknown => Err(Self::unsupported_edit_type_error(
                 raw_semantic_path,
@@ -727,6 +780,45 @@ impl crate::server::PathfinderServer {
         Ok((source, current_hash, new_bytes))
     }
 
+    /// Resolve an `insert_into` edit.
+    async fn resolve_insert_into(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        new_code: Option<&str>,
+    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+        let new_code = new_code.unwrap_or_default();
+        let (body_end, source, current_hash) = self
+            .surgeon
+            .resolve_body_end_range(self.workspace_root.path(), semantic_path)
+            .await
+            .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
+
+        let normalized = normalize_for_full_replace(new_code);
+        let indented = dedent_then_reindent(&normalized, body_end.body_indent_column);
+
+        let before = &source[..body_end.insert_byte];
+        let after = &source[body_end.insert_byte..];
+
+        // Add blank line separator before inserted code if needed
+        let sep = if before.ends_with(b"\n\n") || before.ends_with(b"{\n") {
+            ""
+        } else {
+            "\n"
+        };
+        let trailing = if indented.ends_with('\n') { "" } else { "\n" };
+
+        let mut new_bytes = Vec::with_capacity(
+            before.len() + sep.len() + indented.len() + trailing.len() + after.len(),
+        );
+        new_bytes.extend_from_slice(before);
+        new_bytes.extend_from_slice(sep.as_bytes());
+        new_bytes.extend_from_slice(indented.as_bytes());
+        new_bytes.extend_from_slice(trailing.as_bytes());
+        new_bytes.extend_from_slice(after);
+
+        Ok((source, current_hash, new_bytes))
+    }
+
     /// Resolve a `delete` edit.
     async fn resolve_delete(
         &self,
@@ -773,7 +865,7 @@ impl crate::server::PathfinderServer {
         let err = pathfinder_common::error::PathfinderError::InvalidTarget {
             semantic_path: raw_semantic_path.to_owned(),
             reason: format!(
-                "unsupported edit type: '{edit_type}'. Must be one of: replace_body, replace_full, insert_before, insert_after, delete."
+                "unsupported edit type: '{edit_type}'. Must be one of: replace_body, replace_full, insert_before, insert_after, insert_into, delete."
             ),
             edit_index: None,
             valid_edit_types: None,

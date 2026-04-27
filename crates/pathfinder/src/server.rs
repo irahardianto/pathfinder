@@ -164,7 +164,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_repo_map",
-        description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing. The version_hashes are immediately usable as base_version for edit tools — no additional read required. Two budget knobs control coverage: `max_tokens` is the total token budget (default 16000); `max_tokens_per_file` caps detail per file before collapsing to a stub (default 2000). When `coverage_percent` is low, increase `max_tokens`. When files show `[TRUNCATED DUE TO SIZE]`, increase `max_tokens_per_file`. Use `visibility=all` to include private symbols for auditing. The `depth` parameter (default 5) controls directory traversal depth; increase it for deeply-nested repos when `coverage_percent` is low.\n\n**Temporal & extension filters (Epic E6):**\n- `changed_since` — Git ref or duration to show only recently-modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`). Useful for reviewing what changed in a PR or recent session. When git is unavailable the parameter is silently ignored and `degraded: true` is set in the response.\n- `include_extensions` — Only include files with these extensions (e.g., `[\"ts\", \"tsx\"]`). Mutually exclusive with `exclude_extensions`.\n- `exclude_extensions` — Exclude files with these extensions (e.g., `[\"md\", \"json\"]`). Mutually exclusive with `include_extensions`."
+        description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing. The version_hashes are immediately usable as base_version for edit tools — no additional read required. Two budget knobs control coverage: `max_tokens` is the total token budget (default 16000); `max_tokens_per_file` caps detail per file before collapsing to a stub (default 2000). When `coverage_percent` is low, increase `max_tokens`. When files show `[TRUNCATED DUE TO SIZE]`, increase `max_tokens_per_file`. Use `visibility=all` to include private symbols for auditing. Module scopes (e.g., Rust `mod tests`, `mod types`) are only shown when `visibility` is set to `\"all\"`. They are hidden in public-only maps. The `depth` parameter (default 5) controls directory traversal depth; increase it for deeply-nested repos when `coverage_percent` is low.\n\n**Temporal & extension filters (Epic E6):**\n- `changed_since` — Git ref or duration to show only recently-modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`). Useful for reviewing what changed in a PR or recent session. When git is unavailable the parameter is silently ignored and `degraded: true` is set in the response.\n- `include_extensions` — Only include files with these extensions (e.g., `[\"ts\", \"tsx\"]`). Mutually exclusive with `exclude_extensions`.\n- `exclude_extensions` — Exclude files with these extensions (e.g., `[\"md\", \"json\"]`). Mutually exclusive with `include_extensions`."
     )]
     #[allow(clippy::unused_self)]
     async fn get_repo_map(
@@ -198,7 +198,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_batch",
-        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file. IMPORTANT: For each edit, semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**Two targeting modes per edit (E3.1 — Hybrid Batch):**\n\n**Option A — Semantic targeting (existing):** Set `semantic_path`, `edit_type`, and optionally `new_code`. Use for source-code constructs that have a parseable AST symbol.\n\n**Option B — Text targeting (new):** Set `old_text`, `context_line`, and optionally `replacement_text`. Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path. The search scans ±25 lines around `context_line` (1-indexed) for an exact match of `old_text`. Set `normalize_whitespace: true` to collapse `\\s+` → single space before matching (useful for HTML where indentation may vary; do NOT use for Python or YAML).\n\nBoth targeting modes can appear in the same batch — the batch is fully atomic (all-or-nothing). If any edit fails (e.g., `TEXT_NOT_FOUND`), the entire batch is rolled back.\n\n**Schema quick-reference:**\n  Option A: { \"semantic_path\": \"src/file.rs::MyStruct.my_fn\", \"edit_type\": \"replace_body\", \"new_code\": \"...\" }\n  edit_type values: replace_body | replace_full | insert_before | insert_after | delete\n  Option B: { \"old_text\": \"<old html>\", \"context_line\": 42, \"replacement_text\": \"<new html>\" }\n  Both modes may be mixed in one batch. `context_line` is required for text targeting."
+        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file. IMPORTANT: For each edit, semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**Two targeting modes per edit (E3.1 — Hybrid Batch):**\n\n**Option A — Semantic targeting (existing):** Set `semantic_path`, `edit_type`, and optionally `new_code`. Use for source-code constructs that have a parseable AST symbol.\n\n**Option B — Text targeting (new):** Set `old_text`, `context_line`, and optionally `replacement_text`. Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path. The search scans ±25 lines around `context_line` (1-indexed) for an exact match of `old_text`. Set `normalize_whitespace: true` to collapse `\\s+` → single space before matching (useful for HTML where indentation may vary; do NOT use for Python or YAML).\n\nBoth targeting modes can appear in the same batch — the batch is fully atomic (all-or-nothing). If any edit fails (e.g., `TEXT_NOT_FOUND`), the entire batch is rolled back.\n\n**Schema quick-reference:**\n  Option A: { \"semantic_path\": \"src/file.rs::MyStruct.my_fn\", \"edit_type\": \"replace_body\", \"new_code\": \"...\" }\n  edit_type values: replace_body | replace_full | insert_before | insert_after | insert_into | delete\n  Option B: { \"old_text\": \"<old html>\", \"context_line\": 42, \"replacement_text\": \"<new html>\" }\n  Both modes may be mixed in one batch. `context_line` is required for text targeting.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn replace_batch(
         &self,
@@ -242,7 +242,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_body",
-        description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`."
+        description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn replace_body(
         &self,
@@ -253,7 +253,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "replace_full",
-        description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`."
+        description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn replace_full(
         &self,
@@ -264,7 +264,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "insert_before",
-        description = "Insert new code BEFORE a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between your code and the target.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
+        description = "Insert new code BEFORE a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between your code and the target.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn insert_before(
         &self,
@@ -275,7 +275,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "insert_after",
-        description = "Insert new code AFTER a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between the target and your code.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
+        description = "Insert new code AFTER a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between the target and your code.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn insert_after(
         &self,
@@ -285,8 +285,27 @@ impl PathfinderServer {
     }
 
     #[tool(
+        name = "insert_into",
+        description = "Insert new code at the END of a container symbol's body \
+            (Module, Class, Struct, Impl, Interface). This is the correct tool \
+            for adding new functions to a test module, new methods to a struct, \
+            or new items to any scope. IMPORTANT: semantic_path must target a \
+            container symbol (e.g. 'src/lib.rs::tests'), NOT a bare file path. \
+            For inserting before/after a specific sibling symbol, use insert_before \
+            or insert_after instead.\n\nbase_version accepts either the full SHA-256 hash \
+            (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), \
+            matching Git convention."
+    )]
+    async fn insert_into(
+        &self,
+        Parameters(params): Parameters<crate::server::types::InsertIntoParams>,
+    ) -> Result<Json<EditResponse>, ErrorData> {
+        self.insert_into_impl(params).await
+    }
+
+    #[tool(
         name = "delete_symbol",
-        description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method, only that method is deleted. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
+        description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method, only that method is deleted. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn delete_symbol(
         &self,
@@ -297,7 +316,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "validate_only",
-        description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit.\n\n**LSP validation:** If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront."
+        description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit.\n\n**LSP validation:** If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn validate_only(
         &self,
@@ -319,7 +338,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "delete_file",
-        description = "Delete a file. Requires base_version (OCC) to prevent deleting a file that was modified after you last read it."
+        description = "Delete a file. Requires base_version (OCC) to prevent deleting a file that was modified after you last read it. base_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn delete_file(
         &self,
@@ -341,7 +360,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "write_file",
-        description = "WARNING: This bypasses AST validation and formatting. DO NOT use for source code (TypeScript, Python, Go, Rust). ONLY use for configuration files (.env, .gitignore, Dockerfile, YAML). For source code, use replace_body or replace_full instead. Provide EITHER 'content' for full replacement OR 'replacements' for surgical search-and-replace edits (e.g., {old_text: 'postgres:15', new_text: 'postgres:16'}). Use replacements when changing specific text in large files. Requires base_version (OCC)."
+        description = "WARNING: This bypasses AST validation and formatting. DO NOT use for source code (TypeScript, Python, Go, Rust). ONLY use for configuration files (.env, .gitignore, Dockerfile, YAML). For source code, use replace_body or replace_full instead. Provide EITHER 'content' for full replacement OR 'replacements' for surgical search-and-replace edits (e.g., {old_text: 'postgres:15', new_text: 'postgres:16'}). Use replacements when changing specific text in large files. Requires base_version (OCC).\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]
     async fn write_file(
         &self,

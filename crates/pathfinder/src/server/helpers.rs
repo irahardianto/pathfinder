@@ -84,22 +84,58 @@ pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> E
     ErrorData::internal_error(msg, None)
 }
 
-/// OCC version-mismatch guard.
+/// OCC guard: verify the agent's `base_version` matches the current file hash.
 ///
-/// Returns `Err(VERSION_MISMATCH)` when `base_version` does not match the
-/// `current_hash` of the file on disk. Centralises the 8-line check that
-/// was duplicated across every edit handler.
+/// Accepts two formats:
+/// - Full hash: `sha256:<64 hex chars>` — exact match (legacy, always valid)
+/// - Short prefix: `sha256:<N hex chars>` where N >= 7 — prefix match
+///
+/// The minimum prefix length of 7 characters matches Git's convention and
+/// provides sufficient collision resistance for workspace-scale file sets.
+/// A prefix shorter than 7 hex chars after `sha256:` is rejected as too short.
 pub(crate) fn check_occ(
     base_version: &str,
     current_hash: &VersionHash,
     path: PathBuf,
 ) -> Result<(), ErrorData> {
-    let claimed = VersionHash::from_raw(base_version.to_owned());
-    if claimed.as_str() != current_hash.as_str() {
+    const SHA256_PREFIX: &str = "sha256:";
+    const MIN_HEX_CHARS: usize = 7;
+
+    let current = current_hash.as_str();
+
+    let matches = match base_version.len().cmp(&current.len()) {
+        std::cmp::Ordering::Equal => {
+            // Fast path: same length → exact comparison
+            base_version == current
+        }
+        std::cmp::Ordering::Greater => {
+            // Claimed hash is longer than current (malformed or different algo)
+            false
+        }
+        std::cmp::Ordering::Less => {
+            // base_version is shorter — attempt prefix match
+            let hex_part_len = base_version.strip_prefix(SHA256_PREFIX).map_or(0, str::len);
+
+            if hex_part_len < MIN_HEX_CHARS {
+                // Too short to be meaningful — treat as mismatch to be safe
+                return Err(pathfinder_to_error_data(
+                    &PathfinderError::VersionMismatch {
+                        path,
+                        current_version_hash: current.to_owned(),
+                        lines_changed: None,
+                    },
+                ));
+            }
+
+            current.starts_with(base_version)
+        }
+    };
+
+    if !matches {
         return Err(pathfinder_to_error_data(
             &PathfinderError::VersionMismatch {
                 path,
-                current_version_hash: current_hash.as_str().to_owned(),
+                current_version_hash: current.to_owned(),
                 lines_changed: None,
             },
         ));
@@ -322,5 +358,51 @@ mod tests {
                 err.error_code()
             );
         }
+    }
+
+    #[test]
+    fn test_check_occ_full_hash_match() {
+        let hash = VersionHash::compute(b"hello world");
+        let result = check_occ(hash.as_str(), &hash, PathBuf::from("test.rs"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_occ_short_7_char_prefix_matches() {
+        let hash = VersionHash::compute(b"hello world");
+        // Take first 7 hex chars after "sha256:"
+        let short = &hash.as_str()[..14]; // "sha256:" (7) + 7 hex chars = 14
+        let result = check_occ(short, &hash, PathBuf::from("test.rs"));
+        assert!(result.is_ok(), "7-char prefix should be accepted");
+    }
+
+    #[test]
+    fn test_check_occ_wrong_prefix_fails() {
+        let hash = VersionHash::compute(b"hello world");
+        let result = check_occ("sha256:0000000", &hash, PathBuf::from("test.rs"));
+        assert!(result.is_err(), "wrong prefix must fail");
+    }
+
+    #[test]
+    fn test_check_occ_prefix_too_short_is_rejected() {
+        let hash = VersionHash::compute(b"hello world");
+        let result = check_occ("sha256:4ec", &hash, PathBuf::from("test.rs")); // only 3 hex chars
+        assert!(result.is_err(), "prefix < 7 hex chars must be rejected");
+    }
+
+    #[test]
+    fn test_check_occ_full_hash_mismatch_fails() {
+        let hash_a = VersionHash::compute(b"hello world");
+        let hash_b = VersionHash::compute(b"different content");
+        let result = check_occ(hash_a.as_str(), &hash_b, PathBuf::from("test.rs"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_occ_8_char_prefix_matches() {
+        let hash = VersionHash::compute(b"hello world");
+        let prefix_8 = &hash.as_str()[..15]; // "sha256:" + 8 hex chars
+        let result = check_occ(prefix_8, &hash, PathBuf::from("test.rs"));
+        assert!(result.is_ok(), "8-char prefix should also be accepted");
     }
 }

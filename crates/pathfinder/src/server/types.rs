@@ -189,6 +189,20 @@ pub struct InsertAfterParams {
     pub ignore_validation_failures: bool,
 }
 
+/// Parameters for `insert_into`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct InsertIntoParams {
+    /// Full semantic path to the container target (e.g., `src/lib.rs::tests`).
+    pub semantic_path: String,
+    /// SHA-256 hash from previous read (OCC).
+    pub base_version: String,
+    /// Code block to insert.
+    pub new_code: String,
+    /// Write to disk even if validation fails.
+    #[serde(default)]
+    pub ignore_validation_failures: bool,
+}
+
 /// Parameters for `delete_symbol`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeleteSymbolParams {
@@ -206,7 +220,7 @@ pub struct DeleteSymbolParams {
 pub struct ValidateOnlyParams {
     /// Full semantic path to the target (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
-    /// Edit type: `replace_body`, `replace_full`, `insert_before`, `insert_after`, or `delete`.
+    /// Edit type: `replace_body`, `replace_full`, `insert_before`, `insert_after`, `insert_into`, or `delete`.
     pub edit_type: String,
     /// Replacement code (required for all types except `delete`).
     pub new_code: Option<String>,
