@@ -40,6 +40,8 @@ pub enum SymbolKind {
     Interface,
     /// An enumeration.
     Enum,
+    /// A module block (e.g., Rust `mod tests { ... }`, TS `namespace`).
+    Module,
     /// A Vue SFC zone container (`template` or `style`).
     ///
     /// Acts as a parent grouping all child symbols extracted from that zone.
@@ -96,6 +98,15 @@ pub struct SymbolRange {
     pub end_byte: usize,
     /// Column (0-indexed) of the symbol's start, used as the baseline indentation for inserted code.
     pub indent_column: usize,
+}
+
+/// The byte range used by `insert_into` to append code to a symbol's body.
+#[derive(Debug, Clone)]
+pub struct BodyEndRange {
+    /// Byte offset just before the closing `}` (or `end`, etc.) of the body.
+    pub insert_byte: usize,
+    /// Indentation column for newly inserted content.
+    pub body_indent_column: usize,
 }
 
 /// The `Surgeon` trait — testability boundary for AST-aware operations.
@@ -175,6 +186,16 @@ pub trait Surgeon: Send + Sync {
         workspace_root: &Path,
         semantic_path: &SemanticPath,
     ) -> Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
+
+    /// Resolve the body end byte range and indent column for a container symbol.
+    ///
+    /// Used by `insert_into` to append code at the end of a scope without
+    /// needing to know which symbol is last inside it.
+    async fn resolve_body_end_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<(BodyEndRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
 
     /// Read an entire source file and extract its symbols.
     ///

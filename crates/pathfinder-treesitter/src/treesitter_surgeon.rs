@@ -447,6 +447,102 @@ impl Surgeon for TreeSitterSurgeon {
     }
 
     #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
+    async fn resolve_body_end_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<
+        (
+            crate::surgeon::BodyEndRange,
+            std::sync::Arc<[u8]>,
+            VersionHash,
+        ),
+        SurgeonError,
+    > {
+        let chain =
+            semantic_path
+                .symbol_chain
+                .as_ref()
+                .ok_or_else(|| SurgeonError::SymbolNotFound {
+                    path: semantic_path.to_string(),
+                    did_you_mean: vec![],
+                })?;
+
+        // Use the shared parse/cache/extract pipeline
+        let (_lang, tree, source, version_hash, symbols) = self
+            .cached_parse(workspace_root, &semantic_path.file_path)
+            .await?;
+
+        let symbol =
+            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
+                path: semantic_path.to_string(),
+                did_you_mean: did_you_mean(&symbols, chain, 3),
+            })?;
+
+        // Only container symbols are valid targets
+        match symbol.kind {
+            crate::surgeon::SymbolKind::Module
+            | crate::surgeon::SymbolKind::Class
+            | crate::surgeon::SymbolKind::Struct
+            | crate::surgeon::SymbolKind::Interface
+            | crate::surgeon::SymbolKind::Impl => {}
+            other => {
+                return Err(SurgeonError::InvalidTarget {
+                    path: semantic_path.to_string(),
+                    reason: format!(
+                        "insert_into requires a container symbol (Module, Class, Struct, \
+                    Impl, Interface), but got {other:?}. Use replace_body for functions."
+                    ),
+                })
+            }
+        }
+
+        let (start_byte, end_byte) = Self::find_body_bytes(
+            &tree,
+            &source,
+            symbol.byte_range.clone(),
+            &semantic_path.to_string(),
+        )?;
+
+        // The insert point is just before the closing `}` of the body
+        let raw_end = end_byte.saturating_sub(1);
+
+        let insert_byte = source
+            .get(..raw_end)
+            .unwrap_or(b"")
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(raw_end, |pos| pos + 1);
+
+        let last_newline_pos = source
+            .get(..symbol.byte_range.start)
+            .unwrap_or(&[])
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1);
+        let symbol_indent_column = symbol.byte_range.start.saturating_sub(last_newline_pos);
+
+        let is_brace_block = source.get(start_byte) == Some(&b'{');
+        let fallback_indent = symbol_indent_column + 4;
+        let body_indent_column = Self::detect_body_indent(
+            &source,
+            start_byte,
+            end_byte,
+            is_brace_block,
+            fallback_indent,
+        );
+
+        Ok((
+            crate::surgeon::BodyEndRange {
+                insert_byte,
+                body_indent_column,
+            },
+            source,
+            version_hash,
+        ))
+    }
+
+    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
     async fn resolve_full_range(
         &self,
         workspace_root: &Path,

@@ -16,6 +16,10 @@ pub struct LanguageNodeTypes {
     pub impl_kinds: &'static [&'static str],
     /// Node kinds that represent constants.
     pub constant_kinds: &'static [&'static str],
+    /// Node kinds that represent scoped module blocks.
+    /// Contents are extracted as named children under the module's path segment.
+    /// Example: Rust `mod tests { fn foo() {} }` → `tests` (Module) with child `foo`.
+    pub module_kinds: &'static [&'static str],
 }
 
 /// The programming languages natively supported by the Surgeon.
@@ -91,6 +95,7 @@ impl SupportedLanguage {
                 method_kinds: &["method_declaration", "method_spec", "method_elem"],
                 impl_kinds: &[],
                 constant_kinds: &["const_declaration", "var_declaration"],
+                module_kinds: &[],
             },
             Self::TypeScript | Self::Tsx | Self::JavaScript | Self::Vue => &LanguageNodeTypes {
                 function_kinds: &["function_declaration", "generator_function_declaration"],
@@ -98,6 +103,7 @@ impl SupportedLanguage {
                 method_kinds: &["method_definition"],
                 impl_kinds: &[],
                 constant_kinds: &["lexical_declaration", "variable_declaration"],
+                module_kinds: &[],
             },
             Self::Python => &LanguageNodeTypes {
                 function_kinds: &["function_definition", "decorated_definition"],
@@ -105,6 +111,7 @@ impl SupportedLanguage {
                 method_kinds: &[], // Python treats methods as functions inside classes
                 impl_kinds: &[],
                 constant_kinds: &[],
+                module_kinds: &[],
             },
             Self::Rust => &LanguageNodeTypes {
                 function_kinds: &["function_item"],
@@ -114,6 +121,7 @@ impl SupportedLanguage {
                 // so that methods are grouped under the implementing type's name.
                 impl_kinds: &["impl_item"],
                 constant_kinds: &["const_item", "static_item"],
+                module_kinds: &["mod_item"],
             },
         }
     }

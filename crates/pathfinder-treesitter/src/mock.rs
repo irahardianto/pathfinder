@@ -34,6 +34,21 @@ pub struct MockSurgeon {
     pub resolve_body_range_results:
         Mutex<Vec<Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>>>,
     #[allow(clippy::type_complexity)]
+    /// Pre-configured return values for resolving body end ranges.
+    /// Each call pops the next result in sequence.
+    pub resolve_body_end_range_results: Mutex<
+        Vec<
+            Result<
+                (
+                    crate::surgeon::BodyEndRange,
+                    std::sync::Arc<[u8]>,
+                    VersionHash,
+                ),
+                SurgeonError,
+            >,
+        >,
+    >,
+    #[allow(clippy::type_complexity)]
     /// Pre-configured return values for resolving full ranges.
     /// Each call pops the next result in sequence.
     pub resolve_full_range_results:
@@ -62,6 +77,8 @@ pub struct MockSurgeon {
         Mutex<Vec<(PathBuf, PathBuf, crate::repo_map::SkeletonConfig<'static>)>>,
     /// Recorded `(workspace_root, semantic_path)` arguments for each `resolve_body_range` call.
     pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
+    /// Recorded `(workspace_root, semantic_path)` arguments for each `resolve_body_end_range` call.
+    pub resolve_body_end_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     /// Recorded `(workspace_root, semantic_path)` arguments for each `resolve_full_range` call.
     pub resolve_full_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     /// Recorded `(workspace_root, semantic_path)` arguments for each `resolve_symbol_range` call.
@@ -230,6 +247,27 @@ impl Surgeon for MockSurgeon {
             workspace_root,
             semantic_path,
             "resolve_body_range",
+        )
+    }
+
+    async fn resolve_body_end_range(
+        &self,
+        workspace_root: &Path,
+        semantic_path: &SemanticPath,
+    ) -> Result<
+        (
+            crate::surgeon::BodyEndRange,
+            std::sync::Arc<[u8]>,
+            VersionHash,
+        ),
+        SurgeonError,
+    > {
+        Self::resolve_range_dispatch(
+            &self.resolve_body_end_range_calls,
+            &self.resolve_body_end_range_results,
+            workspace_root,
+            semantic_path,
+            "resolve_body_end_range",
         )
     }
 

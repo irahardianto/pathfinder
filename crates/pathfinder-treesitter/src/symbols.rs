@@ -59,6 +59,11 @@ impl<'a> SymbolExtractionContext<'a> {
             return;
         }
 
+        if self.types.module_kinds.contains(&kind) {
+            self.extract_module_block(child);
+            return;
+        }
+
         let sym_kind = self.determine_symbol_kind(child, kind);
         if let Some(sk) = sym_kind {
             if let Some(name_node) = Self::resolve_name_node(child) {
@@ -146,6 +151,61 @@ impl<'a> SymbolExtractionContext<'a> {
         }
 
         self.out.push(symbol);
+    }
+
+    /// Extract a module block as a named scope symbol with its children.
+    ///
+    /// The module's `name` field becomes the scope prefix for all nested symbols.
+    /// Example: `mod tests { fn test_foo() {} }` becomes:
+    ///   - `tests` (Module, with children)
+    ///     - `test_foo` (Function, path = "`tests.test_foo`")
+    fn extract_module_block(&mut self, child: Node<'a>) {
+        // Get the module name node (Tree-sitter field: "name")
+        let Some(name_node) = child.child_by_field_name("name") else {
+            // Unnamed module — recurse with current parent path (safe fallback)
+            extract_symbols_recursive(
+                child,
+                self.source,
+                self.types,
+                self.lang,
+                self.parent_path,
+                self.out,
+            );
+            return;
+        };
+
+        let Some(name) = self.extract_name(name_node) else {
+            return;
+        };
+
+        let (unique_name, suffix) = make_unique_name(&mut self.name_counts, name);
+        let module_path = self.build_path(&unique_name, &suffix);
+
+        let mut children = Vec::new();
+
+        // Extract body contents as children scoped under `module_path`
+        if let Some(body) = child.child_by_field_name("body") {
+            extract_symbols_recursive(
+                body,
+                self.source,
+                self.types,
+                self.lang,
+                &module_path,
+                &mut children,
+            );
+        }
+
+        // Determine visibility: `pub mod` → public, `mod` → private
+        // (for use by is_symbol_public in repo_map.rs)
+        self.out.push(ExtractedSymbol {
+            name: unique_name,
+            semantic_path: module_path,
+            kind: SymbolKind::Module,
+            byte_range: child.byte_range(),
+            start_line: child.start_position().row,
+            end_line: child.end_position().row,
+            children,
+        });
     }
 
     fn build_path(&self, name: &str, suffix: &str) -> String {
@@ -1317,6 +1377,138 @@ mod tests {
     use super::*;
     use crate::language::SupportedLanguage;
     use crate::parser::AstParser;
+    use pathfinder_common::types::SymbolChain;
+
+    fn parse_and_extract(source: &str, lang: SupportedLanguage) -> Vec<ExtractedSymbol> {
+        let source_bytes = source.as_bytes();
+        let tree =
+            AstParser::parse_source(std::path::Path::new("dummy.rs"), lang, source_bytes).unwrap();
+        extract_symbols_from_tree(&tree, source_bytes, lang)
+    }
+
+    /// PATCH-002-T1: Basic mod block creates Module symbol with children
+    #[test]
+    fn test_extract_rust_mod_block_with_children() {
+        let source = r"
+fn outer() {}
+
+mod helpers {
+    fn inner_one() {}
+    fn inner_two() {}
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        let module = symbols
+            .iter()
+            .find(|s| s.name == "helpers")
+            .expect("helpers module not found");
+        assert_eq!(module.kind, SymbolKind::Module);
+        assert_eq!(module.children.len(), 2);
+        assert!(module.children.iter().any(|c| c.name == "inner_one"));
+        assert!(module.children.iter().any(|c| c.name == "inner_two"));
+        // Module path
+        assert_eq!(module.semantic_path, "helpers");
+        // Child paths include module prefix
+        let child = module
+            .children
+            .iter()
+            .find(|c| c.name == "inner_one")
+            .unwrap();
+        assert_eq!(child.semantic_path, "helpers.inner_one");
+    }
+
+    /// PATCH-002-T2: cfg(test) mod tests is extracted
+    #[test]
+    fn test_extract_rust_cfg_test_mod_block() {
+        let source = r"
+fn production_code() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic() { assert!(true); }
+
+    #[test]
+    fn test_advanced() { assert!(true); }
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        let module = symbols
+            .iter()
+            .find(|s| s.name == "tests")
+            .expect("tests module not found");
+        assert_eq!(module.kind, SymbolKind::Module);
+        // Should contain the two test functions, but NOT the `use` statement
+        assert_eq!(module.children.len(), 2);
+        assert!(module.children.iter().any(|c| c.name == "test_basic"));
+        assert!(module.children.iter().any(|c| c.name == "test_advanced"));
+    }
+
+    /// PATCH-002-T3: `resolve_symbol_chain` traverses through module
+    #[test]
+    fn test_resolve_symbol_chain_through_module() {
+        let source = r"
+mod tests {
+    fn test_foo() {}
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        let chain = SymbolChain::parse("tests.test_foo").unwrap();
+        let resolved = resolve_symbol_chain(&symbols, &chain);
+        assert!(resolved.is_some(), "tests.test_foo should resolve");
+        assert_eq!(resolved.unwrap().name, "test_foo");
+    }
+
+    /// PATCH-002-T4: Nested mod (mod inside mod) works
+    #[test]
+    fn test_extract_rust_nested_mod_blocks() {
+        let source = r"
+mod outer {
+    mod inner {
+        fn deep() {}
+    }
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        let outer = symbols.iter().find(|s| s.name == "outer").unwrap();
+        assert_eq!(outer.kind, SymbolKind::Module);
+        let inner = outer.children.iter().find(|c| c.name == "inner").unwrap();
+        assert_eq!(inner.kind, SymbolKind::Module);
+        let deep = inner.children.iter().find(|c| c.name == "deep").unwrap();
+        assert_eq!(deep.name, "deep");
+        assert_eq!(deep.semantic_path, "outer.inner.deep");
+    }
+
+    /// PATCH-002-T5: Top-level functions are NOT affected (regression)
+    #[test]
+    fn test_extract_rust_top_level_unchanged_with_module_kinds() {
+        let source = r"
+fn top_level_a() {}
+fn top_level_b() {}
+
+mod helpers {
+    fn helper() {}
+}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+        // Top-level functions still at root
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "top_level_a" && s.kind == SymbolKind::Function));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "top_level_b" && s.kind == SymbolKind::Function));
+        // Module present
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "helpers" && s.kind == SymbolKind::Module));
+        // helper is NOT at root level anymore
+        assert!(!symbols
+            .iter()
+            .any(|s| s.name == "helper" && s.semantic_path == "helper"));
+    }
 
     #[test]
     fn test_extract_go_function() {

@@ -143,6 +143,13 @@ fn is_symbol_public(sym: &ExtractedSymbol, lang_is_go: bool) -> bool {
     {
         return name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     }
+
+    // Module blocks are private unless explicitly `pub mod`
+    // For now, conservatively treat all modules as private (visibility: "all" only)
+    if sym.kind == SymbolKind::Module {
+        return false;
+    }
+
     true
 }
 
@@ -202,6 +209,7 @@ fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut
             SymbolKind::Constant => "const ",
             SymbolKind::Interface => "interface ",
             SymbolKind::Enum => "enum ",
+            SymbolKind::Module => "mod ",
             // Vue SFC zone symbols
             SymbolKind::Zone => "zone ",
             SymbolKind::Component => "component ",
