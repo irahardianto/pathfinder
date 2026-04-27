@@ -955,6 +955,6 @@ mod tests {
 
     #[test]
     fn test_ripgrep_scout_new() {
-        let _scout = RipgrepScout::new();
+        let _scout = RipgrepScout::default();
     }
 }
