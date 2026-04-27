@@ -1101,7 +1101,7 @@ checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
 
 [[package]]
 name = "pathfinder-mcp"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
