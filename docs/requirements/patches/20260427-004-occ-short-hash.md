@@ -1,6 +1,6 @@
 # PATCH-004: OCC Short Hash Support (Git-Style 7-Char Prefix)
 
-**Status:** Planned  
+**Status:** Completed  
 **Priority:** P2 — Medium (ergonomic improvement, reduces LLM token friction)  
 **Estimated Effort:** 1–2 hours  
 **Prerequisite:** None (fully independent)  

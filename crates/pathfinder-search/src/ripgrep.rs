@@ -404,7 +404,7 @@ impl Scout for RipgrepScout {
                         tracing::warn!(file = %relative, "Scout: failed to read file for hashing; skipping hash");
                         continue;
                     };
-                    let hash = VersionHash::compute(&bytes).as_str().to_owned();
+                    let hash = VersionHash::compute(&bytes).short().to_owned();
                     sink.backfill_hash(&hash);
                 }
 
@@ -646,11 +646,11 @@ mod tests {
 
         assert_eq!(result.matches.len(), 1);
         let hash = &result.matches[0].version_hash;
+        assert_eq!(hash.len(), 7, "hash should be a 7-char short hash: {hash}");
         assert!(
-            hash.starts_with("sha256:"),
-            "hash should be sha256: prefixed: {hash}"
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash should be hex chars only: {hash}"
         );
-        assert!(hash.len() > 7, "hash should have content after prefix");
     }
 
     // ── Red-Green: enclosing_semantic_path is null in Epic 2 ──────

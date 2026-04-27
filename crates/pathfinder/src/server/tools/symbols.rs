@@ -55,7 +55,7 @@ impl PathfinderServer {
                     content: scope.content.clone(),
                     start_line: scope.start_line,
                     end_line: scope.end_line,
-                    version_hash: scope.version_hash.to_string(),
+                    version_hash: scope.version_hash.short().to_owned(),
                     language: scope.language,
                 };
 

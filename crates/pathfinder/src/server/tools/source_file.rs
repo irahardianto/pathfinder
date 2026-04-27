@@ -188,7 +188,7 @@ impl PathfinderServer {
                 );
 
                 let metadata = ReadSourceFileMetadata {
-                    version_hash: version_hash.to_string(),
+                    version_hash: version_hash.short().to_owned(),
                     language,
                     symbols: final_symbols,
                 };

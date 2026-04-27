@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(val.validation.status, "passed");
 
         let expected_hash = VersionHash::compute(content.as_bytes());
-        assert_eq!(val.version_hash, expected_hash.as_str());
+        assert_eq!(val.version_hash, expected_hash.short());
 
         // Verify file is on disk
         let absolute_path = ws_dir.path().join(filepath);
@@ -1098,7 +1098,7 @@ mod tests {
 
         assert_eq!(metadata.start_line, expected_scope.start_line);
         assert_eq!(metadata.end_line, expected_scope.end_line);
-        assert_eq!(metadata.version_hash, expected_scope.version_hash.as_str());
+        assert_eq!(metadata.version_hash, expected_scope.version_hash.short());
         assert_eq!(metadata.language, expected_scope.language);
 
         let calls = mock_surgeon.read_symbol_scope_calls.lock().unwrap();
@@ -1189,7 +1189,7 @@ mod tests {
         let on_disk = fs::read_to_string(&abs).expect("read");
         assert_eq!(on_disk, replacement);
         let new_hash = VersionHash::compute(replacement.as_bytes());
-        assert_eq!(val.new_version_hash, new_hash.as_str());
+        assert_eq!(val.new_version_hash, new_hash.short());
 
         // VERSION_MISMATCH — use old hash
         let result2 = server

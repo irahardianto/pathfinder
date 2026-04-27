@@ -355,7 +355,7 @@ pub async fn generate_skeleton_text(
         };
         let hash = VersionHash::compute(&source);
 
-        version_hashes.insert(rel_path.display().to_string(), hash.to_string());
+        version_hashes.insert(rel_path.display().to_string(), hash.short().to_owned());
 
         // AST extraction — log failures so operators can diagnose missing files in the repo map
         let raw_symbols = match surgeon.extract_symbols(workspace_root, rel_path).await {

@@ -1,6 +1,8 @@
 //! File operation tools — `create_file`, `delete_file`, `read_file`, `write_file`.
 
-use crate::server::helpers::{io_error_data, language_from_path, pathfinder_to_error_data};
+use crate::server::helpers::{
+    check_occ, io_error_data, language_from_path, pathfinder_to_error_data,
+};
 use crate::server::types::{
     CreateFileParams, CreateFileResponse, DeleteFileParams, DeleteFileResponse, ReadFileParams,
     Replacement, ValidationResult, WriteFileParams,
@@ -94,17 +96,10 @@ async fn prepare_file_write(
         }
     };
 
-    // OCC check
+    // OCC check — uses VersionHash::matches() under the hood, accepting
+    // 7-char short hashes (preferred), sha256: prefixed, or full hashes.
     let current_hash = VersionHash::compute(current_content.as_bytes());
-    if current_hash.as_str() != base_version {
-        let err = PathfinderError::VersionMismatch {
-            path: relative_path.to_path_buf(),
-            current_version_hash: current_hash.as_str().to_owned(),
-            lines_changed: None,
-        };
-        tracing::warn!(tool = tool_name, error = %err, "OCC version mismatch");
-        return Err(pathfinder_to_error_data(&err));
-    }
+    check_occ(base_version, &current_hash, relative_path.to_path_buf())?;
 
     Ok((current_content, current_hash))
 }
@@ -202,7 +197,7 @@ impl PathfinderServer {
 
         Ok(Json(CreateFileResponse {
             success: true,
-            version_hash: version_hash.as_str().to_owned(),
+            version_hash: version_hash.short().to_owned(),
             validation: ValidationResult {
                 status: "passed".to_owned(),
                 introduced_errors: vec![],
@@ -254,17 +249,13 @@ impl PathfinderServer {
             }
         };
 
-        // 3. OCC check
+        // 3. OCC check — accepts short hash (preferred), prefixed short, or full hash.
         let current_hash = VersionHash::compute(&current_content);
-        if current_hash.as_str() != params.base_version {
-            let err = PathfinderError::VersionMismatch {
-                path: relative_path.to_path_buf(),
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            };
-            tracing::warn!(tool = "delete_file", error = %err, "OCC version mismatch");
-            return Err(pathfinder_to_error_data(&err));
-        }
+        check_occ(
+            &params.base_version,
+            &current_hash,
+            relative_path.to_path_buf(),
+        )?;
 
         // 4. Delete
         if let Err(e) = tfs::remove_file(&absolute_path).await {
@@ -375,12 +366,12 @@ impl PathfinderServer {
             lines_returned,
             total_lines,
             truncated,
-            version_hash: version_hash.as_str().to_owned(),
+            version_hash: version_hash.short().to_owned(),
             language,
         };
 
         // Append version_hash footer to text content so agents can extract it
-        let full_content = format!("{}\n---\nversion_hash: {}", content, version_hash.as_str());
+        let full_content = format!("{}\n---\nversion_hash: {}", content, version_hash.short());
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(full_content)]);
         res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
@@ -458,7 +449,9 @@ impl PathfinderServer {
             }
         };
         let late_hash = VersionHash::compute(&late_content);
-        if late_hash.as_str() != params.base_version {
+        // TOCTOU check: use matches() to accept short hashes and enrich the
+        // error with lines_changed (unavailable in the generic check_occ helper).
+        if !late_hash.matches(&params.base_version) {
             let late_str = String::from_utf8_lossy(&late_content);
             let delta = compute_lines_changed(&current_content, &late_str);
             let err = PathfinderError::VersionMismatch {
@@ -507,7 +500,7 @@ impl PathfinderServer {
 
         let metadata = crate::server::types::WriteFileMetadata {
             success: true,
-            new_version_hash: new_hash.as_str().to_owned(),
+            new_version_hash: new_hash.short().to_owned(),
         };
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(

@@ -401,7 +401,7 @@ impl crate::server::PathfinderServer {
 
         Ok(Json(EditResponse {
             success: true,
-            new_version_hash: Some(new_hash.as_str().to_owned()),
+            new_version_hash: Some(new_hash.short().to_owned()),
             formatted: false,
             validation: validation_outcome.validation,
             validation_skipped: validation_outcome.skipped,

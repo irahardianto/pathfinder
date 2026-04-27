@@ -447,7 +447,7 @@ impl PathfinderServer {
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
-            version_hash: scope.version_hash.to_string(),
+            version_hash: scope.version_hash.short().to_owned(),
             language: scope.language,
             dependencies,
             degraded,
@@ -759,7 +759,7 @@ impl PathfinderServer {
             let hash = pathfinder_common::types::VersionHash::compute(&bytes);
             version_hashes.insert(
                 semantic_path.file_path.to_string_lossy().to_string(),
-                hash.as_str().to_owned(),
+                hash.short().to_owned(),
             );
         }
         // Include all files from the call graph
@@ -767,7 +767,7 @@ impl PathfinderServer {
             let abs_path = self.workspace_root.path().join(file_ref);
             if let Ok(bytes) = tokio::fs::read(&abs_path).await {
                 let hash = pathfinder_common::types::VersionHash::compute(&bytes);
-                version_hashes.insert(file_ref.clone(), hash.as_str().to_owned());
+                version_hashes.insert(file_ref.clone(), hash.short().to_owned());
             }
         }
 

@@ -158,6 +158,11 @@ impl fmt::Display for Symbol {
 pub struct VersionHash(String);
 
 impl VersionHash {
+    /// Internal prefix stored in every hash value.
+    const PREFIX: &'static str = "sha256:";
+    /// Minimum number of hex chars accepted as a valid short hash.
+    const MIN_HEX_CHARS: usize = 7;
+
     /// Compute the SHA-256 hash of file content.
     #[must_use]
     pub fn compute(content: &[u8]) -> Self {
@@ -172,10 +177,60 @@ impl VersionHash {
         Self(hash)
     }
 
-    /// Get the hash string.
+    /// Get the full internal hash string (`sha256:<64 hex chars>`).
+    ///
+    /// Use [`short`] for agent-facing responses; use this only for
+    /// diagnostic messages and error context where precision is needed.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Compact 7-hex-char hash for agent-facing responses.
+    ///
+    /// Omits the `sha256:` prefix — the field name `version_hash` already
+    /// communicates the purpose. This cuts per-hash token cost from 71 to 7
+    /// characters, reducing agent context window pressure across multi-file
+    /// editing sessions.
+    ///
+    /// # Example
+    /// ```
+    /// # use pathfinder_common::types::VersionHash;
+    /// let h = VersionHash::compute(b"hello");
+    /// assert_eq!(h.short().len(), 7);
+    /// // short() is the first 7 hex chars of the full hash (no prefix)
+    /// assert!(h.as_str()[7..].starts_with(h.short()));
+    /// ```
+    #[must_use]
+    pub fn short(&self) -> &str {
+        // Internal layout: "sha256:" (7 bytes) + 64 hex chars
+        // Return chars [7..14] — the first 7 hex chars, no prefix.
+        &self.0[Self::PREFIX.len()..Self::PREFIX.len() + Self::MIN_HEX_CHARS]
+    }
+
+    /// Check whether an agent-supplied hash token matches this hash.
+    ///
+    /// This is the single authoritative OCC comparison — it replaces all raw
+    /// `==` / `!=` string comparisons and `check_occ` prefix logic. Accepting
+    /// all formats prevents version-mismatch failures when agents supply the
+    /// short form produced by [`short`].
+    ///
+    /// # Accepted formats
+    ///
+    /// | Format | Example | Notes |
+    /// |--------|---------|-------|
+    /// | Short (no prefix) | `"e3dc7f9"` | Preferred — what [`short`] emits |
+    /// | Short (with prefix) | `"sha256:e3dc7f9"` | Legacy short form |
+    /// | Full (with prefix) | `"sha256:<64 hex>"` | Full hash |
+    ///
+    /// Returns `false` if the input has fewer than 7 hex chars.
+    #[must_use]
+    pub fn matches(&self, agent_input: &str) -> bool {
+        let full_hex = &self.0[Self::PREFIX.len()..]; // 64 hex chars
+        let input_hex = agent_input
+            .strip_prefix(Self::PREFIX)
+            .unwrap_or(agent_input);
+        input_hex.len() >= Self::MIN_HEX_CHARS && full_hex.starts_with(input_hex)
     }
 }
 
@@ -403,6 +458,116 @@ mod tests {
 
         let h3 = VersionHash::compute(b"different content");
         assert_ne!(h1, h3);
+    }
+
+    // ── VersionHash::short() tests ────────────────────────────────────────────
+
+    /// `short()` must return exactly 7 hex characters with no prefix.
+    #[test]
+    fn test_version_hash_short_is_7_hex_chars() {
+        let hash = VersionHash::compute(b"hello world");
+        let s = hash.short();
+        assert_eq!(s.len(), 7, "short() must be exactly 7 chars");
+        assert!(
+            s.chars().all(|c| c.is_ascii_hexdigit()),
+            "short() must be hex chars only, got: {s}"
+        );
+    }
+
+    /// `short()` must NOT contain the 'sha256:' prefix.
+    #[test]
+    fn test_version_hash_short_has_no_prefix() {
+        let hash = VersionHash::compute(b"test content");
+        assert!(
+            !hash.short().starts_with("sha256:"),
+            "short() must not start with 'sha256:'"
+        );
+    }
+
+    /// `short()` must be the start of the hex portion of `as_str()`.
+    #[test]
+    fn test_version_hash_short_is_prefix_of_full_hex() {
+        let hash = VersionHash::compute(b"hello world");
+        let full = hash.as_str(); // "sha256:<64 hex>"
+        assert!(
+            full["sha256:".len()..].starts_with(hash.short()),
+            "full hex must start with short()"
+        );
+    }
+
+    // ── VersionHash::matches() tests ──────────────────────────────────────────
+
+    /// The preferred format: 7 hex chars, no prefix — what `short()` emits.
+    #[test]
+    fn test_matches_short_no_prefix() {
+        let hash = VersionHash::compute(b"hello world");
+        assert!(
+            hash.matches(hash.short()),
+            "hash.matches(hash.short()) must be true — roundtrip test"
+        );
+    }
+
+    /// Short hash with the legacy sha256: prefix.
+    #[test]
+    fn test_matches_short_with_legacy_prefix() {
+        let hash = VersionHash::compute(b"hello world");
+        let with_prefix = format!("sha256:{}", hash.short());
+        assert!(
+            hash.matches(&with_prefix),
+            "7-char hash with sha256: prefix must match"
+        );
+    }
+
+    /// Full 71-char hash with prefix (backward compatibility).
+    #[test]
+    fn test_matches_full_hash_with_prefix() {
+        let hash = VersionHash::compute(b"hello world");
+        assert!(
+            hash.matches(hash.as_str()),
+            "full hash as_str() must match itself"
+        );
+    }
+
+    /// 8-char prefix should also be accepted (> minimum).
+    #[test]
+    fn test_matches_8_char_prefix_accepted() {
+        let hash = VersionHash::compute(b"hello world");
+        let eight = &hash.as_str()["sha256:".len().."sha256:".len() + 8];
+        assert!(hash.matches(eight), "8-char prefix must be accepted");
+    }
+
+    /// Inputs shorter than 7 hex chars must be rejected.
+    #[test]
+    fn test_matches_too_short_rejected() {
+        let hash = VersionHash::compute(b"hello world");
+        assert!(!hash.matches("e3dc7f"), "6 hex chars must be rejected");
+        assert!(
+            !hash.matches("sha256:abc"),
+            "3 hex chars with prefix rejected"
+        );
+        assert!(!hash.matches(""), "empty string must be rejected");
+    }
+
+    /// Wrong prefix must not match.
+    #[test]
+    fn test_matches_wrong_hex_fails() {
+        let hash = VersionHash::compute(b"hello world");
+        assert!(!hash.matches("0000000"), "wrong 7-char hex must not match");
+        assert!(
+            !hash.matches("sha256:0000000"),
+            "wrong prefixed hex must not match"
+        );
+    }
+
+    /// Hashes of different content must not match each other.
+    #[test]
+    fn test_matches_different_content_fails() {
+        let hash_a = VersionHash::compute(b"content A");
+        let hash_b = VersionHash::compute(b"content B");
+        assert!(
+            !hash_a.matches(hash_b.short()),
+            "short hash from different content must not match"
+        );
     }
 
     #[test]
