@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use tokio::sync::OnceCell;
 use tracing::instrument;
 use tree_sitter::Tree;
+use tempfile::tempdir;
 
 /// Map a filesystem `io::Error` to the appropriate `SurgeonError` variant.
 ///
@@ -621,7 +622,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_or_parse_missing_file_returns_file_not_found() {
         let cache = AstCache::new(2);
-        let missing = std::path::PathBuf::from("/tmp/this_file_does_not_exist_pathfinder.go");
+        let temp_dir = tempdir().unwrap();
+        let missing = temp_dir.path().join("this_file_does_not_exist_pathfinder.go");
 
         let err = cache
             .get_or_parse(&missing, SupportedLanguage::Go)
@@ -639,7 +641,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_or_parse_vue_missing_file_returns_file_not_found() {
         let cache = AstCache::new(2);
-        let missing = std::path::PathBuf::from("/tmp/this_file_does_not_exist_pathfinder.vue");
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("this_file_does_not_exist_pathfinder.vue");
 
         let err = cache.get_or_parse_vue(&missing).await.unwrap_err();
 
