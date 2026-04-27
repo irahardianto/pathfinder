@@ -12,6 +12,14 @@ pub enum SurgeonError {
         did_you_mean: Vec<String>,
     },
 
+    /// The requested file does not exist on disk.
+    ///
+    /// Distinct from a generic I/O error so the MCP layer can surface this as a
+    /// client error (`INVALID_PARAMS / FILE_NOT_FOUND`) rather than an internal
+    /// server error (`INTERNAL_ERROR`).
+    #[error("file not found: {0}")]
+    FileNotFound(PathBuf),
+
     /// The requested file's language is not supported.
     #[error("unsupported language for path: {0}")]
     UnsupportedLanguage(PathBuf),
@@ -42,6 +50,9 @@ impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
                     semantic_path: path,
                     did_you_mean,
                 }
+            }
+            SurgeonError::FileNotFound(path) => {
+                pathfinder_common::error::PathfinderError::FileNotFound { path }
             }
             SurgeonError::UnsupportedLanguage(path) => {
                 pathfinder_common::error::PathfinderError::UnsupportedLanguage { path }

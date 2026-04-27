@@ -405,4 +405,33 @@ mod tests {
         let result = check_occ(prefix_8, &hash, PathBuf::from("test.rs"));
         assert!(result.is_ok(), "8-char prefix should also be accepted");
     }
+
+    /// Regression test: `SurgeonError::FileNotFound` must surface as
+    /// `INVALID_PARAMS (-32602)`, not `INTERNAL_ERROR (-32603)`.
+    ///
+    /// Before the fix, a missing file in `cached_parse` propagated through
+    /// `SurgeonError::Io` → `PathfinderError::IoError` → `-32603`, misleading
+    /// agents into thinking the server had crashed.
+    #[test]
+    fn test_surgeon_file_not_found_maps_to_invalid_params() {
+        use pathfinder_treesitter::SurgeonError;
+
+        let surgeon_err = SurgeonError::FileNotFound("src/does_not_exist.rs".into());
+        let pf_err: pathfinder_common::error::PathfinderError = surgeon_err.into();
+        let error_data = pathfinder_to_error_data(&pf_err);
+
+        assert_eq!(
+            error_data.code,
+            ErrorCode::INVALID_PARAMS,
+            "missing file must be INVALID_PARAMS, not INTERNAL_ERROR"
+        );
+        // Verify the structured error code string
+        let code_str = error_data
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code_str, "FILE_NOT_FOUND");
+    }
 }

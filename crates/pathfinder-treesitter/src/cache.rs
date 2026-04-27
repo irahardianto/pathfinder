@@ -14,6 +14,19 @@ use tokio::sync::OnceCell;
 use tracing::instrument;
 use tree_sitter::Tree;
 
+/// Map a filesystem `io::Error` to the appropriate `SurgeonError` variant.
+///
+/// `NotFound` becomes `FileNotFound` so the MCP layer can distinguish a
+/// missing-file client error from a genuine server-side I/O failure.
+#[inline]
+fn io_err(e: std::io::Error, path: &Path) -> SurgeonError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        SurgeonError::FileNotFound(path.to_path_buf())
+    } else {
+        SurgeonError::Io(e)
+    }
+}
+
 /// Type alias for in-flight parse operations.
 /// Represents an `Arc` wrapping a `OnceCell` that will contain the parse result.
 type InFlightParse = Arc<OnceCell<Result<(Tree, Arc<[u8]>), SurgeonError>>>;
@@ -115,7 +128,9 @@ impl AstCache {
         lang: SupportedLanguage,
     ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
         // --- Fast-path guard: single stat syscall ---
-        let meta = tokio::fs::metadata(path).await?;
+        let meta = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| io_err(e, path))?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
         // Check cache while holding the lock; release before any async I/O.
@@ -152,13 +167,7 @@ impl AstCache {
         let result = cell
             .get_or_init(|| async {
                 // --- Slow path: full read + hash + parse ---
-                let content =
-                    tokio::fs::read(path)
-                        .await
-                        .map_err(|e| SurgeonError::ParseError {
-                            path: path.to_path_buf(),
-                            reason: format!("Failed to read file: {e}"),
-                        })?;
+                let content = tokio::fs::read(path).await.map_err(|e| io_err(e, path))?;
                 let current_hash = VersionHash::compute(&content);
                 let content_arc: Arc<[u8]> = Arc::from(content);
                 // For Vue SFCs, preprocess extracts the <script> block before parsing.
@@ -225,7 +234,9 @@ impl AstCache {
         path: &Path,
     ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
         // --- Fast-path guard ---
-        let meta = tokio::fs::metadata(path).await?;
+        let meta = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| io_err(e, path))?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
         {
@@ -272,13 +283,7 @@ impl AstCache {
         let result = cell
             .get_or_init(|| async {
                 // --- Slow path ---
-                let content =
-                    tokio::fs::read(path)
-                        .await
-                        .map_err(|e| SurgeonError::ParseError {
-                            path: path.to_path_buf(),
-                            reason: format!("Failed to read file: {e}"),
-                        })?;
+                let content = tokio::fs::read(path).await.map_err(|e| io_err(e, path))?;
                 let content_hash = VersionHash::compute(&content);
                 let multi =
                     parse_vue_multizone(&content).map_err(|e| SurgeonError::ParseError {
@@ -604,5 +609,43 @@ mod tests {
 
         // Only one entry should be in the Vue cache
         assert_eq!(cache.vue_entries.lock().unwrap().len(), 1);
+    }
+
+    // ── FileNotFound propagation tests ───────────────────────────────────────
+
+    /// `get_or_parse` must return `SurgeonError::FileNotFound` when the path
+    /// does not exist, not a generic `Io` or `ParseError`.
+    ///
+    /// This ensures the MCP layer surfaces `INVALID_PARAMS / FILE_NOT_FOUND`
+    /// (-32602) instead of the misleading `INTERNAL_ERROR` (-32603).
+    #[tokio::test]
+    async fn test_get_or_parse_missing_file_returns_file_not_found() {
+        let cache = AstCache::new(2);
+        let missing = std::path::PathBuf::from("/tmp/this_file_does_not_exist_pathfinder.go");
+
+        let err = cache
+            .get_or_parse(&missing, SupportedLanguage::Go)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, SurgeonError::FileNotFound(_)),
+            "expected FileNotFound, got: {err:?}"
+        );
+    }
+
+    /// `get_or_parse_vue` must return `SurgeonError::FileNotFound` when the
+    /// Vue SFC path does not exist.
+    #[tokio::test]
+    async fn test_get_or_parse_vue_missing_file_returns_file_not_found() {
+        let cache = AstCache::new(2);
+        let missing = std::path::PathBuf::from("/tmp/this_file_does_not_exist_pathfinder.vue");
+
+        let err = cache.get_or_parse_vue(&missing).await.unwrap_err();
+
+        assert!(
+            matches!(err, SurgeonError::FileNotFound(_)),
+            "expected FileNotFound, got: {err:?}"
+        );
     }
 }
