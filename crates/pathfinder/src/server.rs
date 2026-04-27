@@ -97,7 +97,7 @@ impl PathfinderServer {
             workspace_root,
             config,
             sandbox,
-            Arc::new(RipgrepScout::new()),
+            Arc::new(RipgrepScout),
             Arc::new(TreeSitterSurgeon::new(100)), // Cache capacity of 100 files
             lawyer,
         )

@@ -256,15 +256,10 @@ impl Sink for MatchCollector<'_> {
 ///
 /// Walks the workspace with [`ignore::WalkBuilder`] (glob + `.gitignore`-aware),
 /// and runs each file through `grep-searcher`.
+#[derive(Default)]
 pub struct RipgrepScout;
 
 impl RipgrepScout {
-    /// Create a new `RipgrepScout`.
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-
     /// Build a `RegexMatcher` from `params`, respecting `is_regex`.
     fn build_matcher(params: &SearchParams) -> Result<RegexMatcher, SearchError> {
         let mut builder = RegexMatcherBuilder::new();
@@ -354,12 +349,6 @@ impl RipgrepScout {
 
         files.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(files)
-    }
-}
-
-impl Default for RipgrepScout {
-    fn default() -> Self {
-        Self
     }
 }
 
@@ -949,12 +938,5 @@ mod tests {
             .expect("search should succeed");
 
         assert_eq!(result.matches[0].known, None);
-    }
-
-    // ── CG-7: trivial constructor coverage ───────────────────────────────
-
-    #[test]
-    fn test_ripgrep_scout_new() {
-        let _scout = RipgrepScout::new();
     }
 }

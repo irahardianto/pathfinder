@@ -332,7 +332,7 @@ mod tests {
         std::fs::write(ws_dir.path().join("src/data.xyz"), "findme content").unwrap();
 
         // Use real RipgrepScout so it actually searches the filesystem
-        let scout = Arc::new(RipgrepScout::new());
+        let scout = Arc::new(RipgrepScout);
         let surgeon = Arc::new(MockSurgeon::new());
         // Pre-configure surgeon for enrichment calls (1 match expected)
         surgeon
