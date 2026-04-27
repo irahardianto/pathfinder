@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5](https://github.com/irahardianto/pathfinder/compare/v0.1.4...v0.1.5) - 2026-04-27
+
+### Added
+
+- *(treesitter)* implement TypeScript namespace and module visibility support
+- *(server)* Implement tooling primitives, insert_into, and OCC short hash logic
+- *(treesitter)* Enhance AST parsing and extraction for modules and bodies
+
+### Other
+
+- *(search)* replace RipgrepScout constructor with derived Default
+- *(config)* add coverage for successful load path and default idle timeout
+- *(error)* add coverage for InvalidTarget variant
+
 ## [0.1.4](https://github.com/irahardianto/pathfinder/compare/v0.1.3...v0.1.4) - 2026-04-27
 
 ### Other

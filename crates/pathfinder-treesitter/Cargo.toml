@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder-mcp-treesitter"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 license.workspace = true
 description = "The Surgeon — Tree-sitter engine for AST-aware operations in Pathfinder"
