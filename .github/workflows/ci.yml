@@ -87,6 +87,14 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
+      - name: Clean stale integration test binaries
+        # Swatinem/rust-cache may restore lsp_client_integration binaries from
+        # a previous CI run where --features integration was active. Nextest
+        # does NOT respect Cargo's required-features and will run these stale
+        # binaries, causing panics when the mock LSP binary is absent.
+        # Removing them ensures only freshly-built (feature-gated) binaries run.
+        run: rm -f target/debug/deps/lsp_client_integration-*
+
       - name: Run tests with coverage
         # Excludes the `integration` feature to keep unit tests fast.
         # Integration tests run in the separate `integration-tests` job below.
@@ -130,8 +138,10 @@ jobs:
   # watcher) and are gated behind `--features integration` to prevent
   # them from running in the unit-test-only `test` job above.
   #
-  # The mock LSP binary (test-mock-lsp) is compiled automatically by
-  # `cargo test --features integration` because it is a workspace member.
+  # IMPORTANT: The test-mock-lsp production binary must be built
+  # explicitly. `cargo nextest run` only builds test targets (in deps/),
+  # NOT production binaries. The mock_binary() helper locates the binary
+  # at target/debug/test-mock-lsp, which only `cargo build` produces.
   # ──────────────────────────────────────────────
   integration-tests:
     name: Integration Tests
@@ -152,10 +162,18 @@ jobs:
         with:
           tool: cargo-nextest
 
+      - name: Build mock LSP binary
+        # cargo nextest builds test targets (target/debug/deps/) but NOT
+        # production binaries (target/debug/test-mock-lsp). The integration
+        # tests locate the mock binary via mock_binary() which walks up from
+        # current_exe() to target/debug/ and joins "test-mock-lsp". Without
+        # this explicit build step, the binary does not exist and tests panic.
+        run: cargo build -p test-mock-lsp
+
       - name: Run integration tests
-        # `--features integration` activates the integration test feature gate
-        # in pathfinder-lsp. The test-mock-lsp binary is compiled automatically
-        # as a workspace member and located via CARGO_BIN_EXE_test-mock-lsp.
+        # --features integration activates the integration test feature gate
+        # in pathfinder-lsp, compiling lsp_client_integration.rs and its
+        # common module which depends on the mock binary built above.
         run: cargo nextest run --workspace --features integration --test-threads 4
 
   # ──────────────────────────────────────────────
