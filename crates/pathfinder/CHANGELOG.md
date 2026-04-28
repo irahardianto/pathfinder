@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7](https://github.com/irahardianto/pathfinder/compare/v0.1.6...v0.1.7) - 2026-04-28
+
+### Added
+
+- *(lsp)* track indexing complete and uptime status
+
+### Fixed
+
+- *(navigation)* probe LSP readiness before declaring zero callers
+- *(edit)* signal vacuous validation passes during LSP warmup
+- *(search)* bypass filter mode on degraded languages
+- *(treesitter)* resolve E0432 by moving dev-dependency import to test module
+
+### Other
+
+- replace hardcoded temporary paths with tempfile::tempdir
+
 ## [0.1.6](https://github.com/irahardianto/pathfinder/compare/v0.1.5...v0.1.6) - 2026-04-27
 
 ### Fixed
