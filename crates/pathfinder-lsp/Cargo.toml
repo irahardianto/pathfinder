@@ -53,3 +53,11 @@ test-mock-lsp = { path = "../test-mock-lsp" }
 # (unit tests only) stays fast. Run integration tests with:
 #   cargo test --workspace --features integration
 integration = []
+
+# Prevent the integration test binary from being compiled or executed unless
+# `--features integration` is explicitly requested.  Without this, nextest
+# builds and runs `lsp_client_integration` unconditionally, which panics when
+# the `test-mock-lsp` binary has not been compiled.
+[[test]]
+name = "lsp_client_integration"
+required-features = ["integration"]
