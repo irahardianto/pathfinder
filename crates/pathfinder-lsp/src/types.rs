@@ -3,6 +3,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Language server status for a single LSP language slot.
+///
+/// Returned by the `get_repo_map` and validation tools to communicate the
+/// current health of the associated language server process.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LspLanguageStatus {
     /// Whether validation is enabled.

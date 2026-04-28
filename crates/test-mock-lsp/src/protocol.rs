@@ -37,13 +37,17 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
+/// A JSON-RPC 2.0 error object included in error responses.
 #[derive(Debug, Serialize)]
 pub struct JsonRpcError {
+    /// The JSON-RPC error code (e.g., `-32601` for method-not-found).
     pub code: i64,
+    /// A human-readable description of the error.
     pub message: String,
 }
 
 impl JsonRpcResponse {
+    /// Construct a successful JSON-RPC 2.0 response.
     pub fn success(id: Option<Value>, result: Value) -> Self {
         Self {
             jsonrpc: "2.0",
@@ -53,6 +57,7 @@ impl JsonRpcResponse {
         }
     }
 
+    /// Construct a JSON-RPC 2.0 error response.
     pub fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0",
@@ -76,7 +81,7 @@ pub fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<JsonRpcMess
     // Read headers until a blank line
     let mut content_length: Option<usize> = None;
     loop {
-        let mut line = String::new();
+        let mut line = String::default();
         let n = reader.read_line(&mut line)?;
         if n == 0 {
             // Clean EOF

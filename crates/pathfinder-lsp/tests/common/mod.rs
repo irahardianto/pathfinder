@@ -106,10 +106,7 @@ pub fn mock_lsp_config(mock_bin: PathBuf, extra_flags: &[&str]) -> PathfinderCon
 
     PathfinderConfig {
         lsp: lsp_map,
-        sandbox: Default::default(),
-        search: Default::default(),
-        repo_map: Default::default(),
-        validation: Default::default(),
         log_level: "info".to_string(),
+        ..Default::default()
     }
 }

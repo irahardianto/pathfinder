@@ -60,4 +60,9 @@ exclude_patterns = [
   ".pi/**",
   "docs/**",
   "banner.jpeg",
+  # test-mock-lsp is a standalone binary used as a test fixture (subprocess).
+  # Coverage tools cannot trace across process boundaries, so its source lines
+  # are always reported as uncovered even though they execute during integration
+  # tests. Excluding it keeps the coverage metric meaningful.
+  "crates/test-mock-lsp/**",
 ]
