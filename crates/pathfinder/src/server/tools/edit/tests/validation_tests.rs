@@ -453,3 +453,67 @@ async fn test_run_lsp_validation_blocking_ignored() {
     assert!(resp.validation.introduced_errors.is_empty());
     assert!(resp.validation.resolved_errors.is_empty());
 }
+
+// ── empty_diagnostics_both_snapshots: warmup signal ─────────────────────────
+
+#[test]
+fn test_build_validation_outcome_empty_snapshots_signals_warmup() {
+    // When both pre and post diagnostic snapshots are empty, the validation
+    // outcome must be skipped with reason "empty_diagnostics_both_snapshots".
+    // This prevents agents from trusting a vacuously-clean pass during LSP warmup.
+    use crate::server::tools::edit::text_edit::build_validation_outcome;
+    use std::path::Path;
+
+    let outcome = build_validation_outcome(
+        &[], // pre_diags: empty (LSP warmup or genuinely clean)
+        &[], // post_diags: empty
+        false,
+        Path::new("src/lib.rs"),
+    );
+
+    assert!(
+        outcome.skipped,
+        "validation_skipped must be true when both snapshots are empty"
+    );
+    assert_eq!(
+        outcome.skipped_reason.as_deref(),
+        Some("empty_diagnostics_both_snapshots"),
+        "skipped_reason must identify the warmup signal"
+    );
+    assert_eq!(
+        outcome.validation.status, "passed",
+        "status must still be passed (never block on empty)"
+    );
+    assert!(
+        !outcome.should_block,
+        "should_block must be false — empty snapshots are never a blocker"
+    );
+}
+
+#[test]
+fn test_build_validation_outcome_non_empty_pre_does_not_skip() {
+    // If pre_diags has errors but post is empty (errors resolved),
+    // we must NOT trigger the warmup-skip path — the diff is meaningful.
+    use crate::server::tools::edit::text_edit::build_validation_outcome;
+    use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
+    use std::path::Path;
+
+    let pre = vec![LspDiagnostic {
+        severity: LspDiagnosticSeverity::Error,
+        code: None,
+        message: "pre-existing error".to_owned(),
+        file: "src/lib.rs".to_owned(),
+        start_line: 1,
+        end_line: 1,
+    }];
+
+    let outcome = build_validation_outcome(&pre, &[], false, Path::new("src/lib.rs"));
+
+    // pre non-empty → NOT the warmup-skip path
+    assert!(
+        !outcome.skipped,
+        "must not skip when pre_diags is non-empty (diff is meaningful)"
+    );
+    assert_eq!(outcome.validation.status, "passed");
+    assert!(!outcome.should_block);
+}

@@ -270,6 +270,31 @@ pub(crate) fn build_validation_outcome(
     let diff = diff_diagnostics(pre_diags, post_diags);
     let has_new_errors = diff.has_new_errors();
 
+    // When both diagnostic snapshots are empty, the diff is trivially clean.
+    // This happens in two scenarios:
+    //   1. The file genuinely has no errors (common in well-maintained codebases).
+    //   2. The LSP hasn't finished indexing and returned [] for both snapshots (warmup).
+    // In both cases `should_block` stays false (we never block on absence of errors),
+    // but we set `validation_skipped: true` with a specific reason so agents know
+    // the validation result may be vacuously true rather than a genuine clean pass.
+    if pre_diags.is_empty() && post_diags.is_empty() {
+        tracing::debug!(
+            file = %file_path.display(),
+            "build_validation_outcome: both diagnostic snapshots are empty \
+             — validation_skipped to signal possible LSP warmup"
+        );
+        return ValidationOutcome {
+            validation: EditValidation {
+                status: "passed".to_owned(),
+                introduced_errors: vec![],
+                resolved_errors: vec![],
+            },
+            skipped: true,
+            skipped_reason: Some("empty_diagnostics_both_snapshots".to_owned()),
+            should_block: false,
+        };
+    }
+
     // C3: Audit logging for ignore_validation_failures flag usage
     if has_new_errors && ignore_validation_failures {
         tracing::warn!(
