@@ -671,12 +671,46 @@ impl PathfinderServer {
                 max_depth_reached = std::cmp::max(max_depth_reached, depth_out);
             }
             Ok(_) => {
-                // LSP responded with empty items — confirmed zero callers/callees
-                engines.push("lsp");
-                degraded = false;
-                degraded_reason = None;
-                incoming = Some(Vec::new());
-                outgoing = Some(Vec::new());
+                // LSP responded with empty items — but this is ambiguous:
+                //   - Genuine "zero callers": LSP is warm and the symbol truly has no references.
+                //   - LSP warmup: LSP hasn't finished indexing and returned [] for everything.
+                //
+                // Probe goto_definition at the same position. A warm LSP can resolve a symbol
+                // to its definition; a cold LSP returns None even for well-known symbols.
+                // If the probe returns Ok(Some(_)) the LSP is warm → confirmed zero callers.
+                // If the probe returns Ok(None) or Err, we degrade rather than lying to the agent.
+                let probe = self
+                    .lawyer
+                    .goto_definition(
+                        self.workspace_root.path(),
+                        &semantic_path.file_path,
+                        u32::try_from(scope.start_line + 1).unwrap_or(1),
+                        1,
+                    )
+                    .await;
+
+                if matches!(probe, Ok(Some(_))) {
+                    // LSP is warm — definition resolved → confirmed zero callers/callees
+                    engines.push("lsp");
+                    degraded = false;
+                    degraded_reason = None;
+                    incoming = Some(Vec::new());
+                    outgoing = Some(Vec::new());
+                } else {
+                    // LSP likely still warming up — empty call hierarchy is not reliable.
+                    // Degrade so agents know to verify before acting on "zero references".
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        symbol = %semantic_path,
+                        "analyze_impact: call_hierarchy_prepare returned [] but goto_definition \
+                         probe returned no result — LSP likely warming up, marking as degraded"
+                    );
+                    engines.push("lsp");
+                    degraded = true;
+                    degraded_reason = Some("lsp_warmup_empty_unverified".to_owned());
+                    // incoming/outgoing remain None so agents know results are unknown,
+                    // not confirmed-zero. Do NOT set Some(vec![]) here.
+                }
             }
             Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
                 // Degraded mode — LSP not available. Use grep-based reference search
@@ -1338,6 +1372,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_analyze_impact_empty_hierarchy_confirmed_zero() {
+        // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(Some(...))
+        // → LSP is warm, confirmed zero callers. Must NOT be degraded.
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1346,8 +1382,15 @@ mod tests {
             .push(Ok(make_scope()));
 
         let lawyer = Arc::new(MockLawyer::default());
-        // Return empty items — LSP confirmed zero callers
+        // Empty call hierarchy — ambiguous on its own
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // Probe: goto_definition succeeds → LSP is warm → confirmed zero
+        lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".into(),
+            line: 10,
+            column: 4,
+            preview: "fn login() {}".into(),
+        })));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -1360,13 +1403,71 @@ mod tests {
         let val: crate::server::types::AnalyzeImpactMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        // NOT degraded — LSP was available and confirmed zero
-        assert!(!val.degraded);
+        // NOT degraded — LSP warm, genuinely zero callers confirmed
+        assert!(
+            !val.degraded,
+            "must not be degraded when probe confirms LSP is warm"
+        );
         assert_eq!(val.degraded_reason, None);
-        let incoming = val.incoming.as_ref().expect("must be Some");
-        let outgoing = val.outgoing.as_ref().expect("must be Some");
+        let incoming = val
+            .incoming
+            .as_ref()
+            .expect("must be Some when confirmed-zero");
+        let outgoing = val
+            .outgoing
+            .as_ref()
+            .expect("must be Some when confirmed-zero");
         assert!(incoming.is_empty(), "confirmed zero callers");
         assert!(outgoing.is_empty(), "confirmed zero callees");
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_empty_hierarchy_warmup_degrades() {
+        // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(None)
+        // → LSP is warming up. Must be degraded with "lsp_warmup_empty_unverified".
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty call hierarchy
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // Probe: goto_definition returns Ok(None) → LSP is still warming up
+        // MockLawyer::default() already returns Ok(None) for goto_definition, so no extra setup needed.
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // DEGRADED — LSP warmup detected
+        assert!(
+            val.degraded,
+            "must be degraded when goto_definition probe also returns None"
+        );
+        assert_eq!(
+            val.degraded_reason.as_deref(),
+            Some("lsp_warmup_empty_unverified"),
+            "degraded_reason must indicate warmup ambiguity"
+        );
+        // incoming/outgoing must be None — do NOT mislead agent with Some([])
+        assert!(
+            val.incoming.is_none(),
+            "incoming must be None (unknown) during warmup, not Some([]) (confirmed-zero)"
+        );
+        assert!(
+            val.outgoing.is_none(),
+            "outgoing must be None (unknown) during warmup, not Some([]) (confirmed-zero)"
+        );
     }
 
     // ── analyze_impact with LSP error on call_hierarchy_prepare ────────────
