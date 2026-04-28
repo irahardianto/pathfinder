@@ -3,6 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Represents the status of the language server, including validation status,
+/// indexing completion, and uptime information.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LspLanguageStatus {
     /// Whether validation is enabled.
