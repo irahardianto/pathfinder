@@ -6,10 +6,13 @@
 # building the Linux x86_64 binary independently and generating a signed
 # attestation (.intoto.jsonl) that is uploaded to the same GitHub Release.
 #
-# NOTE: We use `base64-subjects-as-file` instead of `base64-subjects` to avoid
-# fragility around GitHub Actions output masking, ARG_MAX limits, and the
-# generator's internal upload-artifact step not receiving the path correctly.
-# The hash file is uploaded as an artifact and consumed by the generator job.
+# The hash is passed as a plain `base64-subjects` string via a job output.
+# We previously used `base64-subjects-as-file` with a plain artifact name,
+# but that input requires a JSON handle produced by the companion action
+# `create-base64-subjects-from-file` — not a raw artifact name. Passing a
+# plain name causes the generator to fail with:
+#   "Input required and not supplied: path"
+# Using `base64-subjects` with a job output avoids this entirely.
 
 name: SLSA Provenance
 
@@ -55,6 +58,11 @@ jobs:
     needs: check-tag
     if: needs.check-tag.outputs.should-run == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      # base64-encoded sha256 digest line for the binary. Consumed by the
+      # provenance job via `base64-subjects`. Format matches sha256sum output:
+      #   "<sha256>  <filename>\n"  base64-encoded with no line wrapping.
+      hash: ${{ steps.hash.outputs.hash }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -73,20 +81,14 @@ jobs:
           cargo build --release --bin pathfinder-mcp
           cp target/release/pathfinder-mcp pathfinder-mcp-x86_64-unknown-linux-gnu
 
-      - name: Generate provenance subjects file
+      - name: Generate provenance hash
+        id: hash
         run: |
           set -euo pipefail
-          # Write hashes to a file rather than an output variable.
-          # This avoids GitHub Actions output masking and ARG_MAX limits,
-          # and satisfies the generator's base64-subjects-as-file input.
-          sha256sum pathfinder-mcp-x86_64-unknown-linux-gnu | base64 -w0 > provenance-hashes.txt
-
-      - name: Upload provenance subjects artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: provenance-subjects
-          path: provenance-hashes.txt
-          retention-days: 1
+          # Produce a base64-encoded sha256sum line suitable for the generator's
+          # `base64-subjects` input. -w0 disables line wrapping so the value is
+          # a single line that survives GitHub Actions output handling.
+          echo "hash=$(sha256sum pathfinder-mcp-x86_64-unknown-linux-gnu | base64 -w0)" >> "$GITHUB_OUTPUT"
 
   provenance:
     name: Generate Provenance
@@ -98,6 +100,10 @@ jobs:
       contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects-as-file: provenance-subjects
+      # Pass the hash inline as a plain base64 string — the correct interface
+      # for a single artifact. `base64-subjects-as-file` requires a JSON handle
+      # from the create-base64-subjects-from-file companion action; a raw
+      # artifact name is not valid and causes the generator to exit with code 1.
+      base64-subjects: "${{ needs.build.outputs.hash }}"
       upload-assets: true
       upload-tag-name: "${{ needs.check-tag.outputs.tag }}"

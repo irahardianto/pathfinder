@@ -105,7 +105,6 @@ jobs:
           --output-path lcov.info
 
       - name: Verify coverage report
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           if [ ! -f lcov.info ]; then
             echo "::error::lcov.info was not generated"
@@ -119,7 +118,10 @@ jobs:
           echo "Coverage report verified: $LINES lines"
 
       - name: Upload coverage to DeepSource
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        # Upload on every run (push + PR) so DeepSource receives the coverage
+        # artifact and can close the test-coverage check. Without this, PR runs
+        # never send an artifact and DeepSource times out with:
+        #   "Analysis artifacts didn't arrive in time"
         timeout-minutes: 5
         env:
           DEEPSOURCE_DSN: ${{ secrets.DEEPSOURCE_DSN }}
