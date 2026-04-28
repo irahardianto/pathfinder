@@ -43,3 +43,13 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Used by integration tests to spawn the mock LSP server binary.
+# The binary is built as part of the workspace; tests locate it via
+# CARGO_BIN_EXE_test-mock-lsp (set automatically by `cargo test`).
+test-mock-lsp = { path = "../test-mock-lsp" }
+
+[features]
+# Gate integration tests behind an explicit feature flag so `cargo test`
+# (unit tests only) stays fast. Run integration tests with:
+#   cargo test --workspace --features integration
+integration = []

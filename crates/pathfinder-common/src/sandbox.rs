@@ -512,4 +512,82 @@ mod tests {
             "cross-workspace absolute path should be denied"
         );
     }
+
+    // ── Sandbox::new disk I/O tests ─────────────────────────────────────────
+    //
+    // These tests exercise `Sandbox::new`, which reads `.pathfinderignore` from
+    // the workspace root on disk.  They use `tempfile::tempdir()` so they are
+    // completely isolated and clean up automatically on drop.
+    //
+    // Future agents: add more `.pathfinderignore` pattern tests here; each
+    // scenario should use a fresh `tempdir` to avoid cross-test contamination.
+
+    #[test]
+    fn test_new_loads_pathfinderignore_from_disk() {
+        // Create a real temporary workspace directory.
+        let workspace = tempfile::tempdir().expect("failed to create tempdir");
+        let root = workspace.path();
+
+        // Write a .pathfinderignore that blocks "secrets.txt".
+        std::fs::write(root.join(".pathfinderignore"), "secrets.txt\n")
+            .expect("failed to write .pathfinderignore");
+
+        let sandbox = Sandbox::new(root, &SandboxConfig::default());
+
+        // The file listed in .pathfinderignore must be blocked (Tier 3).
+        assert!(
+            sandbox.check(Path::new("secrets.txt")).is_err(),
+            "secrets.txt should be denied by .pathfinderignore"
+        );
+
+        // An unlisted file must still be accessible.
+        assert!(
+            sandbox.check(Path::new("src/main.rs")).is_ok(),
+            "src/main.rs should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_new_without_pathfinderignore_allows_normal_files() {
+        // Workspace with NO .pathfinderignore — Tier 3 must be absent.
+        let workspace = tempfile::tempdir().expect("failed to create tempdir");
+        let root = workspace.path();
+
+        // Sanity: no .pathfinderignore file exists.
+        assert!(!root.join(".pathfinderignore").exists());
+
+        let sandbox = Sandbox::new(root, &SandboxConfig::default());
+
+        // Normal source files should pass without a .pathfinderignore.
+        assert!(sandbox.check(Path::new("src/lib.rs")).is_ok());
+        assert!(sandbox.check(Path::new("README.md")).is_ok());
+    }
+
+    #[test]
+    fn test_new_with_directory_glob_in_pathfinderignore() {
+        // Verify that glob patterns in .pathfinderignore work correctly via
+        // the `ignore` crate's gitignore-style parser.
+        //
+        // NOTE on gitignore semantics: a trailing-slash pattern like `private/`
+        // matches the *directory entry* itself, not files inside it (is_dir check).
+        // To deny files *within* a directory, use `private/**` instead.
+        // This test uses `private/**` to match what users actually want.
+        let workspace = tempfile::tempdir().expect("failed to create tempdir");
+        let root = workspace.path();
+
+        // Block all files inside `private/` using a glob wildcard.
+        std::fs::write(root.join(".pathfinderignore"), "private/**\n")
+            .expect("failed to write .pathfinderignore");
+
+        let sandbox = Sandbox::new(root, &SandboxConfig::default());
+
+        assert!(
+            sandbox.check(Path::new("private/config.toml")).is_err(),
+            "file inside private/ must be denied by private/** pattern"
+        );
+        assert!(
+            sandbox.check(Path::new("public/api.rs")).is_ok(),
+            "file outside private/ must be allowed"
+        );
+    }
 }

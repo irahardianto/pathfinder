@@ -1,0 +1,19 @@
+[package]
+name = "test-mock-lsp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# This is a test-only binary crate. It implements a minimal JSON-RPC / LSP
+# server that speaks over stdin/stdout, intended to be spawned by integration
+# tests in crates/pathfinder-lsp/tests/. It is NOT published to crates.io.
+
+[[bin]]
+name = "test-mock-lsp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

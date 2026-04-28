@@ -78,37 +78,53 @@ enum ProcessEntry {
 impl ProcessEntry {
     fn to_validation_status(&self, command: &str) -> crate::types::LspLanguageStatus {
         match self {
-            Self::Running(state) => {
-                let uptime_seconds = Some(state.spawned_at.elapsed().as_secs());
-                let indexing_complete = Some(
-                    state
-                        .indexing_complete
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                );
+            Self::Running(state) => validation_status_from_parts(
+                command,
+                true,
+                state.process.capabilities.diagnostic_provider,
+                state
+                    .indexing_complete
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                state.spawned_at.elapsed().as_secs(),
+            ),
+            Self::Unavailable(_) => validation_status_from_parts(command, false, false, false, 0),
+        }
+    }
+}
 
-                if state.process.capabilities.diagnostic_provider {
-                    crate::types::LspLanguageStatus {
-                        validation: true,
-                        reason: "LSP connected and supports validation".to_owned(),
-                        indexing_complete,
-                        uptime_seconds,
-                    }
-                } else {
-                    crate::types::LspLanguageStatus {
-                        validation: false,
-                        reason: "LSP connected but does not support textDocument/diagnostic"
-                            .to_owned(),
-                        indexing_complete,
-                        uptime_seconds,
-                    }
-                }
-            }
-            Self::Unavailable(_) => crate::types::LspLanguageStatus {
-                validation: false,
-                reason: format!("{command} failed to start or crashed repeatedly"),
-                indexing_complete: None,
-                uptime_seconds: None,
-            },
+/// Pure helper that maps raw process state to [`LspLanguageStatus`].
+///
+/// Extracted from [`ProcessEntry::to_validation_status`] to make the
+/// mapping logic independently unit-testable without requiring a live
+/// [`ManagedProcess`] (which embeds an OS child process handle).
+fn validation_status_from_parts(
+    command: &str,
+    running: bool,
+    diagnostic_provider: bool,
+    indexing_complete: bool,
+    uptime_seconds: u64,
+) -> crate::types::LspLanguageStatus {
+    if !running {
+        return crate::types::LspLanguageStatus {
+            validation: false,
+            reason: format!("{command} failed to start or crashed repeatedly"),
+            indexing_complete: None,
+            uptime_seconds: None,
+        };
+    }
+    if diagnostic_provider {
+        crate::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected and supports validation".to_owned(),
+            indexing_complete: Some(indexing_complete),
+            uptime_seconds: Some(uptime_seconds),
+        }
+    } else {
+        crate::types::LspLanguageStatus {
+            validation: false,
+            reason: "LSP connected but does not support textDocument/diagnostic".to_owned(),
+            indexing_complete: Some(indexing_complete),
+            uptime_seconds: Some(uptime_seconds),
         }
     }
 }
@@ -1963,29 +1979,51 @@ mod tests {
 
     #[test]
     fn test_process_entry_running_with_diagnostics_status() {
-        // Verify the status string for a running process with diagnostic_provider=true
-        let caps = DetectedCapabilities {
-            definition_provider: true,
-            diagnostic_provider: true,
-            call_hierarchy_provider: true,
-            formatting_provider: true,
-            workspace_diagnostic_provider: true,
-        };
-        // We can't easily construct a full ManagedProcess in a unit test,
-        // so we verify the logic indirectly via the match branches
-        assert!(caps.diagnostic_provider);
+        // validation_status_from_parts is the pure helper extracted from
+        // ProcessEntry::to_validation_status so we can test without a
+        // live ManagedProcess (which requires a real OS child handle).
+        // Future agents: add more variants here as capabilities grow.
+        let status = validation_status_from_parts("rust-analyzer", true, true, false, 10);
+        assert!(
+            status.validation,
+            "diagnostic_provider=true must yield validation=true"
+        );
+        assert_eq!(status.reason, "LSP connected and supports validation");
+        assert_eq!(status.indexing_complete, Some(false));
+        assert_eq!(status.uptime_seconds, Some(10));
+    }
+
+    #[test]
+    fn test_process_entry_running_with_diagnostics_indexing_complete() {
+        let status = validation_status_from_parts("rust-analyzer", true, true, true, 42);
+        assert!(status.validation);
+        assert_eq!(status.indexing_complete, Some(true));
+        assert_eq!(status.uptime_seconds, Some(42));
     }
 
     #[test]
     fn test_process_entry_running_without_diagnostics_status() {
-        let caps = DetectedCapabilities {
-            definition_provider: true,
-            diagnostic_provider: false,
-            call_hierarchy_provider: true,
-            formatting_provider: true,
-            workspace_diagnostic_provider: false,
-        };
-        assert!(!caps.diagnostic_provider);
+        // LSP connected but does not support textDocument/diagnostic.
+        let status = validation_status_from_parts("gopls", true, false, true, 5);
+        assert!(
+            !status.validation,
+            "diagnostic_provider=false must yield validation=false"
+        );
+        assert!(
+            status.reason.contains("does not support"),
+            "reason must mention lack of support, got: {}",
+            status.reason
+        );
+        assert_eq!(status.indexing_complete, Some(true));
+        assert_eq!(status.uptime_seconds, Some(5));
+    }
+
+    #[test]
+    fn test_process_entry_running_uptime_is_non_none() {
+        // Uptime should always be Some for a running process (even if 0 seconds).
+        let status = validation_status_from_parts("pyright", true, true, false, 0);
+        assert!(status.uptime_seconds.is_some());
+        assert!(status.indexing_complete.is_some());
     }
 
     // ── WP-1: LspClient Test Harness ──────────────────────────────

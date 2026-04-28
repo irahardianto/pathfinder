@@ -163,6 +163,13 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_markdown_fences_opening_only_no_closing() {
+        let input = "```rust\nfn main() {}\n// no closing fence";
+        let result = strip_markdown_fences(input);
+        assert_eq!(result, input); // passthrough — no matching closing fence
+    }
+
+    #[test]
     fn test_strip_markdown_fences_multiline() {
         let input = "```typescript\nconst x = 1;\nconst y = 2;\n```";
         assert_eq!(strip_markdown_fences(input), "const x = 1;\nconst y = 2;");

@@ -5,6 +5,11 @@
 # This workflow runs in parallel with release-binaries.yml on every release,
 # building the Linux x86_64 binary independently and generating a signed
 # attestation (.intoto.jsonl) that is uploaded to the same GitHub Release.
+#
+# NOTE: We use `base64-subjects-as-file` instead of `base64-subjects` to avoid
+# fragility around GitHub Actions output masking, ARG_MAX limits, and the
+# generator's internal upload-artifact step not receiving the path correctly.
+# The hash file is uploaded as an artifact and consumed by the generator job.
 
 name: SLSA Provenance
 
@@ -50,8 +55,6 @@ jobs:
     needs: check-tag
     if: needs.check-tag.outputs.should-run == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      digests: ${{ steps.hash.outputs.digests }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -70,11 +73,20 @@ jobs:
           cargo build --release --bin pathfinder-mcp
           cp target/release/pathfinder-mcp pathfinder-mcp-x86_64-unknown-linux-gnu
 
-      - name: Generate provenance subjects
-        id: hash
+      - name: Generate provenance subjects file
         run: |
           set -euo pipefail
-          echo "hashes=$(sha256sum pathfinder-mcp-x86_64-unknown-linux-gnu | base64 -w0)" >> "${GITHUB_OUTPUT}"
+          # Write hashes to a file rather than an output variable.
+          # This avoids GitHub Actions output masking and ARG_MAX limits,
+          # and satisfies the generator's base64-subjects-as-file input.
+          sha256sum pathfinder-mcp-x86_64-unknown-linux-gnu | base64 -w0 > provenance-hashes.txt
+
+      - name: Upload provenance subjects artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-subjects
+          path: provenance-hashes.txt
+          retention-days: 1
 
   provenance:
     name: Generate Provenance
@@ -86,6 +98,6 @@ jobs:
       contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: "${{ needs.build.outputs.digests }}"
+      base64-subjects-as-file: provenance-subjects
       upload-assets: true
       upload-tag-name: "${{ needs.check-tag.outputs.tag }}"

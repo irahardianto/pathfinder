@@ -88,15 +88,31 @@ jobs:
           tool: cargo-llvm-cov,cargo-nextest
 
       - name: Run tests with coverage
+        # Excludes the `integration` feature to keep unit tests fast.
+        # Integration tests run in the separate `integration-tests` job below.
         run: >-
           cargo llvm-cov nextest
-          --all-features
           --workspace
           --lcov
           --output-path lcov.info
 
+      - name: Verify coverage report
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          if [ ! -f lcov.info ]; then
+            echo "::error::lcov.info was not generated"
+            exit 1
+          fi
+          LINES=$(wc -l < lcov.info)
+          if [ "$LINES" -lt 100 ]; then
+            echo "::error::lcov.info suspiciously small ($LINES lines) — coverage generation may have failed"
+            exit 1
+          fi
+          echo "Coverage report verified: $LINES lines"
+
       - name: Upload coverage to DeepSource
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        timeout-minutes: 5
         env:
           DEEPSOURCE_DSN: ${{ secrets.DEEPSOURCE_DSN }}
         run: |
@@ -105,6 +121,42 @@ jobs:
             --analyzer test-coverage \
             --key rust \
             --value-file lcov.info
+
+  # ──────────────────────────────────────────────
+  # Stage 2b: Integration Tests
+  #
+  # Runs after lint (not after test) to maximize parallelism.
+  # These tests require spawning real subprocesses (mock LSP, git, file
+  # watcher) and are gated behind `--features integration` to prevent
+  # them from running in the unit-test-only `test` job above.
+  #
+  # The mock LSP binary (test-mock-lsp) is compiled automatically by
+  # `cargo test --features integration` because it is a workspace member.
+  # ──────────────────────────────────────────────
+  integration-tests:
+    name: Integration Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run integration tests
+        # `--features integration` activates the integration test feature gate
+        # in pathfinder-lsp. The test-mock-lsp binary is compiled automatically
+        # as a workspace member and located via CARGO_BIN_EXE_test-mock-lsp.
+        run: cargo nextest run --workspace --features integration --test-threads 4
 
   # ──────────────────────────────────────────────
   # Stage 3: Security — Dependency audit
@@ -167,10 +219,11 @@ jobs:
       github.event_name == 'push' &&
       (needs.changes.outputs.code == 'false' || (
         needs.test.result == 'success' &&
+        needs.integration-tests.result == 'success' &&
         needs.cargo-deny.result == 'success' &&
         needs.osv-scanner.result == 'success'
       ))
-    needs: [changes, test, cargo-deny, osv-scanner]
+    needs: [changes, test, integration-tests, cargo-deny, osv-scanner]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -227,10 +280,11 @@ jobs:
       github.event_name == 'push' &&
       (needs.changes.outputs.code == 'false' || (
         needs.test.result == 'success' &&
+        needs.integration-tests.result == 'success' &&
         needs.cargo-deny.result == 'success' &&
         needs.osv-scanner.result == 'success'
       ))
-    needs: [changes, test, cargo-deny, osv-scanner]
+    needs: [changes, test, integration-tests, cargo-deny, osv-scanner]
     runs-on: ubuntu-latest
     permissions:
       contents: write

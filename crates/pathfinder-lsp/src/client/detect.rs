@@ -114,6 +114,10 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
 
 /// Detect available language servers for the given workspace root and configuration.
 #[allow(clippy::missing_errors_doc)]
+// The function is structured as one block per language (Rust, Go, TS, Python).
+// Each block is short but the four-language repetition pushes the total just
+// over the 100-line clippy default. Suppressing to keep the pattern intact.
+#[allow(clippy::too_many_lines)]
 pub async fn detect_languages(
     workspace_root: &Path,
     config: &pathfinder_common::config::PathfinderConfig,
@@ -142,6 +146,18 @@ pub async fn detect_languages(
         };
     }
 
+    // Get args from config (non-empty overrides language defaults; enables test mock flags).
+    macro_rules! get_args {
+        ($lang:expr, $default:expr) => {
+            config
+                .lsp
+                .get($lang)
+                .filter(|c| !c.args.is_empty())
+                .map(|c| c.args.clone())
+                .unwrap_or_else(|| $default)
+        };
+    }
+
     // Rust — Cargo.toml (root only; Rust workspaces always have it at the root)
     let rust_root = match get_override!("rust") {
         Some(r) => Some(r),
@@ -154,7 +170,7 @@ pub async fn detect_languages(
             detected.push(LanguageLsp {
                 language_id: "rust".to_owned(),
                 command,
-                args: vec![],
+                args: get_args!("rust", vec![]),
                 root,
                 init_timeout_secs: None,
             });
@@ -172,7 +188,7 @@ pub async fn detect_languages(
             detected.push(LanguageLsp {
                 language_id: "go".to_owned(),
                 command,
-                args: vec![],
+                args: get_args!("go", vec![]),
                 root,
                 init_timeout_secs: None,
             });
@@ -193,7 +209,7 @@ pub async fn detect_languages(
             detected.push(LanguageLsp {
                 language_id: "typescript".to_owned(),
                 command,
-                args: vec!["--stdio".to_owned()],
+                args: get_args!("typescript", vec!["--stdio".to_owned()]),
                 root,
                 init_timeout_secs: None,
             });
@@ -214,7 +230,7 @@ pub async fn detect_languages(
             detected.push(LanguageLsp {
                 language_id: "python".to_owned(),
                 command,
-                args: vec!["--stdio".to_owned()],
+                args: get_args!("python", vec!["--stdio".to_owned()]),
                 root,
                 init_timeout_secs: None,
             });

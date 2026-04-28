@@ -5,6 +5,9 @@ members = [
     "crates/pathfinder-lsp",
     "crates/pathfinder-search",
     "crates/pathfinder-treesitter",
+    # Test-only mock LSP binary used by pathfinder-lsp integration tests.
+    # Not published to crates.io (publish = false in its Cargo.toml).
+    "crates/test-mock-lsp",
 ]
 resolver = "2"
 
