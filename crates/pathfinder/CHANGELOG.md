@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8](https://github.com/irahardianto/pathfinder/compare/v0.1.7...v0.1.8) - 2026-04-28
+
+### Fixed
+
+- *(lsp)* add required-features to prevent integration test binary from running in unit-test mode
+- *(lsp)* gate `mod common` behind `#[cfg(feature = "integration")]`
+
+### Other
+
+- *(integration)* establish mock LSP test harness and fix SLSA provenance
+
 ## [0.1.7](https://github.com/irahardianto/pathfinder/compare/v0.1.6...v0.1.7) - 2026-04-28
 
 ### Added
