@@ -13,7 +13,6 @@ use std::time::SystemTime;
 use tokio::sync::OnceCell;
 use tracing::instrument;
 use tree_sitter::Tree;
-use tempfile::tempdir;
 
 /// Map a filesystem `io::Error` to the appropriate `SurgeonError` variant.
 ///
@@ -362,7 +361,7 @@ impl AstCache {
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[tokio::test]
     async fn test_cache_hits_and_misses() {
@@ -623,7 +622,9 @@ mod tests {
     async fn test_get_or_parse_missing_file_returns_file_not_found() {
         let cache = AstCache::new(2);
         let temp_dir = tempdir().unwrap();
-        let missing = temp_dir.path().join("this_file_does_not_exist_pathfinder.go");
+        let missing = temp_dir
+            .path()
+            .join("this_file_does_not_exist_pathfinder.go");
 
         let err = cache
             .get_or_parse(&missing, SupportedLanguage::Go)
