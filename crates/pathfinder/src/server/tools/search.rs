@@ -30,12 +30,16 @@ impl PathfinderServer {
     /// 2. Node-type classification — determines if at a comment, string, or code position
     ///
     /// After enrichment, matches are filtered by `filter_mode` (`code_only` / `comments_only`).
-    /// `degraded: true` is only set when a file uses an unsupported language (no Tree-sitter grammar).
+    /// `degraded: true` is set when a file uses an unsupported language (no Tree-sitter grammar).
+    /// When degraded, `filter_mode` is **bypassed** (all matches returned) to prevent silent
+    /// result-loss. The `degraded_reason` is set to `"unsupported_language_filter_bypassed"` in
+    /// this case so agents know filtering was not applied.
     ///
     /// **E4 features:**
     /// - `exclude_glob` is passed to the scout to exclude files before search.
     /// - `known_files` suppresses verbose context for files the agent already has.
     /// - `group_by_file` clusters results into `file_groups` in the response.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn search_codebase_impl(
         &self,
         params: SearchCodebaseParams,
@@ -80,14 +84,27 @@ impl PathfinderServer {
                 let degraded = enriched_matches
                     .iter()
                     .any(|m| SupportedLanguage::detect(Path::new(&m.file)).is_none());
-                let degraded_reason = if degraded {
+
+                // When degraded (unsupported language), node-type classification is unavailable.
+                // Bypass the filter entirely rather than silently dropping every match.
+                // Agents that requested `comments_only` will receive all matches labelled with
+                // `degraded: true` and `degraded_reason: "unsupported_language_filter_bypassed"`
+                // so they can decide how to handle the results themselves. Returning zero matches
+                // would cause agents to falsely conclude the codebase has no results.
+                let filter_was_bypassed = degraded && params.filter_mode != FilterMode::All;
+                let filtered_matches = if filter_was_bypassed {
+                    enriched_matches
+                } else {
+                    apply_filter_mode(enriched_matches, &node_types, params.filter_mode)
+                };
+
+                let degraded_reason = if filter_was_bypassed {
+                    Some("unsupported_language_filter_bypassed".to_owned())
+                } else if degraded {
                     Some("unsupported_language".to_owned())
                 } else {
                     None
                 };
-
-                let filtered_matches =
-                    apply_filter_mode(enriched_matches, &node_types, params.filter_mode);
 
                 // Build the normalised known-file set for O(1) lookups.
                 // Strip a leading "./" so that "./src/auth.ts" == "src/auth.ts".
@@ -127,6 +144,7 @@ impl PathfinderServer {
                     returned = returned_count,
                     truncated = result.truncated,
                     filter_mode = ?params.filter_mode,
+                    filter_bypassed = filter_was_bypassed,
                     ripgrep_ms,
                     tree_sitter_parse_ms,
                     duration_ms,
@@ -359,7 +377,9 @@ mod tests {
             context_lines: 0,
             known_files: vec![],
             group_by_file: false,
-            filter_mode: pathfinder_common::types::FilterMode::default(),
+            // Use FilterMode::All so no bypass occurs — degraded_reason is "unsupported_language"
+            // (not "unsupported_language_filter_bypassed" which happens with CodeOnly/CommentsOnly)
+            filter_mode: pathfinder_common::types::FilterMode::All,
         };
         let result = server.search_codebase_impl(params).await;
         let response = result.expect("search should succeed");
@@ -369,7 +389,64 @@ mod tests {
         );
         assert_eq!(
             response.0.degraded_reason.as_deref(),
-            Some("unsupported_language")
+            Some("unsupported_language"),
+            "with FilterMode::All, filter is not bypassed so reason is unsupported_language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_degraded_filter_bypassed_returns_matches() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // File with unsupported extension — Tree-sitter can't classify nodes
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(ws_dir.path().join("src/data.xyz"), "// TODO: fix this hack").unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .push(Ok("code".to_string())); // degraded: defaults to code
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        // Request comments_only on an unsupported language — without the fix this returns 0 matches
+        let params = SearchCodebaseParams {
+            query: "TODO".to_owned(),
+            is_regex: false,
+            path_glob: "**/*.xyz".to_owned(),
+            exclude_glob: String::default(),
+            max_results: 10,
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            filter_mode: pathfinder_common::types::FilterMode::CommentsOnly,
+        };
+        let result = server.search_codebase_impl(params).await;
+        let response = result.expect("search should succeed");
+
+        // The match should be returned despite filter_mode = CommentsOnly
+        assert!(
+            !response.0.matches.is_empty(),
+            "matches must not be empty when filter is bypassed"
+        );
+        assert!(response.0.degraded, "degraded must be true");
+        assert_eq!(
+            response.0.degraded_reason.as_deref(),
+            Some("unsupported_language_filter_bypassed"),
+            "degraded_reason must indicate filter was bypassed"
         );
     }
 }
