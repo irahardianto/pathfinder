@@ -47,6 +47,9 @@
 // This prevents them from running during `cargo test` (unit-test-only mode) and
 // ensures the mock binary is available via CARGO_BIN_EXE_test-mock-lsp.
 
+// `mod common` is gated so the `mock_binary()` assert never fires in unit-
+// test-only mode (where `test-mock-lsp` is not compiled).
+#[cfg(feature = "integration")]
 mod common;
 
 // Imports are only needed when the `integration` feature is active.
