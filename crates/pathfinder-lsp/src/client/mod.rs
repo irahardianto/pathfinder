@@ -50,6 +50,17 @@ struct LanguageState {
     reader_handle: tokio::task::JoinHandle<()>,
     /// Number of times we have restarted this LSP (used in M3 crash recovery UI).
     restart_count: u32,
+    /// When this process was first spawned successfully.
+    ///
+    /// Used to compute `uptime_seconds` in `capability_status()`.
+    spawned_at: Instant,
+    /// Whether the LSP has finished initial workspace indexing.
+    ///
+    /// Set to `true` when the reader task observes a `$/progress` notification
+    /// carrying a `WorkDoneProgressEnd` token for the initial indexing job
+    /// (title typically contains "Indexing" or "cargo check" for rust-analyzer).
+    /// Never reset to `false` once set — processes don't re-index unless restarted.
+    indexing_complete: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Marks a language as permanently unavailable after repeated crashes.
@@ -68,22 +79,35 @@ impl ProcessEntry {
     fn to_validation_status(&self, command: &str) -> crate::types::LspLanguageStatus {
         match self {
             Self::Running(state) => {
+                let uptime_seconds = Some(state.spawned_at.elapsed().as_secs());
+                let indexing_complete = Some(
+                    state
+                        .indexing_complete
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
+
                 if state.process.capabilities.diagnostic_provider {
                     crate::types::LspLanguageStatus {
                         validation: true,
                         reason: "LSP connected and supports validation".to_owned(),
+                        indexing_complete,
+                        uptime_seconds,
                     }
                 } else {
                     crate::types::LspLanguageStatus {
                         validation: false,
                         reason: "LSP connected but does not support textDocument/diagnostic"
                             .to_owned(),
+                        indexing_complete,
+                        uptime_seconds,
                     }
                 }
             }
             Self::Unavailable(_) => crate::types::LspLanguageStatus {
                 validation: false,
                 reason: format!("{command} failed to start or crashed repeatedly"),
+                indexing_complete: None,
+                uptime_seconds: None,
             },
         }
     }
@@ -392,12 +416,29 @@ impl LspClient {
             );
         }
 
+        // Create indexing_complete flag — will be set by the progress watcher task
+        // when the LSP emits WorkDoneProgressEnd for its initial indexing job.
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawned_at = Instant::now();
+
+        // Spawn a background task that monitors $/progress notifications from the
+        // LSP and sets indexing_complete when the initial indexing token closes.
+        // This gives agents an unambiguous binary signal when LSP navigation is ready.
+        let indexing_flag = Arc::clone(&indexing_complete);
+        let lang_id_for_watcher = language_id.clone();
+        let dispatcher_for_watcher = Arc::clone(&self.dispatcher);
+        tokio::spawn(async move {
+            progress_watcher_task(lang_id_for_watcher, dispatcher_for_watcher, indexing_flag).await;
+        });
+
         self.processes.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
                 process,
                 reader_handle: supervisor_handle,
                 restart_count: attempt,
+                spawned_at,
+                indexing_complete,
             })),
         );
 
@@ -999,6 +1040,9 @@ impl Lawyer for LspClient {
                 None => crate::types::LspLanguageStatus {
                     validation: true,
                     reason: format!("{} available (lazy start)", desc.command),
+                    // Process hasn't started yet — indexing status and uptime unknown
+                    indexing_complete: None,
+                    uptime_seconds: None,
                 },
             };
             status.insert(desc.language_id.clone(), lang_status);
@@ -1345,6 +1389,68 @@ async fn reader_supervisor_task(
     // Remove the process entry — this allows future requests to retry
     // via the recovery cooldown mechanism in ensure_process()
     processes.remove(&language_id);
+}
+
+/// Background task: watch `$/progress` notifications for indexing completion.
+///
+/// The LSP server emits `window/workDoneProgress/create` followed by
+/// `$/progress` notifications to report long-running operations like initial
+/// workspace indexing. When the `$/progress` notification has a `kind == "end"`
+/// value, the work token is complete.
+///
+/// We treat any `WorkDoneProgressEnd` notification as evidence that the LSP has
+/// finished its initial index build (conservative: we set the flag on the *first*
+/// `end` event regardless of the token title). Most LSPs (rust-analyzer, clangd,
+/// pyright, tsserver) emit one primary indexing token that completes before they
+/// are ready to serve navigation requests.
+///
+/// The task exits when the broadcast channel is closed (LSP process died / shut down).
+async fn progress_watcher_task(
+    language_id: String,
+    dispatcher: Arc<RequestDispatcher>,
+    indexing_complete: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut rx = dispatcher.subscribe_notifications();
+    tracing::debug!(language = %language_id, "progress_watcher_task: started");
+
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                // Both "$/progress" and "window/workDoneProgress/*" are signals.
+                if method == "$/progress" || method.starts_with("window/workDoneProgress") {
+                    let kind = msg
+                        .pointer("/params/value/kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if kind == "end" {
+                        // WorkDoneProgressEnd — the LSP has finished at least one major
+                        // work token (typically initial indexing).
+                        if !indexing_complete.load(std::sync::atomic::Ordering::Relaxed) {
+                            indexing_complete.store(true, std::sync::atomic::Ordering::Relaxed);
+                            tracing::info!(
+                                language = %language_id,
+                                "LSP: WorkDoneProgressEnd received — indexing_complete = true"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                // We missed some notifications (slow subscriber). Log and continue.
+                tracing::warn!(
+                    language = %language_id,
+                    missed = n,
+                    "progress_watcher_task: lagged, missed notifications"
+                );
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Dispatcher shut down — LSP process ended.
+                tracing::debug!(language = %language_id, "progress_watcher_task: channel closed, exiting");
+                break;
+            }
+        }
+    }
 }
 
 /// Background task: check for idle processes and terminate them.

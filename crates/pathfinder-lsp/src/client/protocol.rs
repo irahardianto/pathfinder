@@ -10,7 +10,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
+
+/// Capacity of the server-notification broadcast channel.
+/// Older notifications are dropped silently if all subscribers are slow.
+const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
 
 /// Correlates outgoing JSON-RPC requests with their responses.
 ///
@@ -19,13 +23,18 @@ use tokio::sync::oneshot;
 pub(super) struct RequestDispatcher {
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, LspError>>>>,
     next_id: AtomicU64,
+    /// Broadcast channel for unsolicited server notifications (no `id`).
+    /// Subscribers receive a clone of each incoming notification `Value`.
+    notification_tx: broadcast::Sender<Value>,
 }
 
 impl RequestDispatcher {
     pub(super) fn new() -> Self {
+        let (notification_tx, _) = broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY);
         Self {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            notification_tx,
         }
     }
 
@@ -65,12 +74,15 @@ impl RequestDispatcher {
     /// Dispatch an incoming message to the waiting caller.
     ///
     /// If the message has an `id` that matches a pending request, fires its
-    /// oneshot. Notifications (no `id`) and unmatched responses are silently
-    /// ignored (they are handled elsewhere or are unsolicited server messages).
+    /// oneshot. Notifications (no `id`) are forwarded to the notification
+    /// broadcast channel (subscribers include the `progress_watcher_task`).
+    /// Unmatched responses are silently ignored.
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(super) fn dispatch_response(&self, message: &Value) {
         let Some(id_val) = message.get("id") else {
-            // Notification — no correlation needed
+            // Server notification — forward to broadcast channel for subscribers.
+            // Ignore send errors (no active subscribers is fine).
+            let _ = self.notification_tx.send(message.clone());
             return;
         };
         let Some(id) = id_val.as_u64() else {
@@ -92,6 +104,15 @@ impl RequestDispatcher {
             // Ignore send error — the caller may have timed out and dropped the rx
             let _ = sender.send(result);
         }
+    }
+
+    /// Subscribe to unsolicited server notifications.
+    ///
+    /// Returns a `broadcast::Receiver` that yields each incoming notification
+    /// value (messages without a JSON-RPC `id`). Used by `progress_watcher_task`
+    /// to detect `$/progress` events for LSP indexing completion.
+    pub(super) fn subscribe_notifications(&self) -> broadcast::Receiver<Value> {
+        self.notification_tx.subscribe()
     }
 
     /// Remove a pending request by ID (e.g. after a timeout).

@@ -1,19 +1,34 @@
 //! Result types returned by the `Lawyer` trait.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Status of a specific language server (for diagnostics/capabilities).
-///
-/// **Note:** This is a point-in-time snapshot taken when `get_repo_map` was called.
-/// If the LSP process crashes or is restarted after this call, the `per_language`
-/// map may be stale. Always treat `validation_skipped_reason` in edit responses
-/// as the authoritative signal for the current edit operation's actual LSP status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LspLanguageStatus {
     /// Whether validation is enabled.
     pub validation: bool,
     /// Reason explaining the validation status.
     pub reason: String,
+    /// Whether the LSP has completed initial workspace indexing.
+    ///
+    /// `Some(true)` — the LSP emitted a `WorkDoneProgressEnd` for its initial
+    /// indexing token, indicating the workspace index is fully built and navigation
+    /// tools (`get_definition`, `analyze_impact`) should return reliable results.
+    ///
+    /// `Some(false)` — the process is running but indexing is still in progress.
+    ///
+    /// `None` — the process has not started yet, is unavailable, or does not
+    /// report `WorkDoneProgress` (e.g., some LSPs omit it). Agents should treat
+    /// `None` the same as `Some(false)` and prefer `validation_skipped_reason` in
+    /// edit responses as the authoritative per-operation LSP health signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_complete: Option<bool>,
+    /// Seconds since the LSP process was spawned.
+    ///
+    /// Useful alongside `indexing_complete = Some(false)` to gauge warmup progress.
+    /// `None` when the process has not started or is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_seconds: Option<u64>,
 }
 
 /// The location of a symbol's definition in the workspace.
