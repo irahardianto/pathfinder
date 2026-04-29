@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder-mcp"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license.workspace = true
 description = "Pathfinder — The Headless IDE MCP Server for AI Coding Agents"
@@ -24,7 +24,7 @@ path = "src/lib.rs"
 
 [dependencies]
 pathfinder-common = { version = "0.1.6", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
-pathfinder-lsp = { version = "0.2.4", path = "../pathfinder-lsp", package = "pathfinder-mcp-lsp" }
+pathfinder-lsp = { version = "0.2.5", path = "../pathfinder-lsp", package = "pathfinder-mcp-lsp" }
 pathfinder-search = { version = "0.2.3", path = "../pathfinder-search", package = "pathfinder-mcp-search" }
 pathfinder-treesitter = { version = "0.3.3", path = "../pathfinder-treesitter", package = "pathfinder-mcp-treesitter" }
 rmcp = { version = "=1.0.0", features = ["server", "macros", "transport-io"] }
