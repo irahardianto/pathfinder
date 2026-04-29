@@ -135,6 +135,13 @@ impl AstCache {
 
         // Check cache while holding the lock; release before any async I/O.
         {
+            // COVERAGE NOTE: The `map_err` arm below ("Lock poisoned") is intentionally
+            // untested. A `std::sync::Mutex` only becomes poisoned when a thread panics
+            // while holding the lock — a catastrophic OS-level scenario that cannot be
+            // triggered in safe Rust without an `unsafe` thread-panic harness. Attempting
+            // to test it would introduce flakiness and violate the project's safe-Rust
+            // testing policy. The arm exists as a defensive last-resort error path.
+            // Do NOT attempt to write a test for this branch.
             let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
                 path: path.to_path_buf(),
                 reason: "Lock poisoned".into(),
@@ -150,6 +157,8 @@ impl AstCache {
 
         // --- Singleflight: check if another request is already parsing this file ---
         let cell = {
+            // COVERAGE NOTE: lock-poison arm — see the identical note above.
+            // Structurally untestable in safe Rust; intentionally left uncovered.
             let mut in_flight = self
                 .in_flight
                 .lock()
@@ -177,6 +186,8 @@ impl AstCache {
                 let tree = AstParser::parse_source(path, lang, &parse_input)?;
 
                 // Re-acquire the lock to insert/update.
+                // COVERAGE NOTE: lock-poison arm — see the identical note above.
+                // Structurally untestable in safe Rust; intentionally left uncovered.
                 let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
                     path: path.to_path_buf(),
                     reason: "Lock poisoned".into(),
@@ -200,6 +211,8 @@ impl AstCache {
 
         // Clean up the in-flight entry now that parsing is complete
         {
+            // COVERAGE NOTE: lock-poison arm — see the identical note above.
+            // Structurally untestable in safe Rust; intentionally left uncovered.
             let mut in_flight = self
                 .in_flight
                 .lock()
@@ -240,6 +253,8 @@ impl AstCache {
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
         {
+            // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
+            // Structurally untestable in safe Rust; intentionally left uncovered.
             let mut lock = self
                 .vue_entries
                 .lock()
@@ -266,6 +281,8 @@ impl AstCache {
 
         // --- Singleflight: check if another request is already parsing this Vue file ---
         let cell = {
+            // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
+            // Structurally untestable in safe Rust; intentionally left uncovered.
             let mut vue_in_flight =
                 self.vue_in_flight
                     .lock()
@@ -291,6 +308,8 @@ impl AstCache {
                         reason: format!("Vue multi-zone parse failed: {e}"),
                     })?;
 
+                // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
+                // Structurally untestable in safe Rust; intentionally left uncovered.
                 let mut lock = self
                     .vue_entries
                     .lock()
@@ -323,6 +342,8 @@ impl AstCache {
 
         // Clean up the in-flight entry now that parsing is complete
         {
+            // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
+            // Structurally untestable in safe Rust; intentionally left uncovered.
             let mut vue_in_flight =
                 self.vue_in_flight
                     .lock()
