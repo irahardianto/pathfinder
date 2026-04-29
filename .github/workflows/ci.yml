@@ -98,9 +98,13 @@ jobs:
       - name: Run tests with coverage
         # Excludes the `integration` feature to keep unit tests fast.
         # Integration tests run in the separate `integration-tests` job below.
+        # test-mock-lsp is excluded: it is a subprocess fixture whose lines
+        # always appear uncovered (llvm-cov cannot trace across process
+        # boundaries). Excluding it keeps the coverage metric meaningful.
         run: >-
           cargo llvm-cov nextest
           --workspace
+          --exclude test-mock-lsp
           --lcov
           --output-path lcov.info
 
@@ -116,6 +120,14 @@ jobs:
             exit 1
           fi
           echo "Coverage report verified: $LINES lines"
+
+      - name: Normalize paths in coverage report
+        # cargo-llvm-cov emits absolute SF: paths (e.g. /home/runner/work/...).
+        # DeepSource matches coverage lines against repo-relative paths; absolute
+        # paths cause it to fail to resolve any file and remain in WAITING state
+        # indefinitely. Strip the workspace prefix so every SF: line is relative
+        # (e.g. crates/pathfinder-core/src/lib.rs).
+        run: sed -i "s|$(pwd)/||g" lcov.info
 
       - name: Upload coverage to DeepSource
         # Upload on every run (push + PR) so DeepSource receives the coverage
