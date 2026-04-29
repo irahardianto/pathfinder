@@ -173,7 +173,7 @@ impl VersionHash {
 
     /// Create from a raw hash string (for deserialization from client input).
     #[must_use]
-    pub fn from_raw(hash: String) -> Self {
+    pub const fn from_raw(hash: String) -> Self {
         Self(hash)
     }
 

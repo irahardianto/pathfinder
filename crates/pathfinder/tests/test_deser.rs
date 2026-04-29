@@ -20,7 +20,7 @@ fn default_detail_level() -> String {
     "compact".to_string()
 }
 
-fn default_start_line() -> u32 {
+const fn default_start_line() -> u32 {
     1
 }
 

@@ -108,7 +108,7 @@ pub struct InMemoryFileEventSource {
 impl InMemoryFileEventSource {
     /// Create a new source pre-loaded with `events`.
     #[must_use]
-    pub fn new(events: Vec<FileEvent>) -> Self {
+    pub const fn new(events: Vec<FileEvent>) -> Self {
         Self { events }
     }
 }

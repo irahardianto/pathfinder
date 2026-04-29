@@ -41,7 +41,7 @@ impl Default for SearchParams {
 /// A single match returned by `search_codebase`.
 ///
 /// Matches the JSON schema described in PRD §3.1.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SearchMatch {
     /// Path to the matching file, relative to the workspace root.
     pub file: String,

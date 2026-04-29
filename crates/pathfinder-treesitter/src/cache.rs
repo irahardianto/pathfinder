@@ -188,13 +188,10 @@ impl AstCache {
                 // Re-acquire the lock to insert/update.
                 // COVERAGE NOTE: lock-poison arm — see the identical note above.
                 // Structurally untestable in safe Rust; intentionally left uncovered.
-                let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
+                self.entries.lock().map_err(|_| SurgeonError::ParseError {
                     path: path.to_path_buf(),
                     reason: "Lock poisoned".into(),
-                })?;
-
-                // LruCache automatically evicts the least recently used item if capacity is reached
-                lock.put(
+                })?.put(
                     path.to_path_buf(),
                     CacheEntry {
                         tree: tree.clone(),
@@ -205,7 +202,7 @@ impl AstCache {
                     },
                 );
 
-                Ok::<_, SurgeonError>((tree.clone(), content_arc.clone()))
+                Ok::<_, SurgeonError>((tree, content_arc.clone()))
             })
             .await;
 
@@ -308,16 +305,6 @@ impl AstCache {
                         reason: format!("Vue multi-zone parse failed: {e}"),
                     })?;
 
-                // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
-                // Structurally untestable in safe Rust; intentionally left uncovered.
-                let mut lock = self
-                    .vue_entries
-                    .lock()
-                    .map_err(|_| SurgeonError::ParseError {
-                        path: path.to_path_buf(),
-                        reason: "Vue cache lock poisoned".into(),
-                    })?;
-
                 let cached_multi = MultiZoneTree {
                     script_tree: multi.script_tree.clone(),
                     template_tree: multi.template_tree.clone(),
@@ -327,7 +314,12 @@ impl AstCache {
                     degraded: multi.degraded,
                 };
 
-                lock.put(
+                // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
+                // Structurally untestable in safe Rust; intentionally left uncovered.
+                self.vue_entries.lock().map_err(|_| SurgeonError::ParseError {
+                    path: path.to_path_buf(),
+                    reason: "Vue cache lock poisoned".into(),
+                })?.put(
                     path.to_path_buf(),
                     MultiZoneEntry {
                         multi: cached_multi,
@@ -336,7 +328,7 @@ impl AstCache {
                     },
                 );
 
-                Ok::<_, SurgeonError>((multi.clone(), content_hash.clone()))
+                Ok::<_, SurgeonError>((multi, content_hash))
             })
             .await;
 

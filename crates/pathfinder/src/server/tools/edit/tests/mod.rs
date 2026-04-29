@@ -1,5 +1,5 @@
 mod batch_tests;
 mod handler_tests;
-pub(crate) mod helpers;
+pub mod helpers;
 mod text_edit_tests;
 mod validation_tests;

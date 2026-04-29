@@ -87,7 +87,7 @@ impl SupportedLanguage {
 
     /// Get the node type maps for building semantic paths.
     #[must_use]
-    pub fn node_types(&self) -> &'static LanguageNodeTypes {
+    pub const fn node_types(&self) -> &'static LanguageNodeTypes {
         match self {
             Self::Go => &LanguageNodeTypes {
                 function_kinds: &["function_declaration"],

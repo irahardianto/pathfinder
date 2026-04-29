@@ -24,7 +24,7 @@ pub struct ExtractedSymbol {
     ///   name-convention heuristics in `repo_map::is_symbol_public`).
     pub is_public: bool,
     /// Nested child symbols (e.g., methods within a class).
-    pub children: Vec<ExtractedSymbol>,
+    pub children: Vec<Self>,
 }
 
 /// The type of an AST symbol.

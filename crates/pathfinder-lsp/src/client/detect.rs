@@ -53,23 +53,25 @@ pub struct LanguageLsp {
 ///
 /// Returns `None` and logs a warning if the binary is not found on `PATH`.
 fn resolve_command(name: &str, lang: &str) -> Option<String> {
-    if let Ok(path) = which::which(name) {
-        tracing::debug!(
-            language = lang,
-            binary = %path.display(),
-            "LSP: resolved binary path"
-        );
-        Some(path.to_string_lossy().into_owned())
-    } else {
-        tracing::warn!(
-            language = lang,
-            binary = name,
-            "LSP: binary not found on PATH — language server will not start. \
-             Install it or set `lsp.{lang}.command` in .pathfinder.toml to \
-             an absolute path (e.g. for nix, asdf, volta, or GUI launcher installs)"
-        );
-        None
-    }
+    which::which(name)
+        .map(|path| {
+            tracing::debug!(
+                language = lang,
+                binary = %path.display(),
+                "LSP: resolved binary path"
+            );
+            path.to_string_lossy().into_owned()
+        })
+        .map_err(|_| {
+            tracing::warn!(
+                language = lang,
+                binary = name,
+                "LSP: binary not found on PATH — language server will not start. \
+                 Install it or set `lsp.{lang}.command` in .pathfinder.toml to \
+                 an absolute path (e.g. for nix, asdf, volta, or GUI launcher installs)"
+            );
+        })
+        .ok()
 }
 
 /// Search for a marker file within `base` directory up to `max_depth` levels deep.
@@ -514,7 +516,7 @@ mod tests {
         config.lsp.insert(
             "go".to_string(),
             pathfinder_common::config::LspConfig {
-                command: String::new(), // Empty → must fall through to `which`
+                command: String::default(), // Empty → must fall through to `which`
                 args: vec![],
                 idle_timeout_minutes: 15,
                 settings: serde_json::Value::Null,

@@ -284,13 +284,11 @@ impl Sandbox {
     }
 
     fn is_user_denied(&self, path: &Path) -> bool {
-        if let Some(ignore) = &self.user_ignore {
+        self.user_ignore.as_ref().is_some_and(|ignore| {
             // Avoid live I/O stat: guess based on trailing slash, otherwise default to false
             let is_dir = path.to_string_lossy().ends_with('/');
             ignore.matched(path, is_dir).is_ignore()
-        } else {
-            false
-        }
+        })
     }
 }
 

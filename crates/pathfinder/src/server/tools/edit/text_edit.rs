@@ -6,7 +6,7 @@ use pathfinder_common::error::DiagnosticError;
 use rmcp::model::ErrorData;
 use std::path::Path;
 /// Build a list of byte offsets for the start of every line (0-indexed).
-pub(crate) fn build_line_starts(source_str: &str) -> Vec<usize> {
+pub fn build_line_starts(source_str: &str) -> Vec<usize> {
     std::iter::once(0)
         .chain(
             source_str
@@ -18,7 +18,7 @@ pub(crate) fn build_line_starts(source_str: &str) -> Vec<usize> {
 }
 
 /// Compute the search window byte range for a given context line.
-pub(crate) fn compute_search_window(
+pub fn compute_search_window(
     line_starts: &[usize],
     context_line: u32,
     source_str_len: usize,
@@ -39,7 +39,7 @@ pub(crate) fn compute_search_window(
 }
 
 /// Collapse all runs of whitespace to a single space.
-pub(crate) fn collapse_whitespace(s: &str) -> String {
+pub fn collapse_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_ws = false;
     for ch in s.chars() {
@@ -57,7 +57,7 @@ pub(crate) fn collapse_whitespace(s: &str) -> String {
 }
 
 /// Normalize and match, then map back to original byte positions.
-pub(crate) fn collapse_and_match(
+pub fn collapse_and_match(
     window_text: &str,
     old_text: &str,
     filepath: &std::path::Path,
@@ -141,7 +141,7 @@ pub(crate) fn collapse_and_match(
 /// # Errors
 /// - [`PathfinderError::TextNotFound`] — `old_text` not present in the ±25-line window.
 /// - Propagated UTF-8 errors if source is not valid UTF-8 (returns an opaque I/O error).
-pub(crate) fn resolve_text_edit(
+pub fn resolve_text_edit(
     source: &[u8],
     old_text: &str,
     context_line: u32,
@@ -227,7 +227,7 @@ pub(crate) fn resolve_text_edit(
 ///   between them with proper indentation for the closing brace.
 /// - **Non-brace blocks** (Python): replaces only the byte range, trimming
 ///   trailing whitespace before the insertion point to avoid double indentation.
-pub(crate) fn build_body_replacement(
+pub fn build_body_replacement(
     source: &[u8],
     body_range: &pathfinder_treesitter::surgeon::BodyRange,
     indented: &str,
@@ -269,7 +269,7 @@ pub(crate) fn build_body_replacement(
 ///
 /// Pure function: diffs the diagnostics, maps them to `DiagnosticError`,
 /// and decides whether the edit should be blocked.
-pub(crate) fn build_validation_outcome(
+pub fn build_validation_outcome(
     pre_diags: &[pathfinder_lsp::types::LspDiagnostic],
     post_diags: &[pathfinder_lsp::types::LspDiagnostic],
     ignore_validation_failures: bool,
@@ -337,7 +337,7 @@ pub(crate) fn build_validation_outcome(
     }
 }
 
-pub(crate) fn normalize_blank_lines(content: &[u8]) -> Vec<u8> {
+pub fn normalize_blank_lines(content: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(content.len());
     let mut i = 0;
     while i < content.len() {
@@ -358,13 +358,13 @@ pub(crate) fn normalize_blank_lines(content: &[u8]) -> Vec<u8> {
     result
 }
 
-pub(crate) fn is_whitespace_significant_file(path: &std::path::Path) -> bool {
+pub fn is_whitespace_significant_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| matches!(ext, "py" | "yaml" | "yml" | "toml"))
 }
 
-pub(crate) fn strip_orphaned_doc_comment(source: &[u8], before_end: usize) -> usize {
+pub fn strip_orphaned_doc_comment(source: &[u8], before_end: usize) -> usize {
     if before_end == 0 {
         return before_end;
     }

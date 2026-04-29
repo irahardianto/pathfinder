@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[allow(dead_code)]
-pub(crate) struct UnsupportedDiagLawyer;
+pub struct UnsupportedDiagLawyer;
 
 #[async_trait::async_trait]
 impl Lawyer for UnsupportedDiagLawyer {
@@ -108,7 +108,7 @@ impl Lawyer for UnsupportedDiagLawyer {
     }
 }
 
-pub(crate) fn make_server_dyn(
+pub fn make_server_dyn(
     ws_dir: &tempfile::TempDir,
     surgeon: Arc<dyn pathfinder_treesitter::surgeon::Surgeon>,
 ) -> crate::server::PathfinderServer {
@@ -124,14 +124,14 @@ pub(crate) fn make_server_dyn(
     )
 }
 
-pub(crate) fn make_server(
+pub fn make_server(
     ws_dir: &tempfile::TempDir,
     mock_surgeon: MockSurgeon,
 ) -> crate::server::PathfinderServer {
     make_server_dyn(ws_dir, Arc::new(mock_surgeon))
 }
 
-pub(crate) fn make_body_range(
+pub fn make_body_range(
     open: usize,
     close: usize,
     indent: usize,

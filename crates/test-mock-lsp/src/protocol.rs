@@ -18,21 +18,29 @@ use std::io::{self, BufRead, Write};
 /// Responses are represented separately via [`JsonRpcResponse`].
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcMessage {
+    /// The JSON-RPC version (always "2.0").
     #[allow(dead_code)]
     pub jsonrpc: String,
+    /// Request identifier (omitted for notifications).
     pub id: Option<Value>,
+    /// Method name to invoke (e.g., "textDocument/hover").
     pub method: Option<String>,
+    /// Method parameters (structure varies by method).
     pub params: Option<Value>,
 }
 
 /// A JSON-RPC 2.0 response (success or error).
 #[derive(Debug, Serialize)]
 pub struct JsonRpcResponse {
+    /// The JSON-RPC version (always "2.0").
     pub jsonrpc: &'static str,
+    /// Request identifier (matches the request's `id`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
+    /// Success result (present only for successful responses).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Error details (present only for error responses).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 }
@@ -48,7 +56,8 @@ pub struct JsonRpcError {
 
 impl JsonRpcResponse {
     /// Construct a successful JSON-RPC 2.0 response.
-    pub fn success(id: Option<Value>, result: Value) -> Self {
+    #[must_use]
+    pub const fn success(id: Option<Value>, result: Value) -> Self {
         Self {
             jsonrpc: "2.0",
             id,

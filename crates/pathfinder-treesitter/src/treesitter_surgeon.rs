@@ -116,28 +116,31 @@ impl TreeSitterSurgeon {
                 found
             });
 
-        if let Some(body) = body_node {
-            // Return the byte offsets of the opening/closing brace characters.
-            // Most grammars include the braces in the body node range.
-            Ok((body.start_byte(), body.end_byte()))
-        } else {
-            // Check if the symbol kind is simply not body-bearing
-            let source_snippet = source
-                .get(symbol_byte_range)
-                .and_then(|b| std::str::from_utf8(b).ok())
-                .unwrap_or("<non-utf8>")
-                .chars()
-                .take(80)
-                .collect::<String>();
+        body_node.map_or_else(
+            || {
+                // Check if the symbol kind is simply not body-bearing
+                let source_snippet = source
+                    .get(symbol_byte_range)
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .unwrap_or("<non-utf8>")
+                    .chars()
+                    .take(80)
+                    .collect::<String>();
 
-            Err(SurgeonError::InvalidTarget {
-                path: symbol_path.to_owned(),
-                reason: format!(
-                    "symbol has no block body (snippet: \"{source_snippet}...\"). \
-                     Use replace_full for declarations without a body."
-                ),
-            })
-        }
+                Err(SurgeonError::InvalidTarget {
+                    path: symbol_path.to_owned(),
+                    reason: format!(
+                        "symbol has no block body (snippet: \"{source_snippet}...\"). \
+                         Use replace_full for declarations without a body."
+                    ),
+                })
+            },
+            |body| {
+                // Return the byte offsets of the opening/closing brace characters.
+                // Most grammars include the braces in the body node range.
+                Ok((body.start_byte(), body.end_byte()))
+            },
+        )
     }
 
     /// Detect the actual indentation column of a block body.

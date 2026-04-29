@@ -546,7 +546,7 @@ pub struct SourceSymbol {
     pub end_line: usize,
     /// Child symbols nested within this symbol.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<SourceSymbol>,
+    pub children: Vec<Self>,
 }
 
 /// The metadata embedded in `structured_content` for `read_source_file`.
@@ -770,36 +770,47 @@ pub struct AnalyzeImpactMetadata {
 
 // ── Default Value Functions ─────────────────────────────────────────
 
-pub(crate) fn default_path_glob() -> String {
+#[must_use]
+pub fn default_path_glob() -> String {
     "**/*".to_owned()
 }
-pub(crate) fn default_max_results() -> u32 {
+#[must_use]
+pub const fn default_max_results() -> u32 {
     50
 }
-pub(crate) fn default_context_lines() -> u32 {
+#[must_use]
+pub const fn default_context_lines() -> u32 {
     2
 }
-pub(crate) fn default_repo_map_path() -> String {
+#[must_use] 
+pub fn default_repo_map_path() -> String {
     ".".to_owned()
 }
-pub(crate) fn default_max_tokens() -> u32 {
+#[must_use] 
+pub const fn default_max_tokens() -> u32 {
     16_000
 }
-pub(crate) fn default_max_tokens_per_file() -> u32 {
+#[must_use] 
+pub const fn default_max_tokens_per_file() -> u32 {
     2_000
 }
-pub(crate) fn default_depth() -> u32 {
+#[must_use] 
+pub const fn default_depth() -> u32 {
     5
 }
-pub(crate) fn default_max_depth() -> u32 {
+#[must_use] 
+pub const fn default_max_depth() -> u32 {
     2
 }
-pub(crate) fn default_start_line() -> u32 {
+#[must_use] 
+pub const fn default_start_line() -> u32 {
     1
 }
-pub(crate) fn default_max_lines() -> u32 {
+#[must_use] 
+pub const fn default_max_lines() -> u32 {
     500
 }
-pub(crate) fn default_detail_level() -> String {
+#[must_use] 
+pub fn default_detail_level() -> String {
     "compact".to_string()
 }

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// Convert a [`PathfinderError`] to an [`ErrorData`] that MCP callers can
 /// inspect. The structured error JSON is embedded in the `data` field so
 /// agents can parse `error` (code) and `message` without extra round-trips.
-pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
+pub fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
     let data = match serde_json::to_value(err.to_error_response()) {
         Ok(v) => Some(v),
         Err(e) => {
@@ -75,12 +75,12 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
 
 /// Convert a `SurgeonError` into a `PathfinderError` and then to an [`ErrorData`].
 /// This centralizes the exhaustive matching of AST errors to our standard error taxonomy.
-pub(crate) fn treesitter_error_to_error_data(e: pathfinder_treesitter::SurgeonError) -> ErrorData {
+pub fn treesitter_error_to_error_data(e: pathfinder_treesitter::SurgeonError) -> ErrorData {
     pathfinder_to_error_data(&e.into())
 }
 
 /// Wrap a plain IO / infrastructure message in an [`ErrorData`].
-pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
+pub fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
     ErrorData::internal_error(msg, None)
 }
 
@@ -93,7 +93,7 @@ pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> E
 ///
 /// Returns `VERSION_MISMATCH` (`-32003`) if the hash does not match or the
 /// supplied prefix is shorter than 7 hex chars.
-pub(crate) fn check_occ(
+pub fn check_occ(
     base_version: &str,
     current_hash: &VersionHash,
     path: PathBuf,
@@ -115,7 +115,7 @@ pub(crate) fn check_occ(
 /// Checks whether `relative_path` is accessible per the sandbox rules.
 /// On denial, logs a structured warning and returns `Err(ACCESS_DENIED)`.
 /// Centralises the 7-line sandbox-check preamble duplicated across edit handlers.
-pub(crate) fn check_sandbox_access(
+pub fn check_sandbox_access(
     sandbox: &Sandbox,
     relative_path: &Path,
     tool_name: &str,
@@ -137,7 +137,7 @@ pub(crate) fn check_sandbox_access(
 
 /// Detect the language of a file from its extension.
 /// Used by `read_file` to populate the `language` field in the response.
-pub(crate) fn language_from_path(path: &Path) -> String {
+pub fn language_from_path(path: &Path) -> String {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ts" | "tsx") => "typescript",
         Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
@@ -165,7 +165,7 @@ pub(crate) fn language_from_path(path: &Path) -> String {
 ///
 /// This centralises the `let Some(semantic_path) = SemanticPath::parse(...)` preamble
 /// that previously appeared in every tool handler.
-pub(crate) fn parse_semantic_path(raw: &str) -> Result<SemanticPath, ErrorData> {
+pub fn parse_semantic_path(raw: &str) -> Result<SemanticPath, ErrorData> {
     SemanticPath::parse(raw).ok_or_else(|| {
         pathfinder_to_error_data(&PathfinderError::InvalidSemanticPath {
             input: raw.to_owned(),
@@ -178,7 +178,7 @@ pub(crate) fn parse_semantic_path(raw: &str) -> Result<SemanticPath, ErrorData> 
 ///
 /// Returns `Err` with a structured [`PathfinderError::InvalidSemanticPath`] when
 /// `semantic_path.is_bare_file()` is `true`, otherwise `Ok(())`.
-pub(crate) fn require_symbol_target(
+pub fn require_symbol_target(
     semantic_path: &SemanticPath,
     raw_path: &str,
 ) -> Result<(), ErrorData> {
@@ -198,7 +198,7 @@ pub(crate) fn require_symbol_target(
 /// silently degrading to `Value::Null` via `unwrap_or_default()`.
 ///
 /// Returns `Some(Value)` on success, `None` on failure (with a warning log).
-pub(crate) fn serialize_metadata<T: serde::Serialize>(metadata: &T) -> Option<serde_json::Value> {
+pub fn serialize_metadata<T: serde::Serialize>(metadata: &T) -> Option<serde_json::Value> {
     match serde_json::to_value(metadata) {
         Ok(v) => Some(v),
         Err(e) => {

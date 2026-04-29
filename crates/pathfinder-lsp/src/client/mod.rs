@@ -1051,16 +1051,16 @@ impl Lawyer for LspClient {
     async fn capability_status(&self) -> HashMap<String, crate::types::LspLanguageStatus> {
         let mut status = HashMap::new();
         for desc in self.descriptors.iter() {
-            let lang_status = match self.processes.get(&desc.language_id) {
-                Some(entry) => entry.to_validation_status(&desc.command),
-                None => crate::types::LspLanguageStatus {
+            let lang_status = self.processes.get(&desc.language_id).map_or_else(
+                || crate::types::LspLanguageStatus {
                     validation: true,
                     reason: format!("{} available (lazy start)", desc.command),
                     // Process hasn't started yet — indexing status and uptime unknown
                     indexing_complete: None,
                     uptime_seconds: None,
                 },
-            };
+                |entry| entry.to_validation_status(&desc.command),
+            );
             status.insert(desc.language_id.clone(), lang_status);
         }
         status
@@ -1126,16 +1126,10 @@ fn parse_workspace_diagnostic_response(
 
         // Convert URI to relative file path using workspace_root
         let file_path = match Url::parse(uri_str) {
-            Ok(url) => {
-                if let Ok(path) = url.to_file_path() {
-                    match path.strip_prefix(workspace_root) {
-                        Ok(rel) => rel.to_path_buf(),
-                        Err(_) => path, // Fallback to absolute if not in workspace
-                    }
-                } else {
-                    continue;
-                }
-            }
+            Ok(url) => match url.to_file_path() {
+                Ok(path) => path.strip_prefix(workspace_root).map_or_else(|_| path.clone(), std::path::Path::to_path_buf),
+                Err(()) => continue,
+            },
             Err(_) => continue,
         };
 
