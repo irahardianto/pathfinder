@@ -46,9 +46,6 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct PathfinderServer {
     workspace_root: Arc<WorkspaceRoot>,
-    #[allow(dead_code)]
-    config: Arc<PathfinderConfig>,
-    #[allow(dead_code)]
     sandbox: Arc<Sandbox>,
     scout: Arc<dyn Scout>,
     surgeon: Arc<dyn Surgeon>,
@@ -127,6 +124,7 @@ impl PathfinderServer {
 
     /// Create a server with all three engines injected (for testing with a `MockLawyer`).
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // Preserve API compatibility; 20+ call sites in tests
     pub fn with_all_engines(
         workspace_root: WorkspaceRoot,
         config: PathfinderConfig,
@@ -135,9 +133,9 @@ impl PathfinderServer {
         surgeon: Arc<dyn Surgeon>,
         lawyer: Arc<dyn Lawyer>,
     ) -> Self {
+        let _ = config;
         Self {
             workspace_root: Arc::new(workspace_root),
-            config: Arc::new(config),
             sandbox: Arc::new(sandbox),
             scout,
             surgeon,
@@ -684,7 +682,10 @@ mod tests {
             Arc::new(mock_scout),
             Arc::new(MockSurgeon::new()),
         );
-        let params = SearchCodebaseParams::default();
+        let params = SearchCodebaseParams {
+            query: "test".to_owned(),
+            ..Default::default()
+        };
 
         let result = server.search_codebase(Parameters(params)).await;
 
@@ -859,7 +860,7 @@ mod tests {
             PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
 
         let params = SearchCodebaseParams {
-            query: String::default(),
+            query: "test".to_owned(),
             filter_mode: FilterMode::All,
             ..Default::default()
         };

@@ -158,6 +158,14 @@ pub(crate) fn resolve_text_edit(
 
     // Build line starts and compute search window
     let line_starts = build_line_starts(source_str);
+    let total_lines = line_starts.len();
+    if context_line as usize > total_lines {
+        tracing::warn!(
+            context_line,
+            total_lines,
+            "context_line exceeds file length; search window will be truncated"
+        );
+    }
     let (window_byte_start, window_byte_end) =
         compute_search_window(&line_starts, context_line, source_str.len());
     let window_text = &source_str[window_byte_start..window_byte_end];

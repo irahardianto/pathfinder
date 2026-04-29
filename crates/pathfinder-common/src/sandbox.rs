@@ -72,7 +72,10 @@ impl Sandbox {
     /// [`Sandbox::with_user_rules`] instead.
     #[must_use]
     pub fn new(workspace_root: &Path, config: &SandboxConfig) -> Self {
-        // Load .pathfinderignore if it exists
+        // `.exists()` is a synchronous stat(2) syscall. This is intentional:
+        // `Sandbox::new` is called once at server startup, not on the hot path.
+        // If Pathfinder is ever embedded in a multi-tenant async host, this
+        // should move into `tokio::task::spawn_blocking`.
         let ignore_path = workspace_root.join(".pathfinderignore");
         let user_ignore = if ignore_path.exists() {
             let mut builder = GitignoreBuilder::new(workspace_root);

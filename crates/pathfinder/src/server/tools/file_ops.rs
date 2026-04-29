@@ -1,7 +1,7 @@
 //! File operation tools — `create_file`, `delete_file`, `read_file`, `write_file`.
 
 use crate::server::helpers::{
-    check_occ, io_error_data, language_from_path, pathfinder_to_error_data,
+    check_occ, io_error_data, language_from_path, pathfinder_to_error_data, serialize_metadata,
 };
 use crate::server::types::{
     CreateFileParams, CreateFileResponse, DeleteFileParams, DeleteFileResponse, ReadFileParams,
@@ -326,6 +326,16 @@ impl PathfinderServer {
                 tracing::warn!(tool = "read_file", error = %err, "file not found");
                 return Err(pathfinder_to_error_data(&err));
             }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                tracing::warn!(
+                    tool = "read_file",
+                    path = %relative_path.display(),
+                    "file contains invalid UTF-8 (likely binary)"
+                );
+                return Err(io_error_data(
+                    "file appears to be binary (not valid UTF-8). read_file only supports text files."
+                ));
+            }
             Err(e) => {
                 tracing::warn!(tool = "read_file", error = %e, "failed to read file");
                 return Err(io_error_data(format!("failed to read file: {e}")));
@@ -374,7 +384,7 @@ impl PathfinderServer {
         let full_content = format!("{}\n---\nversion_hash: {}", content, version_hash.short());
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(full_content)]);
-        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
 
@@ -506,7 +516,7 @@ impl PathfinderServer {
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
             "File successfully written",
         )]);
-        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
 }

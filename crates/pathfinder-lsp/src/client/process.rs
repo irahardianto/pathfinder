@@ -55,9 +55,6 @@ pub(super) struct ManagedProcess {
     pub(super) child: Child,
     /// Exclusive write handle to the LSP's stdin.
     pub(super) stdin: Mutex<tokio::io::BufWriter<ChildStdin>>,
-    /// The language this process serves.
-    #[allow(dead_code)] // Kept for debugging/logging; not yet used in dispatch
-    pub(super) language_id: String,
     /// Capabilities negotiated during `initialize`.
     pub(super) capabilities: DetectedCapabilities,
     /// Last time this process was used (for idle-timeout tracking).
@@ -139,7 +136,6 @@ pub(super) async fn spawn_and_initialize(
     let process = ManagedProcess {
         child,
         stdin: Mutex::new(writer),
-        language_id: language_id.to_owned(),
         capabilities,
         last_used: Instant::now(),
         in_flight: Arc::new(AtomicU32::new(0)),

@@ -192,6 +192,24 @@ pub(crate) fn require_symbol_target(
         ));
     }
     Ok(())
+} // ── Serialization Helpers ───────────────────────────────────────────
+
+/// Serialize metadata to JSON, logging a warning on failure instead of
+/// silently degrading to `Value::Null` via `unwrap_or_default()`.
+///
+/// Returns `Some(Value)` on success, `None` on failure (with a warning log).
+pub(crate) fn serialize_metadata<T: serde::Serialize>(metadata: &T) -> Option<serde_json::Value> {
+    match serde_json::to_value(metadata) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                type_name = std::any::type_name::<T>(),
+                "structured metadata serialization failed; agent will receive null"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -411,5 +429,14 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert_eq!(code_str, "FILE_NOT_FOUND");
+    }
+
+    #[test]
+    fn test_serialize_metadata_success() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert("key", "value");
+        let result = super::serialize_metadata(&map);
+        assert!(result.is_some());
     }
 }

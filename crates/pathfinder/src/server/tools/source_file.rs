@@ -1,6 +1,8 @@
 //! `read_source_file` tool — AST-based full file symbol extraction via Tree-sitter.
 
-use crate::server::helpers::{pathfinder_to_error_data, treesitter_error_to_error_data};
+use crate::server::helpers::{
+    pathfinder_to_error_data, serialize_metadata, treesitter_error_to_error_data,
+};
 use crate::server::types::{ReadSourceFileMetadata, ReadSourceFileParams, SourceSymbol};
 use crate::server::PathfinderServer;
 
@@ -199,8 +201,7 @@ impl PathfinderServer {
                 }
 
                 let mut result = CallToolResult::success(contents);
-                result.structured_content =
-                    Some(serde_json::to_value(&metadata).unwrap_or_default());
+                result.structured_content = serialize_metadata(&metadata);
 
                 Ok(result)
             }

@@ -1,7 +1,7 @@
 //! `read_symbol_scope` tool — AST-based symbol extraction via Tree-sitter.
 
 use crate::server::helpers::{
-    parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+    parse_semantic_path, pathfinder_to_error_data, require_symbol_target, serialize_metadata,
 };
 use crate::server::types::ReadSymbolScopeParams;
 use crate::server::PathfinderServer;
@@ -60,8 +60,7 @@ impl PathfinderServer {
                 };
 
                 let mut result = CallToolResult::success(vec![Content::text(scope.content)]);
-                result.structured_content =
-                    Some(serde_json::to_value(&metadata).unwrap_or_default());
+                result.structured_content = serialize_metadata(&metadata);
 
                 Ok(result)
             }

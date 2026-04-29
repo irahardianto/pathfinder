@@ -58,6 +58,12 @@ impl PathfinderServer {
             "search_codebase: start"
         );
 
+        if params.query.trim().is_empty() {
+            return Err(crate::server::helpers::io_error_data(
+                "query must not be empty",
+            ));
+        }
+
         let search_params = SearchParams {
             workspace_root: self.workspace_root.path().to_path_buf(),
             query: params.query.clone(),
@@ -155,6 +161,7 @@ impl PathfinderServer {
                 Ok(Json(SearchCodebaseResponse {
                     matches: flat_matches,
                     total_matches: result.total_matches,
+                    returned_count,
                     truncated: result.truncated,
                     file_groups,
                     degraded,

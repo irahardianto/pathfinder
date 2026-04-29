@@ -361,9 +361,19 @@ pub struct ReplaceBatchParams {
 pub struct SearchCodebaseResponse {
     /// List of search matches.
     pub matches: Vec<pathfinder_search::SearchMatch>,
-    /// Total number of matches found.
+    /// Raw match count from ripgrep **before** `filter_mode` filtering, **after** ripgrep truncation.
+    ///
+    /// When `truncated = true`, this equals `max_results` and ripgrep stopped searching early.
+    /// When `filter_mode` is `"comments_only"` or `"code_only"`, matches that do not
+    /// pass the filter are excluded from `matches` but still counted here.
+    /// Compare with `returned_count` to understand how many matches were filtered.
     pub total_matches: usize,
-    /// Indicates if the match list was truncated.
+    /// Number of matches actually returned in this response (after `filter_mode` filtering).
+    ///
+    /// `returned_count == matches.len()`. Provided as a convenience field so agents
+    /// do not need to count `matches` themselves.
+    pub returned_count: usize,
+    /// Indicates if the match list was truncated by `max_results`.
     pub truncated: bool,
     /// Grouped output — populated when `group_by_file: true`.
     ///

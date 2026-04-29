@@ -85,7 +85,10 @@ pub fn strip_outer_braces(input: &str) -> &str {
     // The outer `{` must match the final `}`
     match close_pos {
         Some(pos) if pos == trimmed.len() - 1 => {
-            // Strip outer braces and trim whitespace adjacent to them
+            // Safety: slicing at byte positions 1 and `len-1` is correct here because
+            // `{` and `}` are both single-byte ASCII characters. The slice
+            // cannot fall on a multi-byte boundary since we're only indexing into
+            // positions adjacent to these ASCII delimiters.
             &trimmed[1..trimmed.len() - 1]
         }
         _ => input,

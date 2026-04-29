@@ -12,7 +12,7 @@
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{
-    parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+    parse_semantic_path, pathfinder_to_error_data, require_symbol_target, serialize_metadata,
     treesitter_error_to_error_data,
 };
 use crate::server::types::{
@@ -465,7 +465,7 @@ impl PathfinderServer {
             format!("{dep_count} dependencies loaded\n\n{}", scope.content)
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
-        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
 
@@ -572,10 +572,14 @@ impl PathfinderServer {
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
+        // Cap max_depth to prevent unbounded BFS traversal (PRD §5.1 maximum).
+        // Also floor at 1 to guarantee at least one level of traversal.
+        let max_depth = params.max_depth.clamp(1, 5);
+
         tracing::info!(
             tool = "analyze_impact",
             semantic_path = %params.semantic_path,
-            max_depth = params.max_depth,
+            max_depth = max_depth,
             "analyze_impact: start"
         );
 
@@ -651,7 +655,7 @@ impl PathfinderServer {
                     .bfs_call_hierarchy(
                         initial_item,
                         CallDirection::Incoming,
-                        params.max_depth,
+                        max_depth,
                         &mut files_referenced,
                     )
                     .await;
@@ -663,7 +667,7 @@ impl PathfinderServer {
                     .bfs_call_hierarchy(
                         initial_item,
                         CallDirection::Outgoing,
-                        params.max_depth,
+                        max_depth,
                         &mut files_referenced,
                     )
                     .await;
@@ -845,7 +849,7 @@ impl PathfinderServer {
 
         let text = text_parts.join("\n");
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
-        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
 }

@@ -1,6 +1,6 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
-use crate::server::helpers::pathfinder_to_error_data;
+use crate::server::helpers::{pathfinder_to_error_data, serialize_metadata};
 use crate::server::types::{GetRepoMapParams, LspCapabilities, RepoCapabilities};
 use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, ErrorData};
@@ -52,8 +52,10 @@ impl PathfinderServer {
             pathfinder_common::types::Visibility::Public => "public",
             pathfinder_common::types::Visibility::All => "all",
         };
+        // Clamp to reasonable bounds: minimum 500 (usable output), max 100k (memory safety)
+        let max_tokens = params.max_tokens.clamp(500, 100_000);
         let config = pathfinder_treesitter::repo_map::SkeletonConfig::new(
-            params.max_tokens,
+            max_tokens,
             params.depth,
             visibility_str,
             params.max_tokens_per_file,
@@ -108,7 +110,7 @@ impl PathfinderServer {
         };
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(result.skeleton)]);
-        res.structured_content = Some(serde_json::to_value(metadata).unwrap_or_default());
+        res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
 }

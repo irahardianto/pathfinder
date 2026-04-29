@@ -272,11 +272,24 @@ impl WorkspaceRoot {
 
     /// Resolve a relative path against the workspace root.
     ///
+    /// # Path traversal protection
+    ///
+    /// This function returns a joined `PathBuf` even if the input contains
+    /// `..` components. The caller's Sandbox is the primary security boundary;
+    /// it rejects traversal before any I/O. This method normalizes the path but
+    /// does not perform access control.
+    ///
+    /// # Symlink behavior
+    ///
+    /// This method does not resolve symlinks. Symlinks are handled at the
+    /// Sandbox layer for security enforcement. If you need the canonical path,
+    /// use `WorkspaceRoot::path()` and canonicalize manually with appropriate
+    /// error handling.
+    ///
     /// # Security
     /// This function performs a defense-in-depth traversal check: if the
     /// relative path contains `..` components, a warning is logged.
-    /// The caller's Sandbox is the primary security boundary; this guard
-    /// ensures internal callers that bypass the Sandbox are also warned.
+    /// This guard ensures internal callers that bypass the Sandbox are warned.
     #[must_use]
     pub fn resolve(&self, relative: &Path) -> PathBuf {
         let is_absolute = relative.is_absolute();

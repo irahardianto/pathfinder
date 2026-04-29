@@ -38,8 +38,8 @@ pub(crate) fn diff_diagnostics(pre: &[LspDiagnostic], post: &[LspDiagnostic]) ->
     let pre_counts = build_counts(pre);
     let post_counts = build_counts(post);
 
-    let introduced = collect_introduced(post, &pre_counts);
-    let resolved = collect_resolved(pre, &post_counts);
+    let introduced = collect_introduced(post, &pre_counts, &post_counts);
+    let resolved = collect_resolved(pre, &pre_counts, &post_counts);
 
     DiagnosticDiff {
         introduced,
@@ -75,23 +75,19 @@ fn build_counts(diags: &[LspDiagnostic]) -> HashMap<DiagKey, usize> {
 /// Collect diagnostics in `post` that appear **more often** than in `pre`.
 ///
 /// Each element in the returned vec is a representative `LspDiagnostic` for
-/// one excess occurrence.
+/// one excess occurrence. Both count maps are passed in from the caller to
+/// avoid redundant `HashMap` construction.
 fn collect_introduced(
     post: &[LspDiagnostic],
     pre_counts: &HashMap<DiagKey, usize>,
+    post_counts: &HashMap<DiagKey, usize>,
 ) -> Vec<LspDiagnostic> {
-    // Build how many of each key appear post but not pre
-    let mut post_counts_local: HashMap<DiagKey, usize> = HashMap::new();
-    for d in post {
-        *post_counts_local.entry(diag_key(d)).or_insert(0) += 1;
-    }
-
     let mut result = Vec::new();
     let mut emitted: HashMap<DiagKey, usize> = HashMap::new();
     for d in post {
         let key = diag_key(d);
         let pre = *pre_counts.get(&key).unwrap_or(&0);
-        let post_count = *post_counts_local.get(&key).unwrap_or(&0);
+        let post_count = *post_counts.get(&key).unwrap_or(&0);
         let excess = post_count.saturating_sub(pre);
         let done = *emitted.get(&key).unwrap_or(&0);
         if done < excess {
@@ -103,21 +99,20 @@ fn collect_introduced(
 }
 
 /// Collect diagnostics in `pre` that appear **more often** than in `post`.
+///
+/// Both count maps are passed in from the caller to avoid redundant `HashMap`
+/// construction.
 fn collect_resolved(
     pre: &[LspDiagnostic],
+    pre_counts: &HashMap<DiagKey, usize>,
     post_counts: &HashMap<DiagKey, usize>,
 ) -> Vec<LspDiagnostic> {
-    let mut pre_counts_local: HashMap<DiagKey, usize> = HashMap::new();
-    for d in pre {
-        *pre_counts_local.entry(diag_key(d)).or_insert(0) += 1;
-    }
-
     let mut result = Vec::new();
     let mut emitted: HashMap<DiagKey, usize> = HashMap::new();
     for d in pre {
         let key = diag_key(d);
         let post = *post_counts.get(&key).unwrap_or(&0);
-        let pre_count = *pre_counts_local.get(&key).unwrap_or(&0);
+        let pre_count = *pre_counts.get(&key).unwrap_or(&0);
         let excess = pre_count.saturating_sub(post);
         let done = *emitted.get(&key).unwrap_or(&0);
         if done < excess {
