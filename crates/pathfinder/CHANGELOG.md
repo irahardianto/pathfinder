@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9](https://github.com/irahardianto/pathfinder/compare/v0.1.8...v0.1.9) - 2026-04-29
+
+### Fixed
+
+- *(coverage)* exclude test-mock-lsp from coverage analysis and fix DeepSource issues
+
+### Other
+
+- *(coverage)* add targeted unit tests to eliminate TCV-001 gaps
+- *(integration)* establish mock LSP test harness and fix SLSA provenance
+- *(cache)* annotate lock-poison arms as structurally untestable in safe Rust
+
 ## [0.1.8](https://github.com/irahardianto/pathfinder/compare/v0.1.7...v0.1.8) - 2026-04-28
 
 ### Fixed
