@@ -1127,7 +1127,9 @@ fn parse_workspace_diagnostic_response(
         // Convert URI to relative file path using workspace_root
         let file_path = match Url::parse(uri_str) {
             Ok(url) => match url.to_file_path() {
-                Ok(path) => path.strip_prefix(workspace_root).map_or_else(|_| path.clone(), std::path::Path::to_path_buf),
+                Ok(path) => path
+                    .strip_prefix(workspace_root)
+                    .map_or_else(|_| path.clone(), std::path::Path::to_path_buf),
                 Err(()) => continue,
             },
             Err(_) => continue,

@@ -320,6 +320,9 @@ async fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn apply_linux_process_hardening(cmd: &mut tokio::process::Command) {
+    // SAFETY: pre_exec closure runs in the child process after fork but before exec.
+    // The closure only calls a single libc function (prctl) which is async-signal-safe.
+    // All resources used are either primitive types or libc constants.
     unsafe {
         cmd.pre_exec(|| {
             let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);

@@ -782,35 +782,35 @@ pub const fn default_max_results() -> u32 {
 pub const fn default_context_lines() -> u32 {
     2
 }
-#[must_use] 
+#[must_use]
 pub fn default_repo_map_path() -> String {
     ".".to_owned()
 }
-#[must_use] 
+#[must_use]
 pub const fn default_max_tokens() -> u32 {
     16_000
 }
-#[must_use] 
+#[must_use]
 pub const fn default_max_tokens_per_file() -> u32 {
     2_000
 }
-#[must_use] 
+#[must_use]
 pub const fn default_depth() -> u32 {
     5
 }
-#[must_use] 
+#[must_use]
 pub const fn default_max_depth() -> u32 {
     2
 }
-#[must_use] 
+#[must_use]
 pub const fn default_start_line() -> u32 {
     1
 }
-#[must_use] 
+#[must_use]
 pub const fn default_max_lines() -> u32 {
     500
 }
-#[must_use] 
+#[must_use]
 pub fn default_detail_level() -> String {
     "compact".to_string()
 }

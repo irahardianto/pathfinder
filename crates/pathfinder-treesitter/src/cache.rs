@@ -188,19 +188,22 @@ impl AstCache {
                 // Re-acquire the lock to insert/update.
                 // COVERAGE NOTE: lock-poison arm — see the identical note above.
                 // Structurally untestable in safe Rust; intentionally left uncovered.
-                self.entries.lock().map_err(|_| SurgeonError::ParseError {
-                    path: path.to_path_buf(),
-                    reason: "Lock poisoned".into(),
-                })?.put(
-                    path.to_path_buf(),
-                    CacheEntry {
-                        tree: tree.clone(),
-                        source: content_arc.clone(),
-                        content_hash: current_hash,
-                        lang,
-                        mtime: current_mtime,
-                    },
-                );
+                self.entries
+                    .lock()
+                    .map_err(|_| SurgeonError::ParseError {
+                        path: path.to_path_buf(),
+                        reason: "Lock poisoned".into(),
+                    })?
+                    .put(
+                        path.to_path_buf(),
+                        CacheEntry {
+                            tree: tree.clone(),
+                            source: content_arc.clone(),
+                            content_hash: current_hash,
+                            lang,
+                            mtime: current_mtime,
+                        },
+                    );
 
                 Ok::<_, SurgeonError>((tree, content_arc.clone()))
             })
@@ -316,17 +319,20 @@ impl AstCache {
 
                 // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
                 // Structurally untestable in safe Rust; intentionally left uncovered.
-                self.vue_entries.lock().map_err(|_| SurgeonError::ParseError {
-                    path: path.to_path_buf(),
-                    reason: "Vue cache lock poisoned".into(),
-                })?.put(
-                    path.to_path_buf(),
-                    MultiZoneEntry {
-                        multi: cached_multi,
-                        content_hash: content_hash.clone(),
-                        mtime: current_mtime,
-                    },
-                );
+                self.vue_entries
+                    .lock()
+                    .map_err(|_| SurgeonError::ParseError {
+                        path: path.to_path_buf(),
+                        reason: "Vue cache lock poisoned".into(),
+                    })?
+                    .put(
+                        path.to_path_buf(),
+                        MultiZoneEntry {
+                            multi: cached_multi,
+                            content_hash: content_hash.clone(),
+                            mtime: current_mtime,
+                        },
+                    );
 
                 Ok::<_, SurgeonError>((multi, content_hash))
             })

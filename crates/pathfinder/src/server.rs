@@ -127,13 +127,12 @@ impl PathfinderServer {
     #[allow(clippy::needless_pass_by_value)] // Preserve API compatibility; 20+ call sites in tests
     pub fn with_all_engines(
         workspace_root: WorkspaceRoot,
-        config: PathfinderConfig,
+        _config: PathfinderConfig,
         sandbox: Sandbox,
         scout: Arc<dyn Scout>,
         surgeon: Arc<dyn Surgeon>,
         lawyer: Arc<dyn Lawyer>,
     ) -> Self {
-        let _ = config;
         Self {
             workspace_root: Arc::new(workspace_root),
             sandbox: Arc::new(sandbox),
@@ -164,7 +163,6 @@ impl PathfinderServer {
         name = "get_repo_map",
         description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing. The version_hashes are immediately usable as base_version for edit tools — no additional read required. Two budget knobs control coverage: `max_tokens` is the total token budget (default 16000); `max_tokens_per_file` caps detail per file before collapsing to a stub (default 2000). When `coverage_percent` is low, increase `max_tokens`. When files show `[TRUNCATED DUE TO SIZE]`, increase `max_tokens_per_file`. Use `visibility=all` to include private symbols for auditing. Module scopes (e.g., Rust `mod tests`, `mod types`) are only shown when `visibility` is set to `\"all\"`. They are hidden in public-only maps. The `depth` parameter (default 5) controls directory traversal depth; increase it for deeply-nested repos when `coverage_percent` is low.\n\n**Temporal & extension filters (Epic E6):**\n- `changed_since` — Git ref or duration to show only recently-modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`). Useful for reviewing what changed in a PR or recent session. When git is unavailable the parameter is silently ignored and `degraded: true` is set in the response.\n- `include_extensions` — Only include files with these extensions (e.g., `[\"ts\", \"tsx\"]`). Mutually exclusive with `exclude_extensions`.\n- `exclude_extensions` — Exclude files with these extensions (e.g., `[\"md\", \"json\"]`). Mutually exclusive with `include_extensions`."
     )]
-    #[allow(clippy::unused_self)]
     async fn get_repo_map(
         &self,
         Parameters(params): Parameters<GetRepoMapParams>,
