@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.1.4...pathfinder-mcp-common-v0.1.5) - 2026-04-29
+
+### Other
+
+- *(core)* implement 2026-04-29 patch batch (7 patches)
+- *(coverage)* add targeted unit tests to eliminate TCV-001 gaps
+- *(integration)* establish mock LSP test harness and fix SLSA provenance
+
 ## [0.1.4](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.1.3...pathfinder-mcp-common-v0.1.4) - 2026-04-27
 
 ### Other
