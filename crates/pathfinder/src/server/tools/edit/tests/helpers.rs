@@ -131,7 +131,12 @@ pub(crate) fn make_server(
     make_server_dyn(ws_dir, Arc::new(mock_surgeon))
 }
 
-pub(crate) fn make_body_range(open: usize, close: usize, indent: usize, body_indent: usize) -> BodyRange {
+pub(crate) fn make_body_range(
+    open: usize,
+    close: usize,
+    indent: usize,
+    body_indent: usize,
+) -> BodyRange {
     BodyRange {
         start_byte: open,
         end_byte: close,
