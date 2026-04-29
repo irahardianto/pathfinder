@@ -76,7 +76,13 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
+      # Checkout the PR head commit directly (not the merge commit GitHub creates).
+      # DeepSource associates coverage artifacts by commit SHA; a merge commit
+      # doesn't exist upstream, so the artifact never matches and the
+      # test-coverage check hangs indefinitely.
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
