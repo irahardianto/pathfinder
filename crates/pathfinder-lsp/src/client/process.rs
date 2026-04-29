@@ -93,8 +93,10 @@ pub(super) async fn spawn_and_initialize(
     language_id: &str,
     dispatcher: Arc<RequestDispatcher>,
     init_timeout_secs: Option<u64>,
+    isolate_target_dir: bool,
 ) -> Result<(ManagedProcess, tokio::task::JoinHandle<()>), LspError> {
-    let (child, stdin, stdout) = spawn_lsp_child(command, args, project_root, language_id)?;
+    let (child, stdin, stdout) =
+        spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)?;
     let mut writer = tokio::io::BufWriter::new(stdin);
 
     // Start the reader task BEFORE writing the initialize request.
@@ -154,6 +156,7 @@ fn spawn_lsp_child(
     args: &[String],
     project_root: &Path,
     language_id: &str,
+    isolate_target_dir: bool,
 ) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
     let mut cmd = tokio::process::Command::new(command);
     cmd.args(args)
@@ -162,6 +165,19 @@ fn spawn_lsp_child(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+
+    // When concurrent LSP instances are detected for Rust, isolate the build
+    // artifacts to avoid cargo cache lock contention. Two rust-analyzer processes
+    // sharing the same target/ directory will fight over .cargo-lock and
+    // build cache, causing one or both to stall indefinitely during indexing.
+    if isolate_target_dir && language_id == "rust" {
+        let isolated_target = project_root.join("target").join("pathfinder-lsp");
+        cmd.env("CARGO_TARGET_DIR", isolated_target);
+        tracing::info!(
+            language = language_id,
+            "LSP: set CARGO_TARGET_DIR to isolated target to avoid cache contention"
+        );
+    }
 
     // prctl(PR_SET_PDEATHSIG) is Linux-only — not available on macOS/BSD even
     // though they are also "unix". Gate strictly on linux to avoid link errors
@@ -220,7 +236,12 @@ async fn build_initialize_request(id: u64, project_root: &Path) -> Result<Value,
                     "definition": { "dynamicRegistration": false, "linkSupport": false },
                     "publishDiagnostics": { "relatedInformation": false }
                 },
-                "workspace": { "workspaceFolders": true, "diagnostics": {} }
+                "workspace": { "workspaceFolders": true, "diagnostics": {} },
+                // Opt into work done progress so LSPs like rust-analyzer send
+                // $/progress notifications during initial workspace indexing.
+                // Without this, the progress_watcher_task never sees WorkDoneProgressEnd
+                // and indexing_complete stays false forever.
+                "window": { "workDoneProgress": true }
             }
         }),
     ))
@@ -414,6 +435,12 @@ mod process_tests {
         assert!(caps["workspace"]["workspaceFolders"]
             .as_bool()
             .unwrap_or(false));
+        assert!(
+            caps["window"]["workDoneProgress"]
+                .as_bool()
+                .unwrap_or(false),
+            "workDoneProgress must be opted into for progress tracking"
+        );
     }
 
     #[tokio::test]

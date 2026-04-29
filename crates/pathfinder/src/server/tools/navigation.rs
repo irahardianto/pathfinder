@@ -185,6 +185,22 @@ impl PathfinderServer {
             .map_err(treesitter_error_to_error_data)?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
+        // Open the file in the LSP so it can serve navigation queries.
+        // rust-analyzer requires files to be in its document buffer to resolve
+        // definitions. Without this, it returns null for all navigation.
+        let file_content =
+            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
+                .await
+                .unwrap_or_default();
+        let _did_open_result = self
+            .lawyer
+            .did_open(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                &file_content,
+            )
+            .await;
+
         // Query LSP for the definition location at the symbol's start line
         let lsp_start = std::time::Instant::now();
         let lsp_result = self
@@ -198,6 +214,12 @@ impl PathfinderServer {
             )
             .await;
         let lsp_ms = lsp_start.elapsed().as_millis();
+
+        // Close the file in the LSP to prevent memory leaks.
+        let _did_close_result = self
+            .lawyer
+            .did_close(self.workspace_root.path(), &semantic_path.file_path)
+            .await;
 
         let duration_ms = start.elapsed().as_millis();
 
@@ -224,6 +246,43 @@ impl PathfinderServer {
             }
             Ok(None) => {
                 // Symbol has no definition (e.g., built-in, external) or LSP is still warming up.
+                //
+                // Retry once after a brief wait: if the LSP just finished indexing
+                // between our did_open and the query, a second attempt often succeeds.
+                // This is the single most impactful fix for warmup-period reliability.
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                let retry_lsp_result = self
+                    .lawyer
+                    .goto_definition(
+                        self.workspace_root.path(),
+                        &semantic_path.file_path,
+                        u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
+                        1,
+                    )
+                    .await;
+
+                if let Ok(Some(def)) = retry_lsp_result {
+                    tracing::info!(
+                        tool = "get_definition",
+                        file = %def.file,
+                        definition_line = def.line,
+                        tree_sitter_ms,
+                        lsp_ms,
+                        duration_ms = start.elapsed().as_millis(),
+                        engines_used = ?["tree-sitter", "lsp"],
+                        "get_definition: complete (succeeded on retry after warmup wait)"
+                    );
+                    return Ok(Json(GetDefinitionResponse {
+                        file: def.file,
+                        line: def.line,
+                        column: def.column,
+                        preview: def.preview,
+                        degraded: false,
+                        degraded_reason: None,
+                    }));
+                }
+
                 tracing::info!(
                     tool = "get_definition",
                     semantic_path = %params.semantic_path,
@@ -328,19 +387,50 @@ impl PathfinderServer {
     }
 
     /// Grep-based fallback for definition resolution when LSP is unavailable or warming up.
+    ///
+    /// Uses a multi-strategy approach:
+    /// 1. Search the expected file first (if known from the semantic path)
+    /// 2. Search for struct-qualified patterns (e.g., `impl Struct` + `fn method`)
+    /// 3. Fall back to a global search with scoring by file proximity
     async fn fallback_definition_grep(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
     ) -> Option<GetDefinitionResponse> {
-        let symbol_name = semantic_path
-            .symbol_chain
-            .as_ref()
-            .and_then(|c| c.segments.last())
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
+        let symbol_chain = semantic_path.symbol_chain.as_ref()?;
+        let symbol_name = symbol_chain.segments.last()?.name.clone();
+        let expected_file = &semantic_path.file_path;
 
-        let pattern =
-            format!(r"(?:fn|def|func|class|struct|type|interface|const|let|var)\s+{symbol_name}");
+        // Strategy 1: Search the expected file first (highest confidence)
+        if let Some(result) = self
+            .grep_definition_in_file(symbol_name.clone(), expected_file.clone())
+            .await
+        {
+            return Some(result);
+        }
+
+        // Strategy 2: For method lookups (impl Struct), search for the impl block
+        if symbol_chain.segments.len() >= 2 {
+            let parent_name = symbol_chain.segments[symbol_chain.segments.len() - 2]
+                .name
+                .clone();
+            if let Some(result) = self.grep_impl_method(&parent_name, &symbol_name).await {
+                return Some(result);
+            }
+        }
+
+        // Strategy 3: Global search with file-proximity scoring
+        self.grep_definition_global(symbol_name).await
+    }
+
+    /// Search for a definition within a specific file.
+    async fn grep_definition_in_file(
+        &self,
+        symbol_name: String,
+        file_path: std::path::PathBuf,
+    ) -> Option<GetDefinitionResponse> {
+        let pattern = format!(
+            r"(?:fn|def|func|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
+        );
 
         let search_result = self
             .scout
@@ -349,7 +439,7 @@ impl PathfinderServer {
                 query: pattern,
                 is_regex: true,
                 max_results: 5,
-                path_glob: "**/*".to_owned(),
+                path_glob: file_path.to_string_lossy().to_string(),
                 exclude_glob: String::default(),
                 context_lines: 0,
             })
@@ -365,7 +455,108 @@ impl PathfinderServer {
                     preview: m.content.clone(),
                     degraded: true,
                     degraded_reason: Some(
-                        "grep_fallback: result from Ripgrep pattern search — \
+                        "grep_fallback_file_scoped: result from file-scoped Ripgrep search. \
+                         Verify with read_source_file."
+                            .to_owned(),
+                    ),
+                });
+            }
+        }
+        None
+    }
+
+    /// Search for a method within an impl block (e.g., `impl Sandbox` containing `fn check`).
+    async fn grep_impl_method(
+        &self,
+        parent_name: &str,
+        method_name: &str,
+    ) -> Option<GetDefinitionResponse> {
+        // First find files containing the impl block
+        let impl_pattern = format!(r"impl\s+(?:<[^>]+>\s+)?{parent_name}\\b");
+        let search_result = self
+            .scout
+            .search(&pathfinder_search::SearchParams {
+                workspace_root: self.workspace_root.path().to_path_buf(),
+                query: impl_pattern,
+                is_regex: true,
+                max_results: 10,
+                path_glob: "**/*.rs".to_owned(),
+                exclude_glob: String::default(),
+                context_lines: 0,
+            })
+            .await;
+
+        if let Ok(result) = search_result {
+            for m in &result.matches {
+                // Now search within this specific file for the method
+                let method_pattern = format!(r"fn\s+{method_name}\\b");
+                let file_search = self
+                    .scout
+                    .search(&pathfinder_search::SearchParams {
+                        workspace_root: self.workspace_root.path().to_path_buf(),
+                        query: method_pattern,
+                        is_regex: true,
+                        max_results: 5,
+                        path_glob: m.file.clone(),
+                        exclude_glob: String::default(),
+                        context_lines: 0,
+                    })
+                    .await;
+
+                if let Ok(file_result) = file_search {
+                    if !file_result.matches.is_empty() {
+                        let hit = &file_result.matches[0];
+                        return Some(GetDefinitionResponse {
+                            file: hit.file.clone(),
+                            line: u32::try_from(hit.line).unwrap_or(u32::MAX),
+                            column: u32::try_from(hit.column).unwrap_or(1),
+                            preview: hit.content.clone(),
+                            degraded: true,
+                            degraded_reason: Some(
+                                "grep_fallback_impl_scoped: result from impl-scoped Ripgrep search. \
+                                 Verify with read_source_file."
+                                    .to_owned(),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Global search for a definition when file-scoped and impl-scoped searches fail.
+    /// Avoids matching in test files and mock implementations.
+    async fn grep_definition_global(&self, symbol_name: String) -> Option<GetDefinitionResponse> {
+        let pattern = format!(
+            r"(?:fn|def|func|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
+        );
+
+        let search_result = self
+            .scout
+            .search(&pathfinder_search::SearchParams {
+                workspace_root: self.workspace_root.path().to_path_buf(),
+                query: pattern,
+                is_regex: true,
+                max_results: 10,
+                path_glob: "**/*".to_owned(),
+                // Exclude test files and mock implementations to prefer real definitions
+                exclude_glob: "**/{test,tests,mock}*/**".to_owned(),
+                context_lines: 0,
+            })
+            .await;
+
+        if let Ok(result) = search_result {
+            if !result.matches.is_empty() {
+                let m = &result.matches[0];
+                return Some(GetDefinitionResponse {
+                    file: m.file.clone(),
+                    line: u32::try_from(m.line).unwrap_or(u32::MAX),
+                    column: u32::try_from(m.column).unwrap_or(1),
+                    preview: m.content.clone(),
+                    degraded: true,
+                    degraded_reason: Some(
+                        "grep_fallback_global: result from global Ripgrep search — \
                          may not be the canonical definition. Verify with read_source_file."
                             .to_owned(),
                     ),
@@ -417,6 +608,20 @@ impl PathfinderServer {
             .map_err(treesitter_error_to_error_data)?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
+        // Open the file in the LSP so it can serve call hierarchy queries.
+        let file_content =
+            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
+                .await
+                .unwrap_or_default();
+        let _did_open_result = self
+            .lawyer
+            .did_open(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                &file_content,
+            )
+            .await;
+
         let lsp_start = std::time::Instant::now();
 
         let LspResolution {
@@ -426,6 +631,12 @@ impl PathfinderServer {
             engines,
         } = self
             .resolve_lsp_dependencies(&semantic_path, scope.start_line)
+            .await;
+
+        // Close the file in the LSP to prevent memory leaks.
+        let _did_close_result = self
+            .lawyer
+            .did_close(self.workspace_root.path(), &semantic_path.file_path)
             .await;
 
         let lsp_ms = lsp_start.elapsed().as_millis();
@@ -619,6 +830,20 @@ impl PathfinderServer {
         };
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
+        // Open the file in the LSP so it can serve call hierarchy queries.
+        let file_content =
+            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
+                .await
+                .unwrap_or_default();
+        let _did_open_result = self
+            .lawyer
+            .did_open(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                &file_content,
+            )
+            .await;
+
         let lsp_start = std::time::Instant::now();
         // Use Option<Vec> to distinguish "unknown" (LSP unavailable) from "verified empty" (LSP confirmed zero).
         // None = degraded (LSP was down — callers are unknown, do NOT treat as zero)
@@ -783,6 +1008,12 @@ impl PathfinderServer {
                 );
             }
         }
+
+        // Close the file in the LSP to prevent memory leaks.
+        let _did_close_result = self
+            .lawyer
+            .did_close(self.workspace_root.path(), &semantic_path.file_path)
+            .await;
 
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();

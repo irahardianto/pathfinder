@@ -378,6 +378,9 @@ impl LspClient {
             "LSP: spawning process"
         );
 
+        // Warn about concurrent instances (e.g., VS Code's RA)
+        let isolate_target_dir = self.detect_concurrent_lsp(&language_id, &descriptor.command);
+
         let spawn_result = spawn_and_initialize(
             &descriptor.command,
             &descriptor.args,
@@ -385,6 +388,7 @@ impl LspClient {
             &language_id,
             Arc::clone(&self.dispatcher),
             descriptor.init_timeout_secs,
+            isolate_target_dir,
         )
         .await;
 
@@ -461,6 +465,239 @@ impl LspClient {
         Ok(())
     }
 
+    /// Probe whether the LSP for a language has finished indexing.
+    ///
+    /// Sends a `textDocument/definition` request for a well-known position
+    /// in the workspace. If the LSP returns `Ok(Some(_))`, it has indexed
+    /// enough to serve navigation requests. Returns `Ok(true)` if ready,
+    /// `Ok(false)` if still warming up (Ok(None) response), and `Err` if
+    /// the LSP is unavailable.
+    #[allow(dead_code)] // Utility for future warmup probing / agent diagnostics
+    #[allow(clippy::too_many_lines)] // TODO: refactor this function to be smaller
+    async fn lsp_ready_probe(&self, language_id: &str) -> Result<bool, LspError> {
+        // Find a .rs file to probe with
+        let descriptor = self
+            .descriptors
+            .iter()
+            .find(|d| d.language_id == language_id)
+            .ok_or(LspError::NoLspAvailable)?;
+
+        // Try to find any source file in the workspace for the probe
+        let probe_file = self.find_probe_file(&descriptor.root, language_id).await;
+
+        let Some((file_path, content)) = probe_file else {
+            // No source file found — can't probe, assume not ready
+            tracing::debug!(
+                language = language_id,
+                "lsp_ready_probe: no source file found for probe"
+            );
+            return Ok(false);
+        };
+
+        // Open the file first so RA can serve navigation
+        let workspace_root = descriptor.root.clone();
+        let _relative = file_path
+            .strip_prefix(&workspace_root)
+            .unwrap_or(&file_path);
+
+        if let Err(e) = self
+            .notify(
+                language_id,
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": Url::from_file_path(&file_path)
+                            .map_err(|()| LspError::Protocol("uri".into()))?
+                            .as_str(),
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": content
+                    }
+                }),
+            )
+            .await
+        {
+            tracing::debug!(language = language_id, error = %e, "probe did_open failed");
+            return Ok(false);
+        }
+
+        // Find a line with a definition keyword to probe
+        let probe_line = content
+            .lines()
+            .enumerate()
+            .find(|(_, line)| {
+                let trimmed = line.trim();
+                trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("struct ")
+                    || trimmed.starts_with("pub struct ")
+                    || trimmed.starts_with("async fn ")
+                    || trimmed.starts_with("pub async fn ")
+            })
+            .map_or(0, |(i, _)| i);
+
+        let file_uri =
+            Url::from_file_path(&file_path).map_err(|()| LspError::Protocol("uri".into()))?;
+
+        let result = self
+            .request(
+                language_id,
+                "textDocument/definition",
+                json!({
+                    "textDocument": { "uri": file_uri.as_str() },
+                    "position": {
+                        "line": probe_line,
+                        "character": 0
+                    }
+                }),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        // Close the file to free LSP memory
+        let _ = self
+            .notify(
+                language_id,
+                "textDocument/didClose",
+                json!({
+                    "textDocument": {
+                        "uri": file_uri.as_str()
+                    }
+                }),
+            )
+            .await;
+
+        match result {
+            Ok(response) => {
+                // If the LSP returned a non-null result for goto_definition on a
+                // definition keyword, it has indexed enough to serve navigation.
+                let is_ready = !response.is_null();
+                if is_ready {
+                    tracing::info!(
+                        language = language_id,
+                        "lsp_ready_probe: LSP is ready (definition resolved)"
+                    );
+                } else {
+                    tracing::debug!(
+                        language = language_id,
+                        "lsp_ready_probe: LSP returned null (still warming up)"
+                    );
+                }
+                Ok(is_ready)
+            }
+            Err(e) => {
+                tracing::debug!(
+                    language = language_id,
+                    error = %e,
+                    "lsp_ready_probe: definition request failed"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Find a suitable source file for probing LSP readiness.
+    #[allow(dead_code)] // Utility for future warmup probing / agent diagnostics
+    async fn find_probe_file(
+        &self,
+        workspace_root: &Path,
+        language_id: &str,
+    ) -> Option<(std::path::PathBuf, String)> {
+        let extensions: &[&str] = match language_id {
+            "rust" => &["rs"],
+            "go" => &["go"],
+            "typescript" => &["ts", "tsx"],
+            "python" => &["py"],
+            _ => return None,
+        };
+
+        // Walk up to 50 entries looking for a source file with actual content
+        if let Ok(mut entries) = tokio::fs::read_dir(workspace_root).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|ext| extensions.contains(&ext))
+                {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                        if content.len() > 10 {
+                            return Some((path, content));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check src/ subdirectory if present
+        let src_dir = workspace_root.join("src");
+        if let Ok(mut entries) = tokio::fs::read_dir(&src_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|ext| extensions.contains(&ext))
+                {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                        if content.len() > 10 {
+                            return Some((path, content));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check for concurrent LSP processes for the same language on the same
+    /// workspace. Returns true if concurrent instances detected. Logs a warning
+    /// if found — two RA instances fighting over the same build cache is a known
+    /// cause of indexing stalls.
+    #[allow(clippy::unused_self)] // kept as method for consistency
+    fn detect_concurrent_lsp(&self, language_id: &str, command: &str) -> bool {
+        // Extract the binary name (e.g., "rust-analyzer" from an absolute path)
+        let binary_name = Path::new(command)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(command);
+
+        // Check if there's already a process with this binary name running
+        // that we didn't spawn. We do this by counting how many instances
+        // exist in the system process table.
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                let mut count = 0;
+                for entry in entries.flatten() {
+                    let cmdline_path = entry.path().join("cmdline");
+                    if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                        if cmdline.contains(binary_name) {
+                            count += 1;
+                        }
+                    }
+                }
+                // We count ourselves too, so >1 means another instance exists
+                if count > 1 {
+                    tracing::warn!(
+                        language = language_id,
+                        binary = binary_name,
+                        instances_found = count,
+                        "LSP: detected {} concurrent instances of {binary_name} on this workspace. \
+                         Isolating build artifacts to avoid cache lock contention.",
+                        count
+                    );
+                    return true;
+                }
+            }
+        }
+        let _ = (language_id, binary_name); // suppress unused warnings on non-linux
+        false
+    }
+
     /// Update `last_used` for a language (called after each successful request).
     fn touch(&self, language_id: &str) {
         if let Some(mut entry) = self.processes.get_mut(language_id) {
@@ -494,9 +731,15 @@ impl LspClient {
             };
             // Health check: verify reader task is still alive
             if state.reader_handle.is_finished() {
+                // Proactively remove the stale process entry so the next request
+                // triggers recovery via ensure_process() instead of returning
+                // ConnectionLost forever. The reader_supervisor_task will also
+                // remove it, but there's a race window where requests pile up.
+                drop(entry);
+                self.processes.remove(language_id);
                 tracing::warn!(
                     language = %language_id,
-                    "LSP: reader task not alive, returning ConnectionLost"
+                    "LSP: reader task not alive, removed stale entry for recovery"
                 );
                 return Err(LspError::ConnectionLost);
             }
