@@ -2,9 +2,11 @@
   <img src="banner.jpeg" alt="Pathfinder" width="800" />
   <h2 align="center">🧭 Pathfinder</h2>
 
+  [![CI](https://github.com/irahardianto/pathfinder/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/irahardianto/pathfinder/actions/workflows/ci.yml)
   [![DeepSource](https://app.deepsource.com/gh/irahardianto/pathfinder.svg/?label=code+coverage&show_trend=false&token=P_dCO6CVhJcHRXVQdoRMdPDE)](https://app.deepsource.com/gh/irahardianto/pathfinder/)
   [![CodeQL](https://github.com/irahardianto/pathfinder/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/irahardianto/qurio/actions/workflows/github-code-scanning/codeql)
   [![Dependabot](https://badgen.net/badge/Dependabot/enabled/green?icon=dependabot)](https://dependabot.com/)
+  [![SLSA Provenance](https://github.com/irahardianto/pathfinder/actions/workflows/slsa-provenance.yml/badge.svg)](https://github.com/irahardianto/pathfinder/actions/workflows/slsa-provenance.yml)
 
   <p align="center">
     The Headless IDE — an MCP server that gives AI coding agents<br />

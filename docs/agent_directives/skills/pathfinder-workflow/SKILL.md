@@ -1,6 +1,6 @@
 ---
 name: pathfinder-workflow
-description: Use when exploring a codebase, refactoring code, implementing features, or auditing code quality effectively.
+description: "MANDATORY after pathfinder-first bootstrap. Detailed tool chains for: exploring codebases (get_repo_map, search_codebase, read_with_deep_context), refactoring (analyze_impact, replace_body, validate_only), implementing features (insert_after, create_file), auditing (read_source_file, analyze_impact), and debugging (get_definition, read_with_deep_context). Load AFTER confirming Pathfinder MCP is available via pathfinder-first skill."
 ---
 
 # Pathfinder Workflow Skill
@@ -44,37 +44,36 @@ A **Semantic Path** is the unified addressing scheme for Pathfinder tools.
 
 ### Tool Preference Table
 
-
 > **Canonical source:** The always-on rule `pathfinder-tool-routing.md` is the single source of truth for which tool to use. This table adds the **"Why"** column for deeper understanding but defers to the rule for routing decisions.
 
 | Action | Prefer (Pathfinder) | Instead of (Built-in) | Why |
 |---|---|---|---|
-| Explore project structure | `get_repo_map` | `list_dir` + `view_file` | One call returns full skeleton with semantic paths + version hashes for immediate editing |
-| Search for code patterns | `search_codebase` | `grep_search` | Returns `enclosing_semantic_path` + `version_hash` per match — enables Discovery→Edit chaining |
-| Read a function or class | `read_symbol_scope` | `view_file` | Extracts exactly one symbol — no context waste, returns `version_hash` for OCC |
-| Read entire source file + AST hierarchy | `read_source_file` | `view_file` | Returns full file content + nested symbol tree with semantic paths + version hash. Three detail levels: `compact` (default — source + flat symbol list), `symbols` (tree only, no source), `full` (source + nested AST). **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files |
-| Read function + dependencies | `read_with_deep_context` | Multiple `view_file` calls | Returns target code + signatures of all called functions in one call. **Latency:** first call may be slow (30–120s) due to LSP warm-up; subsequent calls are fast. Check `degraded` in metadata — if `true`, LSP was unavailable and `dependencies` will be empty |
-| Jump to a definition | `get_definition` | `grep_search` (approximation) | LSP-powered, follows imports and re-exports across files |
-| Assess refactoring impact | `analyze_impact` | No equivalent | Maps all incoming callers + outgoing callees with BFS traversal; returns version hashes for all referenced files |
-| Read a config/docs file | `read_file` | `view_file` | Either is fine — roughly equivalent for config files. **Never** call `read_source_file` on config files (YAML, TOML, JSON, Markdown, `.env`, Dockerfile) — it returns `UNSUPPORTED_LANGUAGE` |
-| Edit a function body | `replace_body` | `replace_file_content` | Semantic addressing + auto-indentation + LSP validation before disk write |
-| Edit an entire declaration | `replace_full` | `replace_file_content` | Semantic addressing, includes signature/decorators/doc comments |
-| Batch-edit multiple symbols in one file | `replace_batch` | `multi_replace_file_content` | Atomic single-call with single OCC guard; edits applied back-to-front to avoid offset shifts |
-| Add code before/after a symbol | `insert_before` / `insert_after` | `replace_file_content` | Semantic anchor point + auto-spacing |
-| Delete a function or class | `delete_symbol` | `replace_file_content` (empty) | Handles decorators, doc comments, whitespace cleanup |
+| Explore project structure | `get_repo_map` | `Glob` + `Read` | One call returns full skeleton with semantic paths + version hashes for immediate editing |
+| Search for code patterns | `search_codebase` | `Grep` | Returns `enclosing_semantic_path` + `version_hash` per match — enables Discovery→Edit chaining |
+| Read a function or class | `read_symbol_scope` | `Read` | Extracts exactly one symbol — no context waste, returns `version_hash` for OCC |
+| Read entire source file + AST hierarchy | `read_source_file` | `Read` | Returns full file content + nested symbol tree with semantic paths + version hash. Three detail levels: `compact` (default — source + flat symbol list), `symbols` (tree only, no source), `full` (source + nested AST). **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files |
+| Read function + dependencies | `read_with_deep_context` | Multiple `Read` calls | Returns target code + signatures of all called functions in one call. **Latency:** first call after LSP start may take 5–60s while the server indexes; Pathfinder auto-retries once during warmup. Subsequent calls are fast. Check `degraded` in metadata — if `true`, LSP was unavailable and `dependencies` will be empty or incomplete |
+| Jump to a definition | `get_definition` | `Grep` (approximation) | LSP-powered, follows imports and re-exports across files. Has multi-strategy grep fallback when LSP is unavailable — check `degraded` in response |
+| Assess refactoring impact | `analyze_impact` | No equivalent | Maps all incoming callers + outgoing callees with BFS traversal; returns version hashes for all referenced files. When LSP is warming up, empty results may be unverified — check `degraded` |
+| Read a config/docs file | `read_file` | `Read` | Either is fine — roughly equivalent for config files. **Never** call `read_source_file` on config files (YAML, TOML, JSON, Markdown, `.env`, Dockerfile) — it returns `UNSUPPORTED_LANGUAGE` |
+| Edit a function body | `replace_body` | `Edit` | Semantic addressing + auto-indentation + LSP validation before disk write |
+| Edit an entire declaration | `replace_full` | `Edit` | Semantic addressing, includes signature/decorators/doc comments |
+| Batch-edit multiple symbols in one file | `replace_batch` | Multiple `Edit` calls | Atomic single-call with single OCC guard; edits applied back-to-front to avoid offset shifts |
+| Add code before/after a symbol | `insert_before` / `insert_after` | `Edit` | Semantic anchor point + auto-spacing |
+| Delete a function or class | `delete_symbol` | `Edit` (replace with empty) | Handles decorators, doc comments, whitespace cleanup |
 | Delete a file | `delete_file` | No built-in equivalent | OCC-protected — requires `base_version` to prevent deleting a file modified after you last read it |
 | Pre-check a risky edit | `validate_only` | No equivalent | Dry-run with LSP diagnostics, zero disk side-effects |
-| Create a new file | `create_file` | `write_to_file` | Returns `version_hash` for subsequent OCC-protected edits |
-| Edit a config file (.env, Dockerfile, YAML) | `write_file` | `replace_file_content` | OCC protection; supports search-and-replace mode for surgical edits |
+| Create a new file | `create_file` | `Write` | Returns `version_hash` for subsequent OCC-protected edits |
+| Edit a config file (.env, Dockerfile, YAML) | `write_file` | `Edit` | OCC protection; supports search-and-replace mode for surgical edits |
 
 ### Keep Using Built-in Tools For
 
 These tasks have **no Pathfinder equivalent** — always use built-in tools:
 
-- **Listing directory contents** → `list_dir`
-- **Running commands** (tests, linters, builds) → `run_command`
-- **Viewing binary files** (images, videos) → `view_file`
-- **Quick one-line fixes where you already know the exact line** → `replace_file_content` is acceptable for trivial edits
+- **Listing directory contents** → `Bash` (with `ls`) or `Glob`
+- **Running commands** (tests, linters, builds) → `Bash`
+- **Viewing binary files** (images, videos) → `Read`
+- **Quick one-line fixes where you already know the exact text** → `Edit` is fine for trivial edits
 
 ---
 
@@ -149,9 +148,10 @@ Step 2: search_codebase(query="<entry point pattern>", path_glob="src/**/*")
 Step 3: read_with_deep_context(semantic_path="<chosen entry point>")
         → Read the entry point + all functions it calls
         → Follow the dependency chain to understand data flow
-        → NOTE: First call may be slow (30–120s) due to LSP warm-up. This is
-          expected — subsequent calls are fast. If degraded=true in metadata,
-          LSP was unavailable; dependencies will be empty but source is still returned.
+        → NOTE: First call after LSP start may take 5–60s while the server
+          indexes. Pathfinder auto-retries once during warmup.
+        → If degraded=true in metadata, LSP was unavailable or warming up;
+          dependencies will be empty or incomplete but source is still returned.
 
         Alternative: read_source_file(filepath="<key file>", detail_level="compact")
         → When you need the full file context + symbol tree, not just one function
@@ -190,7 +190,7 @@ Step 4: replace_body(semantic_path="<target>",
 Step 5: (If callers need updating) For each caller from Step 2:
         read_symbol_scope → replace_body → verify
 
-Step 6: run_command("cargo test" / "npm test")  [built-in tool]
+Step 6: Bash("cargo test" / "npm test")
         → Verify the refactoring didn't break anything
 ```
 
@@ -220,7 +220,7 @@ Step 4: (If adding imports) insert_before(semantic_path="<filepath>",
                      new_code="<import statements>", base_version="<new hash>")
         → Use bare file path to insert at the top of the file
 
-Step 5: run_command("cargo test" / "npm test")  [built-in tool]
+Step 5: Bash("cargo test" / "npm test")
 ```
 
 ---
@@ -267,6 +267,7 @@ Step 1: read_with_deep_context(semantic_path="<failing function>")
 
 Step 2: get_definition(semantic_path="<suspicious call within the function>")
         → Jump to the definition of a called function to inspect its contract
+        → If degraded=true, result is from grep fallback — verify with read_source_file
 
 Step 3: analyze_impact(semantic_path="<failing function>", max_depth=1)
         → Find all callers to understand what inputs are being passed
@@ -335,10 +336,10 @@ replace_body("main.py::_collect_words", base_version=hash_v1) → hash_v2
 replace_body("main.py::_patch_audio_urls", base_version=hash_v2) → hash_v3
 ```
 
-**When to fall back to `multi_replace_file_content`:**
+**When to fall back to multiple `Edit` calls:**
 - Pathfinder tools are unavailable (server offline)
 - Edits are inside non-symbol regions (e.g., top-level constants, inline comments)
-- Trivial single-line changes across many locations (regex-safe `AllowMultiple=True`)
+- Trivial single-line changes across many locations
 
 ### Vue SFC Text Targeting
 
@@ -408,6 +409,37 @@ replace_full(semantic_path=result.enclosing_semantic_path,
 
 ---
 
+## LSP Navigation Tools and Degraded Mode
+
+Three Pathfinder tools depend on LSP for precise results:
+
+| Tool | LSP Feature Used | Degraded Fallback |
+|---|---|---|
+| `get_definition` | `textDocument/definition` | Multi-strategy ripgrep (file-scoped → impl-scoped → global) |
+| `analyze_impact` | `callHierarchy/incomingCalls` + `outgoingCalls` | Grep heuristics for callers |
+| `read_with_deep_context` | `callHierarchy/outgoingCalls` | Tree-sitter only (no dependency signatures) |
+
+### Interpreting Degraded Results
+
+Every LSP-dependent response includes `degraded` (boolean) and `degraded_reason` (string):
+
+| `degraded_reason` | Meaning | What to do |
+|---|---|---|
+| `null` (not degraded) | LSP confirmed the result | Trust fully |
+| `no_lsp` | No language server available | Install the LSP or accept limited results |
+| `lsp_warmup_empty_unverified` | LSP still indexing; empty results unverified | Do NOT treat empty as confirmed-zero. Re-run after a few seconds |
+| `lsp_warmup_grep_fallback` | LSP returned null; result from grep | Verify with `read_source_file` |
+| `grep_fallback_file_scoped` | No LSP; file-scoped grep result | Good confidence if file path was correct |
+| `grep_fallback_impl_scoped` | No LSP; impl-block grep result | Good for Rust methods |
+| `grep_fallback_global` | No LSP; global grep result | Least precise. Verify before relying on it |
+| `lsp_error` | LSP returned an error | Results from Tree-sitter/grep only |
+
+### Key Rule
+
+**When `degraded: true`, never treat empty results as confirmed-zero.** The LSP may not have finished indexing. Re-run the tool after a few seconds, or check `get_repo_map` capabilities to see if `indexing_complete` is true.
+
+---
+
 ## Error Recovery Patterns
 
 ### SYMBOL_NOT_FOUND
@@ -458,7 +490,7 @@ This means: The edit was written to disk but was NOT validated by LSP.
 When you see this:
 → Check capabilities.lsp.per_language via get_repo_map to understand LSP status
 → The edit landed successfully — but you have no compile-time safety net
-→ Compensate by running tests (run_command) or manual review
+→ Compensate by running tests (Bash) or manual review
 → If the reason is "lsp_not_on_path", suggest the user install the language server
 → If the reason is "lsp_crash" or "lsp_timeout", the LSP may recover on next edit
 ```
@@ -506,20 +538,20 @@ If Pathfinder MCP tools are **not available** (server offline, tools not surface
 
 | Pathfinder tool | Built-in fallback |
 |---|---|
-| `read_symbol_scope` / `read_with_deep_context` | `view_file` (with line ranges for focused reading) |
-| `read_source_file` | `view_file` |
-| `read_file` | `view_file` |
-| `search_codebase` | `grep_search` |
-| `replace_body` / `replace_full` | `replace_file_content` |
-| `replace_batch` | `multi_replace_file_content` |
-| `insert_before` / `insert_after` | `replace_file_content` |
-| `delete_symbol` | `replace_file_content` (replace with empty) |
-| `delete_file` | `run_command` (`rm`) |
-| `get_repo_map` | `list_dir` (recursive) |
-| `analyze_impact` | `grep_search` (search for function name — approximate) |
-| `create_file` | `write_to_file` |
-| `write_file` | `replace_file_content` / `multi_replace_file_content` |
-| `validate_only` | No equivalent — rely on `run_command` with linter/compiler |
+| `read_symbol_scope` / `read_with_deep_context` | `Read` (with line ranges for focused reading) |
+| `read_source_file` | `Read` |
+| `read_file` | `Read` |
+| `search_codebase` | `Grep` |
+| `replace_body` / `replace_full` | `Edit` |
+| `replace_batch` | Multiple `Edit` calls |
+| `insert_before` / `insert_after` | `Edit` |
+| `delete_symbol` | `Edit` (replace with empty) |
+| `delete_file` | `Bash` (`rm`) |
+| `get_repo_map` | `Glob` or `Bash` (with `ls`) |
+| `analyze_impact` | `Grep` (search for function name — approximate) |
+| `create_file` | `Write` |
+| `write_file` | `Edit` |
+| `validate_only` | No equivalent — rely on `Bash` with linter/compiler |
 
 **Rules:**
 - Do not block on Pathfinder being unavailable — complete the work with built-in tools
