@@ -337,7 +337,7 @@ pub fn build_validation_outcome(
     }
 }
 
-pub fn normalize_blank_lines(content: &[u8]) -> Vec<u8> {
+pub(crate) fn normalize_blank_lines(content: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(content.len());
     let mut i = 0;
     while i < content.len() {
@@ -358,13 +358,13 @@ pub fn normalize_blank_lines(content: &[u8]) -> Vec<u8> {
     result
 }
 
-pub fn is_whitespace_significant_file(path: &std::path::Path) -> bool {
+pub(crate) fn is_whitespace_significant_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| matches!(ext, "py" | "yaml" | "yml" | "toml"))
 }
 
-pub fn strip_orphaned_doc_comment(source: &[u8], before_end: usize) -> usize {
+pub(crate) fn strip_orphaned_doc_comment(source: &[u8], before_end: usize) -> usize {
     if before_end == 0 {
         return before_end;
     }

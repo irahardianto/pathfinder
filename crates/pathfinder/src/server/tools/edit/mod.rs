@@ -18,7 +18,7 @@ use crate::server::types::EditValidation;
 use pathfinder_common::types::{SemanticPath, VersionHash};
 
 /// Result of the LSP validation step.
-pub struct ValidationOutcome {
+pub(crate) struct ValidationOutcome {
     pub(crate) validation: EditValidation,
     pub(crate) skipped: bool,
     pub(crate) skipped_reason: Option<String>,
@@ -28,7 +28,7 @@ pub struct ValidationOutcome {
 }
 
 /// Parameter struct for [`finalize_edit`] to reduce parameter count from 9 to 2.
-pub struct FinalizeEditParams<'a> {
+pub(crate) struct FinalizeEditParams<'a> {
     tool_name: &'static str,
     semantic_path: &'a SemanticPath,
     raw_semantic_path_str: &'a str,
@@ -45,7 +45,7 @@ pub struct FinalizeEditParams<'a> {
 /// Passed to [`PathfinderServer::resolve_insert_position`] to distinguish
 /// `insert_before` (start of symbol) from `insert_after` (end of symbol).
 #[derive(Clone, Copy)]
-pub enum InsertEdge {
+pub(crate) enum InsertEdge {
     /// Insert at `symbol_range.start_byte` (before the symbol) or file offset 0.
     Before,
     /// Insert at `symbol_range.end_byte` (after the symbol) or end-of-file.
@@ -53,14 +53,14 @@ pub enum InsertEdge {
 }
 
 #[derive(Debug)]
-pub struct ResolvedEditFree {
+pub(crate) struct ResolvedEditFree {
     start_byte: usize,
     end_byte: usize,
     replacement: Vec<u8>,
 }
 
 #[derive(Debug)]
-pub struct ResolvedEdit {
+pub(crate) struct ResolvedEdit {
     start_byte: usize,
     end_byte: usize,
     replacement: Vec<u8>,

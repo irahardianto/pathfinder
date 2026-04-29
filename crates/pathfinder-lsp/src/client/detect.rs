@@ -62,6 +62,10 @@ fn resolve_command(name: &str, lang: &str) -> Option<String> {
             );
             path.to_string_lossy().into_owned()
         })
+        // NOTE: map_err is used here for its side effect (logging the warning) before
+        // discarding the error with .ok(). This is intentional: we want to log why the
+        // binary wasn't found, but we still want to return None rather than propagating
+        // the error.
         .map_err(|_| {
             tracing::warn!(
                 language = lang,

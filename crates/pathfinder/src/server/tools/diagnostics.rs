@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 /// The result of diffing pre-edit and post-edit diagnostics.
 #[derive(Debug, Default)]
-pub struct DiagnosticDiff {
+pub(crate) struct DiagnosticDiff {
     /// Diagnostics that appeared **after** the edit (new problems).
     pub introduced: Vec<LspDiagnostic>,
     /// Diagnostics that disappeared **after** the edit (fixed problems).
@@ -34,7 +34,7 @@ impl DiagnosticDiff {
 /// Uses `(severity, code, message, file)` as the hash key — line/column are
 /// excluded because edits shift positions.  Two diagnostics with the same key
 /// but different positions count as the same diagnostic for diffing purposes.
-pub fn diff_diagnostics(pre: &[LspDiagnostic], post: &[LspDiagnostic]) -> DiagnosticDiff {
+pub(crate) fn diff_diagnostics(pre: &[LspDiagnostic], post: &[LspDiagnostic]) -> DiagnosticDiff {
     let pre_counts = build_counts(pre);
     let post_counts = build_counts(post);
 
