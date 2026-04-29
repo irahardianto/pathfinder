@@ -107,6 +107,7 @@ jobs:
           --exclude test-mock-lsp
           --lcov
           --output-path lcov.info
+          --remap-path-prefix
 
       - name: Verify coverage report
         run: |
@@ -135,14 +136,18 @@ jobs:
         # never send an artifact and DeepSource times out with:
         #   "Analysis artifacts didn't arrive in time"
         timeout-minutes: 5
-        env:
-          DEEPSOURCE_DSN: ${{ secrets.DEEPSOURCE_DSN }}
         run: |
           curl -fsSL https://cli.deepsource.com/install | BINDIR=./bin sh
+          # Verify lcov.info is relative before upload
+          echo "Checking lcov.info for absolute paths..."
+          grep -E "SF:/" lcov.info && echo "ERROR: lcov.info contains absolute paths!" && exit 1 || echo "SUCCESS: lcov.info has relative paths"
+          # Use OIDC for authentication (more reliable than DSN)
           ./bin/deepsource report \
             --analyzer test-coverage \
             --key rust \
-            --value-file lcov.info
+            --value-file lcov.info \
+            --use-oidc \
+            --oidc-provider github-actions
 
   # ──────────────────────────────────────────────
   # Stage 2b: Integration Tests
