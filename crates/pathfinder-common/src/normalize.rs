@@ -252,4 +252,57 @@ mod tests {
         let result = normalize_for_body_replace(input);
         assert_eq!(result, "x := 1\nreturn x");
     }
+
+    // ── L39-40 uncovered branch: closing fence unreachable after lang-tag split ─
+
+    #[test]
+    fn test_strip_markdown_fences_inline_no_newline_returns_input() {
+        // Trigger the else-branch at L39: the input starts AND ends with ```
+        // but there is no newline after the opening fence.
+        // `after_open.split_once('\n')` returns `None` → `after_lang = ""`
+        // → `"".strip_suffix("```")` fails → return input unchanged.
+        let input = "```code```";
+        assert_eq!(
+            strip_markdown_fences(input),
+            input,
+            "inline fence with no newline must be returned unchanged"
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_fences_only_opening_and_closing_no_body() {
+        // Another way to hit L39: opening + closing fences with lang tag but
+        // the body between them ends in a word (not ```), yet trimmed ends with ```
+        // because the lang-tag line itself is the closing.
+        // e.g. "```\n```" → after_open = "\n```", after_lang = "```"
+        // after_lang.strip_suffix("```") = Some("") → body = "" → stripped = ""
+        let input = "```\n```";
+        let result = strip_markdown_fences(input);
+        // Body is "", strip_suffix('\n') on "" → unwrap_or("") = ""
+        assert_eq!(result, "", "empty-body fence must strip to empty string");
+    }
+
+    // ── normalize_for_full_replace (no outer-brace stripping) ────────────────
+
+    #[test]
+    fn test_normalize_for_full_replace_does_not_strip_braces() {
+        // Unlike `normalize_for_body_replace`, this function must NOT strip
+        // outer braces — a full replacement includes the signature.
+        let input = "{ return 42; }";
+        let result = normalize_for_full_replace(input);
+        assert_eq!(
+            result, input,
+            "normalize_for_full_replace must preserve outer braces"
+        );
+    }
+
+    #[test]
+    fn test_normalize_for_full_replace_strips_fence_and_crlf() {
+        // The fence stripping happens before CRLF normalization.
+        // Input: fenced block with CRLF line endings, no CRLF before closing fence.
+        // After stripping: "func Hello() {}" (CRLF → LF normalized).
+        let input = "```go\r\nfunc Hello() {}\n```";
+        let result = normalize_for_full_replace(input);
+        assert_eq!(result, "func Hello() {}");
+    }
 }

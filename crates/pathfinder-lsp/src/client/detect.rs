@@ -427,4 +427,105 @@ mod tests {
         assert_eq!(language_id_for_extension("md"), None);
         assert_eq!(language_id_for_extension("yaml"), None);
     }
+
+    // ── resolve_command — not-found path (L63-72) ────────────────────────────
+
+    #[test]
+    fn test_resolve_command_not_found_returns_none() {
+        // A binary name that will never exist on any PATH — exercises the
+        // `else { None }` arm (L63-72) that emits a warning and returns None.
+        let result = resolve_command(
+            "pathfinder_lsp_binary_that_does_not_exist_xyzzy_42",
+            "test-lang",
+        );
+        assert!(
+            result.is_none(),
+            "resolve_command must return None when the binary is not on PATH"
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_found_returns_some() {
+        // `echo` is always available on POSIX-compliant systems.
+        // This exercises the Ok arm (L56-62).
+        let result = resolve_command("sh", "shell");
+        assert!(
+            result.is_some(),
+            "resolve_command must return Some for a binary on PATH"
+        );
+        let path = result.expect("sh must resolve to an absolute path");
+        // Resolved path must be non-empty and typically absolute
+        assert!(!path.is_empty());
+    }
+
+    // ── find_marker — depth-2 scan (L100-110) ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_marker_finds_at_depth_2() {
+        // Arrange: workspace → apps → backend → go.mod
+        let dir = tempdir().expect("temp dir");
+        let deep = dir.path().join("apps").join("backend");
+        std::fs::create_dir_all(&deep).expect("create dirs");
+        std::fs::write(deep.join("go.mod"), "module deep").expect("write");
+
+        // find_marker with max_depth=2 must recurse into the sub-subdirectory.
+        let found = find_marker(dir.path(), "go.mod", 2).await;
+        assert_eq!(
+            found.as_deref(),
+            Some(deep.as_path()),
+            "depth-2 marker must be discovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_depth_0_does_not_recurse() {
+        // With max_depth=0 only the base directory is checked.
+        let dir = tempdir().expect("temp dir");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).expect("create dir");
+        std::fs::write(sub.join("Cargo.toml"), "[package]").expect("write");
+
+        let found = find_marker(dir.path(), "Cargo.toml", 0).await;
+        assert!(
+            found.is_none(),
+            "max_depth=0 must not recurse into subdirectories"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_missing_returns_none() {
+        let dir = tempdir().expect("temp dir");
+        let found = find_marker(dir.path(), "no_such_marker_file.toml", 2).await;
+        assert!(found.is_none(), "absent marker must return None");
+    }
+
+    // ── detect_languages with command override empty string filter (L144-146) ─
+
+    #[tokio::test]
+    async fn test_command_override_empty_string_falls_back_to_which() {
+        // An empty `command` in LspConfig must be treated as "not configured"
+        // (the `filter(|c| !c.is_empty())` gate at L145 drops it) so the
+        // code falls through to `resolve_command`. If the binary is absent in CI
+        // the language will simply be absent — no panic.
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("go.mod"), "module test").expect("write");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config.lsp.insert(
+            "go".to_string(),
+            pathfinder_common::config::LspConfig {
+                command: String::new(), // Empty → must fall through to `which`
+                args: vec![],
+                idle_timeout_minutes: 15,
+                settings: serde_json::Value::Null,
+                root_override: None,
+            },
+        );
+
+        // Must not panic; binary may or may not be present
+        let langs = detect_languages(dir.path(), &config).await.expect("detect");
+        for l in &langs {
+            assert!(!l.command.is_empty(), "resolved command must be non-empty");
+        }
+    }
 }

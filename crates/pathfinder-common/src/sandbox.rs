@@ -590,4 +590,72 @@ mod tests {
             "file outside private/ must be allowed"
         );
     }
+
+    // ── Path traversal guard (L137-L146) ────────────────────────────────────
+
+    #[test]
+    fn test_path_traversal_parent_dir_denied() {
+        let sandbox = default_sandbox();
+        // `../etc/passwd` contains a `ParentDir` component — must be denied
+        // at the hardcoded-deny tier (before Tier-1 pattern checks).
+        let result = sandbox.check(Path::new("../etc/passwd"));
+        assert!(
+            result.is_err(),
+            "path traversal with '..' must be denied by the hardcoded guard"
+        );
+        let Err(PathfinderError::AccessDenied { tier, .. }) = result else {
+            panic!("expected AccessDenied");
+        };
+        assert!(
+            matches!(tier, SandboxTier::HardcodedDeny),
+            "traversal must be SandboxTier::HardcodedDeny"
+        );
+    }
+
+    #[test]
+    fn test_nested_path_traversal_denied() {
+        let sandbox = default_sandbox();
+        // A traversal buried deeper in the path is equally dangerous.
+        let result = sandbox.check(Path::new("src/../../etc/shadow"));
+        assert!(
+            result.is_err(),
+            "nested '..' traversal must be denied by the hardcoded guard"
+        );
+    }
+
+    // ── matches_wildcard_pattern no-star arm (L109-L110) ────────────────────
+
+    #[test]
+    fn test_wildcard_pattern_without_trailing_star_returns_false() {
+        // Pattern has no trailing `*` — `strip_suffix('*')` returns None.
+        // The `else { return false; }` arm must be exercised.
+        //
+        // We use `is_additional_denied` indirectly via `check()` by injecting an
+        // `additional_deny` config with no `*.` prefix, no trailing `/`,
+        // and no trailing `*` — making it hit the exact-pattern branch, NOT the
+        // wildcard branch. To directly call the private function we use it from
+        // within the same module.
+        assert!(
+            !Sandbox::matches_wildcard_pattern("no-star-pattern", "anything.txt"),
+            "a pattern without a trailing '*' must return false"
+        );
+    }
+
+    #[test]
+    fn test_wildcard_pattern_with_star_matches_prefix() {
+        // Confirm the positive arm: `.env.*` should match `.env.local`.
+        assert!(
+            Sandbox::matches_wildcard_pattern(".env.*", ".env.local"),
+            ".env.* pattern must match .env.local"
+        );
+    }
+
+    #[test]
+    fn test_wildcard_pattern_with_star_no_match() {
+        // `.env.*` must NOT match `secrets.txt` (different prefix).
+        assert!(
+            !Sandbox::matches_wildcard_pattern(".env.*", "secrets.txt"),
+            ".env.* must not match secrets.txt"
+        );
+    }
 }

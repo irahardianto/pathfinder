@@ -298,3 +298,138 @@ fn test_text_not_found_includes_actual_content() {
         "actual_content should contain context from the source file"
     );
 }
+
+// ── is_whitespace_significant_file (L353-357) ────────────────────────────
+
+#[test]
+fn test_is_whitespace_significant_file_known_extensions() {
+    assert!(is_whitespace_significant_file(Path::new("main.py")));
+    assert!(is_whitespace_significant_file(Path::new("config.yaml")));
+    assert!(is_whitespace_significant_file(Path::new("config.yml")));
+    assert!(is_whitespace_significant_file(Path::new("Cargo.toml")));
+}
+
+#[test]
+fn test_is_whitespace_significant_file_non_significant_extensions() {
+    assert!(!is_whitespace_significant_file(Path::new("src/main.rs")));
+    assert!(!is_whitespace_significant_file(Path::new("comp.vue")));
+    assert!(!is_whitespace_significant_file(Path::new("app.ts")));
+    assert!(!is_whitespace_significant_file(Path::new("index.go")));
+}
+
+#[test]
+fn test_is_whitespace_significant_file_no_extension() {
+    assert!(!is_whitespace_significant_file(Path::new("Makefile")));
+    assert!(!is_whitespace_significant_file(Path::new("Dockerfile")));
+}
+
+// ── normalize_blank_lines (L332-351) ─────────────────────────────────────
+
+#[test]
+fn test_normalize_blank_lines_collapses_triple_blank() {
+    // Three consecutive newlines → must collapse to two (one blank line).
+    let input = b"line1\n\n\n\nline2\n";
+    let result = normalize_blank_lines(input);
+    let s = String::from_utf8(result).unwrap();
+    assert_eq!(
+        s, "line1\n\nline2\n",
+        "three consecutive \\n must collapse to two"
+    );
+}
+
+#[test]
+fn test_normalize_blank_lines_preserves_single_blank() {
+    let input = b"line1\n\nline2\n";
+    let result = normalize_blank_lines(input);
+    assert_eq!(
+        result, input,
+        "a single blank line must be preserved unchanged"
+    );
+}
+
+#[test]
+fn test_normalize_blank_lines_no_blanks_unchanged() {
+    let input = b"line1\nline2\nline3";
+    let result = normalize_blank_lines(input);
+    assert_eq!(result, input, "no blank lines must be preserved unchanged");
+}
+
+#[test]
+fn test_normalize_blank_lines_empty_input() {
+    let result = normalize_blank_lines(b"");
+    assert!(result.is_empty(), "empty input must produce empty output");
+}
+
+// ── strip_orphaned_doc_comment (L359-395) ────────────────────────────────
+
+#[test]
+fn test_strip_orphaned_doc_comment_zero_before_end() {
+    // before_end == 0: early return must be exercised.
+    let result = strip_orphaned_doc_comment(b"anything", 0);
+    assert_eq!(result, 0, "before_end=0 must return 0 unchanged");
+}
+
+#[test]
+fn test_strip_orphaned_doc_comment_no_doc_comment() {
+    // The last line before the cut is NOT a doc comment → before_end unchanged.
+    let src = b"fn hello() {}\nfn world() {}\n";
+    let before_end = src.len();
+    let result = strip_orphaned_doc_comment(src, before_end);
+    assert_eq!(
+        result, before_end,
+        "no doc comment → before_end must be unchanged"
+    );
+}
+
+#[test]
+fn test_strip_orphaned_doc_comment_strips_trailing_doc_comment() {
+    // The line immediately before the cut point is `/// orphaned`
+    // → the function should step back to exclude it.
+    let src = b"fn foo() {}\n/// orphaned doc\n";
+    let before_end = src.len();
+    let result = strip_orphaned_doc_comment(src, before_end);
+    // Result must be strictly less than before_end (comment stripped)
+    assert!(
+        result < before_end,
+        "orphaned /// comment must be stripped: result={result} before_end={before_end}"
+    );
+    // Stripped position must still include fn foo() {}
+    let kept = std::str::from_utf8(&src[..result]).unwrap();
+    assert!(kept.contains("fn foo()"), "fn foo must still be present");
+    assert!(!kept.contains("orphaned"), "orphaned doc must be removed");
+}
+
+#[test]
+fn test_strip_orphaned_doc_comment_strips_inner_doc_comment() {
+    // `//!` inner doc is also an orphaned comment and must be stripped.
+    let src = b"mod foo {}\n//! inner doc\n";
+    let before_end = src.len();
+    let result = strip_orphaned_doc_comment(src, before_end);
+    assert!(result < before_end, "orphaned //! comment must be stripped");
+}
+
+// ── whitespace-significant TextNotFound path (L183-190) ─────────────────
+
+#[test]
+fn test_text_not_found_in_python_file_no_fuzzy_fallback() {
+    // Python files are whitespace-significant: the fuzzy fallback must NOT
+    // be attempted when the exact match fails.  The error must be
+    // TextNotFound with a `closest_match` field (not a recursive retry).
+    let source = src(&["def hello():", "    pass"]);
+    let err = resolve_text_edit(
+        &source,
+        "def hello( ):", // wrong spacing — different from source
+        1,
+        "def goodbye():",
+        false,
+        Path::new("app.py"),
+    )
+    .expect_err("spacing-mismatch in .py must fail without fuzzy fallback");
+    assert!(
+        matches!(
+            err,
+            pathfinder_common::error::PathfinderError::TextNotFound { .. }
+        ),
+        "expected TextNotFound, got: {err:?}"
+    );
+}
