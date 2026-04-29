@@ -60,7 +60,7 @@ impl SemanticPath {
 
     /// Returns `true` if this is a bare file path (no `::` symbol chain).
     #[must_use]
-    pub fn is_bare_file(&self) -> bool {
+    pub const fn is_bare_file(&self) -> bool {
         self.symbol_chain.is_none()
     }
 }

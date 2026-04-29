@@ -514,8 +514,7 @@ impl PathfinderServer {
                         files_referenced.insert(referenced_item.file.clone());
 
                         let key = (referenced_item.file.clone(), referenced_item.line);
-                        if !seen.contains(&key) {
-                            seen.insert(key);
+                        if seen.insert(key) {
                             queue.push_back((referenced_item.clone(), current_depth + 1));
 
                             references.push(crate::server::types::ImpactReference {

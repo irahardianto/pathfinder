@@ -50,19 +50,14 @@ impl DetectedCapabilities {
         // An object means "supported" (non-null) — we use is_some_and for the
         // outer Option and separate bool/object handling inside.
         let is_cap = |key: &str| -> bool {
-            caps.get(key).is_some_and(|v| match v.as_bool() {
-                Some(b) => b,
-                None => !v.is_null(), // object form = supported
-            })
+            caps.get(key)
+                .is_some_and(|v| v.as_bool().unwrap_or_else(|| !v.is_null()))
         };
 
         let workspace_diagnostic_provider = caps
             .get("diagnosticProvider")
             .and_then(|v| v.get("workspaceDiagnostics"))
-            .is_some_and(|v| match v.as_bool() {
-                Some(b) => b,
-                None => !v.is_null(), // Object means supported
-            });
+            .is_some_and(|v| v.as_bool().unwrap_or_else(|| !v.is_null()));
 
         Self {
             definition_provider: is_cap("definitionProvider"),

@@ -191,14 +191,18 @@ pub enum ConfigError {
     /// Error when reading the configuration file fails.
     #[error("failed to read config file {}: {source}", path.display())]
     ReadFailed {
+        /// Path to the configuration file that failed to read.
         path: std::path::PathBuf,
+        /// Underlying I/O error.
         source: std::io::Error,
     },
 
     /// Error when parsing the configuration file fails.
     #[error("failed to parse config file {}: {source}", path.display())]
     ParseFailed {
+        /// Path to the configuration file that failed to parse.
         path: std::path::PathBuf,
+        /// Underlying JSON parsing error.
         source: serde_json::Error,
     },
 }
@@ -207,11 +211,11 @@ fn default_log_level() -> String {
     "info".to_owned()
 }
 
-fn default_idle_timeout() -> u64 {
+const fn default_idle_timeout() -> u64 {
     15
 }
 
-fn default_max_results() -> usize {
+const fn default_max_results() -> usize {
     50
 }
 
@@ -219,7 +223,7 @@ fn default_filter_mode() -> String {
     "code_only".to_owned()
 }
 
-fn default_max_tokens() -> usize {
+const fn default_max_tokens() -> usize {
     16_000
 }
 

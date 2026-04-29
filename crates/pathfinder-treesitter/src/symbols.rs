@@ -286,13 +286,13 @@ fn refine_class_kind(node: Node) -> SymbolKind {
 
 /// Refine constant kind to detect arrow functions in JS/TS.
 fn refine_constant_kind(node: Node, kind: &str) -> SymbolKind {
-    let mut kind_refine = SymbolKind::Constant;
     if (kind == "lexical_declaration" || kind == "variable_declaration")
         && has_arrow_function_value(node)
     {
-        kind_refine = SymbolKind::Function;
+        SymbolKind::Function
+    } else {
+        SymbolKind::Constant
     }
-    kind_refine
 }
 
 /// Check if a variable declaration contains an arrow function or function expression.
@@ -553,10 +553,8 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
 
                 s.name = format!("impl {clean_name}{suffix}");
                 s.semantic_path.clone_from(&s.name);
-                true // Keep Impl block so find_enclosing_symbol can find it
-            } else {
-                true
             }
+            true
         });
 
         // 2. Append methods to the matching structural type
@@ -998,12 +996,9 @@ fn collect_jsx_elements(
         let kind = child.kind();
         if kind == "jsx_element" || kind == "jsx_self_closing_element" {
             emit_jsx_symbol(child, source, parent_path, out, tag_counts);
-            // Recurse into children of this JSX element to find nested elements
-            collect_jsx_elements(child, source, parent_path, out, tag_counts);
-        } else {
-            // Recurse through non-JSX nodes (parenthesized_expression, etc.)
-            collect_jsx_elements(child, source, parent_path, out, tag_counts);
         }
+        // Recurse to find nested elements (works for both JSX and non-JSX nodes)
+        collect_jsx_elements(child, source, parent_path, out, tag_counts);
     }
 }
 

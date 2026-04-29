@@ -66,7 +66,7 @@ fn test_exact_match_replaces_correctly() {
     )
     .expect("exact match should succeed");
 
-    let mut out = source.clone();
+    let mut out = source;
     out.splice(r.start_byte..r.end_byte, r.replacement);
     let out_str = String::from_utf8(out).unwrap();
     assert!(
@@ -130,7 +130,7 @@ fn test_multiline_old_text() {
         Path::new("lib.rs"),
     )
     .expect("multi-line match should succeed");
-    let mut out = source.clone();
+    let mut out = source;
     out.splice(r.start_byte..r.end_byte, r.replacement);
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("let z = 42;"), "replacement present: {s}");
@@ -155,7 +155,7 @@ fn test_normalize_whitespace_matches_with_collapsed_spaces() {
         Path::new("comp.vue"),
     )
     .expect("normalized whitespace should match");
-    let mut out = source.clone();
+    let mut out = source;
     out.splice(r.start_byte..r.end_byte, r.replacement);
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("Submit"), "replacement present: {s}");
@@ -175,7 +175,7 @@ fn test_no_normalize_fails_on_spacing_mismatch() {
     )
     .expect("fuzzy fallback should handle spacing mismatch");
 
-    let mut out = source.clone();
+    let mut out = source;
     out.splice(r.start_byte..r.end_byte, r.replacement);
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("Submit"), "replacement present");
@@ -232,7 +232,7 @@ fn test_window_25_lines() {
     )
     .expect("match at line 30 (±25 from line 15) should succeed");
 
-    let mut out = source.clone();
+    let mut out = source;
     out.splice(r.start_byte..r.end_byte, r.replacement);
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("replaced"), "replacement present");
@@ -259,7 +259,7 @@ fn test_fuzzy_whitespace_fallback() {
     )
     .expect("fuzzy whitespace fallback should succeed");
 
-    let mut out = source.clone();
+    let mut out = source;
     out.splice(r.start_byte..r.end_byte, r.replacement);
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("Submit"), "replacement present");

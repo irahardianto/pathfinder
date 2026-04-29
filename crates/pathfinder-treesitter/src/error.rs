@@ -45,32 +45,22 @@ pub enum SurgeonError {
 impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
     fn from(error: SurgeonError) -> Self {
         match error {
-            SurgeonError::SymbolNotFound { path, did_you_mean } => {
-                pathfinder_common::error::PathfinderError::SymbolNotFound {
-                    semantic_path: path,
-                    did_you_mean,
-                }
-            }
-            SurgeonError::FileNotFound(path) => {
-                pathfinder_common::error::PathfinderError::FileNotFound { path }
-            }
-            SurgeonError::UnsupportedLanguage(path) => {
-                pathfinder_common::error::PathfinderError::UnsupportedLanguage { path }
-            }
-            SurgeonError::ParseError { path, reason } => {
-                pathfinder_common::error::PathfinderError::ParseError { path, reason }
-            }
-            SurgeonError::Io(err) => pathfinder_common::error::PathfinderError::IoError {
+            SurgeonError::SymbolNotFound { path, did_you_mean } => Self::SymbolNotFound {
+                semantic_path: path,
+                did_you_mean,
+            },
+            SurgeonError::FileNotFound(path) => Self::FileNotFound { path },
+            SurgeonError::UnsupportedLanguage(path) => Self::UnsupportedLanguage { path },
+            SurgeonError::ParseError { path, reason } => Self::ParseError { path, reason },
+            SurgeonError::Io(err) => Self::IoError {
                 message: err.to_string(),
             },
-            SurgeonError::InvalidTarget { path, reason } => {
-                pathfinder_common::error::PathfinderError::InvalidTarget {
-                    semantic_path: path,
-                    reason,
-                    edit_index: None,
-                    valid_edit_types: None,
-                }
-            }
+            SurgeonError::InvalidTarget { path, reason } => Self::InvalidTarget {
+                semantic_path: path,
+                reason,
+                edit_index: None,
+                valid_edit_types: None,
+            },
         }
     }
 }

@@ -13,27 +13,42 @@ use std::path::PathBuf;
 pub enum PathfinderError {
     /// File path doesn't exist.
     #[error("file not found: {path}")]
-    FileNotFound { path: PathBuf },
+    FileNotFound {
+        /// Path to the missing file.
+        path: PathBuf,
+    },
 
     /// File already exists (for `create_file`).
     #[error("file already exists: {path}")]
-    FileAlreadyExists { path: PathBuf },
+    FileAlreadyExists {
+        /// Path to the existing file.
+        path: PathBuf,
+    },
 
     /// Semantic path doesn't resolve.
     #[error("symbol not found: {semantic_path}")]
     SymbolNotFound {
+        /// The semantic path that wasn't found.
         semantic_path: String,
+        /// Similar symbol names suggested by the system (Levenshtein distance).
         did_you_mean: Vec<String>,
     },
 
     /// Semantic path is malformed or missing required '::' separator.
     #[error("invalid semantic path: {input}")]
-    InvalidSemanticPath { input: String, issue: String },
+    InvalidSemanticPath {
+        /// The invalid input string.
+        input: String,
+        /// Description of what makes it invalid.
+        issue: String,
+    },
 
     /// Multiple matches for a semantic path.
     #[error("ambiguous symbol: {semantic_path}")]
     AmbiguousSymbol {
+        /// The ambiguous semantic path.
         semantic_path: String,
+        /// All matching symbol paths.
         matches: Vec<String>,
     },
 
@@ -137,7 +152,7 @@ pub enum PathfinderError {
 impl PathfinderError {
     /// Returns the MCP-facing error code string.
     #[must_use]
-    pub fn error_code(&self) -> &'static str {
+    pub const fn error_code(&self) -> &'static str {
         match self {
             Self::FileNotFound { .. } => "FILE_NOT_FOUND",
             Self::FileAlreadyExists { .. } => "FILE_ALREADY_EXISTS",
