@@ -405,6 +405,7 @@ impl crate::server::PathfinderServer {
                     let mut cmd = tokio::process::Command::new("rg");
                     cmd.arg("-l")
                         .arg("-w")
+                        .arg("--")
                         .arg(symbol_name)
                         .arg(&workspace_path)
                         .stdout(std::process::Stdio::piped())
