@@ -285,6 +285,9 @@ pub fn build_validation_outcome(
     // In both cases `should_block` stays false (we never block on absence of errors),
     // but we set `validation_skipped: true` with a specific reason so agents know
     // the validation result may be vacuously true rather than a genuine clean pass.
+    //
+    // Use `EditValidation::uncertain()` instead of "passed" to honestly signal
+    // that the result is ambiguous during LSP warmup.
     if pre_diags.is_empty() && post_diags.is_empty() {
         tracing::debug!(
             file = %file_path.display(),
@@ -292,11 +295,7 @@ pub fn build_validation_outcome(
              — validation_skipped to signal possible LSP warmup"
         );
         return ValidationOutcome {
-            validation: EditValidation {
-                status: "passed".to_owned(),
-                introduced_errors: vec![],
-                resolved_errors: vec![],
-            },
+            validation: EditValidation::uncertain(),
             skipped: true,
             skipped_reason: Some("empty_diagnostics_both_snapshots".to_owned()),
             should_block: false,

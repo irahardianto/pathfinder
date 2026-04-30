@@ -595,10 +595,15 @@ pub struct EditResponse {
     pub validation_skipped_reason: Option<String>,
 }
 
-/// LSP validation result embedded in `EditResponse`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+/// The result of LSP validation for an edit operation.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct EditValidation {
-    /// `"passed"`, `"failed"`, or `"skipped"`.
+    /// `"passed"`, `"failed"`, `"skipped"`, or `"uncertain"`.
+    ///
+    /// - `"passed"`: validation ran and detected no new errors
+    /// - `"failed"`: validation ran and detected new errors
+    /// - `"skipped"`: validation was not performed (no LSP available)
+    /// - `"uncertain"`: validation ran but results are unreliable (LSP warmup)
     pub status: String,
     /// Errors introduced by the edit.
     pub introduced_errors: Vec<pathfinder_common::error::DiagnosticError>,
@@ -612,6 +617,20 @@ impl EditValidation {
     pub fn skipped() -> Self {
         Self {
             status: "skipped".to_owned(),
+            introduced_errors: vec![],
+            resolved_errors: vec![],
+        }
+    }
+
+    /// Return an uncertain validation result (LSP ran but results are unreliable).
+    ///
+    /// Use when both pre- and post-edit diagnostics are empty, which could mean
+    /// either (a) the code is genuinely clean, or (b) the LSP hasn't finished
+    /// indexing. Agents should treat "uncertain" as "possibly correct but unverified".
+    #[must_use]
+    pub fn uncertain() -> Self {
+        Self {
+            status: "uncertain".to_owned(),
             introduced_errors: vec![],
             resolved_errors: vec![],
         }
