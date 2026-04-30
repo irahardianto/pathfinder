@@ -286,7 +286,10 @@ impl PathfinderServer {
             "delete_file: complete"
         );
 
-        Ok(Json(DeleteFileResponse { success: true }))
+        Ok(Json(DeleteFileResponse {
+            success: true,
+            version_hash: current_hash.short().to_owned(),
+        }))
     }
 
     /// Core logic for the `read_file` tool.
@@ -513,9 +516,10 @@ impl PathfinderServer {
             new_version_hash: new_hash.short().to_owned(),
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
-            "File successfully written",
-        )]);
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(format!(
+            "File written: {} (version {})",
+            params.filepath, metadata.new_version_hash
+        ))]);
         res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
