@@ -2660,4 +2660,18 @@ mod tests {
                              // Give spawned tasks a chance to run
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    #[tokio::test]
+    async fn test_shutdown_sends_signal() {
+        let client = client_no_languages();
+
+        // Subscribe before sending to ensure we catch it
+        let mut rx = client.shutdown_tx.subscribe();
+
+        client.shutdown();
+
+        // The receiver should get the shutdown signal
+        let result = rx.try_recv();
+        assert!(result.is_ok(), "shutdown signal should be sent and received");
+    }
 }
