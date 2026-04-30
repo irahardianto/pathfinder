@@ -2672,6 +2672,9 @@ mod tests {
 
         // The receiver should get the shutdown signal
         let result = rx.try_recv();
-        assert!(result.is_ok(), "shutdown signal should be sent and received");
+        assert!(
+            result.is_ok(),
+            "shutdown signal should be sent and received"
+        );
     }
 }
