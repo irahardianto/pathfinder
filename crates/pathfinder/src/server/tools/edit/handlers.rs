@@ -754,10 +754,7 @@ impl crate::server::PathfinderServer {
 
         // Doc comments need a blank line before them for idiomatic formatting.
         // Detect if the inserted code starts with a doc comment marker.
-        let inserted_starts_doc_comment = indented
-            .bytes()
-            .next()
-            .is_some_and(|b| b == b'/')
+        let inserted_starts_doc_comment = indented.bytes().next().is_some_and(|b| b == b'/')
             && (indented.starts_with("///")
                 || indented.starts_with("//!")
                 || indented.starts_with("/**")
