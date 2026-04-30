@@ -414,15 +414,27 @@ pub struct SearchResultGroup {
     pub file: String,
     /// SHA-256 hash of the file (shared by all matches in this group).
     pub version_hash: String,
+    /// Total number of matches in this group (both full and known).
+    ///
+    /// Provided so agents can quickly assess match density without counting sub-arrays.
+    /// Always present regardless of whether `matches` or `known_matches` are serialized.
+    pub total_matches: usize,
     /// Full matches (for files NOT in `known_files`).
     ///
     /// Per-match objects contain only `{ line, column, content, context_before,
     /// context_after, enclosing_semantic_path }` — `file` and `version_hash` are
     /// deduplicated at group level to avoid repeating them for every match.
+    ///
+    /// Absent (not just empty) when all matches in this group are for known files.
+    /// Check `total_matches` for the match count regardless of which array is populated.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
     pub matches: Vec<GroupedMatch>,
     /// Minimal matches (for files in `known_files`).
+    ///
+    /// Absent when no matches in this group are for known files.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
     pub known_matches: Vec<GroupedKnownMatch>,
 }
 /// A single match within a `SearchResultGroup`.
@@ -622,6 +634,8 @@ pub struct CreateFileResponse {
 pub struct DeleteFileResponse {
     /// Whether the file deletion succeeded.
     pub success: bool,
+    /// Short hash of the file version that was deleted (for audit/OCC chain).
+    pub version_hash: String,
 }
 
 /// The metadata embedded in `structured_content` for `read_file`.
