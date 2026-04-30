@@ -51,6 +51,7 @@ impl PathfinderServer {
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
         start_line: usize,
+        name_column: usize,
     ) -> LspResolution {
         let mut dependencies = Vec::new();
         let mut degraded = true;
@@ -63,7 +64,9 @@ impl PathfinderServer {
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 u32::try_from(start_line + 1).unwrap_or(1),
-                1,
+                // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
+                // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
+                u32::try_from(name_column + 1).unwrap_or(1),
             )
             .await;
 
@@ -79,9 +82,32 @@ impl PathfinderServer {
                 .await;
             }
             Ok(_) => {
-                engines.push("lsp");
-                degraded = false;
-                degraded_reason = None;
+                // Empty call hierarchy — verify LSP is actually warm.
+                // Mirror the probe logic from analyze_impact_impl: if goto_definition
+                // can resolve the symbol, the LSP is indexed and zero deps is genuine.
+                // If goto_definition also returns None, the LSP is still warming up
+                // and the empty result is unreliable.
+                let probe = self
+                    .lawyer
+                    .goto_definition(
+                        self.workspace_root.path(),
+                        &semantic_path.file_path,
+                        u32::try_from(start_line + 1).unwrap_or(1),
+                        u32::try_from(name_column + 1).unwrap_or(1),
+                    )
+                    .await;
+
+                if matches!(probe, Ok(Some(_))) {
+                    // LSP is warm — definition resolved → confirmed zero dependencies
+                    engines.push("lsp");
+                    degraded = false;
+                    degraded_reason = None;
+                } else {
+                    // LSP returned empty but can't resolve the symbol → warmup or bad position
+                    engines.push("lsp");
+                    degraded = true;
+                    degraded_reason = Some("lsp_warmup_empty_unverified".to_owned());
+                }
             }
             Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {}
             Err(e) => {
@@ -210,7 +236,9 @@ impl PathfinderServer {
                 &semantic_path.file_path,
                 // Convert 0-indexed start_line from SymbolScope to 1-indexed for Lawyer
                 u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
-                1, // Column 1 — start of the identifier line
+                // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
+                // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
+                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
             )
             .await;
         let lsp_ms = lsp_start.elapsed().as_millis();
@@ -258,7 +286,7 @@ impl PathfinderServer {
                         self.workspace_root.path(),
                         &semantic_path.file_path,
                         u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
-                        1,
+                        u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
                     )
                     .await;
 
@@ -630,7 +658,7 @@ impl PathfinderServer {
             degraded_reason,
             engines,
         } = self
-            .resolve_lsp_dependencies(&semantic_path, scope.start_line)
+            .resolve_lsp_dependencies(&semantic_path, scope.start_line, scope.name_column)
             .await;
 
         // Close the file in the LSP to prevent memory leaks.
@@ -862,7 +890,9 @@ impl PathfinderServer {
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 u32::try_from(scope.start_line + 1).unwrap_or(1),
-                1, // Column 1
+                // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
+                // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
+                u32::try_from(scope.name_column + 1).unwrap_or(1),
             )
             .await;
 
@@ -913,7 +943,7 @@ impl PathfinderServer {
                         self.workspace_root.path(),
                         &semantic_path.file_path,
                         u32::try_from(scope.start_line + 1).unwrap_or(1),
-                        1,
+                        u32::try_from(scope.name_column + 1).unwrap_or(1),
                     )
                     .await;
 
@@ -1125,6 +1155,7 @@ mod tests {
             content: "fn login() { }".to_owned(),
             start_line: 9,
             end_line: 9,
+            name_column: 0,
             version_hash: VersionHash::compute(b"fn login() { }"),
             language: "rust".to_owned(),
         }
@@ -1782,6 +1813,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_with_deep_context_empty_hierarchy_zero_deps() {
+        // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(Some(...))
+        // → LSP is warm, confirmed zero deps. Must NOT be degraded.
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1790,8 +1823,15 @@ mod tests {
             .push(Ok(make_scope()));
 
         let lawyer = Arc::new(MockLawyer::default());
-        // Empty items = LSP confirmed zero deps
+        // Empty call hierarchy — ambiguous on its own
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // Probe: goto_definition succeeds → LSP is warm → confirmed zero
+        lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".into(),
+            line: 10,
+            column: 4,
+            preview: "fn login() {}".into(),
+        })));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -1803,9 +1843,52 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        // NOT degraded — LSP confirmed zero
-        assert!(!val.degraded);
+        // NOT degraded — LSP warm, genuinely zero deps confirmed
+        assert!(
+            !val.degraded,
+            "must not be degraded when probe confirms LSP is warm"
+        );
         assert_eq!(val.degraded_reason, None);
+        assert!(val.dependencies.is_empty(), "confirmed zero dependencies");
+    }
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_empty_hierarchy_warmup_degrades() {
+        // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(None)
+        // → LSP is warming up. Must be degraded with "lsp_warmup_empty_unverified".
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty call hierarchy
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // Probe: goto_definition returns Ok(None) → LSP is still warming up
+        // MockLawyer::default() already returns Ok(None) for goto_definition, so no extra setup needed.
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // DEGRADED — LSP warmup detected
+        assert!(
+            val.degraded,
+            "must be degraded when goto_definition probe also returns None"
+        );
+        assert_eq!(
+            val.degraded_reason.as_deref(),
+            Some("lsp_warmup_empty_unverified"),
+            "degraded_reason must indicate warmup ambiguity"
+        );
         assert!(val.dependencies.is_empty());
     }
 
