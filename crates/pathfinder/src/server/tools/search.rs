@@ -299,6 +299,7 @@ fn build_file_groups(
                 SearchResultGroup {
                     file: m.file.clone(),
                     version_hash: m.version_hash.clone(),
+                    total_matches: 0,
                     matches: Vec::new(),
                     known_matches: Vec::new(),
                 },
@@ -323,6 +324,11 @@ fn build_file_groups(
                 });
             }
         }
+    }
+
+    // Set total_matches for each group before returning
+    for group in groups.values_mut() {
+        group.total_matches = group.matches.len() + group.known_matches.len();
     }
 
     order
@@ -398,6 +404,117 @@ mod tests {
             response.0.degraded_reason.as_deref(),
             Some("unsupported_language"),
             "with FilterMode::All, filter is not bypassed so reason is unsupported_language"
+        );
+    }
+
+    // ── PATCH-004: group_by_file + known_files regression test ─────────
+
+    #[tokio::test]
+    async fn test_search_group_by_file_with_known_files() {
+        // Bug scenario: when all matches belong to files in `known_files` with
+        // `group_by_file: true`, the original code would:
+        // 1. Return total_matches > 0
+        // 2. But file_groups would be "empty" because both `matches` and `known_matches`
+        //    would be skipped by serde (they use skip_serializing_if = "Vec::is_empty")
+        //    and there was no `total_matches` field to indicate matches exist.
+        //
+        // Fix adds:
+        // - `total_matches` field that is always present
+        // - Known matches go into `known_matches` array instead of being lost
+
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a Rust file with two matches
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/main.rs"),
+            "fn findme() {}\nfn other() { findme(); }\n",
+        )
+        .unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        // Two matches expected — pre-configure surgeon for enrichment calls
+        surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .push(Ok("code".to_string()));
+        surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .push(Ok("code".to_string()));
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = SearchCodebaseParams {
+            query: "findme".to_owned(),
+            is_regex: false,
+            path_glob: "**/*.rs".to_owned(),
+            exclude_glob: String::default(),
+            max_results: 10,
+            context_lines: 0,
+            // KEY: file is in known_files + group_by_file: true
+            known_files: vec!["src/main.rs".to_owned()],
+            group_by_file: true,
+            filter_mode: pathfinder_common::types::FilterMode::All,
+        };
+
+        let result = server.search_codebase_impl(params).await;
+        let response = result.expect("search should succeed");
+
+        // 1. total_matches should be positive
+        assert_eq!(
+            response.0.total_matches, 2,
+            "total_matches should reflect actual number of matches"
+        );
+
+        // 2. file_groups should NOT be empty (original data-loss bug)
+        let groups = response
+            .0
+            .file_groups
+            .expect("should have file_groups when group_by_file=true");
+        assert!(
+            !groups.is_empty(),
+            "file_groups should NOT be empty when matches exist — original bug: total_matches>0 but file_groups empty"
+        );
+
+        // 3. total_matches per group should be populated
+        assert_eq!(
+            groups[0].total_matches, 2,
+            "group total_matches should show count even when all matches are known"
+        );
+
+        // 4. known_matches should contain the matches (NOT `matches` array)
+        //    because the file is in `known_files`
+        assert!(
+            groups[0].matches.is_empty(),
+            "matches array should be empty when all matches belong to known_files"
+        );
+        assert_eq!(
+            groups[0].known_matches.len(),
+            2,
+            "known_matches should contain the suppressed matches"
+        );
+        assert!(
+            groups[0].known_matches[0].known,
+            "known_matches should have known=true flag"
         );
     }
 
