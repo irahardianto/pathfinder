@@ -456,9 +456,17 @@ impl PathfinderServer {
         symbol_name: String,
         file_path: std::path::PathBuf,
     ) -> Option<GetDefinitionResponse> {
+        // Match definition patterns with optional preceding visibility modifier.
+        // Rust: `pub fn`, `pub(crate) fn`, `pub async fn`, bare `fn`
+        // TypeScript: `export function`, `export default function`, bare `function`
+        // Python: `def`, `async def`
         let pattern = format!(
-            r"(?:fn|def|func|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
+            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
         );
+
+        // Use the file as a specific path glob. Convert to forward-slash
+        // format for ripgrep compatibility across platforms.
+        let glob = file_path.to_string_lossy().replace('\\', "/");
 
         let search_result = self
             .scout
@@ -467,7 +475,7 @@ impl PathfinderServer {
                 query: pattern,
                 is_regex: true,
                 max_results: 5,
-                path_glob: file_path.to_string_lossy().to_string(),
+                path_glob: glob,
                 exclude_glob: String::default(),
                 context_lines: 0,
             })
@@ -517,7 +525,9 @@ impl PathfinderServer {
         if let Ok(result) = search_result {
             for m in &result.matches {
                 // Now search within this specific file for the method
-                let method_pattern = format!(r"fn\s+{method_name}\\b");
+                let method_pattern = format!(
+                    r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_name}\\b"
+                );
                 let file_search = self
                     .scout
                     .search(&pathfinder_search::SearchParams {
@@ -556,8 +566,12 @@ impl PathfinderServer {
     /// Global search for a definition when file-scoped and impl-scoped searches fail.
     /// Avoids matching in test files and mock implementations.
     async fn grep_definition_global(&self, symbol_name: String) -> Option<GetDefinitionResponse> {
+        // Match definition patterns with optional preceding visibility modifier.
+        // Rust: `pub fn`, `pub(crate) fn`, `pub async fn`, bare `fn`
+        // TypeScript: `export function`, `export default function`, bare `function`
+        // Python: `def`, `async def`
         let pattern = format!(
-            r"(?:fn|def|func|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
+            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
         );
 
         let search_result = self
@@ -961,13 +975,63 @@ impl PathfinderServer {
                         tool = "analyze_impact",
                         symbol = %semantic_path,
                         "analyze_impact: call_hierarchy_prepare returned [] but goto_definition \
-                         probe returned no result — LSP likely warming up, marking as degraded"
+                         probe returned no result — LSP likely warming up, attempting grep-based reference fallback"
                     );
                     engines.push("lsp");
                     degraded = true;
                     degraded_reason = Some("lsp_warmup_empty_unverified".to_owned());
-                    // incoming/outgoing remain None so agents know results are unknown,
-                    // not confirmed-zero. Do NOT set Some(vec![]) here.
+
+                    // Use grep-based reference search as a heuristic fallback when LSP is warming up.
+                    // Results may over-count (string references) or under-count (indirect calls),
+                    // but give the agent a starting point.
+                    let symbol_name = semantic_path
+                        .symbol_chain
+                        .as_ref()
+                        .and_then(|c| c.segments.last())
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+
+                    let search_result = self
+                        .scout
+                        .search(&pathfinder_search::SearchParams {
+                            workspace_root: self.workspace_root.path().to_path_buf(),
+                            query: symbol_name.clone(),
+                            is_regex: false,
+                            max_results: 50,
+                            path_glob: "**/*".to_owned(),
+                            exclude_glob: String::default(),
+                            context_lines: 0,
+                        })
+                        .await;
+
+                    if let Ok(result) = search_result {
+                        if !result.matches.is_empty() {
+                            let refs: Vec<crate::server::types::ImpactReference> = result
+                                .matches
+                                .into_iter()
+                                .map(|m| {
+                                    files_referenced.insert(m.file.clone());
+                                    crate::server::types::ImpactReference {
+                                        semantic_path: format!("{}::{symbol_name}", m.file),
+                                        file: m.file,
+                                        line: usize::try_from(m.line).unwrap_or(usize::MAX),
+                                        snippet: m.content,
+                                        version_hash: String::default(),
+                                        // Grep fallback: heuristic, direction is assumed incoming
+                                        direction: "incoming_heuristic".to_owned(),
+                                        depth: 0,
+                                    }
+                                })
+                                .collect();
+                            incoming = Some(refs);
+                            degraded_reason = Some("lsp_warmup_grep_fallback".to_owned());
+                            tracing::info!(
+                                tool = "analyze_impact",
+                                references_found = incoming.as_ref().map_or(0, Vec::len),
+                                "analyze_impact: grep-based fallback references found during LSP warmup"
+                            );
+                        }
+                    }
                 }
             }
             Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
