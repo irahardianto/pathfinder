@@ -446,6 +446,7 @@ mod tests {
             byte_range: 0..1,
             start_line: 0,
             end_line: 1,
+            name_column: 0,
             is_public: true,
             children: vec![],
         }
@@ -515,6 +516,7 @@ mod tests {
             byte_range: 0..10,
             start_line: 0,
             end_line: 10,
+            name_column: 0,
             is_public: true,
             children: vec![ExtractedSymbol {
                 name: "my_method".to_string(),
@@ -523,6 +525,7 @@ mod tests {
                 byte_range: 5..8,
                 start_line: 5,
                 end_line: 8,
+                name_column: 0,
                 is_public: true,
                 children: vec![],
             }],
@@ -547,6 +550,7 @@ mod tests {
                 byte_range: 0..0,
                 start_line: 0,
                 end_line: 0,
+                name_column: 0,
                 is_public: true,
                 children: vec![],
             });
@@ -560,6 +564,7 @@ mod tests {
             byte_range: 0..0,
             start_line: 0,
             end_line: 0,
+            name_column: 0,
             is_public: true,
             children: methods,
         }];
@@ -582,6 +587,7 @@ mod tests {
             byte_range: 0..0,
             start_line: 0,
             end_line: 0,
+            name_column: 0,
             is_public: true,
             children: vec![],
         }];
@@ -631,6 +637,7 @@ mod tests {
                 byte_range: 0..29,
                 start_line: 0,
                 end_line: 0,
+                name_column: 0,
                 is_public: true,
                 children: vec![],
             }]));
@@ -789,6 +796,7 @@ mod tests {
             byte_range: 0..30,
             start_line: 0,
             end_line: 5,
+            name_column: 0,
             is_public: true,
             children: vec![ExtractedSymbol {
                 name: "foo".to_string(),
@@ -797,6 +805,7 @@ mod tests {
                 byte_range: 5..25,
                 start_line: 1,
                 end_line: 3,
+                name_column: 0,
                 is_public: true,
                 children: vec![],
             }],
@@ -821,6 +830,7 @@ mod tests {
             byte_range: 0..30,
             start_line: 0,
             end_line: 5,
+            name_column: 0,
             is_public: false,
             children: vec![ExtractedSymbol {
                 name: "helper".to_string(),
@@ -829,6 +839,7 @@ mod tests {
                 byte_range: 5..25,
                 start_line: 1,
                 end_line: 3,
+                name_column: 0,
                 is_public: true,
                 children: vec![],
             }],
@@ -850,6 +861,7 @@ mod tests {
             byte_range: 0..30,
             start_line: 0,
             end_line: 5,
+            name_column: 0,
             is_public: false,
             children: vec![],
         };

@@ -124,6 +124,11 @@ impl<'a> SymbolExtractionContext<'a> {
         let (unique_name, suffix) = make_unique_name(&mut self.name_counts, name);
         let path = self.build_path(&unique_name, &suffix);
 
+        // Resolve the name node's column for LSP navigation positioning.
+        // Falls back to 0 (start of line) when the name node cannot be found
+        // (e.g., for anonymous constructs or grammars without a "name" field).
+        let name_column = Self::resolve_name_node(child).map_or(0, |n| n.start_position().column);
+
         let mut symbol = ExtractedSymbol {
             name: unique_name,
             semantic_path: path.clone(),
@@ -131,6 +136,7 @@ impl<'a> SymbolExtractionContext<'a> {
             byte_range: child.byte_range(),
             start_line: child.start_position().row,
             end_line: child.end_position().row,
+            name_column,
             is_public: true,
             children: Vec::new(),
         };
@@ -199,6 +205,7 @@ impl<'a> SymbolExtractionContext<'a> {
         // Determine visibility: `pub mod` → public, `mod` → private.
         // `visibility_modifier` is a named child (not a field) of `mod_item` in the
         // Rust tree-sitter grammar. Its presence indicates `pub` (or `pub(crate)`, etc).
+        let name_column = name_node.start_position().column;
         let is_public = has_visibility_modifier(child);
         self.out.push(ExtractedSymbol {
             name: unique_name,
@@ -207,6 +214,7 @@ impl<'a> SymbolExtractionContext<'a> {
             byte_range: child.byte_range(),
             start_line: child.start_position().row,
             end_line: child.end_position().row,
+            name_column,
             is_public,
             children,
         });
@@ -425,6 +433,7 @@ fn extract_impl_block(
             let (unique_method_name, method_suffix) =
                 make_unique_name(&mut method_name_counts, method_name);
             let method_path = format!("{impl_path}.{unique_method_name}{method_suffix}");
+            let method_name_column = name_node.start_position().column;
             methods.push(ExtractedSymbol {
                 name: unique_method_name,
                 semantic_path: method_path,
@@ -432,6 +441,7 @@ fn extract_impl_block(
                 byte_range: item.byte_range(),
                 start_line: item.start_position().row,
                 end_line: item.end_position().row,
+                name_column: method_name_column,
                 is_public: true,
                 children: Vec::new(),
             });
@@ -439,6 +449,7 @@ fn extract_impl_block(
     }
 
     if !methods.is_empty() {
+        let impl_name_column = type_node.start_position().column;
         out.push(ExtractedSymbol {
             name: unique_name,
             semantic_path: impl_path,
@@ -446,6 +457,7 @@ fn extract_impl_block(
             byte_range: node.byte_range(),
             start_line: node.start_position().row,
             end_line: node.end_position().row,
+            name_column: impl_name_column,
             is_public: false,
             children: methods,
         });
@@ -581,6 +593,7 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 byte_range: 0..0,
                 start_line: 0,
                 end_line: 0,
+                name_column: 0,
                 is_public: false,
                 children: methods,
             });
@@ -708,6 +721,7 @@ fn push_zone_symbol(
         byte_range,
         start_line,
         end_line,
+        name_column: 0,
         is_public: true,
         children,
     });
@@ -826,6 +840,7 @@ fn walk_html_elements_flat(
                 byte_range: child.byte_range(),
                 start_line: child.start_position().row,
                 end_line: child.end_position().row,
+                name_column: child.start_position().column,
                 is_public: true,
                 children: Vec::new(), // Always flat
             });
@@ -1036,6 +1051,7 @@ fn emit_jsx_symbol(
             byte_range: node.byte_range(),
             start_line: node.start_position().row,
             end_line: node.end_position().row,
+            name_column: node.start_position().column,
             is_public: true,
             children: Vec::new(), // JSX children are flat, not nested
         });
@@ -1142,6 +1158,7 @@ fn walk_css_rules(
                     byte_range: child.byte_range(),
                     start_line: child.start_position().row,
                     end_line: child.end_position().row,
+                    name_column: child.start_position().column,
                     is_public: true,
                     children: Vec::new(),
                 });
@@ -1242,6 +1259,7 @@ fn extract_css_rule_set(
                 byte_range: node.byte_range(), // whole rule_set for read_symbol_scope
                 start_line: node.start_position().row,
                 end_line: node.end_position().row,
+                name_column: selector.start_position().column,
                 is_public: true,
                 children: Vec::new(),
             });
@@ -1773,6 +1791,33 @@ mod helpers {
         assert_eq!(syms[0].kind, SymbolKind::Function);
     }
 
+    /// PATCH-001-T1: `name_column` points to identifier, not to `pub` or `fn` keyword.
+    ///
+    /// For `pub fn compute() { }`:
+    /// - column 0 = `p` in `pub`
+    /// - column 4 = `f` in `fn`
+    /// - column 7 = `c` in `compute` ← `name_column` should point here
+    #[test]
+    fn test_extract_rust_name_column_points_to_identifier_not_keyword() {
+        let source = b"pub fn compute() { }\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "compute");
+        // `compute` starts at column 7: `pub fn compute...`
+        //            01234567
+        assert_eq!(
+            syms[0].name_column, 7,
+            "name_column should point to 'c' in 'compute', not 'p' in 'pub'"
+        );
+    }
+
     /// Regression test for F-6a: `StructName.method` paths must resolve even
     /// when the method lives in a separate `impl StructName { }` block rather
     /// than being nested inside the struct definition itself.
@@ -1889,6 +1934,7 @@ mod helpers {
             byte_range: 0..20,
             start_line: 0,
             end_line: 1,
+            name_column: 0,
             is_public: true,
             children: vec![
                 ExtractedSymbol {
@@ -1898,6 +1944,7 @@ mod helpers {
                     byte_range: 0..10,
                     start_line: 0,
                     end_line: 0,
+                    name_column: 0,
                     is_public: true,
                     children: vec![],
                 },
@@ -1908,6 +1955,7 @@ mod helpers {
                     byte_range: 10..20,
                     start_line: 1,
                     end_line: 1,
+                    name_column: 0,
                     is_public: true,
                     children: vec![],
                 },

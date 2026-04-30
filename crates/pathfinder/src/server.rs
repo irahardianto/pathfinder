@@ -1062,6 +1062,7 @@ mod tests {
             content: content.to_owned(),
             start_line: 5,
             end_line: 7,
+            name_column: 0,
             version_hash: VersionHash::compute(content.as_bytes()),
             language: "go".to_owned(),
         };
@@ -1650,6 +1651,7 @@ mod tests {
                 content: "fn hello() -> i32 { 1 }".to_owned(),
                 start_line: 0,
                 end_line: 0,
+                name_column: 0,
                 version_hash: VersionHash::compute(b"fn hello() -> i32 { 1 }"),
                 language: "rust".to_owned(),
             }));

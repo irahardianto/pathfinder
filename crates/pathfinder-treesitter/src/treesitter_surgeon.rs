@@ -290,6 +290,7 @@ impl Surgeon for TreeSitterSurgeon {
             content,
             start_line: symbol.start_line,
             end_line: symbol.end_line,
+            name_column: symbol.name_column,
             version_hash,
             language: language_str.to_string(),
         })

@@ -241,6 +241,7 @@ mod tests {
             byte_range: 0..0,
             start_line,
             end_line,
+            name_column: 0,
             is_public: true,
             children,
         }

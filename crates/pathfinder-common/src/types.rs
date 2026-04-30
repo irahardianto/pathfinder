@@ -249,6 +249,13 @@ pub struct SymbolScope {
     pub start_line: usize,
     /// The zero-indexed ending line.
     pub end_line: usize,
+    /// The zero-indexed column where the symbol's **name identifier** begins.
+    ///
+    /// For `pub fn dedent(code: &str)`, this is the column of the `d` in `dedent`
+    /// (not the `p` in `pub`). Used by LSP navigation tools (`get_definition`,
+    /// `analyze_impact`, `read_with_deep_context`) to position the cursor on the
+    /// symbol name, which is required for rust-analyzer to resolve the symbol.
+    pub name_column: usize,
     /// The version hash of the *entire file* at the time of extraction.
     pub version_hash: VersionHash,
     /// The language of the file.

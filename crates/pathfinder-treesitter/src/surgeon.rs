@@ -17,6 +17,14 @@ pub struct ExtractedSymbol {
     pub start_line: usize,
     /// The zero-indexed ending line.
     pub end_line: usize,
+    /// The zero-indexed column where the symbol's **name identifier** begins.
+    ///
+    /// For `pub fn dedent(code: &str)`, this is the column of the `d` in `dedent`,
+    /// NOT the `p` in `pub`. Used by LSP navigation tools to position the cursor
+    /// on the symbol name rather than the declaration start.
+    ///
+    /// Falls back to 0 when the name node cannot be resolved (e.g., anonymous symbols).
+    pub name_column: usize,
     /// Whether this symbol is publicly visible.
     ///
     /// - For Rust modules: `true` when declared `pub mod`, `false` for bare `mod`.
