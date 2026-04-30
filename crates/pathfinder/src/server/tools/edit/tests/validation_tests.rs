@@ -481,8 +481,8 @@ fn test_build_validation_outcome_empty_snapshots_signals_warmup() {
         "skipped_reason must identify the warmup signal"
     );
     assert_eq!(
-        outcome.validation.status, "passed",
-        "status must still be passed (never block on empty)"
+        outcome.validation.status, "uncertain",
+        "status must be 'uncertain' when both snapshots are empty (LSP may be warming up)"
     );
     assert!(
         !outcome.should_block,
