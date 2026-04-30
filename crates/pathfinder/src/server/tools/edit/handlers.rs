@@ -752,13 +752,32 @@ impl crate::server::PathfinderServer {
         let before = &source[..insert_byte];
         let after = &source[insert_byte..];
 
+        // Doc comments need a blank line before them for idiomatic formatting.
+        // Detect if the inserted code starts with a doc comment marker.
+        let inserted_starts_doc_comment = indented
+            .bytes()
+            .next()
+            .is_some_and(|b| b == b'/')
+            && (indented.starts_with("///")
+                || indented.starts_with("//!")
+                || indented.starts_with("/**")
+                || indented.starts_with("/*!"));
+
         let before_sep = if before.ends_with(b"\n\n")
             || after.starts_with(b"\n\n")
             || (before.ends_with(b"\n") && after.starts_with(b"\n"))
         {
-            ""
+            if inserted_starts_doc_comment && !before.ends_with(b"\n\n") {
+                "\n" // Add one more newline to create blank line before doc comment
+            } else {
+                ""
+            }
         } else if before.ends_with(b"\n") {
-            "\n"
+            if inserted_starts_doc_comment {
+                "\n\n" // Blank line before doc comment
+            } else {
+                "\n"
+            }
         } else {
             "\n\n"
         };
