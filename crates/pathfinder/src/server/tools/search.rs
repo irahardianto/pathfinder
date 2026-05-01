@@ -525,6 +525,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_apply_filter_mode_code_only() {
+        // Arrange
+        let matches = vec![
+            SearchMatch {
+                file: "src/main.rs".to_owned(),
+                line: 1,
+                column: 1,
+                content: "fn main() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                version_hash: "hash".to_owned(),
+                enclosing_semantic_path: None,
+                known: None,
+            },
+            SearchMatch {
+                file: "src/main.rs".to_owned(),
+                line: 2,
+                column: 1,
+                content: "// a comment".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                version_hash: "hash".to_owned(),
+                enclosing_semantic_path: None,
+                known: None,
+            },
+        ];
+        let node_types = vec!["code".to_owned(), "comment".to_owned()];
+
+        // Act
+        let filtered = apply_filter_mode(matches, &node_types, FilterMode::CodeOnly);
+
+        // Assert
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].content, "fn main() {}");
+    }
+
+    #[test]
+    fn test_apply_filter_mode_comments_only() {
+        // Arrange
+        let matches = vec![
+            SearchMatch {
+                file: "src/main.rs".to_owned(),
+                line: 1,
+                column: 1,
+                content: "fn main() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                version_hash: "hash".to_owned(),
+                enclosing_semantic_path: None,
+                known: None,
+            },
+            SearchMatch {
+                file: "src/main.rs".to_owned(),
+                line: 2,
+                column: 1,
+                content: "// a comment".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                version_hash: "hash".to_owned(),
+                enclosing_semantic_path: None,
+                known: None,
+            },
+            SearchMatch {
+                file: "src/main.rs".to_owned(),
+                line: 3,
+                column: 1,
+                content: "\"a string\"".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                version_hash: "hash".to_owned(),
+                enclosing_semantic_path: None,
+                known: None,
+            },
+        ];
+        let node_types = vec!["code".to_owned(), "comment".to_owned(), "string".to_owned()];
+
+        // Act
+        let filtered = apply_filter_mode(matches, &node_types, FilterMode::CommentsOnly);
+
+        // Assert
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].content, "// a comment");
+        assert_eq!(filtered[1].content, "\"a string\"");
+    }
+
+    #[test]
+    fn test_apply_filter_mode_all() {
+        // Arrange
+        let matches = vec![
+            SearchMatch {
+                file: "src/main.rs".to_owned(),
+                line: 1,
+                column: 1,
+                content: "fn main() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                version_hash: "hash".to_owned(),
+                enclosing_semantic_path: None,
+                known: None,
+            },
+            SearchMatch {
+                file: "src/main.rs".to_owned(),
+                line: 2,
+                column: 1,
+                content: "// a comment".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                version_hash: "hash".to_owned(),
+                enclosing_semantic_path: None,
+                known: None,
+            },
+        ];
+        let node_types = vec!["code".to_owned(), "comment".to_owned()];
+
+        // Act
+        let filtered = apply_filter_mode(matches.clone(), &node_types, FilterMode::All);
+
+        // Assert
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].content, matches[0].content);
+        assert_eq!(filtered[1].content, matches[1].content);
+    }
+
     #[tokio::test]
     async fn test_search_degraded_filter_bypassed_returns_matches() {
         let ws_dir = tempfile::tempdir().unwrap();
