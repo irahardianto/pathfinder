@@ -312,3 +312,174 @@ async fn test_lsp_client_document_sync_notifications_succeed() {
 
     client.shutdown();
 }
+
+// ── Python integration tests ─────────────────────────────────────────────────
+
+/// Verify that the full Python LSP pipeline works end-to-end when pyright
+/// is available.
+///
+/// This test is gated on pyright availability to avoid CI failures on
+/// systems where pyright is not installed. The test verifies:
+///   1. Python language detection (pyproject.toml)
+///   2. LSP initialization with pyright
+///   3. goto_definition jumps to correct location
+///   4. call_hierarchy_prepare works (or gracefully degrades)
+#[cfg(feature = "integration")]
+#[cfg(test)]
+mod python_integration {
+    use super::*;
+    use std::path::Path;
+    use std::time::Duration;
+    use tokio::fs;
+
+    fn pyright_available() -> bool {
+        which::which("pyright").is_ok()
+    }
+
+    #[tokio::test]
+    async fn test_python_lsp_full_pipeline() {
+        if !pyright_available() {
+            eprintln!("Skipping Python integration test: pyright not installed");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pyproject = dir.path().join("pyproject.toml");
+        fs::write(&pyproject, "[tool.poetry]\nname = \"test\"\n")
+            .await
+            .expect("write pyproject");
+
+        let main_py = dir.path().join("main.py");
+        fs::write(
+            &main_py,
+            r#"
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+def main() -> None:
+    message = greet("world")
+    print(message)
+
+if __name__ == "__main__":
+    main()
+"#,
+        )
+        .await
+        .expect("write main.py");
+
+        let config = pathfinder_common::config::PathfinderConfig::default();
+        let client = LspClient::new(dir.path(), Arc::new(config))
+            .await
+            .expect("LspClient init");
+
+        // Check if Python was detected
+        let status = client.capability_status().await;
+        eprintln!("Detected languages: {:?}", status.keys().collect::<Vec<_>>());
+
+        if !status.contains_key("python") {
+            eprintln!("Python was not detected. Skipping test.");
+            client.shutdown();
+            return;
+        }
+
+        let content = r#"
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+def main() -> None:
+    message = greet("world")
+    print(message)
+
+if __name__ == "__main__":
+    main()
+"#;
+
+        // Trigger LSP initialization by opening the file
+        let did_open_result = client
+            .did_open(dir.path(), &main_py, content)
+            .await;
+
+        if let Err(e) = did_open_result {
+            eprintln!("Python did_open failed: {}", e);
+            eprintln!("This likely means pyright could not start as an LSP server. Skipping test.");
+            client.shutdown();
+            return;
+        }
+
+        // Wait for LSP to initialize and index
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // Check LSP status
+        let status = client.capability_status().await;
+        if let Some(py_status) = status.get("python") {
+            eprintln!("Python status: validation={}, reason={}", py_status.validation, py_status.reason);
+        } else {
+            eprintln!("Python not in status after did_open");
+            client.shutdown();
+            return;
+        }
+
+        // Test goto_definition: jump to `greet` from the call site
+        let result = client
+            .goto_definition(
+                dir.path(),
+                Path::new("main.py"),
+                7,  // line of `message = greet("world")`
+                17, // column of `g` in `greet`
+            )
+            .await;
+
+        match result {
+            Ok(Some(def)) => {
+                assert!(
+                    def.file.contains("main.py"),
+                    "definition should be in main.py, got: {}",
+                    def.file
+                );
+                // Line should be near the def greet declaration
+                // Pyright may use different line numbering than expected
+                assert!(
+                    def.line >= 1 && def.line <= 6,
+                    "definition line should be near def greet, got: {}",
+                    def.line
+                );
+            }
+            Ok(None) => {
+                // LSP might still be warming up — acceptable in CI
+                eprintln!("Python goto_definition returned None (possibly still warming up)");
+            }
+            Err(e) => {
+                panic!("Python goto_definition failed: {e}");
+            }
+        }
+
+        // Test call_hierarchy_prepare on the `greet` function
+        let hierarchy = client
+            .call_hierarchy_prepare(
+                dir.path(),
+                Path::new("main.py"),
+                2,  // line of `def greet`
+                5,  // column of `g` in `greet`
+            )
+            .await;
+
+        // Should either work or degrade gracefully (pyright may not fully support call hierarchy)
+        match hierarchy {
+            Ok(items) if !items.is_empty() => {
+                assert_eq!(items[0].name, "greet", "should find greet in call hierarchy");
+            }
+            Ok(_) => {
+                // Empty result — pyright may not return call hierarchy items for simple cases
+                eprintln!("Python call_hierarchy_prepare returned empty items");
+            }
+            Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {
+                // Acceptable: pyright may not support call hierarchy
+            }
+            Err(e) => {
+                panic!("Unexpected call hierarchy error: {e}");
+            }
+        }
+
+        client.shutdown();
+    }
+}

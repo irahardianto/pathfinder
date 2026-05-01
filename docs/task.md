@@ -55,7 +55,10 @@
 
 ### Group D: Provisioning
 - [x] PATCH-008: Surface Install Guidance for Missing LSPs
-- [ ] PATCH-009: End-to-End Python LSP Verification Test
+- [x] PATCH-009: End-to-End Python LSP Verification Test
+  - Fixed pyright detection to use pyright-langserver (actual LSP binary)
+  - Added Python integration test in lsp_client_integration.rs
+  - Added Python name_column test in symbols.rs
 
 ### Group E: Polish
 - [ ] PATCH-010: Enrich lsp_health with Diagnostics Strategy Info

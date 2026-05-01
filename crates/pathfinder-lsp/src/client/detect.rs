@@ -441,7 +441,7 @@ pub async fn detect_languages(
         // ruff-lsp: Extremely fast, new, growing adoption
         // jedi-language-server: Mature, lightweight, pure Python
         let python_lsp_candidates = [
-            ("pyright", vec!["--stdio".to_owned()]),
+            ("pyright-langserver", vec!["--stdio".to_owned()]),
             ("pylsp", vec![]),
             ("ruff-lsp", vec![]),
             ("jedi-language-server", vec![]),
@@ -996,7 +996,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prefers_pyright_over_pylsp() {
-        test_with_fake_python_binaries(&["pyright", "pylsp"], || async {
+        test_with_fake_python_binaries(&["pyright-langserver", "pylsp"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
@@ -1005,11 +1005,11 @@ mod tests {
                 .expect("detect");
 
             if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
-                // Should prefer pyright, which uses --stdio
+                // Should prefer pyright-langserver, which uses --stdio
                 assert_eq!(py.args, ["--stdio"]);
-                assert!(py.command.contains("pyright"));
+                assert!(py.command.contains("pyright-langserver"));
             } else {
-                panic!("Python should be detected with pyright");
+                panic!("Python should be detected with pyright-langserver");
             }
         }).await;
     }

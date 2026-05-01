@@ -2389,4 +2389,33 @@ pub(crate) mod types {
         assert_eq!(syms[0].name, "Status");
         assert_eq!(syms[0].kind, SymbolKind::Enum);
     }
+
+    /// PATCH-009: Verify Python function name_column points to function name
+    ///
+    /// For the line `def compute(x: int) -> int:`:
+    /// - Column 0: 'd' in 'def'
+    /// - Column 4: 'c' in 'compute'
+    /// - name_column should be 4 (pointing to 'c' in 'compute', not 'd' in 'def')
+    #[test]
+    fn test_python_name_column_points_to_function_name() {
+        let source = r#"
+def compute(x: int) -> int:
+    return x * 2
+"#;
+        let source_bytes = source.as_bytes();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("compute.py"),
+            SupportedLanguage::Python,
+            source_bytes,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source_bytes, SupportedLanguage::Python);
+
+        assert_eq!(syms.len(), 1, "should extract one function");
+        assert_eq!(syms[0].name, "compute", "function name should be compute");
+        assert_eq!(
+            syms[0].name_column, 4,
+            "name_column should point to 'c' in 'compute' (column 4), not 'd' in 'def' (column 0)"
+        );
+    }
 }
