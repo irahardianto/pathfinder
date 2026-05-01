@@ -180,7 +180,10 @@ impl PathfinderServer {
     // 3. Degraded path: NoLspAvailable → grep fallback
     // 4. Error path: Other LspError
     // The linear structure makes the orchestration easier to understand.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline: parse → sandbox → TS → LSP (with warmup retry) → grep fallback. Extraction done at helper level; remaining orchestration is linear."
+    )]
     pub(crate) async fn get_definition_impl(
         &self,
         params: GetDefinitionParams,

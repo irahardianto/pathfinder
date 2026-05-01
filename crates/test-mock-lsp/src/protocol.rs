@@ -20,6 +20,7 @@ use std::io::{self, BufRead, Write};
 pub struct JsonRpcMessage {
     /// The JSON-RPC version (always "2.0").
     #[allow(dead_code)]
+    // Spec-required field: deserialized from wire, read by external consumers or debug logging
     pub jsonrpc: String,
     /// Request identifier (omitted for notifications).
     pub id: Option<Value>,
