@@ -322,8 +322,8 @@ async fn test_lsp_client_document_sync_notifications_succeed() {
 /// systems where pyright is not installed. The test verifies:
 ///   1. Python language detection (pyproject.toml)
 ///   2. LSP initialization with pyright
-///   3. goto_definition jumps to correct location
-///   4. call_hierarchy_prepare works (or gracefully degrades)
+///   3. `goto_definition` jumps to correct location
+///   4. `call_hierarchy_prepare` works (or gracefully degrades)
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod python_integration {
@@ -337,6 +337,7 @@ mod python_integration {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn test_python_lsp_full_pipeline() {
         if !pyright_available() {
             eprintln!("Skipping Python integration test: pyright not installed");
@@ -374,7 +375,10 @@ if __name__ == "__main__":
 
         // Check if Python was detected
         let status = client.capability_status().await;
-        eprintln!("Detected languages: {:?}", status.keys().collect::<Vec<_>>());
+        eprintln!(
+            "Detected languages: {:?}",
+            status.keys().collect::<Vec<_>>()
+        );
 
         if !status.contains_key("python") {
             eprintln!("Python was not detected. Skipping test.");
@@ -395,9 +399,7 @@ if __name__ == "__main__":
 "#;
 
         // Trigger LSP initialization by opening the file
-        let did_open_result = client
-            .did_open(dir.path(), &main_py, content)
-            .await;
+        let did_open_result = client.did_open(dir.path(), &main_py, content).await;
 
         if let Err(e) = did_open_result {
             eprintln!("Python did_open failed: {}", e);
@@ -412,7 +414,10 @@ if __name__ == "__main__":
         // Check LSP status
         let status = client.capability_status().await;
         if let Some(py_status) = status.get("python") {
-            eprintln!("Python status: validation={}, reason={}", py_status.validation, py_status.reason);
+            eprintln!(
+                "Python status: validation={}, reason={}",
+                py_status.validation, py_status.reason
+            );
         } else {
             eprintln!("Python not in status after did_open");
             client.shutdown();
@@ -458,15 +463,18 @@ if __name__ == "__main__":
             .call_hierarchy_prepare(
                 dir.path(),
                 Path::new("main.py"),
-                2,  // line of `def greet`
-                5,  // column of `g` in `greet`
+                2, // line of `def greet`
+                5, // column of `g` in `greet`
             )
             .await;
 
         // Should either work or degrade gracefully (pyright may not fully support call hierarchy)
         match hierarchy {
             Ok(items) if !items.is_empty() => {
-                assert_eq!(items[0].name, "greet", "should find greet in call hierarchy");
+                assert_eq!(
+                    items[0].name, "greet",
+                    "should find greet in call hierarchy"
+                );
             }
             Ok(_) => {
                 // Empty result — pyright may not return call hierarchy items for simple cases

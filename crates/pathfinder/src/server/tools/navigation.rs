@@ -1257,7 +1257,9 @@ impl PathfinderServer {
                 probe_verified: false,
                 install_hint: None,
                 degraded_tools: compute_degraded_tools(status),
-                validation_latency_ms: compute_validation_latency(status.diagnostics_strategy.as_deref()),
+                validation_latency_ms: compute_validation_latency(
+                    status.diagnostics_strategy.as_deref(),
+                ),
             });
         }
 
@@ -1272,7 +1274,8 @@ impl PathfinderServer {
                         // LSP has been running for 10+ seconds but still warming_up.
                         // This likely means progress notifications aren't being emitted.
                         // Fire a lightweight probe.
-                        let probe_result = self.probe_language_readiness(&lang_health.language).await;
+                        let probe_result =
+                            self.probe_language_readiness(&lang_health.language).await;
                         if probe_result {
                             "ready".clone_into(&mut lang_health.status);
                             lang_health.probe_verified = true;
@@ -1331,8 +1334,6 @@ impl PathfinderServer {
 
     /// Probe whether an LSP is actually ready by attempting a lightweight operation.
     async fn probe_language_readiness(&self, language_id: &str) -> bool {
-        
-        
         // Find a well-known file in the workspace for this language
         let probe_file = self.find_probe_file(language_id);
         let Some(file_path) = probe_file else {
@@ -1344,23 +1345,20 @@ impl PathfinderServer {
             .await
             .unwrap_or_default();
 
-        let _ = self.lawyer.did_open(
-            self.workspace_root.path(),
-            &file_path,
-            &content,
-        ).await;
+        let _ = self
+            .lawyer
+            .did_open(self.workspace_root.path(), &file_path, &content)
+            .await;
 
-        let result = self.lawyer.goto_definition(
-            self.workspace_root.path(),
-            &file_path,
-            1,
-            1,
-        ).await;
+        let result = self
+            .lawyer
+            .goto_definition(self.workspace_root.path(), &file_path, 1, 1)
+            .await;
 
-        let _ = self.lawyer.did_close(
-            self.workspace_root.path(),
-            &file_path,
-        ).await;
+        let _ = self
+            .lawyer
+            .did_close(self.workspace_root.path(), &file_path)
+            .await;
 
         // Any response (even Ok(None)) means the LSP is alive and processing requests.
         // Only Err means it's not ready.
@@ -1372,7 +1370,14 @@ impl PathfinderServer {
         let candidates = match language_id {
             "rust" => vec!["src/main.rs", "src/lib.rs"],
             "go" => vec!["main.go", "cmd/main.go"],
-            "typescript" | "javascript" => vec!["src/index.ts", "index.ts", "src/main.ts", "src/index.js", "index.js", "src/main.js"],
+            "typescript" | "javascript" => vec![
+                "src/index.ts",
+                "index.ts",
+                "src/main.ts",
+                "src/index.js",
+                "index.js",
+                "src/main.js",
+            ],
             "python" => vec!["src/__init__.py", "main.py", "setup.py"],
             "ruby" => vec!["lib/main.rb", "main.rb"],
             "java" => vec!["src/main/java/Main.java"],
@@ -1387,8 +1392,6 @@ impl PathfinderServer {
         }
         None
     }
-
-
 }
 
 /// Format uptime in seconds as a human-readable string.
@@ -1489,7 +1492,6 @@ fn parse_uptime_to_seconds(uptime: Option<&str>) -> Option<u64> {
 
     Some(seconds)
 }
-
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -2542,7 +2544,7 @@ mod tests {
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
         let val = call_res.0;
-        
+
         assert_eq!(val.status, "unavailable");
         assert!(val.languages.is_empty());
     }
@@ -2642,9 +2644,9 @@ mod tests {
                 uptime_seconds: Some(10),
                 diagnostics_strategy: Some("push".to_string()),
                 supports_definition: Some(true),
-                supports_call_hierarchy: Some(true),  // TS supports call hierarchy
+                supports_call_hierarchy: Some(true), // TS supports call hierarchy
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(false),  // TS doesn't have formatting
+                supports_formatting: Some(false), // TS doesn't have formatting
             },
         )]));
 
@@ -2661,21 +2663,21 @@ mod tests {
         assert_eq!(ts_health.supports_formatting, Some(false));
     }
 
-
     // ── PATCH-006: Probe-Based Readiness Tests ─────────────────────────
 
     #[tokio::test]
     async fn test_lsp_health_probe_upgrades_warming_up_to_ready() {
         let surgeon = Arc::new(MockSurgeon::default());
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-        
+
         // Create a workspace with a main.rs file for probing
         let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
         std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
         std::fs::write(
             ws_dir.path().join("src/main.rs"),
             r#"fn main() { println!("Hello"); }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Mock a Rust LSP that's been warming up for 30 seconds
         lawyer.set_capability_status(std::collections::HashMap::from([(
@@ -2683,8 +2685,8 @@ mod tests {
             pathfinder_lsp::types::LspLanguageStatus {
                 validation: true,
                 reason: "LSP connected".to_string(),
-                indexing_complete: Some(false),  // Still warming up
-                uptime_seconds: Some(30),  // 30 seconds - should trigger probe
+                indexing_complete: Some(false), // Still warming up
+                uptime_seconds: Some(30),       // 30 seconds - should trigger probe
                 diagnostics_strategy: Some("pull".to_string()),
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
@@ -2722,15 +2724,12 @@ mod tests {
     async fn test_lsp_health_probe_keeps_warming_up_when_probe_fails() {
         let surgeon = Arc::new(MockSurgeon::default());
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-        
+
         // Create a workspace with a main.rs file for probing
         // Create a workspace with a main.rs file for probing
         let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
         std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
-        std::fs::write(
-            ws_dir.path().join("src/main.rs"),
-            "fn main() {}",
-        ).unwrap();
+        std::fs::write(ws_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
 
         // Mock a Rust LSP that's been warming up for 30 seconds
         lawyer.set_capability_status(std::collections::HashMap::from([(
@@ -2738,8 +2737,8 @@ mod tests {
             pathfinder_lsp::types::LspLanguageStatus {
                 validation: true,
                 reason: "LSP connected".to_string(),
-                indexing_complete: Some(false),  // Still warming up
-                uptime_seconds: Some(30),  // 30 seconds - should trigger probe
+                indexing_complete: Some(false), // Still warming up
+                uptime_seconds: Some(30),       // 30 seconds - should trigger probe
                 diagnostics_strategy: Some("pull".to_string()),
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
@@ -2779,8 +2778,8 @@ mod tests {
             pathfinder_lsp::types::LspLanguageStatus {
                 validation: true,
                 reason: "LSP connected".to_string(),
-                indexing_complete: Some(false),  // Warming up
-                uptime_seconds: Some(5),  // Only 5 seconds - should NOT trigger probe
+                indexing_complete: Some(false), // Warming up
+                uptime_seconds: Some(5),        // Only 5 seconds - should NOT trigger probe
                 diagnostics_strategy: Some("pull".to_string()),
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
@@ -2824,8 +2823,8 @@ mod tests {
             pathfinder_lsp::types::LspLanguageStatus {
                 validation: true,
                 reason: "LSP connected".to_string(),
-                indexing_complete: Some(true),  // Ready
-                uptime_seconds: Some(60),  // 60 seconds
+                indexing_complete: Some(true), // Ready
+                uptime_seconds: Some(60),      // 60 seconds
                 diagnostics_strategy: Some("pull".to_string()),
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
@@ -2872,7 +2871,7 @@ mod tests {
     async fn test_find_probe_file() {
         let surgeon = Arc::new(MockSurgeon::default());
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-        
+
         // Create some probe files
         let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
         std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
@@ -2888,7 +2887,7 @@ mod tests {
             server.find_probe_file("typescript"),
             Some(std::path::PathBuf::from("src/index.ts"))
         );
-        assert_eq!(server.find_probe_file("rust"), None);  // No Rust file
+        assert_eq!(server.find_probe_file("rust"), None); // No Rust file
     }
 
     // ── PATCH-008: Install Guidance Tests ─────────────────────────────────
@@ -2928,7 +2927,8 @@ mod tests {
                 language_id: "go".to_string(),
                 marker_file: "go.mod".to_string(),
                 tried_binaries: vec!["gopls".to_string()],
-                install_hint: "Install gopls: go install golang.org/x/tools/gopls@latest".to_string(),
+                install_hint: "Install gopls: go install golang.org/x/tools/gopls@latest"
+                    .to_string(),
             },
         ]);
 
@@ -3000,7 +3000,10 @@ mod tests {
         // Should only return Python, not Rust
         assert_eq!(val.languages.len(), 1);
         assert_eq!(val.languages[0].language, "python");
-        assert_eq!(val.languages[0].install_hint, Some("Install pyright".to_string()));
+        assert_eq!(
+            val.languages[0].install_hint,
+            Some("Install pyright".to_string())
+        );
     }
 
     // ── PATCH-010: Degraded Tools and Validation Latency Tests ─────────────
@@ -3039,15 +3042,21 @@ mod tests {
         let go_health = &val.languages[0];
         assert_eq!(go_health.language, "go");
         assert!(
-            go_health.degraded_tools.contains(&"analyze_impact".to_owned()),
+            go_health
+                .degraded_tools
+                .contains(&"analyze_impact".to_owned()),
             "degraded_tools should include analyze_impact when call hierarchy unsupported"
         );
         assert!(
-            go_health.degraded_tools.contains(&"read_with_deep_context".to_owned()),
+            go_health
+                .degraded_tools
+                .contains(&"read_with_deep_context".to_owned()),
             "degraded_tools should include read_with_deep_context when call hierarchy unsupported"
         );
         assert!(
-            go_health.degraded_tools.contains(&"validate_only".to_owned()),
+            go_health
+                .degraded_tools
+                .contains(&"validate_only".to_owned()),
             "degraded_tools should include validate_only when diagnostics unsupported"
         );
     }

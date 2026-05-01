@@ -176,39 +176,40 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
 
 /// Check if the workspace contains Vue single-file components.
 ///
-/// Scans `src/` (preferred) or workspace root up to 2 levels deep for `.vue` files.
+/// Scans for `.vue` files up to 4 levels deep from the workspace root.
+///
+/// Covers:
+/// - Standard layouts: `src/App.vue`, `src/components/Button.vue`
+/// - Monorepo layouts: `apps/frontend/src/App.vue`, `packages/web/src/views/Home.vue`
+///
 /// Avoids loading `@vue/typescript-plugin` unnecessarily in pure TS projects.
 async fn workspace_has_vue_files(workspace_root: &Path) -> bool {
-    let src_dir = workspace_root.join("src");
-    let check_dir = if tokio::fs::metadata(&src_dir).await.is_ok() {
-        src_dir
-    } else {
-        workspace_root.to_path_buf()
-    };
-
-    if let Ok(mut entries) = tokio::fs::read_dir(&check_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if let Some(ext) = path.extension() {
-                if ext == "vue" {
+    fn has_vue_recursive(
+        dir: &Path,
+        depth: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + '_>> {
+        Box::pin(async move {
+            if depth > 4 {
+                return false;
+            }
+            let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+                return false;
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "vue" {
+                        return true;
+                    }
+                }
+                if path.is_dir() && has_vue_recursive(&path, depth + 1).await {
                     return true;
                 }
             }
-            // Check one level of subdirectories
-            if path.is_dir() {
-                if let Ok(mut sub) = tokio::fs::read_dir(&path).await {
-                    while let Ok(Some(sub_entry)) = sub.next_entry().await {
-                        if let Some(ext) = sub_entry.path().extension() {
-                            if ext == "vue" {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            false
+        })
     }
-    false
+    has_vue_recursive(workspace_root, 0).await
 }
 
 /// Find a TypeScript plugin in the workspace's `node_modules`.
@@ -414,7 +415,9 @@ pub async fn detect_languages(
         } else if !has_override {
             missing.push(MissingLanguage {
                 language_id: "typescript".to_owned(),
-                marker_file: ts_marker.unwrap_or("tsconfig.json or package.json").to_string(),
+                marker_file: ts_marker
+                    .unwrap_or("tsconfig.json or package.json")
+                    .to_string(),
                 tried_binaries: vec!["typescript-language-server".to_string()],
                 install_hint: install_hint("typescript"),
             });
@@ -519,6 +522,7 @@ mod tests {
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Helper to run tests with fake Python LSP binaries in PATH
+    #[allow(clippy::await_holding_lock, clippy::expect_fun_call)]
     async fn test_with_fake_python_binaries<F, Fut>(binaries: &[&str], test: F)
     where
         F: FnOnce() -> Fut,
@@ -607,6 +611,19 @@ mod tests {
             .expect("write vue file");
     }
 
+    // Helper to create a .vue file deep in a monorepo (depth 3+).
+    // Simulates: apps/frontend/src/views/Home.vue
+    fn create_vue_file_monorepo(workspace: &Path) {
+        let views = workspace
+            .join("apps")
+            .join("frontend")
+            .join("src")
+            .join("views");
+        std::fs::create_dir_all(&views).expect("create monorepo views dir");
+        std::fs::write(views.join("Home.vue"), "<template>Home</template>")
+            .expect("write vue file");
+    }
+
     fn make_ts_config() -> pathfinder_common::config::PathfinderConfig {
         pathfinder_common::config::PathfinderConfig::default()
     }
@@ -646,7 +663,11 @@ mod tests {
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
             assert_eq!(ts.args, ["--stdio"]);
             assert!(ts.init_timeout_secs.is_none());
         }
@@ -659,7 +680,10 @@ mod tests {
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        let found = result.detected.iter().any(|l| l.language_id == "typescript");
+        let found = result
+            .detected
+            .iter()
+            .any(|l| l.language_id == "typescript");
         let _ = found;
     }
 
@@ -683,7 +707,11 @@ mod tests {
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        let ids: Vec<&str> = result.detected.iter().map(|l| l.language_id.as_str()).collect();
+        let ids: Vec<&str> = result
+            .detected
+            .iter()
+            .map(|l| l.language_id.as_str())
+            .collect();
         for id in &ids {
             assert!(["rust", "go", "typescript", "python"].contains(id));
         }
@@ -839,7 +867,11 @@ mod tests {
             .await
             .expect("detect");
 
-        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
             assert_eq!(ts.auto_plugins, ["@vue/typescript-plugin"]);
         }
     }
@@ -855,7 +887,11 @@ mod tests {
             .await
             .expect("detect");
 
-        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
             assert!(
                 ts.auto_plugins.is_empty(),
                 "auto_plugins should be empty when no .vue files exist"
@@ -875,7 +911,10 @@ mod tests {
             .expect("detect");
 
         assert!(
-            !result.detected.iter().any(|l| l.language_id == "typescript"),
+            !result
+                .detected
+                .iter()
+                .any(|l| l.language_id == "typescript"),
             "TypeScript should not be detected without a marker file"
         );
     }
@@ -902,7 +941,11 @@ mod tests {
 
         let result = detect_languages(dir.path(), &config).await.expect("detect");
 
-        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
             assert_eq!(
                 ts.auto_plugins,
                 ["@custom/plugin"],
@@ -922,7 +965,11 @@ mod tests {
             .await
             .expect("detect");
 
-        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
             assert_eq!(
                 ts.auto_plugins.len(),
                 1,
@@ -941,11 +988,42 @@ mod tests {
             .await
             .expect("detect");
 
-        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
             assert!(
                 ts.auto_plugins.is_empty(),
                 "should not detect plugin without .vue files"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detect_vue_files_in_monorepo_deep() {
+        // Vue files at depth 4: apps/frontend/src/views/Home.vue
+        // This tests the recursive depth-3 scan.
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("write");
+        create_vue_file_monorepo(dir.path());
+        create_vue_plugin(dir.path());
+
+        let result = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
+            assert_eq!(
+                ts.auto_plugins.len(),
+                1,
+                "should detect Vue files in deep monorepo structure (apps/frontend/src/views/)"
+            );
+            assert_eq!(ts.auto_plugins[0], "@vue/typescript-plugin");
         }
     }
 
@@ -960,7 +1038,11 @@ mod tests {
             .await
             .expect("detect");
 
-        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
             assert_eq!(
                 ts.auto_plugins.len(),
                 1,
@@ -991,7 +1073,8 @@ mod tests {
                 !result.detected.iter().any(|l| l.language_id == "python"),
                 "Python should not be detected without any LSP binary on PATH"
             );
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1011,7 +1094,8 @@ mod tests {
             } else {
                 panic!("Python should be detected with pyright-langserver");
             }
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1031,7 +1115,8 @@ mod tests {
             } else {
                 panic!("Python should be detected with pylsp");
             }
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1051,7 +1136,8 @@ mod tests {
             } else {
                 panic!("Python should be detected with ruff-lsp");
             }
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1071,7 +1157,8 @@ mod tests {
             } else {
                 panic!("Python should be detected with jedi-language-server");
             }
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1086,7 +1173,7 @@ mod tests {
                 "python".to_string(),
                 pathfinder_common::config::LspConfig {
                     command: "sh".to_string(), // Use sh as a dummy command
-                    args: vec![], // No args specified in config
+                    args: vec![],              // No args specified in config
                     idle_timeout_minutes: 15,
                     settings: serde_json::Value::Null,
                     root_override: None,
@@ -1101,6 +1188,7 @@ mod tests {
             } else {
                 panic!("Python should be detected with custom command");
             }
-        }).await;
+        })
+        .await;
     }
 }

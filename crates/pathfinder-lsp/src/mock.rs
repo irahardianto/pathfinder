@@ -48,7 +48,8 @@ type PrepareCallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyItem>, St
 type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, String>>>>;
 
 /// Configured result for `capability_status`.
-type CapabilityStatusFixture = Arc<Mutex<std::collections::HashMap<String, crate::types::LspLanguageStatus>>>;
+type CapabilityStatusFixture =
+    Arc<Mutex<std::collections::HashMap<String, crate::types::LspLanguageStatus>>>;
 
 /// Configured result for `missing_languages`.
 type MissingLanguagesFixture = Arc<Mutex<Vec<crate::client::MissingLanguage>>>;
@@ -271,13 +272,22 @@ impl MockLawyer {
     }
 
     /// Set the result to return from `capability_status()`.
-    pub fn set_capability_status(&self, status: std::collections::HashMap<String, crate::types::LspLanguageStatus>) {
-        *self.capability_status_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status;
+    pub fn set_capability_status(
+        &self,
+        status: std::collections::HashMap<String, crate::types::LspLanguageStatus>,
+    ) {
+        *self
+            .capability_status_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = status;
     }
 
     /// Set the result to return from `missing_languages()`.
     pub fn set_missing_languages(&self, missing: Vec<crate::client::MissingLanguage>) {
-        *self.missing_languages_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = missing;
+        *self
+            .missing_languages_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = missing;
     }
 
     /// Set the result for `range_formatting`.
@@ -456,11 +466,17 @@ impl Lawyer for MockLawyer {
     async fn capability_status(
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
-        self.capability_status_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.capability_status_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage> {
-        self.missing_languages_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.missing_languages_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError> {

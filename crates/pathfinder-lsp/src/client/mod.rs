@@ -16,8 +16,10 @@ mod protocol;
 mod transport;
 
 pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy};
-pub use detect::{detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage};
-pub use detect::{install_hint};
+pub use detect::install_hint;
+pub use detect::{
+    detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage,
+};
 
 use crate::types::{CallHierarchyCall, CallHierarchyItem, LspDiagnostic, LspDiagnosticSeverity};
 use crate::{DefinitionLocation, Lawyer, LspError};
@@ -94,18 +96,16 @@ impl ProcessEntry {
                     state.spawned_at.elapsed().as_secs(),
                 )
             }
-            Self::Unavailable(_) => {
-                validation_status_from_parts(
-                    command,
-                    false,
-                    DiagnosticsStrategy::None,
-                    false,
-                    false,
-                    false,
-                    false,
-                    0,
-                )
-            }
+            Self::Unavailable(_) => validation_status_from_parts(
+                command,
+                false,
+                DiagnosticsStrategy::None,
+                false,
+                false,
+                false,
+                false,
+                0,
+            ),
         }
     }
 }
@@ -2189,11 +2189,11 @@ mod tests {
             "rust-analyzer",
             true,
             DiagnosticsStrategy::Pull,
-            true,   // supports_definition
-            true,   // supports_call_hierarchy
-            false,  // supports_formatting
-            false,  // indexing_complete
-            10,     // uptime_seconds
+            true,  // supports_definition
+            true,  // supports_call_hierarchy
+            false, // supports_formatting
+            false, // indexing_complete
+            10,    // uptime_seconds
         );
         assert!(
             status.validation,
@@ -2213,11 +2213,11 @@ mod tests {
             "rust-analyzer",
             true,
             DiagnosticsStrategy::Pull,
-            true,   // supports_definition
-            true,   // supports_call_hierarchy
-            false,  // supports_formatting
-            true,   // indexing_complete
-            42,     // uptime_seconds
+            true,  // supports_definition
+            true,  // supports_call_hierarchy
+            false, // supports_formatting
+            true,  // indexing_complete
+            42,    // uptime_seconds
         );
         assert!(status.validation);
         assert_eq!(status.indexing_complete, Some(true));
@@ -2227,8 +2227,16 @@ mod tests {
     #[test]
     fn test_process_entry_running_without_diagnostics_status() {
         // LSP connected but does not support textDocument/diagnostic.
-        let status =
-            validation_status_from_parts("gopls", true, DiagnosticsStrategy::None, true, true, false, true, 5);
+        let status = validation_status_from_parts(
+            "gopls",
+            true,
+            DiagnosticsStrategy::None,
+            true,
+            true,
+            false,
+            true,
+            5,
+        );
         assert!(
             !status.validation,
             "diagnostic_provider=false must yield validation=false"
@@ -2245,8 +2253,16 @@ mod tests {
     #[test]
     fn test_process_entry_running_uptime_is_non_none() {
         // Uptime should always be Some for a running process (even if 0 seconds).
-        let status =
-            validation_status_from_parts("pyright", true, DiagnosticsStrategy::Pull, true, true, false, false, 0);
+        let status = validation_status_from_parts(
+            "pyright",
+            true,
+            DiagnosticsStrategy::Pull,
+            true,
+            true,
+            false,
+            false,
+            0,
+        );
         assert!(status.uptime_seconds.is_some());
         assert!(status.indexing_complete.is_some());
     }

@@ -518,6 +518,328 @@ fn test_build_validation_outcome_non_empty_pre_does_not_skip() {
     assert!(!outcome.should_block);
 }
 
+// ── Push diagnostics tests (PATCH-002) ──────────────────────────────
+//
+// These tests verify the push diagnostics path in run_lsp_validation.
+// The push path is triggered when capability_status reports diagnostics_strategy
+// as "push" for the file's language. This is the path used by gopls and
+// typescript-language-server (they don't support pull diagnostics).
+//
+// Mock setup: set_capability_status with diagnostics_strategy: Some("push")
+// queues results via push_pull_diagnostics_result (shared queue with pull).
+
+// ── push_validation_no_errors: pre and post both empty → passes ────
+
+#[tokio::test]
+async fn test_push_validation_no_errors() {
+    let ws_dir = tempdir().expect("temp dir");
+    let filepath = "src/auth.go";
+    let src = "func Login() {}";
+    let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+    let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+
+    // Configure capability_status to report push diagnostics for Go
+    mock_lawyer.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "gopls connected (push diagnostics)".to_string(),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+        },
+    )]));
+
+    // Pre-edit: no errors (collect_diagnostics call 1)
+    mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+    // Post-edit: no errors (collect_diagnostics call 2)
+    mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+
+    let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+    let params = ReplaceFullParams {
+        semantic_path: format!("{filepath}::Login"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "func Login() { return }\n".to_owned(),
+        ignore_validation_failures: false,
+    };
+    let result = server
+        .replace_full(Parameters(params))
+        .await
+        .expect("should succeed — push validation with no errors");
+    let resp = result.0;
+
+    assert!(
+        resp.success,
+        "edit should succeed when push validation finds no new errors"
+    );
+    assert_eq!(
+        resp.validation.status, "uncertain",
+        "push validation with empty pre and post should be 'uncertain' (warmup signal)"
+    );
+    assert!(
+        resp.validation_skipped,
+        "empty push snapshots should trigger skip"
+    );
+    assert_eq!(
+        resp.validation_skipped_reason.as_deref(),
+        Some("empty_diagnostics_both_snapshots"),
+        "skip reason should indicate empty snapshots"
+    );
+}
+
+// ── push_validation_clean_pass: pre and post both non-empty, no new errors → passes ──
+
+#[tokio::test]
+async fn test_push_validation_clean_pass() {
+    use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
+
+    let ws_dir = tempdir().expect("temp dir");
+    let filepath = "src/auth.go";
+    let src = "func Login() {}";
+    let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+    let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+
+    mock_lawyer.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "gopls connected (push diagnostics)".to_string(),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+        },
+    )]));
+
+    // Same pre-existing warning in both snapshots → no NEW errors
+    let existing_warning = LspDiagnostic {
+        severity: LspDiagnosticSeverity::Warning,
+        code: Some("W001".into()),
+        message: "unused variable".into(),
+        file: filepath.to_owned(),
+        start_line: 1,
+        end_line: 1,
+    };
+    mock_lawyer.push_pull_diagnostics_result(Ok(vec![existing_warning.clone()]));
+    mock_lawyer.push_pull_diagnostics_result(Ok(vec![existing_warning]));
+
+    let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+    let params = ReplaceFullParams {
+        semantic_path: format!("{filepath}::Login"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "func Login() { return }\n".to_owned(),
+        ignore_validation_failures: false,
+    };
+    let result = server
+        .replace_full(Parameters(params))
+        .await
+        .expect("should succeed — push validation with no new errors");
+    let resp = result.0;
+
+    assert!(resp.success);
+    assert_eq!(resp.validation.status, "passed");
+    assert!(!resp.validation_skipped);
+    assert!(resp.validation.introduced_errors.is_empty());
+    assert!(resp.validation.resolved_errors.is_empty());
+}
+
+// ── push_validation_introduced_error: post has new error → blocks edit ──
+
+#[tokio::test]
+async fn test_push_validation_introduced_error() {
+    use pathfinder_lsp::types::{LspDiagnostic, LspDiagnosticSeverity};
+
+    let ws_dir = tempdir().expect("temp dir");
+    let filepath = "src/auth.go";
+    let src = "func Login() {}";
+    let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+    let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+
+    mock_lawyer.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "gopls connected (push diagnostics)".to_string(),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+        },
+    )]));
+
+    // Pre-edit: no errors
+    mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+    // Post-edit: one new error introduced
+    mock_lawyer.push_pull_diagnostics_result(Ok(vec![LspDiagnostic {
+        severity: LspDiagnosticSeverity::Error,
+        code: Some("E001".into()),
+        message: "undefined: Foo".into(),
+        file: filepath.to_owned(),
+        start_line: 1,
+        end_line: 1,
+    }]));
+
+    let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+    let params = ReplaceFullParams {
+        semantic_path: format!("{filepath}::Login"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "func Login() { Foo() }\n".to_owned(),
+        ignore_validation_failures: false,
+    };
+    let result = server.replace_full(Parameters(params)).await;
+
+    let Err(err) = result else {
+        panic!("expected VALIDATION_FAILED error when push diagnostics finds new errors");
+    };
+    let code = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(code, "VALIDATION_FAILED", "got: {err:?}");
+
+    let introduced = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("details"))
+        .and_then(|d| d.get("introduced_errors"))
+        .and_then(|v| v.as_array())
+        .map_or(0, Vec::len);
+    assert_eq!(
+        introduced, 1,
+        "one new error should appear in introduced_errors from push path"
+    );
+}
+
+// ── push_validation_pre_fails: pre-edit collect_diagnostics errors → skipped ──
+
+#[tokio::test]
+async fn test_push_validation_pre_fails() {
+    let ws_dir = tempdir().expect("temp dir");
+    let filepath = "src/auth.go";
+    let src = "func Login() {}";
+    let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+    let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+
+    mock_lawyer.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "gopls connected (push diagnostics)".to_string(),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+        },
+    )]));
+
+    // Pre-edit collect_diagnostics fails (e.g., LSP timeout)
+    mock_lawyer.push_pull_diagnostics_result(Err("push collection timed out".to_owned()));
+
+    let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+    let params = ReplaceFullParams {
+        semantic_path: format!("{filepath}::Login"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "func Login() { return }\n".to_owned(),
+        ignore_validation_failures: false,
+    };
+    let result = server
+        .replace_full(Parameters(params))
+        .await
+        .expect("should succeed — push pre-diag failure gracefully degrades");
+    let resp = result.0;
+
+    assert!(resp.success, "edit should succeed despite pre-diag failure");
+    assert_eq!(resp.validation.status, "skipped");
+    assert!(resp.validation_skipped);
+    assert_eq!(
+        resp.validation_skipped_reason.as_deref(),
+        Some("lsp_protocol_error"),
+        "push pre-diag failure should map to lsp_protocol_error"
+    );
+}
+
+// ── push_validation_post_fails: post-edit collect_diagnostics errors → skipped ──
+
+#[tokio::test]
+async fn test_push_validation_post_fails() {
+    let ws_dir = tempdir().expect("temp dir");
+    let filepath = "src/auth.go";
+    let src = "func Login() {}";
+    let (mock_surgeon, hash) = setup_full_replace_fixture(&ws_dir, filepath, src);
+
+    let mock_lawyer = pathfinder_lsp::MockLawyer::default();
+
+    mock_lawyer.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "gopls connected (push diagnostics)".to_string(),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+        },
+    )]));
+
+    // Pre-edit: succeeds with empty diags
+    mock_lawyer.push_pull_diagnostics_result(Ok(vec![]));
+    // Post-edit: fails (e.g., LSP crashed mid-collection)
+    mock_lawyer
+        .push_pull_diagnostics_result(Err("connection lost during push collection".to_owned()));
+
+    let server = make_server_with_lawyer(&ws_dir, mock_surgeon, mock_lawyer);
+
+    let params = ReplaceFullParams {
+        semantic_path: format!("{filepath}::Login"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "func Login() { return }\n".to_owned(),
+        ignore_validation_failures: false,
+    };
+    let result = server
+        .replace_full(Parameters(params))
+        .await
+        .expect("should succeed — push post-diag failure gracefully degrades");
+    let resp = result.0;
+
+    assert!(
+        resp.success,
+        "edit should succeed despite post-diag failure"
+    );
+    assert_eq!(resp.validation.status, "skipped");
+    assert!(resp.validation_skipped);
+    assert_eq!(
+        resp.validation_skipped_reason.as_deref(),
+        Some("lsp_protocol_error"),
+        "push post-diag failure should map to lsp_protocol_error"
+    );
+}
+
 // ── lsp_error_to_skip_reason: pure function, all variants tested ──────
 //
 // These tests verify that every LspError variant maps to the correct

@@ -192,7 +192,6 @@ pub trait Lawyer: Send + Sync {
     /// Used to surface actionable install guidance in `lsp_health` responses.
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage>;
 
-
     /// Notify all running LSP processes of a filesystem change.
     ///
     /// Broadcasts `workspace/didChangeWatchedFiles` to every running LSP process.
