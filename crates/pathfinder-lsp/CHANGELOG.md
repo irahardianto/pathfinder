@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.2.7...pathfinder-mcp-lsp-v0.3.0) - 2026-05-01
+
+### Added
+
+- Complete PATCH-001 through PATCH-011 implementation gaps
+- *(lsp)* Python LSP E2E verification test + fix pyright detection (PATCH-009)
+- *(lsp)* surface install guidance for missing LSPs (PATCH-008)
+- *(lsp)* cross-language LSP reliability improvements
+
+### Other
+
+- *(lsp)* add branch coverage for LSP response parsers
+- *(lsp)* add process shutdown coverage
+
 ## [0.2.7](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.2.6...pathfinder-mcp-lsp-v0.2.7) - 2026-05-01
 
 ### Other

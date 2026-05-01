@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder-mcp-treesitter"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 license.workspace = true
 description = "The Surgeon — Tree-sitter engine for AST-aware operations in Pathfinder"
@@ -18,7 +18,7 @@ workspace = true
 
 [dependencies]
 # Intra-workspace
-pathfinder-common = { version = "0.2.0", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
+pathfinder-common = { version = "0.3.0", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
 
 # Tree-sitter core
 tree-sitter = "0.24"
