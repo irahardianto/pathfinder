@@ -13,3 +13,7 @@
 ## 2025-05-01 - URL Parsing Fallback Coverage
 **Learning:** In LSP response parsers, URL parsing (e.g. `Url::parse(uri_str)`) can fail for missing schemes or non-file URLs. The fallback logic, such as returning the original raw `uri_str`, must be explicitly tested.
 **Action:** Next time I add or verify parser coverage, I will ensure that not only the happy path but also the fallback behavior for malformed inputs (like missing schemes or invalid URLs) are tested.
+
+## 2024-05-18 - Missing Coverage in search result cache lock
+**Learning:** Testing error handling like mutex poisoning (`lock_or_recover`) and byte conversion from grep (`from_utf8` on matched bytes) requires specific environment simulation (catching panic to poison mutex, writing raw bytes directly to files).
+**Action:** When testing internal error handling edge-cases (like Mutex poisoning or invalid encoding from external crates), artificially manipulate the state in memory or raw files before calling the function.
