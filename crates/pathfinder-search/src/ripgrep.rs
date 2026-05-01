@@ -940,3 +940,92 @@ mod tests {
         assert_eq!(result.matches[0].known, None);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod missing_coverage_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    #[test]
+    fn test_lock_or_recover_poisoned() {
+        let mutex = Mutex::new(vec![1, 2, 3]);
+
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("poisoning");
+        });
+
+        let mut guard = lock_or_recover(&mutex);
+        assert_eq!(*guard, vec![1, 2, 3]);
+        guard.push(4);
+    }
+
+    #[tokio::test]
+    async fn test_search_match_column_invalid_utf8_prefix() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let full = dir.path().join("main.rs");
+        let mut f = std::fs::File::create(&full).expect("create file");
+        f.write_all(b"x\xFFmatch\n").expect("write content");
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "match".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].column, 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_context_lines_gap() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let full = dir.path().join("main.rs");
+        let mut f = std::fs::File::create(&full).expect("create file");
+        f.write_all(b"line1\nline2\nmatch1\nline4\nline5\nline6\nline7\nline8\nmatch2\n")
+            .expect("write content");
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "match".to_owned(),
+            context_lines: 2,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 2);
+
+        assert_eq!(result.matches[0].line, 3);
+        assert_eq!(result.matches[0].context_before, vec!["line1", "line2"]);
+        assert_eq!(result.matches[0].context_after, vec!["line4", "line5"]);
+
+        assert_eq!(result.matches[1].line, 9);
+        assert_eq!(result.matches[1].context_before, vec!["line7", "line8"]);
+    }
+
+    #[tokio::test]
+    async fn test_search_context_lines_max_buffer() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let full = dir.path().join("main.rs");
+        let mut f = std::fs::File::create(&full).expect("create file");
+        f.write_all(b"line1\nline2\nline3\nmatch\n")
+            .expect("write content");
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "match".to_owned(),
+            context_lines: 2,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].context_before, vec!["line2", "line3"]);
+    }
+}
