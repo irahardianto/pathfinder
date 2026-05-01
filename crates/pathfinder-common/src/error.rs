@@ -442,6 +442,105 @@ mod tests {
     }
 
     #[test]
+    fn test_hint_file_not_found() {
+        let err = PathfinderError::FileNotFound {
+            path: "a".into(),
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("relative"), "hint: {hint}");
+    }
+
+    #[test]
+    fn test_hint_validation_failed() {
+        let err = PathfinderError::ValidationFailed {
+            count: 0,
+            introduced_errors: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("ignore_validation_failures"), "hint: {hint}");
+    }
+
+    #[test]
+    fn test_hint_ambiguous_match() {
+        let err = PathfinderError::AmbiguousMatch {
+            filepath: "a".into(),
+            occurrences: 2,
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("2 times"), "hint: {hint}");
+    }
+
+    #[test]
+    fn test_hint_invalid_semantic_path() {
+        let err = PathfinderError::InvalidSemanticPath {
+            input: "x".into(),
+            issue: "y".into(),
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("'x' is missing"), "hint: {hint}");
+    }
+
+    #[test]
+    fn test_hint_file_already_exists() {
+        let err = PathfinderError::FileAlreadyExists {
+            path: "a".into(),
+        };
+        assert!(err.hint().is_none());
+    }
+
+    #[test]
+    fn test_details_serialization_extra() {
+        let err = PathfinderError::AmbiguousSymbol {
+            semantic_path: "a".into(),
+            matches: vec!["b".into()],
+        };
+        assert_eq!(err.to_details()["matches"][0], "b");
+
+        let err = PathfinderError::ValidationFailed {
+            count: 0,
+            introduced_errors: vec![],
+        };
+        assert!(err.to_details().get("introduced_errors").is_some());
+
+        let err = PathfinderError::AmbiguousMatch {
+            filepath: "a".into(),
+            occurrences: 3,
+        };
+        assert_eq!(err.to_details()["occurrences"], 3);
+
+        let err = PathfinderError::AccessDenied {
+            path: "a".into(),
+            tier: SandboxTier::UserDefined,
+        };
+        assert_eq!(err.to_details()["tier"], "UserDefined");
+
+        let err = PathfinderError::TokenBudgetExceeded {
+            used: 10,
+            budget: 5,
+        };
+        assert_eq!(err.to_details()["used"], 10);
+        assert_eq!(err.to_details()["budget"], 5);
+
+        let err = PathfinderError::InvalidSemanticPath {
+            input: "a".into(),
+            issue: "b".into(),
+        };
+        assert_eq!(err.to_details()["issue"], "b");
+
+        let err = PathfinderError::FileNotFound { path: "a".into() };
+        assert!(err.to_details().as_object().unwrap().is_empty());
+
+        let err = PathfinderError::TextNotFound {
+            filepath: "a.vue".into(),
+            old_text: "<button>Check</button>".into(),
+            context_line: 42,
+            actual_content: Some("content".into()),
+            closest_match: None,
+        };
+        assert_eq!(err.to_details()["actual_content"], "content");
+    }
+
+    #[test]
     fn test_all_error_codes_are_screaming_snake_case() {
         let errors: Vec<PathfinderError> = vec![
             PathfinderError::FileNotFound { path: "a".into() },
