@@ -1256,6 +1256,8 @@ impl PathfinderServer {
                 supports_formatting: status.supports_formatting,
                 probe_verified: false,
                 install_hint: None,
+                degraded_tools: compute_degraded_tools(status),
+                validation_latency_ms: compute_validation_latency(status.diagnostics_strategy.as_deref()),
             });
         }
 
@@ -1306,6 +1308,12 @@ impl PathfinderServer {
                 supports_formatting: None,
                 probe_verified: false,
                 install_hint: Some(missing.install_hint.clone()),
+                degraded_tools: vec![
+                    "analyze_impact".to_owned(),
+                    "read_with_deep_context".to_owned(),
+                    "validate_only".to_owned(),
+                ],
+                validation_latency_ms: None,
             });
         }
 
@@ -1408,6 +1416,36 @@ fn format_uptime(seconds: u64) -> String {
 
 /// Parse a formatted uptime string back to seconds.
 /// Handles formats: `"Xs"`, `"XmYs"`, `"XhYm"`, `"XhYmZs"`
+/// Compute which tools are degraded based on LSP capabilities.
+///
+/// Returns a list of tool names that lose LSP support for this language.
+fn compute_degraded_tools(status: &pathfinder_lsp::types::LspLanguageStatus) -> Vec<String> {
+    let mut degraded = Vec::new();
+
+    if status.supports_call_hierarchy != Some(true) {
+        degraded.push("analyze_impact".to_owned());
+        degraded.push("read_with_deep_context".to_owned());
+    }
+    if status.supports_diagnostics != Some(true)
+        && status.diagnostics_strategy.as_deref() != Some("push")
+    {
+        degraded.push("validate_only".to_owned());
+    }
+
+    degraded
+}
+
+/// Compute approximate validation latency based on diagnostics strategy.
+///
+/// Returns estimated time in milliseconds for validation to complete.
+fn compute_validation_latency(strategy: Option<&str>) -> Option<u64> {
+    match strategy {
+        Some("push") => Some(10_000), // ~10s for push collection (5s pre + 5s post)
+        Some("pull") => Some(2_000),  // ~2s for pull request
+        _ => None,
+    }
+}
+
 fn parse_uptime_to_seconds(uptime: Option<&str>) -> Option<u64> {
     let uptime = uptime?;
     let mut seconds = 0u64;
@@ -2965,4 +3003,174 @@ mod tests {
         assert_eq!(val.languages[0].install_hint, Some("Install pyright".to_string()));
     }
 
+    // ── PATCH-010: Degraded Tools and Validation Latency Tests ─────────────
+
+    #[tokio::test]
+    async fn test_health_shows_degraded_tools_for_no_diagnostics() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock an LSP without diagnostics or call hierarchy support
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "go".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(60),
+                diagnostics_strategy: None,
+                supports_definition: Some(true),
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("go".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        assert_eq!(val.languages.len(), 1);
+        let go_health = &val.languages[0];
+        assert_eq!(go_health.language, "go");
+        assert!(
+            go_health.degraded_tools.contains(&"analyze_impact".to_owned()),
+            "degraded_tools should include analyze_impact when call hierarchy unsupported"
+        );
+        assert!(
+            go_health.degraded_tools.contains(&"read_with_deep_context".to_owned()),
+            "degraded_tools should include read_with_deep_context when call hierarchy unsupported"
+        );
+        assert!(
+            go_health.degraded_tools.contains(&"validate_only".to_owned()),
+            "degraded_tools should include validate_only when diagnostics unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_shows_empty_degraded_when_fully_capable() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock a fully capable LSP
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(60),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        assert_eq!(val.languages.len(), 1);
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.language, "rust");
+        assert!(
+            rust_health.degraded_tools.is_empty(),
+            "degraded_tools should be empty when all capabilities supported, got: {:?}",
+            rust_health.degraded_tools
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_shows_push_latency() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock a push diagnostics language (Go)
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "go".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(60),
+                diagnostics_strategy: Some("push".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("go".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        assert_eq!(val.languages.len(), 1);
+        let go_health = &val.languages[0];
+        assert_eq!(go_health.language, "go");
+        assert_eq!(
+            go_health.validation_latency_ms,
+            Some(10_000),
+            "push diagnostics should have ~10s validation latency"
+        );
+        assert!(
+            go_health.degraded_tools.is_empty(),
+            "fully capable LSP should have no degraded tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_shows_pull_latency() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock a pull diagnostics language (Rust)
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(60),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        let rust_health = &val.languages[0];
+        assert_eq!(
+            rust_health.validation_latency_ms,
+            Some(2_000),
+            "pull diagnostics should have ~2s validation latency"
+        );
+    }
 }

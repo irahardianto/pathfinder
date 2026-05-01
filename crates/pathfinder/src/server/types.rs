@@ -856,6 +856,17 @@ pub struct LspLanguageHealth {
     /// `None` when LSP is running or language not detected at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
+    /// Tools that are degraded (using fallback) for this language.
+    ///
+    /// Empty when LSP is fully operational. Lists which tools lose LSP support.
+    /// Example: `["analyze_impact", "read_with_deep_context"]` when call hierarchy unsupported.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded_tools: Vec<String>,
+    /// Approximate validation latency in milliseconds for this language.
+    ///
+    /// `None` when unknown or not applicable. Helps agents decide whether to validate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_latency_ms: Option<u64>,
 }
 
 /// Helper to skip serializing false values for `probe_verified`.
