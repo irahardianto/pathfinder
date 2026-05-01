@@ -443,9 +443,7 @@ mod tests {
 
     #[test]
     fn test_hint_file_not_found() {
-        let err = PathfinderError::FileNotFound {
-            path: "a".into(),
-        };
+        let err = PathfinderError::FileNotFound { path: "a".into() };
         let hint = err.hint().expect("should have hint");
         assert!(hint.contains("relative"), "hint: {hint}");
     }
@@ -482,9 +480,7 @@ mod tests {
 
     #[test]
     fn test_hint_file_already_exists() {
-        let err = PathfinderError::FileAlreadyExists {
-            path: "a".into(),
-        };
+        let err = PathfinderError::FileAlreadyExists { path: "a".into() };
         assert!(err.hint().is_none());
     }
 
