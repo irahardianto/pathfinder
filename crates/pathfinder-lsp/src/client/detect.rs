@@ -777,6 +777,10 @@ mod tests {
 
     #[test]
     fn test_resolve_command_not_found_returns_none() {
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let result = resolve_command(
             "pathfinder_lsp_binary_that_does_not_exist_xyzzy_42",
             "test-lang",
@@ -789,12 +793,17 @@ mod tests {
 
     #[test]
     fn test_resolve_command_found_returns_some() {
-        let result = resolve_command("sh", "shell");
+        // Lock mutex because other tests modify PATH
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let result = resolve_command("cargo", "rust");
         assert!(
             result.is_some(),
             "resolve_command must return Some for a binary on PATH"
         );
-        let path = result.expect("sh must resolve to an absolute path");
+        let path = result.expect("cargo must resolve to an absolute path");
         assert!(!path.is_empty());
     }
 

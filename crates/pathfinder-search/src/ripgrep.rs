@@ -181,7 +181,12 @@ impl Sink for MatchCollector<'_> {
             file: self.relative_path.clone(),
             line,
             column,
-            content: content.clone(),
+            // PERF: Avoid content.clone() unless context_lines > 0
+            content: if self.context_lines > 0 {
+                content.clone()
+            } else {
+                String::new() // Placeholder, we will move content later in this case
+            },
             context_before: std::mem::take(&mut self.context_before_buf).into(),
             context_after: Vec::new(), // filled later by `context()`
             enclosing_semantic_path: None,
@@ -189,8 +194,10 @@ impl Sink for MatchCollector<'_> {
             known: None, // set to Some(true) by search_codebase_impl for known_files
         };
 
-        // This matching line itself acts as "before context" for a subsequent adjacent overlap match
-        if self.context_lines > 0 {
+        let mut search_match = search_match;
+        if self.context_lines == 0 {
+            search_match.content = content;
+        } else {
             self.context_before_buf.push_back(content);
         }
 
