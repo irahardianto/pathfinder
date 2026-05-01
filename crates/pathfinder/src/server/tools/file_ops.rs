@@ -404,7 +404,6 @@ impl PathfinderServer {
     // 5. Atomic inode-preserving write + LSP broadcast + cache invalidation
     // The linear structure makes each phase's ordering and dependency explicit.
     #[tracing::instrument(skip(self, params), fields(filepath = %params.filepath))]
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn write_file_impl(
         &self,
         params: WriteFileParams,

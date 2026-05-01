@@ -43,7 +43,10 @@ impl PathfinderServer {
     // degraded-mode bypass logic, response formatting for both grouped and flat output,
     // and detailed telemetry logging. The linear structure makes the orchestration
     // easier to understand and verify.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline: ripgrep → TS enrichment → filter → group → response. Extraction done at helper level; remaining orchestration is linear."
+    )]
     pub(crate) async fn search_codebase_impl(
         &self,
         params: SearchCodebaseParams,

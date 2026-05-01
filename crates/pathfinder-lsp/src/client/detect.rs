@@ -123,7 +123,10 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
 // The function is structured as one block per language (Rust, Go, TS, Python).
 // Each block is short but the four-language repetition pushes the total just
 // over the 100-line clippy default. Suppressing to keep the pattern intact.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Four-language repetition block; each block is short but cumulative length exceeds threshold. Pattern is clean per-language — extraction would add indirection without clarity."
+)]
 pub async fn detect_languages(
     workspace_root: &Path,
     config: &pathfinder_common::config::PathfinderConfig,
