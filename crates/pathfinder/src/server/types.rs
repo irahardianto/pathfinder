@@ -801,6 +801,38 @@ pub struct AnalyzeImpactMetadata {
     pub version_hashes: std::collections::HashMap<String, String>,
 }
 
+// ── LSP Health Tool Types ────────────────────────────────────────────
+
+/// Parameters for `lsp_health`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct LspHealthParams {
+    /// Optional language to check (e.g., "rust", "typescript").
+    /// If omitted, checks all available languages.
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+/// The response for `lsp_health`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct LspHealthResponse {
+    /// Overall LSP readiness: `"ready"`, `"warming_up"`, or `"unavailable"`.
+    pub status: String,
+    /// Per-language status details.
+    pub languages: Vec<LspLanguageHealth>,
+}
+
+/// Per-language LSP health status.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct LspLanguageHealth {
+    /// Language ID (e.g., "rust", "typescript").
+    pub language: String,
+    /// Status: `"ready"`, `"warming_up"`, `"starting"`, or `"unavailable"`.
+    pub status: String,
+    /// Time since LSP process started, formatted as a human-readable string (e.g., "45s").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime: Option<String>,
+}
+
 // ── Default Value Functions ─────────────────────────────────────────
 
 #[must_use]

@@ -12,6 +12,7 @@ impl PathfinderServer {
     /// Generates a structural skeleton of the project via Tree-sitter.
     /// Visibility filtering is not yet implemented; `visibility_degraded`
     /// is always set to `Some(true)` so agents know the param has no effect.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn get_repo_map_impl(
         &self,
         params: GetRepoMapParams,
@@ -38,7 +39,38 @@ impl PathfinderServer {
             )
             .await
             {
-                Ok(files) => changed_files = Some(files),
+                Ok(files) => {
+                    if files.is_empty() {
+                        // No changes found — return a structured empty result
+                        // rather than a skeleton with zero content
+                        let capability_status = self.lawyer.capability_status().await;
+                        let metadata = crate::server::types::GetRepoMapMetadata {
+                            tech_stack: vec![],
+                            files_scanned: 0,
+                            files_truncated: 0,
+                            files_in_scope: 0,
+                            coverage_percent: 100,
+                            version_hashes: std::collections::HashMap::new(),
+                            visibility_degraded: None,
+                            degraded: false,
+                            degraded_reason: None,
+                            capabilities: RepoCapabilities {
+                                edit: true,
+                                search: true,
+                                lsp: LspCapabilities {
+                                    supported: true,
+                                    per_language: capability_status,
+                                },
+                            },
+                        };
+                        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
+                            "No files changed since the specified ref. No skeleton generated.",
+                        )]);
+                        res.structured_content = serialize_metadata(&metadata);
+                        return Ok(res);
+                    }
+                    changed_files = Some(files);
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "get_repo_map: fallback to full map (git failed)");
                     degraded = true;

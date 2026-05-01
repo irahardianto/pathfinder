@@ -237,6 +237,20 @@ impl PathfinderServer {
     }
 
     #[tool(
+        name = "lsp_health",
+        description = "Check LSP (Language Server Protocol) health status. Use this at session start to determine whether navigation tools (get_definition, analyze_impact, read_with_deep_context) will return real data or degraded results.\\n\\n**Response fields:**\\n- \\`status\\` — overall readiness: \\\"ready\\\", \\\"warming_up\\\", \\\"starting\\\", or \\\"unavailable\\\".\\n- \\`languages\\` — per-language details with \\`language\\`, \\`status\\`, and optional \\`uptime\\`.\\n\\n**Status values:**\\n- \\\"ready\\\" — LSP has finished indexing. Navigation tools should work reliably.\\n- \\\"warming_up\\\" — LSP is running but still indexing the workspace. Navigation tools may return empty or incomplete results.\\n- \\\"starting\\\" — LSP process has started but not yet initialized.\\n- \\\"unavailable\\\" — No LSP available for this language.\\n\\nWhen \\`status\\` is not \\\"ready\\\", agents should:\\n1. Use Tree-sitter-based tools instead (search_codebase, read_symbol_scope, read_source_file)\\\n2. Wait and retry later, or\\\n3. Treat empty navigation results as UNVERIFIED rather than \\\"confirmed zero\\\".\\n\\n**Optional parameter:** \\`language\\` — filter to a specific language (e.g., \\\"rust\\\", \\\"typescript\\\"). If omitted, checks all available languages."
+    )]
+    async fn lsp_health(
+        &self,
+        Parameters(params): Parameters<crate::server::types::LspHealthParams>,
+    ) -> Result<
+            rmcp::handler::server::wrapper::Json<crate::server::types::LspHealthResponse>,
+            ErrorData,
+        > {
+        self.lsp_health_impl(params).await
+    }
+
+    #[tool(
         name = "replace_body",
         description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
     )]

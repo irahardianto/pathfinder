@@ -30,7 +30,7 @@ Pathfinder operates at the **semantic level** (symbols, functions, classes). Bui
 | Batch-edit multiple symbols | `replace_batch` | multiple edits | Atomic single-call with single OCC guard |
 | Add code before/after symbol | `insert_before` / `insert_after` | edit file | Semantic anchor point + auto-spacing |
 | Delete a function or class | `delete_symbol` | edit file | Handles decorators, doc comments, whitespace |
-| Pre-check a risky edit | `validate_only` | no equivalent | Dry-run with LSP diagnostics |
+| Pre-check a risky edit | `validate_only` | no equivalent | Dry-run with LSP diagnostics. Returns `status: "passed"`, `"failed"`, `"uncertain"`, or `"skipped"`. `"uncertain"` means LSP returned empty diagnostics (could be warmup — not confirmed clean). `"skipped"` means no LSP available. Never trust `"uncertain"` or `"skipped"` as confirmation |
 | Create a new file | `create_file` | write file | Returns version_hash for subsequent edits |
 | Edit config files | `write_file` | edit file | OCC-protected, supports search-and-replace |
 
@@ -38,11 +38,11 @@ Pathfinder operates at the **semantic level** (symbols, functions, classes). Bui
 
 Three Pathfinder tools depend on LSP (Language Server Protocol) for precise results: `get_definition`, `analyze_impact`, and `read_with_deep_context`. When the LSP is unavailable or still indexing, these tools degrade gracefully:
 
-- **`degraded: false`** — LSP confirmed the result. Trust it fully.
+- **`degraded: false`** — LSP confirmed the result. Trust it fully. Exception: `read_with_deep_context` may return `degraded: false` with 0 dependencies when the LSP is still warming up — if the result seems wrong (a function that clearly calls other functions shows 0 deps), re-run after a few seconds.
 - **`degraded: true`** — Result is a best-effort approximation. Check `degraded_reason` for specifics:
   - `no_lsp` — No language server for this language. Install it or accept limited results.
   - `lsp_warmup_*` — LSP is still indexing. Empty results are UNVERIFIED (there may be callers/definitions the LSP hasn't found yet). Re-run after indexing completes.
-  - `grep_fallback_*` — `get_definition` fell back to ripgrep search. Verify with `read_source_file`.
+  - `grep_fallback_*` — `get_definition` or `analyze_impact` fell back to ripgrep search. Verify with `read_source_file`.
   - `lsp_error` — LSP returned an error. Results are from Tree-sitter/grep only.
 
 **Key rule:** When `degraded: true`, do NOT treat empty results as confirmed-zero. Re-run the tool after a few seconds if the LSP is warming up.

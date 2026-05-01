@@ -52,7 +52,7 @@ A **Semantic Path** is the unified addressing scheme for Pathfinder tools.
 | Search for code patterns | `search_codebase` | `Grep` | Returns `enclosing_semantic_path` + `version_hash` per match — enables Discovery→Edit chaining |
 | Read a function or class | `read_symbol_scope` | `Read` | Extracts exactly one symbol — no context waste, returns `version_hash` for OCC |
 | Read entire source file + AST hierarchy | `read_source_file` | `Read` | Returns full file content + nested symbol tree with semantic paths + version hash. Three detail levels: `compact` (default — source + flat symbol list), `symbols` (tree only, no source), `full` (source + nested AST). **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files |
-| Read function + dependencies | `read_with_deep_context` | Multiple `Read` calls | Returns target code + signatures of all called functions in one call. **Latency:** first call after LSP start may take 5–60s while the server indexes; Pathfinder auto-retries once during warmup. Subsequent calls are fast. Check `degraded` in metadata — if `true`, LSP was unavailable and `dependencies` will be empty or incomplete |
+| Read function + dependencies | `read_with_deep_context` | Multiple `Read` calls | Returns target code + signatures of all called functions in one call. **Latency:** LSP warmup is unpredictable. First call may take 5–60s, but some LSP servers (especially rust-analyzer on large codebases) may take several minutes to fully index. Pathfinder auto-retries once during warmup, but if the LSP is still cold after the retry, the tool returns 0 dependencies. Check `degraded` in metadata — if `true`, LSP was unavailable and `dependencies` will be empty or incomplete. If `degraded=false` but `dependencies=[]` and the function clearly calls other functions, the LSP may have returned a false confirmation. Re-run the tool after waiting 30s. This is a known edge case. |
 | Jump to a definition | `get_definition` | `Grep` (approximation) | LSP-powered, follows imports and re-exports across files. Has multi-strategy grep fallback when LSP is unavailable — check `degraded` in response |
 | Assess refactoring impact | `analyze_impact` | No equivalent | Maps all incoming callers + outgoing callees with BFS traversal; returns version hashes for all referenced files. When LSP is warming up, empty results may be unverified — check `degraded` |
 | Read a config/docs file | `read_file` | `Read` | Either is fine — roughly equivalent for config files. **Never** call `read_source_file` on config files (YAML, TOML, JSON, Markdown, `.env`, Dockerfile) — it returns `UNSUPPORTED_LANGUAGE` |
@@ -395,6 +395,8 @@ search_codebase(query="deprecated_api",
                 group_by_file=true)
 ```
 
+**Known issue:** When ALL matches are in `known_files` files, `file_groups` may appear empty despite `total_matches > 0`. This is a serialization bug. Workaround: if `total_matches > 0` but `file_groups` is empty, re-run with `group_by_file=false` and `known_files=[]` to get the full flat `matches` list.
+
 ### Discovery→Edit Chaining
 
 `search_codebase` and `get_repo_map` return version hashes, so you can skip the read step and edit directly:
@@ -477,19 +479,27 @@ Recovery:
 → Apply the corrected edit
 ```
 
-### Validation Skipped
+### Validation Skipped or Uncertain
 
 ```
 Response: validation.validation_skipped = true
           validation.validation_skipped_reason = "no_lsp" | "lsp_not_on_path" |
               "lsp_start_failed" | "lsp_crash" | "lsp_timeout" |
-              "pull_diagnostics_unsupported"
+              "pull_diagnostics_unsupported" |
+              "empty_diagnostics_both_snapshots"
 
-This means: The edit was written to disk but was NOT validated by LSP.
+This means: For validate_only — the edit was NOT written to disk (dry-run only)
+and LSP validation could not confirm the code is clean. For real edit tools —
+the edit WAS written to disk but was NOT validated by LSP.
+
+Special case: `"empty_diagnostics_both_snapshots"` — both pre- and post-edit
+diagnostics were empty. This could mean the code is genuinely clean, OR the LSP
+hasn't finished indexing. The `validation.status` will be `"uncertain"` (not
+`"passed"`) to signal this ambiguity. Do NOT treat `"uncertain"` as confirmation.
 
 When you see this:
 → Check capabilities.lsp.per_language via get_repo_map to understand LSP status
-→ The edit landed successfully — but you have no compile-time safety net
+→ The edit landed successfully (if not validate_only) — but you have no compile-time safety net
 → Compensate by running tests (Bash) or manual review
 → If the reason is "lsp_not_on_path", suggest the user install the language server
 → If the reason is "lsp_crash" or "lsp_timeout", the LSP may recover on next edit

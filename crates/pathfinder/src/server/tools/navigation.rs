@@ -997,7 +997,7 @@ impl PathfinderServer {
                             workspace_root: self.workspace_root.path().to_path_buf(),
                             query: symbol_name.clone(),
                             is_regex: false,
-                            max_results: 50,
+                            max_results: 20,
                             path_glob: "**/*".to_owned(),
                             exclude_glob: String::default(),
                             context_lines: 0,
@@ -1009,6 +1009,12 @@ impl PathfinderServer {
                             let refs: Vec<crate::server::types::ImpactReference> = result
                                 .matches
                                 .into_iter()
+                                // Exclude the definition file itself (it's not a caller)
+                                .filter(|m| {
+                                    let m_path = std::path::Path::new(&m.file);
+                                    m_path != std::path::Path::new(&semantic_path.file_path)
+                                })
+                                .take(10) // Cap at 10 heuristic references to avoid overwhelming output
                                 .map(|m| {
                                     files_referenced.insert(m.file.clone());
                                     crate::server::types::ImpactReference {
@@ -1016,7 +1022,7 @@ impl PathfinderServer {
                                         file: m.file,
                                         line: usize::try_from(m.line).unwrap_or(usize::MAX),
                                         snippet: m.content,
-                                        version_hash: String::default(),
+                                        version_hash: m.version_hash,
                                         // Grep fallback: heuristic, direction is assumed incoming
                                         direction: "incoming_heuristic".to_owned(),
                                         depth: 0,
@@ -1057,7 +1063,7 @@ impl PathfinderServer {
                         workspace_root: self.workspace_root.path().to_path_buf(),
                         query: symbol_name.clone(),
                         is_regex: false,
-                        max_results: 50,
+                        max_results: 20,
                         path_glob: "**/*".to_owned(),
                         exclude_glob: String::default(),
                         context_lines: 0,
@@ -1069,6 +1075,12 @@ impl PathfinderServer {
                         let refs: Vec<crate::server::types::ImpactReference> = result
                             .matches
                             .into_iter()
+                            // Exclude the definition file itself (it's not a caller)
+                            .filter(|m| {
+                                let m_path = std::path::Path::new(&m.file);
+                                m_path != std::path::Path::new(&semantic_path.file_path)
+                            })
+                            .take(10) // Cap at 10 heuristic references to avoid overwhelming output
                             .map(|m| {
                                 files_referenced.insert(m.file.clone());
                                 crate::server::types::ImpactReference {
@@ -1076,7 +1088,7 @@ impl PathfinderServer {
                                     file: m.file,
                                     line: usize::try_from(m.line).unwrap_or(usize::MAX),
                                     snippet: m.content,
-                                    version_hash: String::default(),
+                                    version_hash: m.version_hash,
                                     // Grep fallback: heuristic, direction is assumed incoming
                                     direction: "incoming_heuristic".to_owned(),
                                     depth: 0,
@@ -1176,7 +1188,98 @@ impl PathfinderServer {
         res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
+
+    /// Check LSP health status.
+    ///
+    /// Tests whether LSP navigation tools (`get_definition`, `analyze_impact`,
+    /// `read_with_deep_context`) will return real data or degraded results.
+    /// Agents should call this once at session start to choose their strategy.
+    #[tracing::instrument(skip(self, params), fields(language = ?params.language))]
+    pub(crate) async fn lsp_health_impl(
+        &self,
+        params: crate::server::types::LspHealthParams,
+    ) -> Result<
+        rmcp::handler::server::wrapper::Json<crate::server::types::LspHealthResponse>,
+        ErrorData,
+    > {
+        let capability_status = self.lawyer.capability_status().await;
+
+        let mut languages = Vec::new();
+        let mut overall_status = "unavailable";
+
+        for (lang, status) in &capability_status {
+            if let Some(ref filter) = params.language {
+                if lang != filter {
+                    continue;
+                }
+            }
+
+            let (status_str, uptime) = if status.indexing_complete == Some(true) {
+                ("ready", status.uptime_seconds.map(format_uptime))
+            } else if status.indexing_complete == Some(false) {
+                ("warming_up", status.uptime_seconds.map(format_uptime))
+            } else if status.uptime_seconds.is_some() {
+                ("starting", status.uptime_seconds.map(format_uptime))
+            } else {
+                ("unavailable", None)
+            };
+
+            match status_str {
+                "ready" => overall_status = "ready",
+                "warming_up" if overall_status != "ready" => {
+                    overall_status = "warming_up";
+                }
+                "starting" if overall_status != "ready" && overall_status != "warming_up" => {
+                    overall_status = "starting";
+                }
+                _ => {}
+            }
+
+            languages.push(crate::server::types::LspLanguageHealth {
+                language: lang.clone(),
+                status: status_str.to_owned(),
+                uptime,
+            });
+        }
+
+        if languages.is_empty() && params.language.is_none() {
+            overall_status = "unavailable";
+        }
+
+        Ok(rmcp::handler::server::wrapper::Json(
+            crate::server::types::LspHealthResponse {
+                status: overall_status.to_owned(),
+                languages,
+            },
+        ))
+    }
+
 }
+
+
+/// Format uptime in seconds as a human-readable string.
+fn format_uptime(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        let mins = seconds / 60;
+        let secs = seconds % 60;
+        if secs == 0 {
+            format!("{mins}m")
+        } else {
+            format!("{mins}m{secs}s")
+        }
+    } else {
+        let hours = seconds / 3600;
+        let mins = (seconds % 3600) / 60;
+        if mins == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{mins}m")
+        }
+    }
+}
+
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -2161,12 +2264,18 @@ mod tests {
         .unwrap();
 
         let scout = Arc::new(MockScout::default());
+        // Create a caller file (different from the definition file)
+        std::fs::write(
+            ws_dir.path().join("src/caller.rs"),
+            "fn handle_request() { login(); }",
+        )
+        .unwrap();
         scout.set_result(Ok(pathfinder_search::SearchResult {
             matches: vec![pathfinder_search::SearchMatch {
-                file: "src/auth.rs".to_string(),
+                file: "src/caller.rs".to_string(),
                 line: 1,
                 column: 1,
-                content: "fn login() -> bool { true }".to_string(),
+                content: "fn handle_request() { login(); }".to_string(),
                 context_before: vec![],
                 context_after: vec![],
                 enclosing_semantic_path: None,
@@ -2199,7 +2308,7 @@ mod tests {
         assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp_grep_fallback"));
         let incoming = val.incoming.as_ref().expect("must be Some from grep");
         assert_eq!(incoming.len(), 1);
-        assert_eq!(incoming[0].file, "src/auth.rs");
+        assert_eq!(incoming[0].file, "src/caller.rs");
         assert_eq!(incoming[0].direction, "incoming_heuristic");
         // Version hashes should include the target file and the match file
         assert!(
