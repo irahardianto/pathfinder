@@ -1,7 +1,7 @@
 //! JSON-RPC request/response correlation.
 //!
 //! `RequestDispatcher` maintains a map of in-flight requests keyed by their
-//! JSON-RPC `id`. When the background reader task receives a response, it
+//! `id`. When the background reader task receives a response, it
 //! calls [`RequestDispatcher::dispatch_response`] to fire the matching
 //! [`tokio::sync::oneshot`] and wake the caller.
 
@@ -138,6 +138,48 @@ impl RequestDispatcher {
         for (_, tx) in drained {
             let _ = tx.send(Err(LspError::ConnectionLost));
         }
+    }
+
+    /// Subscribe to `textDocument/publishDiagnostics` notifications for a
+    /// specific file URI. Returns collected diagnostics after `timeout`.
+    ///
+    /// This is a one-shot collector: it subscribes, waits for notifications,
+    /// and returns whatever was received within the timeout window.
+    pub(super) async fn collect_push_diagnostics(
+        &self,
+        file_uri: &str,
+        timeout: tokio::time::Duration,
+    ) -> Vec<serde_json::Value> {
+        let mut rx = self.subscribe_notifications();
+        let mut collected = Vec::new();
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(msg)) => {
+                    let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                    if method != "textDocument/publishDiagnostics" {
+                        continue;
+                    }
+                    let uri = msg
+                        .pointer("/params/uri")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if uri == file_uri {
+                        collected.push(msg);
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
+            }
+        }
+
+        collected
     }
 }
 
@@ -298,5 +340,135 @@ mod tests {
         // Should not match — our ID is numeric
         assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
         assert!(rx.try_recv().is_err());
+    }
+
+    // Tests for collect_push_diagnostics
+    //
+    // Note: broadcast channels only deliver messages sent AFTER subscription.
+    // So tests spawn a task that sends after a delay, then start collecting.
+    #[tokio::test]
+    async fn test_collect_push_diagnostics_timeout_returns_empty() {
+        let dispatcher = RequestDispatcher::new();
+        // Short timeout — no notifications sent
+        let result = dispatcher
+            .collect_push_diagnostics("file:///test.rs", tokio::time::Duration::from_millis(10))
+            .await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_push_diagnostics_collects_matching_uri() {
+        let dispatcher = std::sync::Arc::new(RequestDispatcher::new());
+        let test_uri = "file:///test.rs";
+
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": test_uri,
+                "diagnostics": []
+            }
+        });
+
+        // Spawn task that dispatches after we start collecting
+        let dispatcher_clone = dispatcher.clone();
+        let notif_clone = notif.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            dispatcher_clone.dispatch_response(&notif_clone);
+        });
+
+        // Start collecting with timeout longer than the dispatch delay
+        let result = dispatcher
+            .collect_push_diagnostics(test_uri, tokio::time::Duration::from_millis(150))
+            .await;
+
+        let _ = handle.await;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["params"]["uri"], test_uri);
+    }
+
+    // This test doesn't need to receive anything — it verifies that notifications
+    // for OTHER files are filtered out. The current test structure works because:
+    // 1. We dispatch for other_uri BEFORE subscribing (so we never see it anyway)
+    // 2. We collect for test_uri with a short timeout
+    // 3. Result should be empty because no one sends test_uri notifications
+    #[tokio::test]
+    async fn test_collect_push_diagnostics_ignores_other_files() {
+        let dispatcher = std::sync::Arc::new(RequestDispatcher::new());
+        let test_uri = "file:///test.rs";
+        let other_uri = "file:///other.rs";
+
+        // Send notification for a DIFFERENT file after a delay
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": other_uri,
+                "diagnostics": []
+            }
+        });
+
+        let dispatcher_clone = dispatcher.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            dispatcher_clone.dispatch_response(&notif);
+        });
+
+        // Collect for test_uri — should NOT include the other_uri notification
+        let result = dispatcher
+            .collect_push_diagnostics(test_uri, tokio::time::Duration::from_millis(150))
+            .await;
+
+        let _ = handle.await;
+
+        assert!(
+            result.is_empty(),
+            "should ignore notifications for different URIs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_push_diagnostics_ignores_non_diagnostics_notifications() {
+        let dispatcher = std::sync::Arc::new(RequestDispatcher::new());
+        let test_uri = "file:///test.rs";
+
+        // Send a log message notification (not diagnostics)
+        let log_notif = json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "message": "hello" }
+        });
+
+        // Send a diagnostics notification for the target file
+        let diag_notif = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": test_uri,
+                "diagnostics": []
+            }
+        });
+
+        let dispatcher_clone = dispatcher.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            dispatcher_clone.dispatch_response(&log_notif);
+            dispatcher_clone.dispatch_response(&diag_notif);
+        });
+
+        let result = dispatcher
+            .collect_push_diagnostics(test_uri, tokio::time::Duration::from_millis(150))
+            .await;
+
+        let _ = handle.await;
+
+        assert_eq!(
+            result.len(),
+            1,
+            "should only collect diagnostics notifications"
+        );
+        assert_eq!(result[0]["method"], "textDocument/publishDiagnostics");
     }
 }

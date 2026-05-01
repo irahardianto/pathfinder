@@ -91,6 +91,17 @@ impl Lawyer for NoOpLawyer {
         Err(LspError::NoLspAvailable)
     }
 
+    async fn collect_diagnostics(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _content: &str,
+        _version: i32,
+        _timeout_ms: u64,
+    ) -> Result<Vec<LspDiagnostic>, LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
     async fn pull_workspace_diagnostics(
         &self,
         _workspace_root: &Path,
@@ -202,6 +213,15 @@ mod tests {
     async fn test_no_op_lawyer_pull_diagnostics_returns_no_lsp() {
         let lawyer = NoOpLawyer;
         let result = lawyer.pull_diagnostics(&workspace(), &file()).await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_collect_diagnostics_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer
+            .collect_diagnostics(&workspace(), &file(), "fn main() {}", 1, 1000)
+            .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
 

@@ -33,6 +33,23 @@ pub struct LspLanguageStatus {
     /// `None` when the process has not started or is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_seconds: Option<u64>,
+    /// How this LSP provides diagnostics ("pull", "push", or "none").
+    ///
+    /// `None` when the process hasn't started yet (lazy start).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics_strategy: Option<String>,
+    /// LSP supports textDocument/definition (`get_definition`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_definition: Option<bool>,
+    /// LSP supports textDocument/prepareCallHierarchy (`analyze_impact`, `read_with_deep_context`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_call_hierarchy: Option<bool>,
+    /// LSP supports textDocument/diagnostic or publishDiagnostics (`validate_only`, edit validation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_diagnostics: Option<bool>,
+    /// LSP supports textDocument/rangeFormatting (edit formatting).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_formatting: Option<bool>,
 }
 
 /// The location of a symbol's definition in the workspace.

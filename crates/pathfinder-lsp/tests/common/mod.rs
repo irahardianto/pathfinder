@@ -101,6 +101,7 @@ pub fn mock_lsp_config(mock_bin: PathBuf, extra_flags: &[&str]) -> PathfinderCon
             idle_timeout_minutes: 15,
             settings: serde_json::Value::Null,
             root_override: None,
+            typescript_plugins: vec![],
         },
     );
 

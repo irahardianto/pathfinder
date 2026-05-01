@@ -15,7 +15,7 @@ mod process;
 mod protocol;
 mod transport;
 
-pub use capabilities::DetectedCapabilities;
+pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy};
 pub use detect::{detect_languages, language_id_for_extension, LanguageLsp};
 
 use crate::types::{CallHierarchyCall, CallHierarchyItem, LspDiagnostic, LspDiagnosticSeverity};
@@ -78,16 +78,33 @@ enum ProcessEntry {
 impl ProcessEntry {
     fn to_validation_status(&self, command: &str) -> crate::types::LspLanguageStatus {
         match self {
-            Self::Running(state) => validation_status_from_parts(
-                command,
-                true,
-                state.process.capabilities.diagnostic_provider,
-                state
-                    .indexing_complete
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                state.spawned_at.elapsed().as_secs(),
-            ),
-            Self::Unavailable(_) => validation_status_from_parts(command, false, false, false, 0),
+            Self::Running(state) => {
+                let caps = &state.process.capabilities;
+                validation_status_from_parts(
+                    command,
+                    true,
+                    state.process.capabilities.diagnostics_strategy,
+                    caps.definition_provider,
+                    caps.call_hierarchy_provider,
+                    caps.formatting_provider,
+                    state
+                        .indexing_complete
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    state.spawned_at.elapsed().as_secs(),
+                )
+            }
+            Self::Unavailable(_) => {
+                validation_status_from_parts(
+                    command,
+                    false,
+                    DiagnosticsStrategy::None,
+                    false,
+                    false,
+                    false,
+                    false,
+                    0,
+                )
+            }
         }
     }
 }
@@ -97,10 +114,15 @@ impl ProcessEntry {
 /// Extracted from [`ProcessEntry::to_validation_status`] to make the
 /// mapping logic independently unit-testable without requiring a live
 /// [`ManagedProcess`] (which embeds an OS child process handle).
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)]
 fn validation_status_from_parts(
     command: &str,
     running: bool,
-    diagnostic_provider: bool,
+    diagnostics_strategy: DiagnosticsStrategy,
+    supports_definition: bool,
+    supports_call_hierarchy: bool,
+    supports_formatting: bool,
     indexing_complete: bool,
     uptime_seconds: u64,
 ) -> crate::types::LspLanguageStatus {
@@ -110,22 +132,43 @@ fn validation_status_from_parts(
             reason: format!("{command} failed to start or crashed repeatedly"),
             indexing_complete: None,
             uptime_seconds: None,
+            diagnostics_strategy: None,
+            supports_definition: None,
+            supports_call_hierarchy: None,
+            supports_diagnostics: None,
+            supports_formatting: None,
         };
     }
-    if diagnostic_provider {
-        crate::types::LspLanguageStatus {
+    match diagnostics_strategy {
+        DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
             validation: true,
-            reason: "LSP connected and supports validation".to_owned(),
+            reason: format!(
+                "LSP connected and supports validation ({})",
+                match diagnostics_strategy {
+                    DiagnosticsStrategy::Pull => "pull diagnostics",
+                    DiagnosticsStrategy::Push => "push diagnostics",
+                    DiagnosticsStrategy::None => unreachable!(),
+                }
+            ),
             indexing_complete: Some(indexing_complete),
             uptime_seconds: Some(uptime_seconds),
-        }
-    } else {
-        crate::types::LspLanguageStatus {
+            diagnostics_strategy: Some(diagnostics_strategy.as_str().to_owned()),
+            supports_definition: Some(supports_definition),
+            supports_call_hierarchy: Some(supports_call_hierarchy),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(supports_formatting),
+        },
+        DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
-            reason: "LSP connected but does not support textDocument/diagnostic".to_owned(),
+            reason: "LSP connected but does not support diagnostics".to_owned(),
             indexing_complete: Some(indexing_complete),
             uptime_seconds: Some(uptime_seconds),
-        }
+            diagnostics_strategy: Some("none".to_owned()),
+            supports_definition: Some(supports_definition),
+            supports_call_hierarchy: Some(supports_call_hierarchy),
+            supports_diagnostics: Some(false),
+            supports_formatting: Some(supports_formatting),
+        },
     }
 }
 
@@ -381,6 +424,7 @@ impl LspClient {
         // Warn about concurrent instances (e.g., VS Code's RA)
         let isolate_target_dir = self.detect_concurrent_lsp(&language_id, &descriptor.command);
 
+        let plugins = descriptor.auto_plugins.clone();
         let spawn_result = spawn_and_initialize(
             &descriptor.command,
             &descriptor.args,
@@ -389,6 +433,7 @@ impl LspClient {
             Arc::clone(&self.dispatcher),
             descriptor.init_timeout_secs,
             isolate_target_dir,
+            plugins,
         )
         .await;
 
@@ -937,9 +982,9 @@ impl Lawyer for LspClient {
 
         // Check capability before sending the request
         let caps = self.capabilities_for(language_id)?;
-        if !caps.diagnostic_provider {
+        if !matches!(caps.diagnostics_strategy, DiagnosticsStrategy::Pull) {
             return Err(LspError::UnsupportedCapability {
-                capability: "diagnosticProvider".to_owned(),
+                capability: "diagnosticProvider (pull model)".to_owned(),
             });
         }
 
@@ -976,6 +1021,61 @@ impl Lawyer for LspClient {
         );
 
         parse_diagnostic_response(&response, file_path)
+    }
+
+    async fn collect_diagnostics(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: &str,
+        version: i32,
+        timeout_ms: u64,
+    ) -> Result<Vec<LspDiagnostic>, LspError> {
+        let start = Instant::now();
+        tracing::info!(tool = "collect_diagnostics", file = %file_path.display(), "LSP operation started");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+        let file_uri_str = file_uri.to_string();
+
+        // Send didOpen or didChange depending on version
+        if version <= 1 {
+            self.did_open(workspace_root, file_path, content).await?;
+        } else {
+            self.did_change(workspace_root, file_path, content, version)
+                .await?;
+        }
+
+        // Wait for push diagnostics within timeout
+        let raw_diags = self
+            .dispatcher
+            .collect_push_diagnostics(&file_uri_str, Duration::from_millis(timeout_ms))
+            .await;
+
+        // Parse all collected diagnostics
+        let mut all_diags = Vec::new();
+        for notif in raw_diags {
+            if let Some(items) = notif
+                .pointer("/params/diagnostics")
+                .and_then(|v| v.as_array())
+            {
+                all_diags.extend(parse_diagnostic_items(items, file_path));
+            }
+        }
+
+        self.touch(language_id);
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::debug!(
+            language = language_id,
+            elapsed_ms = elapsed,
+            "textDocument/publishDiagnostics collection complete"
+        );
+
+        Ok(all_diags)
     }
 
     async fn pull_workspace_diagnostics(
@@ -1110,9 +1210,15 @@ impl Lawyer for LspClient {
                 || crate::types::LspLanguageStatus {
                     validation: true,
                     reason: format!("{} available (lazy start)", desc.command),
+                    diagnostics_strategy: None,
                     // Process hasn't started yet — indexing status and uptime unknown
                     indexing_complete: None,
                     uptime_seconds: None,
+                    // Capabilities unknown until process starts
+                    supports_definition: None,
+                    supports_call_hierarchy: None,
+                    supports_diagnostics: None,
+                    supports_formatting: None,
                 },
                 |entry| entry.to_validation_status(&desc.command),
             );
@@ -2068,19 +2174,40 @@ mod tests {
         // ProcessEntry::to_validation_status so we can test without a
         // live ManagedProcess (which requires a real OS child handle).
         // Future agents: add more variants here as capabilities grow.
-        let status = validation_status_from_parts("rust-analyzer", true, true, false, 10);
+        let status = validation_status_from_parts(
+            "rust-analyzer",
+            true,
+            DiagnosticsStrategy::Pull,
+            true,   // supports_definition
+            true,   // supports_call_hierarchy
+            false,  // supports_formatting
+            false,  // indexing_complete
+            10,     // uptime_seconds
+        );
         assert!(
             status.validation,
-            "diagnostic_provider=true must yield validation=true"
+            "DiagnosticsStrategy::Pull must yield validation=true"
         );
-        assert_eq!(status.reason, "LSP connected and supports validation");
+        assert_eq!(
+            status.reason,
+            "LSP connected and supports validation (pull diagnostics)"
+        );
         assert_eq!(status.indexing_complete, Some(false));
         assert_eq!(status.uptime_seconds, Some(10));
     }
 
     #[test]
     fn test_process_entry_running_with_diagnostics_indexing_complete() {
-        let status = validation_status_from_parts("rust-analyzer", true, true, true, 42);
+        let status = validation_status_from_parts(
+            "rust-analyzer",
+            true,
+            DiagnosticsStrategy::Pull,
+            true,   // supports_definition
+            true,   // supports_call_hierarchy
+            false,  // supports_formatting
+            true,   // indexing_complete
+            42,     // uptime_seconds
+        );
         assert!(status.validation);
         assert_eq!(status.indexing_complete, Some(true));
         assert_eq!(status.uptime_seconds, Some(42));
@@ -2089,7 +2216,8 @@ mod tests {
     #[test]
     fn test_process_entry_running_without_diagnostics_status() {
         // LSP connected but does not support textDocument/diagnostic.
-        let status = validation_status_from_parts("gopls", true, false, true, 5);
+        let status =
+            validation_status_from_parts("gopls", true, DiagnosticsStrategy::None, true, true, false, true, 5);
         assert!(
             !status.validation,
             "diagnostic_provider=false must yield validation=false"
@@ -2106,7 +2234,8 @@ mod tests {
     #[test]
     fn test_process_entry_running_uptime_is_non_none() {
         // Uptime should always be Some for a running process (even if 0 seconds).
-        let status = validation_status_from_parts("pyright", true, true, false, 0);
+        let status =
+            validation_status_from_parts("pyright", true, DiagnosticsStrategy::Pull, true, true, false, false, 0);
         assert!(status.uptime_seconds.is_some());
         assert!(status.indexing_complete.is_some());
     }
@@ -2146,6 +2275,7 @@ mod tests {
                 args: vec![],
                 root: std::env::temp_dir(),
                 init_timeout_secs: None,
+                auto_plugins: vec![],
             })
             .collect();
 

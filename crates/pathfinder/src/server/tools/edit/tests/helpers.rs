@@ -75,6 +75,18 @@ impl Lawyer for UnsupportedDiagLawyer {
             capability: "diagnosticProvider".into(),
         })
     }
+    async fn collect_diagnostics(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _content: &str,
+        _version: i32,
+        _timeout_ms: u64,
+    ) -> Result<Vec<LspDiagnostic>, LspError> {
+        Err(LspError::UnsupportedCapability {
+            capability: "diagnosticProvider (push model)".into(),
+        })
+    }
     async fn pull_workspace_diagnostics(
         &self,
         _workspace_root: &Path,

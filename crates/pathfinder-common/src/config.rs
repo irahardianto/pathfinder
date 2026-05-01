@@ -113,6 +113,13 @@ pub struct LspConfig {
     /// Example: `"apps/backend"` for a Go backend in a monorepo.
     #[serde(default)]
     pub root_override: Option<String>,
+
+    /// TypeScript plugins to load via initializationOptions.
+    ///
+    /// Each entry is a plugin name that will be resolved from `node_modules`.
+    /// Example: `"@vue/typescript-plugin"`
+    #[serde(default)]
+    pub typescript_plugins: Vec<String>,
 }
 
 /// Sandbox configuration overrides.
@@ -332,5 +339,30 @@ mod tests {
     #[test]
     fn test_default_idle_timeout_value() {
         assert_eq!(default_idle_timeout(), 15);
+    }
+
+    #[test]
+    fn test_typescript_plugins_defaults_to_empty() {
+        let config: LspConfig =
+            serde_json::from_str(r#"{ "command": "tsserver" }"#).expect("should parse");
+        assert!(config.typescript_plugins.is_empty());
+    }
+
+    #[test]
+    fn test_typescript_plugins_deserialization() {
+        let json = r#"{
+            "lsp": {
+                "typescript": {
+                    "command": "typescript-language-server",
+                    "typescript_plugins": ["@vue/typescript-plugin", "@angular/language-service"]
+                }
+            }
+        }"#;
+
+        let config: PathfinderConfig = serde_json::from_str(json).expect("should deserialize");
+        let ts_config = &config.lsp["typescript"];
+        assert_eq!(ts_config.typescript_plugins.len(), 2);
+        assert_eq!(ts_config.typescript_plugins[0], "@vue/typescript-plugin");
+        assert_eq!(ts_config.typescript_plugins[1], "@angular/language-service");
     }
 }

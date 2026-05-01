@@ -1249,7 +1249,38 @@ impl PathfinderServer {
                 language: lang.clone(),
                 status: status_str.to_owned(),
                 uptime,
+                diagnostics_strategy: status.diagnostics_strategy.clone(),
+                supports_call_hierarchy: status.supports_call_hierarchy,
+                supports_diagnostics: status.supports_diagnostics,
+                supports_definition: status.supports_definition,
+                supports_formatting: status.supports_formatting,
+                probe_verified: false,
             });
+        }
+
+        // PATCH-006: Probe-based readiness check
+        // For languages that have been running for a while but still show warming_up,
+        // fire a probe to verify actual readiness.
+        for lang_health in &mut languages {
+            if lang_health.status == "warming_up" {
+                let uptime_secs = parse_uptime_to_seconds(lang_health.uptime.as_deref());
+                if let Some(secs) = uptime_secs {
+                    if secs > 10 {
+                        // LSP has been running for 10+ seconds but still warming_up.
+                        // This likely means progress notifications aren't being emitted.
+                        // Fire a lightweight probe.
+                        let probe_result = self.probe_language_readiness(&lang_health.language).await;
+                        if probe_result {
+                            "ready".clone_into(&mut lang_health.status);
+                            lang_health.probe_verified = true;
+                            // Update overall status
+                            if overall_status != "ready" {
+                                overall_status = "ready";
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if languages.is_empty() && params.language.is_none() {
@@ -1263,6 +1294,67 @@ impl PathfinderServer {
             },
         ))
     }
+
+    /// Probe whether an LSP is actually ready by attempting a lightweight operation.
+    async fn probe_language_readiness(&self, language_id: &str) -> bool {
+        
+        
+        // Find a well-known file in the workspace for this language
+        let probe_file = self.find_probe_file(language_id);
+        let Some(file_path) = probe_file else {
+            return false; // No file to probe with
+        };
+
+        // Open the file, try goto_definition on line 1 column 1
+        let content = tokio::fs::read_to_string(self.workspace_root.path().join(&file_path))
+            .await
+            .unwrap_or_default();
+
+        let _ = self.lawyer.did_open(
+            self.workspace_root.path(),
+            &file_path,
+            &content,
+        ).await;
+
+        let result = self.lawyer.goto_definition(
+            self.workspace_root.path(),
+            &file_path,
+            1,
+            1,
+        ).await;
+
+        let _ = self.lawyer.did_close(
+            self.workspace_root.path(),
+            &file_path,
+        ).await;
+
+        // Any response (even Ok(None)) means the LSP is alive and processing requests.
+        // Only Err means it's not ready.
+        result.is_ok()
+    }
+
+    /// Find a well-known file in the workspace for probing language readiness.
+    pub(crate) fn find_probe_file(&self, language_id: &str) -> Option<std::path::PathBuf> {
+        let candidates = match language_id {
+            "rust" => vec!["src/main.rs", "src/lib.rs"],
+            "go" => vec!["main.go", "cmd/main.go"],
+            "typescript" | "javascript" => vec!["src/index.ts", "index.ts", "src/main.ts", "src/index.js", "index.js", "src/main.js"],
+            "python" => vec!["src/__init__.py", "main.py", "setup.py"],
+            "ruby" => vec!["lib/main.rb", "main.rb"],
+            "java" => vec!["src/main/java/Main.java"],
+            _ => return None,
+        };
+
+        for candidate in candidates {
+            let path = self.workspace_root.path().join(candidate);
+            if path.exists() {
+                return Some(std::path::PathBuf::from(candidate));
+            }
+        }
+        None
+    }
+
+
 }
 
 /// Format uptime in seconds as a human-readable string.
@@ -1287,6 +1379,53 @@ fn format_uptime(seconds: u64) -> String {
         }
     }
 }
+
+/// Parse a formatted uptime string back to seconds.
+/// Handles formats: `"Xs"`, `"XmYs"`, `"XhYm"`, `"XhYmZs"`
+fn parse_uptime_to_seconds(uptime: Option<&str>) -> Option<u64> {
+    let uptime = uptime?;
+    let mut seconds = 0u64;
+
+    // Parse hours
+    if let Some(h_pos) = uptime.find('h') {
+        let h_str = &uptime[..h_pos];
+        if let Ok(h) = h_str.parse::<u64>() {
+            seconds += h * 3600;
+        }
+    }
+
+    // Parse minutes
+    let min_part = if let Some(h_pos) = uptime.find('h') {
+        &uptime[h_pos + 1..]
+    } else {
+        uptime
+    };
+
+    if let Some(m_pos) = min_part.find('m') {
+        let m_str = &min_part[..m_pos];
+        if let Ok(m) = m_str.parse::<u64>() {
+            seconds += m * 60;
+        }
+    }
+
+    // Parse seconds
+    let sec_part = if let Some(m_pos) = min_part.find('m') {
+        &min_part[m_pos + 1..]
+    } else {
+        // min_part already equals uptime when no 'h', so we can just use min_part
+        min_part
+    };
+
+    if let Some(s_pos) = sec_part.find('s') {
+        let s_str = &sec_part[..s_pos];
+        if let Ok(s) = s_str.parse::<u64>() {
+            seconds += s;
+        }
+    }
+
+    Some(seconds)
+}
+
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -2323,4 +2462,369 @@ mod tests {
             "version_hashes must include the referenced file"
         );
     }
+
+    // ── PATCH-005: Per-Language Capabilities Tests ─────────────────────
+
+    #[tokio::test]
+    async fn test_lsp_health_includes_diagnostics_strategy() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        // No lawyer_clone needed - MockLawyer returns empty status
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // MockLawyer returns empty capability_status, so no languages should be returned
+        // This tests the structure exists and doesn't panic
+        let params = crate::server::types::LspHealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+        
+        assert_eq!(val.status, "unavailable");
+        assert!(val.languages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_shows_push_for_go() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock a Go LSP with push diagnostics
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "go".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(15),
+                diagnostics_strategy: Some("push".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(false),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("go".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        assert_eq!(val.languages.len(), 1);
+        let go_health = &val.languages[0];
+        assert_eq!(go_health.language, "go");
+        assert_eq!(go_health.status, "ready");
+        assert_eq!(go_health.diagnostics_strategy, Some("push".to_string()));
+        assert_eq!(go_health.supports_call_hierarchy, Some(true));
+        assert_eq!(go_health.supports_diagnostics, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_shows_pull_for_rust() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock a Rust LSP with pull diagnostics
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(20),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        assert_eq!(val.languages.len(), 1);
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.language, "rust");
+        assert_eq!(rust_health.status, "ready");
+        assert_eq!(rust_health.diagnostics_strategy, Some("pull".to_string()));
+        assert_eq!(rust_health.supports_call_hierarchy, Some(true));
+        assert_eq!(rust_health.supports_diagnostics, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_shows_capabilities() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock an LSP with partial capabilities
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "typescript".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(10),
+                diagnostics_strategy: Some("push".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),  // TS supports call hierarchy
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(false),  // TS doesn't have formatting
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        assert_eq!(val.languages.len(), 1);
+        let ts_health = &val.languages[0];
+        assert_eq!(ts_health.supports_definition, Some(true));
+        assert_eq!(ts_health.supports_call_hierarchy, Some(true));
+        assert_eq!(ts_health.supports_diagnostics, Some(true));
+        assert_eq!(ts_health.supports_formatting, Some(false));
+    }
+
+
+    // ── PATCH-006: Probe-Based Readiness Tests ─────────────────────────
+
+    #[tokio::test]
+    async fn test_lsp_health_probe_upgrades_warming_up_to_ready() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        
+        // Create a workspace with a main.rs file for probing
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/main.rs"),
+            r#"fn main() { println!("Hello"); }"#,
+        ).unwrap();
+
+        // Mock a Rust LSP that's been warming up for 30 seconds
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(false),  // Still warming up
+                uptime_seconds: Some(30),  // 30 seconds - should trigger probe
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        // Mock successful goto_definition response (LSP is ready)
+        lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 0,
+            preview: "fn main()".to_string(),
+        })));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        // Probe should have upgraded the status to "ready"
+        assert_eq!(val.status, "ready");
+        assert_eq!(val.languages.len(), 1);
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.language, "rust");
+        assert_eq!(rust_health.status, "ready");
+        assert_eq!(rust_health.uptime, Some("30s".to_string()));
+        assert!(rust_health.probe_verified);
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_probe_keeps_warming_up_when_probe_fails() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        
+        // Create a workspace with a main.rs file for probing
+        // Create a workspace with a main.rs file for probing
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/main.rs"),
+            "fn main() {}",
+        ).unwrap();
+
+        // Mock a Rust LSP that's been warming up for 30 seconds
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(false),  // Still warming up
+                uptime_seconds: Some(30),  // 30 seconds - should trigger probe
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        // Mock failed goto_definition response (LSP is not ready)
+        lawyer.set_goto_definition_result(Err("Connection lost".to_string()));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        // Status should remain "warming_up" since probe failed
+        assert_eq!(val.status, "warming_up");
+        assert_eq!(val.languages.len(), 1);
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.language, "rust");
+        assert_eq!(rust_health.status, "warming_up");
+        assert!(!rust_health.probe_verified);
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_no_probe_for_recently_started() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+        // Mock a Rust LSP that just started (5 seconds ago)
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(false),  // Warming up
+                uptime_seconds: Some(5),  // Only 5 seconds - should NOT trigger probe
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        // Set a goto_definition result to verify it's not called
+        lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 0,
+            preview: "fn main()".to_string(),
+        })));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        // Status should be "warming_up" and probe not attempted
+        assert_eq!(val.status, "warming_up");
+        assert_eq!(val.languages.len(), 1);
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.status, "warming_up");
+        assert!(!rust_health.probe_verified);
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_no_probe_for_already_ready() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+        // Mock a Rust LSP that's already ready
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),  // Ready
+                uptime_seconds: Some(60),  // 60 seconds
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+            },
+        )]));
+
+        // Set a goto_definition result to verify it's not called
+        lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 0,
+            preview: "fn main()".to_string(),
+        })));
+
+        let params = crate::server::types::LspHealthParams {
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        // Status should be "ready" and probe not attempted
+        assert_eq!(val.status, "ready");
+        assert_eq!(val.languages.len(), 1);
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.status, "ready");
+        assert!(!rust_health.probe_verified);
+    }
+
+    #[tokio::test]
+    async fn test_parse_uptime_to_seconds() {
+        assert_eq!(parse_uptime_to_seconds(Some("5s")), Some(5));
+        assert_eq!(parse_uptime_to_seconds(Some("1m30s")), Some(90));
+        assert_eq!(parse_uptime_to_seconds(Some("2h15m")), Some(8100));
+        assert_eq!(parse_uptime_to_seconds(Some("1h30m45s")), Some(5445));
+        assert_eq!(parse_uptime_to_seconds(Some("1m")), Some(60));
+        assert_eq!(parse_uptime_to_seconds(Some("1h")), Some(3600));
+        assert_eq!(parse_uptime_to_seconds(None), None);
+    }
+
+    #[tokio::test]
+    async fn test_find_probe_file() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        
+        // Create some probe files
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(ws_dir.path().join("main.go"), "package main").unwrap();
+        std::fs::write(ws_dir.path().join("src/index.ts"), "export const x = 1;").unwrap();
+
+        // Test finding probe files
+        assert_eq!(
+            server.find_probe_file("go"),
+            Some(std::path::PathBuf::from("main.go"))
+        );
+        assert_eq!(
+            server.find_probe_file("typescript"),
+            Some(std::path::PathBuf::from("src/index.ts"))
+        );
+        assert_eq!(server.find_probe_file("rust"), None);  // No Rust file
+    }
+
 }

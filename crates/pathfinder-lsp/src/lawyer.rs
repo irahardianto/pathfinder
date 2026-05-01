@@ -126,6 +126,28 @@ pub trait Lawyer: Send + Sync {
         file_path: &Path,
     ) -> Result<Vec<LspDiagnostic>, LspError>;
 
+    /// Collect diagnostics using the push model (`textDocument/publishDiagnostics`).
+    ///
+    /// Sends `didOpen` or `didChange` as indicated by the version, then waits
+    /// for `textDocument/publishDiagnostics` notifications targeting the file.
+    /// Returns all diagnostics received within the timeout window.
+    ///
+    /// Used as a fallback for LSP servers that don't support Pull Diagnostics
+    /// (LSP 3.17), such as gopls and typescript-language-server.
+    ///
+    /// # Errors
+    /// - `LspError::NoLspAvailable` — no language server for this file type
+    /// - `LspError::Timeout` — LSP did not respond within the timeout (rare for push model, returns empty instead)
+    /// - `LspError::Protocol` — LSP returned malformed diagnostics
+    async fn collect_diagnostics(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: &str,
+        version: i32,
+        timeout_ms: u64,
+    ) -> Result<Vec<LspDiagnostic>, LspError>;
+
     /// Request Pull Diagnostics for the entire workspace (LSP 3.17 `workspace/diagnostic`).
     ///
     /// Intended for use in the edit validation pipeline: called after an in-memory

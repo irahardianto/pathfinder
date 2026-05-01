@@ -47,6 +47,9 @@ type PrepareCallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyItem>, St
 /// Queue of results for `call_hierarchy_incoming` and `call_hierarchy_outgoing`.
 type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, String>>>>;
 
+/// Configured result for `capability_status`.
+type CapabilityStatusFixture = Arc<Mutex<std::collections::HashMap<String, crate::types::LspLanguageStatus>>>;
+
 /// A configurable fake `Lawyer` for unit testing.
 #[derive(Clone, Default)]
 pub struct MockLawyer {
@@ -73,6 +76,10 @@ pub struct MockLawyer {
     // ── did_change_watched_files ──────────────────────────────────────────────
     /// All file events passed to `did_change_watched_files`.
     pub watched_file_changes: Arc<Mutex<Vec<FileEvent>>>,
+
+    // ── capability_status ─────────────────────────────────────────────────────
+    /// Configured result for `capability_status`.
+    capability_status_result: CapabilityStatusFixture,
 
     // ── pull_diagnostics ──────────────────────────────────────────────────────
     /// Queue of results for successive `pull_diagnostics` calls.
@@ -256,6 +263,11 @@ impl MockLawyer {
             .len()
     }
 
+    /// Set the result to return from `capability_status()`.
+    pub fn set_capability_status(&self, status: std::collections::HashMap<String, crate::types::LspLanguageStatus>) {
+        *self.capability_status_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status;
+    }
+
     /// Set the result for `range_formatting`.
     ///
     /// Pass `Ok(Some(text))` for formatted output, `Ok(None)` for no edits, or `Err` for error.
@@ -385,6 +397,18 @@ impl Lawyer for MockLawyer {
         Self::pop_queued_result(&self.pull_diagnostics_results).unwrap_or_else(|| Ok(vec![]))
     }
 
+    async fn collect_diagnostics(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _content: &str,
+        _version: i32,
+        _timeout_ms: u64,
+    ) -> Result<Vec<LspDiagnostic>, LspError> {
+        // Return empty by default — reuse pull_diagnostics_results queue for testing
+        Self::pop_queued_result(&self.pull_diagnostics_results).unwrap_or_else(|| Ok(vec![]))
+    }
+
     async fn pull_workspace_diagnostics(
         &self,
         _workspace_root: &Path,
@@ -420,7 +444,7 @@ impl Lawyer for MockLawyer {
     async fn capability_status(
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
-        std::collections::HashMap::new()
+        self.capability_status_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError> {

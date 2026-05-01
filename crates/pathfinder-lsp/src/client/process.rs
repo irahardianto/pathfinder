@@ -85,6 +85,7 @@ const INIT_TIMEOUT_SECS: u64 = 120;
 /// block to set `prctl(PR_SET_PDEATHSIG, SIGKILL)` via a `pre_exec` hook.
 /// This is safe: `prctl` is async-signal-safe, and the call has no Rust
 /// memory-safety implications (no raw pointers, no aliased state).
+#[allow(clippy::too_many_arguments)]
 #[allow(unsafe_code)]
 pub(super) async fn spawn_and_initialize(
     command: &str,
@@ -94,6 +95,7 @@ pub(super) async fn spawn_and_initialize(
     dispatcher: Arc<RequestDispatcher>,
     init_timeout_secs: Option<u64>,
     isolate_target_dir: bool,
+    plugins: Vec<String>,
 ) -> Result<(ManagedProcess, tokio::task::JoinHandle<()>), LspError> {
     let (child, stdin, stdout) =
         spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)?;
@@ -108,7 +110,7 @@ pub(super) async fn spawn_and_initialize(
     let reader_handle = start_reader_task(stdout, Arc::clone(&dispatcher));
 
     let (id, rx) = dispatcher.register();
-    let init_request = build_initialize_request(id, project_root).await?;
+    let init_request = build_initialize_request(id, project_root, &plugins).await?;
     write_message(&mut writer, &init_request).await?;
 
     let timeout_secs = init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
@@ -130,7 +132,7 @@ pub(super) async fn spawn_and_initialize(
     tracing::info!(
         language = language_id,
         definition_provider = capabilities.definition_provider,
-        diagnostic_provider = capabilities.diagnostic_provider,
+        diagnostics_strategy = %capabilities.diagnostics_strategy.as_str(),
         formatting_provider = capabilities.formatting_provider,
         "LSP initialized"
     );
@@ -216,12 +218,40 @@ fn spawn_lsp_child(
 }
 
 /// Build the LSP `initialize` request JSON-RPC message.
-async fn build_initialize_request(id: u64, project_root: &Path) -> Result<Value, LspError> {
+async fn build_initialize_request(
+    id: u64,
+    project_root: &Path,
+    plugins: &[String],
+) -> Result<Value, LspError> {
     let workspace_uri = path_to_file_uri(project_root).await?;
     let workspace_name = project_root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
+
+    let initialization_options = if plugins.is_empty() {
+        json!({})
+    } else {
+        // Build plugins array for typescript-language-server
+        let plugin_entries: Vec<Value> = plugins
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name
+                })
+            })
+            .collect();
+
+        json!({
+            "plugins": plugin_entries,
+            // Tell tsserver to handle .vue files
+            "tsserver": {
+                "extraFileExtensions": [
+                    { "extension": "vue", "scriptKind": 3 }  // TS = 3 in tsserver enum
+                ]
+            }
+        })
+    };
 
     Ok(RequestDispatcher::make_request(
         id,
@@ -231,6 +261,7 @@ async fn build_initialize_request(id: u64, project_root: &Path) -> Result<Value,
             "clientInfo": { "name": "pathfinder", "version": "0.1.0" },
             "rootUri": workspace_uri,
             "workspaceFolders": [{ "uri": workspace_uri, "name": workspace_name }],
+            "initializationOptions": initialization_options,
             "capabilities": {
                 "textDocument": {
                     "definition": { "dynamicRegistration": false, "linkSupport": false },
@@ -388,7 +419,9 @@ mod process_tests {
     #[tokio::test]
     async fn test_build_initialize_request_structure() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(42, dir.path()).await.expect("ok");
+        let request = build_initialize_request(42, dir.path(), &[])
+            .await
+            .expect("ok");
 
         assert_eq!(request["jsonrpc"], "2.0");
         assert_eq!(request["id"], 42);
@@ -416,7 +449,9 @@ mod process_tests {
         let named_dir = dir.path().join("my_project");
         std::fs::create_dir_all(&named_dir).expect("create dir");
 
-        let request = build_initialize_request(1, &named_dir).await.expect("ok");
+        let request = build_initialize_request(1, &named_dir, &[])
+            .await
+            .expect("ok");
         let folders = request["params"]["workspaceFolders"]
             .as_array()
             .expect("array");
@@ -426,7 +461,9 @@ mod process_tests {
     #[tokio::test]
     async fn test_build_initialize_request_capabilities() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(1, dir.path()).await.expect("ok");
+        let request = build_initialize_request(1, dir.path(), &[])
+            .await
+            .expect("ok");
 
         let caps = &request["params"]["capabilities"];
         assert!(!caps["textDocument"]["definition"]["dynamicRegistration"]
@@ -440,6 +477,79 @@ mod process_tests {
                 .as_bool()
                 .unwrap_or(false),
             "workDoneProgress must be opted into for progress tracking"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_includes_plugins_when_present() {
+        let dir = tempdir().expect("temp dir");
+        let plugins = vec!["@vue/typescript-plugin".to_owned()];
+        let request = build_initialize_request(1, dir.path(), &plugins)
+            .await
+            .expect("ok");
+
+        let init_opts = &request["params"]["initializationOptions"];
+        assert!(
+            !init_opts.is_null(),
+            "initializationOptions should not be null"
+        );
+        assert!(!init_opts["plugins"].is_null(), "plugins should be present");
+
+        let plugin_array = init_opts["plugins"]
+            .as_array()
+            .expect("plugins should be an array");
+        assert_eq!(plugin_array.len(), 1);
+        assert_eq!(
+            plugin_array[0]["name"].as_str(),
+            Some("@vue/typescript-plugin")
+        );
+
+        // Check tsserver extraFileExtensions for .vue
+        let tsserver = &init_opts["tsserver"];
+        assert!(!tsserver.is_null(), "tsserver config should be present");
+        let extensions = tsserver["extraFileExtensions"]
+            .as_array()
+            .expect("should be array");
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0]["extension"].as_str(), Some("vue"));
+    }
+
+    #[tokio::test]
+    async fn test_initialize_empty_when_no_plugins() {
+        let dir = tempdir().expect("temp dir");
+        let request = build_initialize_request(1, dir.path(), &[])
+            .await
+            .expect("ok");
+
+        let init_opts = &request["params"]["initializationOptions"];
+        assert!(
+            init_opts.is_null() || init_opts.as_object().is_none_or(serde_json::Map::is_empty),
+            "initializationOptions should be null or empty when no plugins"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_includes_vue_file_extension() {
+        let dir = tempdir().expect("temp dir");
+        let plugins = vec!["@vue/typescript-plugin".to_owned()];
+        let request = build_initialize_request(1, dir.path(), &plugins)
+            .await
+            .expect("ok");
+
+        let init_opts = &request["params"]["initializationOptions"];
+        let tsserver = &init_opts["tsserver"];
+        let extensions = tsserver["extraFileExtensions"]
+            .as_array()
+            .expect("should be array");
+
+        let vue_ext = extensions
+            .iter()
+            .find(|e| e["extension"].as_str() == Some("vue"));
+        assert!(vue_ext.is_some(), "Vue extension should be present");
+        assert_eq!(
+            vue_ext.expect("checked above")["scriptKind"].as_u64(),
+            Some(3),
+            "Vue should use TS script kind"
         );
     }
 

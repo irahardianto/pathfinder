@@ -8,7 +8,7 @@
 #![allow(dead_code)] // Fields are read by serde deserialization, not by name
 
 use rmcp::schemars;
-use rmcp::serde::{self, Serialize};
+use rmcp::serde::{self, Deserialize, Serialize};
 
 // ── Tool Parameter Types ────────────────────────────────────────────
 
@@ -813,7 +813,7 @@ pub struct LspHealthParams {
 }
 
 /// The response for `lsp_health`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LspHealthResponse {
     /// Overall LSP readiness: `"ready"`, `"warming_up"`, or `"unavailable"`.
     pub status: String,
@@ -822,7 +822,7 @@ pub struct LspHealthResponse {
 }
 
 /// Per-language LSP health status.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LspLanguageHealth {
     /// Language ID (e.g., "rust", "typescript").
     pub language: String,
@@ -831,6 +831,31 @@ pub struct LspLanguageHealth {
     /// Time since LSP process started, formatted as a human-readable string (e.g., "45s").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime: Option<String>,
+    /// How diagnostics work for this language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics_strategy: Option<String>,
+    /// Whether call hierarchy is supported (affects `analyze_impact`, `read_with_deep_context`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_call_hierarchy: Option<bool>,
+    /// Whether validation is supported (affects `validate_only`, edit tools).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_diagnostics: Option<bool>,
+    /// Whether definition is supported (affects `get_definition`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_definition: Option<bool>,
+    /// Whether formatting is supported (affects edit tools).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_formatting: Option<bool>,
+    /// Whether the status was verified by a live probe (rather than just progress notifications).
+    /// When true, the agent can trust the status.
+    #[serde(skip_serializing_if = "crate::server::types::is_false")]
+    pub probe_verified: bool,
+}
+
+/// Helper to skip serializing false values for `probe_verified`.
+#[allow(clippy::trivially_copy_pass_by_ref)] // Required by serde's skip_serializing_if signature
+pub(crate) fn is_false(b: &bool) -> bool {
+    !b
 }
 
 // ── Default Value Functions ─────────────────────────────────────────

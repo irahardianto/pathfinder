@@ -166,11 +166,14 @@ impl crate::server::PathfinderServer {
         let _ = self.lawyer.did_close(workspace, relative).await;
     }
 
-    /// Run LSP Pull Diagnostics validation on a pending in-memory edit.
+    /// Run LSP validation on a pending in-memory edit.
+    ///
+    /// Uses either Pull Diagnostics (LSP 3.17) or Push Diagnostics depending
+    /// on what the LSP server supports, determined via `diagnostics_strategy`.
     ///
     /// # Flow
     /// 1. Notify LSP of the original file via `didOpen`
-    /// 2. Snapshot pre-edit diagnostics via `textDocument/diagnostic`
+    /// 2. Snapshot pre-edit diagnostics
     /// 3. Notify LSP of the new content via `didChange`
     /// 4. Snapshot post-edit diagnostics
     /// 5. Diff pre vs post, returning introduced/resolved lists
@@ -205,6 +208,74 @@ impl crate::server::PathfinderServer {
                 should_block: false,
             }
         };
+
+        // Determine diagnostics strategy from capabilities
+        //
+        // Interpretation:
+        // - Some("pull") → use pull diagnostics
+        // - Some("push") → skip (not yet implemented, PATCH-002)
+        // - Some("none") → skip (no diagnostics support)
+        // - None → unknown (lazy start, test mock, etc.) → try pull diagnostics and let it fail naturally
+        let ext = relative.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let lang = pathfinder_lsp::client::language_id_for_extension(ext);
+        let caps = self.lawyer.capability_status().await;
+        let diagnostics_strategy =
+            lang.and_then(|l| caps.get(l).and_then(|s| s.diagnostics_strategy.clone()));
+
+        match diagnostics_strategy.as_deref() {
+            Some("push") => {
+                // Push diagnostics: didOpen/didChange → collect → didChange → collect → diff
+                let push_timeout_ms = 5000; // 5 seconds to collect diagnostics
+
+                // Step 1: Open and collect pre-edit diagnostics
+                let pre_diags = match self
+                    .lawyer
+                    .collect_diagnostics(workspace, relative, original_content, 1, push_timeout_ms)
+                    .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let reason = Self::lsp_error_to_skip_reason(&e);
+                        tracing::warn!(error = %e, "validation: push pre-diagnostics collection failed");
+                        return return_skip(reason);
+                    }
+                };
+
+                // Step 2: Apply change and collect post-edit diagnostics
+                let post_diags = match self
+                    .lawyer
+                    .collect_diagnostics(workspace, relative, new_content, 2, push_timeout_ms)
+                    .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let reason = Self::lsp_error_to_skip_reason(&e);
+                        tracing::warn!(error = %e, "validation: push post-diagnostics collection failed");
+                        self.lsp_revert_and_close(workspace, relative, original_content)
+                            .await;
+                        return return_skip(reason);
+                    }
+                };
+
+                // Step 3: Revert and close
+                self.lsp_revert_and_close(workspace, relative, original_content)
+                    .await;
+
+                // Step 4: Same diff logic as pull diagnostics
+                return build_validation_outcome(
+                    &pre_diags,
+                    &post_diags,
+                    ignore_validation_failures,
+                    file_path,
+                );
+            }
+            Some("none") => {
+                return return_skip("no_diagnostics_support");
+            }
+            // "pull", unknown values, or None → proceed with pull diagnostics flow
+            // (unknown/None lets lazy start and test mocks work as before)
+            Some(_) | None => {}
+        }
 
         // Step 1: Open LSP document and collect pre-edit diagnostics
         let pre_diags = match self
