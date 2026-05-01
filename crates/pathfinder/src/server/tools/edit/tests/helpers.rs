@@ -10,7 +10,6 @@ use pathfinder_treesitter::surgeon::BodyRange;
 use std::path::Path;
 use std::sync::Arc;
 
-#[allow(dead_code)]
 pub(crate) struct UnsupportedDiagLawyer;
 
 #[async_trait::async_trait]

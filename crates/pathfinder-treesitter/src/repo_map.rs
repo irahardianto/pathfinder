@@ -104,7 +104,7 @@ use crate::surgeon::{ExtractedSymbol, SymbolKind};
 /// Default per-file token cap. Used when no per-call override is supplied.
 /// At ~4 chars/token, 2 000 tokens ≈ 8 KB — covers the vast majority of
 /// real source files without falling back to the truncated stub.
-#[allow(dead_code)] // Canonical fallback value; callers receive it via default_max_tokens_per_file()
+#[cfg(test)]
 const MAX_TOKENS_PER_FILE: u32 = 2_000;
 
 /// Determine whether a symbol should be included when `visibility = "public"`.
