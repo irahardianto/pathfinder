@@ -49,13 +49,24 @@
 
 ---
 
-## Deferred (Future)
+---
 
-### Group D: Provisioning (PATCH-007, PATCH-008, PATCH-009)
-- [ ] PATCH-007: Verify Python LSP Detection Completeness
-- [ ] PATCH-008: Surface Install Guidance for Missing LSPs
+## 2026-05-01: Additional Patches (Not Yet Implemented)
+
+### Group D: Provisioning
+- [x] PATCH-008: Surface Install Guidance for Missing LSPs
 - [ ] PATCH-009: End-to-End Python LSP Verification Test
 
-### Group E: Polish (PATCH-010, PATCH-011)
+### Group E: Polish
 - [ ] PATCH-010: Enrich lsp_health with Diagnostics Strategy Info
 - [ ] PATCH-011: Document Plugin Detection and Configuration
+
+---
+
+## Completed in This Session
+
+### All Groups (Committed)
+- [x] Group A: Foundation (PATCH-001, PATCH-002) - Diagnostics strategy, push diagnostics
+- [x] Group B: Vue (PATCH-003, PATCH-004) - TS plugin system, @vue/typescript-plugin auto-detection
+- [x] Group C: Observability (PATCH-005, PATCH-006) - Per-language capabilities, probe-based readiness
+- [x] PATCH-007: Python LSP Detection Completeness - pyright -> pylsp -> ruff-lsp -> jedi-language-server fallback chain

@@ -1255,6 +1255,7 @@ impl PathfinderServer {
                 supports_definition: status.supports_definition,
                 supports_formatting: status.supports_formatting,
                 probe_verified: false,
+                install_hint: None,
             });
         }
 
@@ -1281,6 +1282,31 @@ impl PathfinderServer {
                     }
                 }
             }
+        }
+
+        // PATCH-008: Add missing languages (markers found but no LSP binary)
+        // These are languages where we detected marker files (Cargo.toml, pyproject.toml, etc.)
+        // but no LSP binary is on PATH. We show them as "unavailable" with install hints.
+        let missing_languages = self.lawyer.missing_languages();
+        for missing in &missing_languages {
+            if let Some(ref filter) = params.language {
+                if &missing.language_id != filter {
+                    continue;
+                }
+            }
+
+            languages.push(crate::server::types::LspLanguageHealth {
+                language: missing.language_id.clone(),
+                status: "unavailable".to_owned(),
+                uptime: None,
+                diagnostics_strategy: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_definition: None,
+                supports_formatting: None,
+                probe_verified: false,
+                install_hint: Some(missing.install_hint.clone()),
+            });
         }
 
         if languages.is_empty() && params.language.is_none() {
@@ -2825,6 +2851,118 @@ mod tests {
             Some(std::path::PathBuf::from("src/index.ts"))
         );
         assert_eq!(server.find_probe_file("rust"), None);  // No Rust file
+    }
+
+    // ── PATCH-008: Install Guidance Tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_lsp_health_includes_missing_languages_with_install_hint() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Mock a detected language (TypeScript with running LSP)
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "typescript".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(60),
+                diagnostics_strategy: Some("push".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(false),
+            },
+        )]));
+
+        // Mock missing languages (Python and Go with markers but no LSP binaries)
+        lawyer_clone.set_missing_languages(vec![
+            pathfinder_lsp::client::MissingLanguage {
+                language_id: "python".to_string(),
+                marker_file: "pyproject.toml".to_string(),
+                tried_binaries: vec!["pyright".to_string(), "pylsp".to_string()],
+                install_hint: "Install pyright: npm install -g pyright".to_string(),
+            },
+            pathfinder_lsp::client::MissingLanguage {
+                language_id: "go".to_string(),
+                marker_file: "go.mod".to_string(),
+                tried_binaries: vec!["gopls".to_string()],
+                install_hint: "Install gopls: go install golang.org/x/tools/gopls@latest".to_string(),
+            },
+        ]);
+
+        let params = crate::server::types::LspHealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        // Should have 3 languages total: 1 detected + 2 missing
+        assert_eq!(val.languages.len(), 3);
+
+        // Find the missing languages
+        let python_health = val.languages.iter().find(|l| l.language == "python");
+        let go_health = val.languages.iter().find(|l| l.language == "go");
+        let ts_health = val.languages.iter().find(|l| l.language == "typescript");
+
+        // TypeScript should be ready
+        assert!(ts_health.is_some());
+        assert_eq!(ts_health.unwrap().status, "ready");
+
+        // Python and Go should be unavailable with install hints
+        assert!(python_health.is_some());
+        assert_eq!(python_health.unwrap().status, "unavailable");
+        assert_eq!(
+            python_health.unwrap().install_hint,
+            Some("Install pyright: npm install -g pyright".to_string())
+        );
+
+        assert!(go_health.is_some());
+        assert_eq!(go_health.unwrap().status, "unavailable");
+        assert_eq!(
+            go_health.unwrap().install_hint,
+            Some("Install gopls: go install golang.org/x/tools/gopls@latest".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_missing_language_filter_works() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // No detected languages, only missing ones
+        lawyer_clone.set_capability_status(std::collections::HashMap::new());
+        lawyer_clone.set_missing_languages(vec![
+            pathfinder_lsp::client::MissingLanguage {
+                language_id: "python".to_string(),
+                marker_file: "pyproject.toml".to_string(),
+                tried_binaries: vec!["pyright".to_string()],
+                install_hint: "Install pyright".to_string(),
+            },
+            pathfinder_lsp::client::MissingLanguage {
+                language_id: "rust".to_string(),
+                marker_file: "Cargo.toml".to_string(),
+                tried_binaries: vec!["rust-analyzer".to_string()],
+                install_hint: "Install rust-analyzer".to_string(),
+            },
+        ]);
+
+        // Filter by language = python
+        let params = crate::server::types::LspHealthParams {
+            language: Some("python".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = call_res.0;
+
+        // Should only return Python, not Rust
+        assert_eq!(val.languages.len(), 1);
+        assert_eq!(val.languages[0].language, "python");
+        assert_eq!(val.languages[0].install_hint, Some("Install pyright".to_string()));
     }
 
 }

@@ -50,6 +50,9 @@ type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, String>>>
 /// Configured result for `capability_status`.
 type CapabilityStatusFixture = Arc<Mutex<std::collections::HashMap<String, crate::types::LspLanguageStatus>>>;
 
+/// Configured result for `missing_languages`.
+type MissingLanguagesFixture = Arc<Mutex<Vec<crate::client::MissingLanguage>>>;
+
 /// A configurable fake `Lawyer` for unit testing.
 #[derive(Clone, Default)]
 pub struct MockLawyer {
@@ -80,6 +83,10 @@ pub struct MockLawyer {
     // ── capability_status ─────────────────────────────────────────────────────
     /// Configured result for `capability_status`.
     capability_status_result: CapabilityStatusFixture,
+
+    // ── missing_languages ─────────────────────────────────────────────────────
+    /// Configured result for `missing_languages`.
+    missing_languages_result: MissingLanguagesFixture,
 
     // ── pull_diagnostics ──────────────────────────────────────────────────────
     /// Queue of results for successive `pull_diagnostics` calls.
@@ -268,6 +275,11 @@ impl MockLawyer {
         *self.capability_status_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status;
     }
 
+    /// Set the result to return from `missing_languages()`.
+    pub fn set_missing_languages(&self, missing: Vec<crate::client::MissingLanguage>) {
+        *self.missing_languages_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = missing;
+    }
+
     /// Set the result for `range_formatting`.
     ///
     /// Pass `Ok(Some(text))` for formatted output, `Ok(None)` for no edits, or `Err` for error.
@@ -445,6 +457,10 @@ impl Lawyer for MockLawyer {
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
         self.capability_status_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn missing_languages(&self) -> Vec<crate::client::MissingLanguage> {
+        self.missing_languages_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError> {

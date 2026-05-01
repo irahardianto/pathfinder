@@ -16,7 +16,8 @@ mod protocol;
 mod transport;
 
 pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy};
-pub use detect::{detect_languages, language_id_for_extension, LanguageLsp};
+pub use detect::{detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage};
+pub use detect::{install_hint};
 
 use crate::types::{CallHierarchyCall, CallHierarchyItem, LspDiagnostic, LspDiagnosticSeverity};
 use crate::{DefinitionLocation, Lawyer, LspError};
@@ -198,6 +199,10 @@ impl Drop for InFlightGuard {
 pub struct LspClient {
     /// Known language descriptors (from Zero-Config detection).
     descriptors: Arc<Vec<LspDescriptor>>,
+    /// Languages whose markers were found but whose LSP binaries are not on PATH.
+    ///
+    /// Used to surface actionable install guidance in `lsp_health` responses.
+    missing_languages: Arc<Vec<crate::client::detect::MissingLanguage>>,
     /// Running processes keyed by language id.
     processes: Arc<DashMap<String, ProcessEntry>>,
     /// Locks for concurrent initialization to prevent duplicate spawns.
@@ -222,11 +227,12 @@ impl LspClient {
         workspace_root: &Path,
         config: std::sync::Arc<pathfinder_common::config::PathfinderConfig>,
     ) -> std::io::Result<Self> {
-        let descriptors = detect_languages(workspace_root, &config).await?;
+        let detection_result = detect_languages(workspace_root, &config).await?;
 
         tracing::info!(
             workspace = %workspace_root.display(),
-            detected_languages = ?descriptors.iter().map(|l| &l.language_id).collect::<Vec<_>>(),
+            detected_languages = ?detection_result.detected.iter().map(|l| &l.language_id).collect::<Vec<_>>(),
+            missing_languages = ?detection_result.missing.iter().map(|l| &l.language_id).collect::<Vec<_>>(),
             "LspClient: language detection complete"
         );
 
@@ -234,7 +240,8 @@ impl LspClient {
         let shutdown_tx = Arc::new(shutdown_tx);
 
         let client = Self {
-            descriptors: Arc::new(descriptors),
+            descriptors: Arc::new(detection_result.detected),
+            missing_languages: Arc::new(detection_result.missing),
             processes: Arc::new(DashMap::new()),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
@@ -1225,6 +1232,10 @@ impl Lawyer for LspClient {
             status.insert(desc.language_id.clone(), lang_status);
         }
         status
+    }
+
+    fn missing_languages(&self) -> Vec<crate::client::MissingLanguage> {
+        self.missing_languages.iter().cloned().collect()
     }
 }
 
@@ -2254,6 +2265,7 @@ mod tests {
         let (shutdown_tx, _) = broadcast::channel(1);
         LspClient {
             descriptors: Arc::new(Vec::new()),
+            missing_languages: Arc::new(Vec::new()),
             processes: Arc::new(DashMap::new()),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
@@ -2287,6 +2299,7 @@ mod tests {
         let (shutdown_tx, _) = broadcast::channel(1);
         LspClient {
             descriptors: Arc::new(descriptors),
+            missing_languages: Arc::new(Vec::new()),
             processes: Arc::new(processes_dashmap),
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),

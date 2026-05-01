@@ -127,6 +127,10 @@ impl Lawyer for NoOpLawyer {
         std::collections::HashMap::new()
     }
 
+    fn missing_languages(&self) -> Vec<crate::client::MissingLanguage> {
+        vec![]
+    }
+
     async fn did_change_watched_files(&self, _changes: Vec<FileEvent>) -> Result<(), LspError> {
         Ok(())
     }

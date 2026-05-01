@@ -111,6 +111,9 @@ impl Lawyer for UnsupportedDiagLawyer {
     ) -> std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus> {
         std::collections::HashMap::new()
     }
+    fn missing_languages(&self) -> Vec<pathfinder_lsp::client::MissingLanguage> {
+        vec![]
+    }
     async fn did_change_watched_files(
         &self,
         _changes: Vec<pathfinder_lsp::types::FileEvent>,

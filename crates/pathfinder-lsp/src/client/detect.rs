@@ -24,6 +24,55 @@
 
 use std::path::Path;
 
+/// Result of language detection.
+///
+/// Contains both languages that were fully detected (marker + binary found) and
+/// languages that have markers but no LSP binaries on PATH.
+#[derive(Debug, Clone)]
+pub struct DetectionResult {
+    /// Languages with markers AND binaries found.
+    pub detected: Vec<LanguageLsp>,
+    /// Languages with markers but no binary on PATH.
+    pub missing: Vec<MissingLanguage>,
+}
+
+/// A language whose marker files were found but whose LSP binary is not on PATH.
+///
+/// Used to surface actionable install guidance in `lsp_health` responses.
+#[derive(Debug, Clone)]
+pub struct MissingLanguage {
+    /// Short language identifier (e.g., "rust", "python").
+    pub language_id: String,
+    /// The marker file that was found (e.g., "Cargo.toml", "pyproject.toml").
+    pub marker_file: String,
+    /// All binaries that were tried and failed to resolve.
+    pub tried_binaries: Vec<String>,
+    /// Actionable install guidance for this language.
+    pub install_hint: String,
+}
+
+/// Return an actionable install hint for each language.
+///
+/// Provides specific commands users can run to install their LSP servers.
+#[must_use]
+pub fn install_hint(language_id: &str) -> String {
+    match language_id {
+        "rust" => {
+            "Install rust-analyzer: https://rust-analyzer.github.io/".to_string()
+        }
+        "go" => "Install gopls: go install golang.org/x/tools/gopls@latest".to_string(),
+        "typescript" => {
+            "Install typescript-language-server: npm install -g typescript-language-server typescript"
+                .to_string()
+        }
+        "python" => {
+            "Install pyright: npm install -g pyright\nOr install pylsp: pip install python-lsp-server"
+                .to_string()
+        }
+        _ => format!("Install a language server for {language_id}"),
+    }
+}
+
 /// Identifies a language and the command used to spawn its LSP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageLsp {
@@ -243,8 +292,9 @@ async fn detect_typescript_plugins(
 pub async fn detect_languages(
     workspace_root: &Path,
     config: &pathfinder_common::config::PathfinderConfig,
-) -> std::io::Result<Vec<LanguageLsp>> {
+) -> std::io::Result<DetectionResult> {
     let mut detected = Vec::new();
+    let mut missing = Vec::new();
 
     // Helper macro to get the root_override path if configured
     macro_rules! get_override {
@@ -286,6 +336,7 @@ pub async fn detect_languages(
         None => find_marker(workspace_root, "Cargo.toml", 0).await,
     };
     if let Some(root) = rust_root {
+        let has_override = get_command_override!("rust").is_some();
         let cmd =
             get_command_override!("rust").or_else(|| resolve_command("rust-analyzer", "rust"));
         if let Some(command) = cmd {
@@ -297,6 +348,14 @@ pub async fn detect_languages(
                 init_timeout_secs: None,
                 auto_plugins: vec![],
             });
+        } else if !has_override {
+            // Marker found but no binary, and no custom command configured
+            missing.push(MissingLanguage {
+                language_id: "rust".to_owned(),
+                marker_file: "Cargo.toml".to_string(),
+                tried_binaries: vec!["rust-analyzer".to_string()],
+                install_hint: install_hint("rust"),
+            });
         }
     }
 
@@ -306,6 +365,7 @@ pub async fn detect_languages(
         None => find_marker(workspace_root, "go.mod", 2).await,
     };
     if let Some(root) = go_root {
+        let has_override = get_command_override!("go").is_some();
         let cmd = get_command_override!("go").or_else(|| resolve_command("gopls", "go"));
         if let Some(command) = cmd {
             detected.push(LanguageLsp {
@@ -316,17 +376,29 @@ pub async fn detect_languages(
                 init_timeout_secs: None,
                 auto_plugins: vec![],
             });
+        } else if !has_override {
+            missing.push(MissingLanguage {
+                language_id: "go".to_owned(),
+                marker_file: "go.mod".to_string(),
+                tried_binaries: vec!["gopls".to_string()],
+                install_hint: install_hint("go"),
+            });
         }
     }
 
     // TypeScript / JavaScript — tsconfig.json or package.json (depth 2)
-    let ts_root = match get_override!("typescript") {
-        Some(r) => Some(r),
-        None => find_marker(workspace_root, "tsconfig.json", 2)
-            .await
-            .or(find_marker(workspace_root, "package.json", 2).await),
+    let (ts_root, ts_marker) = if get_override!("typescript").is_some() {
+        (get_override!("typescript"), None)
+    } else if let Some(r) = find_marker(workspace_root, "tsconfig.json", 2).await {
+        (Some(r), Some("tsconfig.json"))
+    } else {
+        (
+            find_marker(workspace_root, "package.json", 2).await,
+            Some("package.json"),
+        )
     };
     if let Some(root) = ts_root {
+        let has_override = get_command_override!("typescript").is_some();
         let cmd = get_command_override!("typescript")
             .or_else(|| resolve_command("typescript-language-server", "typescript"));
         if let Some(command) = cmd {
@@ -339,16 +411,28 @@ pub async fn detect_languages(
                 init_timeout_secs: None,
                 auto_plugins,
             });
+        } else if !has_override {
+            missing.push(MissingLanguage {
+                language_id: "typescript".to_owned(),
+                marker_file: ts_marker.unwrap_or("tsconfig.json or package.json").to_string(),
+                tried_binaries: vec!["typescript-language-server".to_string()],
+                install_hint: install_hint("typescript"),
+            });
         }
     }
 
     // Python — pyproject.toml, setup.py, or requirements.txt (depth 2)
-    let py_root = match get_override!("python") {
-        Some(r) => Some(r),
-        None => find_marker(workspace_root, "pyproject.toml", 2)
-            .await
-            .or(find_marker(workspace_root, "setup.py", 2).await)
-            .or(find_marker(workspace_root, "requirements.txt", 2).await),
+    let (py_root, py_marker) = if get_override!("python").is_some() {
+        (get_override!("python"), None)
+    } else if let Some(r) = find_marker(workspace_root, "pyproject.toml", 2).await {
+        (Some(r), Some("pyproject.toml"))
+    } else if let Some(r) = find_marker(workspace_root, "setup.py", 2).await {
+        (Some(r), Some("setup.py"))
+    } else {
+        (
+            find_marker(workspace_root, "requirements.txt", 2).await,
+            Some("requirements.txt"),
+        )
     };
     if let Some(root) = py_root {
         // Try Python LSP servers in order of preference.
@@ -363,11 +447,13 @@ pub async fn detect_languages(
             ("jedi-language-server", vec![]),
         ];
 
+        let has_override = get_command_override!("python").is_some();
+
         let maybe_command_and_args = if let Some(cmd_override) = get_command_override!("python") {
             // User specified custom command in config
             Some((cmd_override, vec!["--stdio".to_owned()])) // Keep backward compatibility: default to --stdio for custom commands
         } else {
-            // Try each candidate in order
+            // Try each candidate in order, tracking which were tried
             let mut resolved = None;
             for (binary, args) in &python_lsp_candidates {
                 if let Some(resolved_cmd) = resolve_command(binary, "python") {
@@ -387,10 +473,23 @@ pub async fn detect_languages(
                 init_timeout_secs: None,
                 auto_plugins: vec![],
             });
+        } else if !has_override {
+            // No binary found and no custom command configured — add to missing
+            missing.push(MissingLanguage {
+                language_id: "python".to_owned(),
+                marker_file: py_marker
+                    .unwrap_or("pyproject.toml, setup.py, or requirements.txt")
+                    .to_string(),
+                tried_binaries: python_lsp_candidates
+                    .iter()
+                    .map(|(name, _)| name.to_string())
+                    .collect(),
+                install_hint: install_hint("python"),
+            });
         }
     }
 
-    Ok(detected)
+    Ok(DetectionResult { detected, missing })
 }
 
 /// Map a file extension to its language identifier.
@@ -518,10 +617,10 @@ mod tests {
     async fn test_detects_cargo_toml() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("write");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        if let Some(rust) = langs.iter().find(|l| l.language_id == "rust") {
+        if let Some(rust) = result.detected.iter().find(|l| l.language_id == "rust") {
             assert!(rust.args.is_empty());
             assert!(rust.init_timeout_secs.is_none());
             assert!(!rust.command.is_empty());
@@ -532,10 +631,10 @@ mod tests {
     async fn test_detects_go_mod() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("go.mod"), "module foo").expect("write");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        if let Some(go) = langs.iter().find(|l| l.language_id == "go") {
+        if let Some(go) = result.detected.iter().find(|l| l.language_id == "go") {
             assert!(!go.command.is_empty());
         }
     }
@@ -544,10 +643,10 @@ mod tests {
     async fn test_detects_typescript_via_tsconfig() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("tsconfig.json"), "{}").expect("write");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        if let Some(ts) = langs.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
             assert_eq!(ts.args, ["--stdio"]);
             assert!(ts.init_timeout_secs.is_none());
         }
@@ -557,10 +656,10 @@ mod tests {
     async fn test_detects_typescript_via_package_json() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("package.json"), "{}").expect("write");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        let found = langs.iter().any(|l| l.language_id == "typescript");
+        let found = result.detected.iter().any(|l| l.language_id == "typescript");
         let _ = found;
     }
 
@@ -568,10 +667,10 @@ mod tests {
     async fn test_detects_python_via_pyproject() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        if let Some(py) = langs.iter().find(|l| l.language_id == "python") {
+        if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
             assert!(!py.command.is_empty());
         }
     }
@@ -581,10 +680,10 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("write");
         std::fs::write(dir.path().join("package.json"), "{}").expect("write");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        let ids: Vec<&str> = langs.iter().map(|l| l.language_id.as_str()).collect();
+        let ids: Vec<&str> = result.detected.iter().map(|l| l.language_id.as_str()).collect();
         for id in &ids {
             assert!(["rust", "go", "typescript", "python"].contains(id));
         }
@@ -593,10 +692,10 @@ mod tests {
     #[tokio::test]
     async fn test_empty_directory() {
         let dir = tempdir().expect("temp dir");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        assert!(langs.is_empty());
+        assert!(result.detected.is_empty() && result.missing.is_empty());
     }
 
     #[tokio::test]
@@ -605,10 +704,10 @@ mod tests {
         let sub_dir = dir.path().join("apps").join("backend");
         std::fs::create_dir_all(&sub_dir).expect("create dir");
         std::fs::write(sub_dir.join("go.mod"), "module foo").expect("write");
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        if let Some(go_lang) = langs.into_iter().find(|l| l.language_id == "go") {
+        if let Some(go_lang) = result.detected.into_iter().find(|l| l.language_id == "go") {
             assert_eq!(go_lang.root, sub_dir);
         }
     }
@@ -629,8 +728,8 @@ mod tests {
             },
         );
 
-        let langs = detect_languages(dir.path(), &config).await.expect("detect");
-        if let Some(go_lang) = langs.into_iter().find(|l| l.language_id == "go") {
+        let result = detect_languages(dir.path(), &config).await.expect("detect");
+        if let Some(go_lang) = result.detected.into_iter().find(|l| l.language_id == "go") {
             assert_eq!(go_lang.root, dir.path().join("custom/backend"));
             assert_eq!(go_lang.command, "gopls");
         }
@@ -721,8 +820,8 @@ mod tests {
                 typescript_plugins: vec![],
             },
         );
-        let langs = detect_languages(dir.path(), &config).await.expect("detect");
-        for l in &langs {
+        let result = detect_languages(dir.path(), &config).await.expect("detect");
+        for l in &result.detected {
             assert!(!l.command.is_empty(), "resolved command must be non-empty");
         }
     }
@@ -736,11 +835,11 @@ mod tests {
         create_vue_file(dir.path());
         create_vue_plugin(dir.path());
 
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
 
-        if let Some(ts) = langs.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
             assert_eq!(ts.auto_plugins, ["@vue/typescript-plugin"]);
         }
     }
@@ -752,11 +851,11 @@ mod tests {
         // Plugin installed but NO .vue files
         create_vue_plugin(dir.path());
 
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
 
-        if let Some(ts) = langs.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
             assert!(
                 ts.auto_plugins.is_empty(),
                 "auto_plugins should be empty when no .vue files exist"
@@ -771,12 +870,12 @@ mod tests {
         create_vue_file(dir.path());
         create_vue_plugin(dir.path());
 
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
 
         assert!(
-            !langs.iter().any(|l| l.language_id == "typescript"),
+            !result.detected.iter().any(|l| l.language_id == "typescript"),
             "TypeScript should not be detected without a marker file"
         );
     }
@@ -801,9 +900,9 @@ mod tests {
             },
         );
 
-        let langs = detect_languages(dir.path(), &config).await.expect("detect");
+        let result = detect_languages(dir.path(), &config).await.expect("detect");
 
-        if let Some(ts) = langs.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
             assert_eq!(
                 ts.auto_plugins,
                 ["@custom/plugin"],
@@ -819,11 +918,11 @@ mod tests {
         create_vue_file_nested(dir.path());
         create_vue_plugin(dir.path());
 
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
 
-        if let Some(ts) = langs.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
             assert_eq!(
                 ts.auto_plugins.len(),
                 1,
@@ -838,11 +937,11 @@ mod tests {
         std::fs::write(dir.path().join("package.json"), "{}").expect("write");
         // No .vue files, no plugin installed
 
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
 
-        if let Some(ts) = langs.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
             assert!(
                 ts.auto_plugins.is_empty(),
                 "should not detect plugin without .vue files"
@@ -857,11 +956,11 @@ mod tests {
         create_vue_file(dir.path());
         create_vue_plugin_pnpm(dir.path());
 
-        let langs = detect_languages(dir.path(), &make_ts_config())
+        let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
 
-        if let Some(ts) = langs.iter().find(|l| l.language_id == "typescript") {
+        if let Some(ts) = result.detected.iter().find(|l| l.language_id == "typescript") {
             assert_eq!(
                 ts.auto_plugins.len(),
                 1,
@@ -884,12 +983,12 @@ mod tests {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
-            let langs = detect_languages(dir.path(), &make_ts_config())
+            let result = detect_languages(dir.path(), &make_ts_config())
                 .await
                 .expect("detect");
 
             assert!(
-                !langs.iter().any(|l| l.language_id == "python"),
+                !result.detected.iter().any(|l| l.language_id == "python"),
                 "Python should not be detected without any LSP binary on PATH"
             );
         }).await;
@@ -901,11 +1000,11 @@ mod tests {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
-            let langs = detect_languages(dir.path(), &make_ts_config())
+            let result = detect_languages(dir.path(), &make_ts_config())
                 .await
                 .expect("detect");
 
-            if let Some(py) = langs.iter().find(|l| l.language_id == "python") {
+            if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
                 // Should prefer pyright, which uses --stdio
                 assert_eq!(py.args, ["--stdio"]);
                 assert!(py.command.contains("pyright"));
@@ -921,11 +1020,11 @@ mod tests {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
-            let langs = detect_languages(dir.path(), &make_ts_config())
+            let result = detect_languages(dir.path(), &make_ts_config())
                 .await
                 .expect("detect");
 
-            if let Some(py) = langs.iter().find(|l| l.language_id == "python") {
+            if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
                 // pylsp uses empty args
                 assert!(py.args.is_empty());
                 assert!(py.command.contains("pylsp"));
@@ -941,11 +1040,11 @@ mod tests {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
-            let langs = detect_languages(dir.path(), &make_ts_config())
+            let result = detect_languages(dir.path(), &make_ts_config())
                 .await
                 .expect("detect");
 
-            if let Some(py) = langs.iter().find(|l| l.language_id == "python") {
+            if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
                 // ruff-lsp uses empty args
                 assert!(py.args.is_empty());
                 assert!(py.command.contains("ruff-lsp"));
@@ -961,11 +1060,11 @@ mod tests {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
-            let langs = detect_languages(dir.path(), &make_ts_config())
+            let result = detect_languages(dir.path(), &make_ts_config())
                 .await
                 .expect("detect");
 
-            if let Some(py) = langs.iter().find(|l| l.language_id == "python") {
+            if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
                 // jedi-language-server uses empty args
                 assert!(py.args.is_empty());
                 assert!(py.command.contains("jedi-language-server"));
@@ -995,8 +1094,8 @@ mod tests {
                 },
             );
 
-            let langs = detect_languages(dir.path(), &config).await.expect("detect");
-            if let Some(py) = langs.iter().find(|l| l.language_id == "python") {
+            let result = detect_languages(dir.path(), &config).await.expect("detect");
+            if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
                 // Custom command with no args specified in config should default to --stdio (backward compat)
                 assert_eq!(py.args, ["--stdio"]);
             } else {

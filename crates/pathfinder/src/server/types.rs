@@ -850,6 +850,12 @@ pub struct LspLanguageHealth {
     /// When true, the agent can trust the status.
     #[serde(skip_serializing_if = "crate::server::types::is_false")]
     pub probe_verified: bool,
+    /// Install guidance when LSP is unavailable.
+    ///
+    /// Provides actionable commands users can run to install their LSP servers.
+    /// `None` when LSP is running or language not detected at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
 }
 
 /// Helper to skip serializing false values for `probe_verified`.

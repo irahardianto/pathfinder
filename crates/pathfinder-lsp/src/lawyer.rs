@@ -187,6 +187,12 @@ pub trait Lawyer: Send + Sync {
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus>;
 
+    /// Retrieve languages whose markers were found but whose LSP binaries are not on PATH.
+    ///
+    /// Used to surface actionable install guidance in `lsp_health` responses.
+    fn missing_languages(&self) -> Vec<crate::client::MissingLanguage>;
+
+
     /// Notify all running LSP processes of a filesystem change.
     ///
     /// Broadcasts `workspace/didChangeWatchedFiles` to every running LSP process.
