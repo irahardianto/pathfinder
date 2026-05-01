@@ -173,6 +173,13 @@ impl PathfinderServer {
     /// definition location, and returns the result.
     ///
     /// **Degraded mode:** Returns a `LSP_REQUIRED` error when no LSP is configured.
+    // This function coordinates Tree-sitter (position resolution), LSP (goto_definition),
+    // and Ripgrep (degraded fallback). It has multiple outcome paths:
+    // 1. Happy path: LSP returns Some(def)
+    // 2. Warmup path: LSP returns None → 3s wait → retry → grep fallback
+    // 3. Degraded path: NoLspAvailable → grep fallback
+    // 4. Error path: Other LspError
+    // The linear structure makes the orchestration easier to understand.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn get_definition_impl(
         &self,
