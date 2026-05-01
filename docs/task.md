@@ -62,7 +62,7 @@
 
 ### Group E: Polish
 - [x] PATCH-010: Enrich lsp_health with Diagnostics Strategy Info
-- [ ] PATCH-011: Document Plugin Detection and Configuration
+- [x] PATCH-011: Document Plugin Detection and Configuration
 
 ---
 

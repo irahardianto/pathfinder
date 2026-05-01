@@ -1,5 +1,12 @@
 # Research Log: Epic 4 — The Lawyer (LSP Client)
 
+> **Update (2026-05-01):** Rust LSP remediation is complete and the architecture
+> is now language-agnostic. The column-1 fix, empty probe, and didOpen lifecycle
+> apply to all languages. New languages need: `detect.rs` entry + tree-sitter
+> grammar (Python has both). Diagnostics strategy (pull vs push) is the remaining
+> gap for full cross-language parity. See
+> `docs/requirements/patches/20260501/ARCHITECTURE.md` for the full architecture reference.
+
 ## Date: 2026-03-07
 
 ## Context
