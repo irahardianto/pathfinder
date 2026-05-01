@@ -1,7 +1,6 @@
 ## Pathfinder Tool Routing
 
-Canonical location for Pathfinder tool routing, addressing rules, and fallback details.
-`APPEND_SYSTEM.md` §1 points here for bootstrap. Full tool chains and workflows: `.agents/skills/pathfinder-workflow/SKILL.md`.
+Canonical location for Pathfinder tool routing, addressing rules, and fallback details. Full tool chains and workflows: `.agents/skills/pathfinder-workflow/SKILL.md`.
 
 ### Pre-Flight Check
 

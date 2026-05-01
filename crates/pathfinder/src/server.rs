@@ -244,9 +244,9 @@ impl PathfinderServer {
         &self,
         Parameters(params): Parameters<crate::server::types::LspHealthParams>,
     ) -> Result<
-            rmcp::handler::server::wrapper::Json<crate::server::types::LspHealthResponse>,
-            ErrorData,
-        > {
+        rmcp::handler::server::wrapper::Json<crate::server::types::LspHealthResponse>,
+        ErrorData,
+    > {
         self.lsp_health_impl(params).await
     }
 

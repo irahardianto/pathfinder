@@ -1253,9 +1253,7 @@ impl PathfinderServer {
             },
         ))
     }
-
 }
-
 
 /// Format uptime in seconds as a human-readable string.
 fn format_uptime(seconds: u64) -> String {
@@ -1279,7 +1277,6 @@ fn format_uptime(seconds: u64) -> String {
         }
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
