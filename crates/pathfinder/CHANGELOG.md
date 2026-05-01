@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/irahardianto/pathfinder/compare/v0.3.1...v0.4.0) - 2026-05-01
+
+### Added
+
+- Complete PATCH-001 through PATCH-011 implementation gaps
+- *(lsp)* enrich lsp_health with degraded tools and validation latency (PATCH-010)
+- *(lsp)* surface install guidance for missing LSPs (PATCH-008)
+- *(lsp)* cross-language LSP reliability improvements
+- *(lsp)* Python LSP E2E verification test + fix pyright detection (PATCH-009)
+
+### Other
+
+- *(coverage)* add comprehensive tests for lsp_error_to_skip_reason
+- add test coverage for apply_filter_mode in search tool
+- 🛡️ Shield: Fix panic in test_details_serialization_extra
+- 🛡️ Shield: Fix panic in test_details_serialization_extra
+- 🛡️ Shield: Increased coverage for error mapping and serialization in pathfinder-common
+- 🛡️ Shield: Increased coverage for error mapping and serialization in pathfinder-common
+- *(lsp)* add branch coverage for LSP response parsers
+- *(lsp)* add process shutdown coverage
+- *(search)* add missing coverage for mutex poisoning, utf8 handling, context lines
+
 ## [0.3.1](https://github.com/irahardianto/pathfinder/compare/v0.3.0...v0.3.1) - 2026-05-01
 
 ### Other
