@@ -1720,6 +1720,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_definition_response_invalid_uri_fallback() {
+        // Provide an invalid URL. It should fallback to the raw URI string.
+        let response = json!({
+            "uri": "invalid_url_no_scheme",
+            "range": {
+                "start": { "line": 10, "character": 0 },
+                "end":   { "line": 10, "character": 5 }
+            }
+        });
+        let result = parse_definition_response(response).expect("ok");
+        let loc = result.expect("some location");
+        assert_eq!(loc.file, "invalid_url_no_scheme");
+    }
+
     // ── parse_diagnostic_items tests ──────────────────────────────
 
     #[test]
@@ -1898,6 +1913,25 @@ mod tests {
         let result =
             parse_call_hierarchy_prepare_response(&json!({"foo": "bar"}), Path::new("/workspace"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_call_hierarchy_prepare_response_invalid_uri_fallback() {
+        let response = json!([{
+            "name": "main",
+            "kind": 12,
+            "detail": "fn()",
+            "uri": "invalid-uri",
+            "selectionRange": {
+                "start": { "line": 0, "character": 2 },
+                "end": { "line": 0, "character": 6 }
+            }
+        }]);
+
+        let result =
+            parse_call_hierarchy_prepare_response(&response, Path::new("/workspace")).expect("ok");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file, "invalid-uri");
     }
 
     // ── parse_call_hierarchy_calls_response tests ─────────────────
