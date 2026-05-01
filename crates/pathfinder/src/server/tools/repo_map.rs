@@ -12,6 +12,9 @@ impl PathfinderServer {
     /// Generates a structural skeleton of the project via Tree-sitter.
     /// Visibility filtering is not yet implemented; `visibility_degraded`
     /// is always set to `Some(true)` so agents know the param has no effect.
+    // Orchestrates git (changed_since filter) and Tree-sitter (skeleton generation),
+    // with degraded-mode fallback when git fails, plus LSP capability collection for
+    // the response metadata. The linear structure makes the orchestration explicit.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn get_repo_map_impl(
         &self,
