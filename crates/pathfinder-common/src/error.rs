@@ -524,7 +524,11 @@ mod tests {
         assert_eq!(err.to_details()["issue"], "b");
 
         let err = PathfinderError::FileNotFound { path: "a".into() };
-        assert!(err.to_details().as_object().expect("should be an object").is_empty());
+        assert!(err
+            .to_details()
+            .as_object()
+            .expect("should be an object")
+            .is_empty());
 
         let err = PathfinderError::TextNotFound {
             filepath: "a.vue".into(),
