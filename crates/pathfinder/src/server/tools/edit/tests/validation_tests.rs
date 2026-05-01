@@ -517,3 +517,103 @@ fn test_build_validation_outcome_non_empty_pre_does_not_skip() {
     assert_eq!(outcome.validation.status, "passed");
     assert!(!outcome.should_block);
 }
+
+// ── lsp_error_to_skip_reason: pure function, all variants tested ──────
+//
+// These tests verify that every LspError variant maps to the correct
+// skip reason string. This ensures complete coverage of the match
+// statement in lsp_error_to_skip_reason.
+
+#[test]
+fn test_lsp_error_to_skip_reason_no_lsp() {
+    use crate::server::PathfinderServer;
+    use pathfinder_lsp::LspError;
+
+    let err = LspError::NoLspAvailable;
+    let reason = PathfinderServer::lsp_error_to_skip_reason(&err);
+    assert_eq!(reason, "no_lsp");
+}
+
+#[test]
+fn test_lsp_error_to_skip_reason_timeout() {
+    use crate::server::PathfinderServer;
+    use pathfinder_lsp::LspError;
+
+    let err = LspError::Timeout {
+        operation: "textDocument/definition".to_owned(),
+        timeout_ms: 10_000,
+    };
+    let reason = PathfinderServer::lsp_error_to_skip_reason(&err);
+    assert_eq!(reason, "lsp_timeout");
+}
+
+#[test]
+fn test_lsp_error_to_skip_reason_protocol() {
+    use crate::server::PathfinderServer;
+    use pathfinder_lsp::LspError;
+
+    let err = LspError::Protocol("malformed JSON response".to_owned());
+    let reason = PathfinderServer::lsp_error_to_skip_reason(&err);
+    assert_eq!(reason, "lsp_protocol_error");
+}
+
+#[test]
+fn test_lsp_error_to_skip_reason_connection_lost() {
+    use crate::server::PathfinderServer;
+    use pathfinder_lsp::LspError;
+
+    let err = LspError::ConnectionLost;
+    let reason = PathfinderServer::lsp_error_to_skip_reason(&err);
+    assert_eq!(reason, "lsp_crash");
+}
+
+#[test]
+fn test_lsp_error_to_skip_reason_unsupported_capability() {
+    use crate::server::PathfinderServer;
+    use pathfinder_lsp::LspError;
+
+    let err = LspError::UnsupportedCapability {
+        capability: "diagnosticProvider".to_owned(),
+    };
+    let reason = PathfinderServer::lsp_error_to_skip_reason(&err);
+    assert_eq!(reason, "pull_diagnostics_unsupported");
+}
+
+#[test]
+fn test_lsp_error_to_skip_reason_io_not_found() {
+    use crate::server::PathfinderServer;
+    use pathfinder_lsp::LspError;
+    use std::io::{Error, ErrorKind};
+
+    // Io(NotFound) maps to "lsp_not_on_path" - this is the case where
+    // the LSP binary is not installed or not in PATH.
+    let io_err = Error::new(ErrorKind::NotFound, "No such file or directory");
+    let err = LspError::Io(io_err);
+    let reason = PathfinderServer::lsp_error_to_skip_reason(&err);
+    assert_eq!(reason, "lsp_not_on_path");
+}
+
+#[test]
+fn test_lsp_error_to_skip_reason_io_other_kinds() {
+    use crate::server::PathfinderServer;
+    use pathfinder_lsp::LspError;
+    use std::io::{Error, ErrorKind};
+
+    // All non-NotFound Io errors map to "lsp_start_failed".
+    // Test several common error kinds.
+    for (kind, name) in [
+        (ErrorKind::PermissionDenied, "PermissionDenied"),
+        (ErrorKind::ConnectionRefused, "ConnectionRefused"),
+        (ErrorKind::BrokenPipe, "BrokenPipe"),
+        (ErrorKind::TimedOut, "TimedOut"),
+        (ErrorKind::Other, "Other"),
+    ] {
+        let io_err = Error::new(kind, format!("{name} error"));
+        let err = LspError::Io(io_err);
+        let reason = PathfinderServer::lsp_error_to_skip_reason(&err);
+        assert_eq!(
+            reason, "lsp_start_failed",
+            "ErrorKind::{name} should map to 'lsp_start_failed'"
+        );
+    }
+}
