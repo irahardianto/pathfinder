@@ -39,7 +39,14 @@ impl PathfinderServer {
     /// - `exclude_glob` is passed to the scout to exclude files before search.
     /// - `known_files` suppresses verbose context for files the agent already has.
     /// - `group_by_file` clusters results into `file_groups` in the response.
-    #[allow(clippy::too_many_lines)]
+    // Orchestrates Ripgrep (raw search) and Tree-sitter (AST enrichment), with
+    // degraded-mode bypass logic, response formatting for both grouped and flat output,
+    // and detailed telemetry logging. The linear structure makes the orchestration
+    // easier to understand and verify.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline: ripgrep → TS enrichment → filter → group → response. Extraction done at helper level; remaining orchestration is linear."
+    )]
     pub(crate) async fn search_codebase_impl(
         &self,
         params: SearchCodebaseParams,

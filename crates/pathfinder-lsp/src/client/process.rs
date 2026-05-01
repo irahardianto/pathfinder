@@ -451,4 +451,39 @@ mod process_tests {
         // depending on the URL library
         assert!(uri.is_ok() || uri.is_err());
     }
+
+    #[tokio::test]
+    async fn test_shutdown_terminates_process() {
+        // Arrange
+        let mut child_process = tokio::process::Command::new("sleep")
+            .arg("10")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("Failed to spawn sleep");
+
+        let stdin = child_process.stdin.take().expect("Failed to take stdin");
+
+        let mut process = ManagedProcess {
+            child: child_process,
+            stdin: tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin)),
+            capabilities: crate::client::capabilities::DetectedCapabilities::default(),
+            last_used: std::time::Instant::now(),
+            in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+
+        let dispatcher = std::sync::Arc::new(RequestDispatcher::new());
+
+        // Act
+        shutdown(&mut process, &dispatcher).await;
+
+        // Assert
+        // Give the OS a moment to reap the process
+        let status = process.child.wait().await.expect("Failed to wait on child");
+        assert!(
+            !status.success(),
+            "Process should have been killed, but exited successfully"
+        );
+    }
 }

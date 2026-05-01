@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/irahardianto/pathfinder/compare/v0.3.0...v0.3.1) - 2026-05-01
+
+### Other
+
+- *(lint)* normalize lint suppressions for consistency and clarity
+- *(lint)* add justifying comments for clippy::too_many_lines
+- *(cleanup)* remove dead code and stale allow(dead_code)
+
+## [0.3.0](https://github.com/irahardianto/pathfinder/compare/v0.2.2...v0.3.0) - 2026-05-01
+
+### Fixed
+
+- *(navigation)* improve grep fallbacks with visibility modifiers and warmup support
+- *(validation)* return uncertain status when both diagnostic snapshots empty
+- *(edit)* add blank line before doc comments in insert_after
+- *(file-ops)* standardize response envelopes (PATCH-006 + PATCH-007)
+- *(search)* populate total_matches in build_file_groups + add regression test (PATCH-004)
+- *(search)* schema and serialization fixes for group_by_file + known_files (PATCH-004 + PATCH-005)
+- *(navigation)* use name_column in LSP calls + add empty-hierarchy probe (PATCH-002 + PATCH-003)
+- *(navigation)* add name_column for correct LSP cursor positioning (PATCH-001)
+
+### Other
+
+- Apply cargo fmt formatting fixes
+- Complete PATCH-001 through PATCH-015 implementation
+- Fix argument injection in ripgrep execution
+- *(edit)* apply cargo fmt to insert_after doc comment detection
+- *(validation)* update test to expect uncertain status for empty snapshots
+- *(lsp)* Verify LspClient shutdown broadcasts signal
+- *(lsp)* Verify LspClient shutdown broadcasts signal
+
 ## [0.2.2](https://github.com/irahardianto/pathfinder/compare/v0.2.1...v0.2.2) - 2026-04-29
 
 ### Fixed

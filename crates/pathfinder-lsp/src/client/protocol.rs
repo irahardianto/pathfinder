@@ -120,7 +120,6 @@ impl RequestDispatcher {
     /// Prevents request IDs from leaking forever in the dispatcher when
     /// the caller gives up waiting for a response.
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
-    #[allow(dead_code)]
     pub(super) fn remove(&self, id: u64) {
         self.pending.lock().expect("dispatcher lock").remove(&id);
     }

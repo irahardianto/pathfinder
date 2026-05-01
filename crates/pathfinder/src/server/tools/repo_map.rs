@@ -7,12 +7,42 @@ use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
 
 impl PathfinderServer {
+    /// Build an empty-changes response when `changed_since` finds no diffs.
+    async fn empty_changes_response(&self) -> Result<CallToolResult, ErrorData> {
+        let capability_status = self.lawyer.capability_status().await;
+        let metadata = crate::server::types::GetRepoMapMetadata {
+            tech_stack: vec![],
+            files_scanned: 0,
+            files_truncated: 0,
+            files_in_scope: 0,
+            coverage_percent: 100,
+            version_hashes: std::collections::HashMap::new(),
+            visibility_degraded: None,
+            degraded: false,
+            degraded_reason: None,
+            capabilities: RepoCapabilities {
+                edit: true,
+                search: true,
+                lsp: LspCapabilities {
+                    supported: true,
+                    per_language: capability_status,
+                },
+            },
+        };
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
+            "No files changed since the specified ref. No skeleton generated.",
+        )]);
+        res.structured_content = serialize_metadata(&metadata);
+        Ok(res)
+    }
     /// Core logic for the `get_repo_map` tool.
     ///
     /// Generates a structural skeleton of the project via Tree-sitter.
     /// Visibility filtering is not yet implemented; `visibility_degraded`
     /// is always set to `Some(true)` so agents know the param has no effect.
-    #[allow(clippy::too_many_lines)]
+    // Orchestrates git (changed_since filter) and Tree-sitter (skeleton generation),
+    // with degraded-mode fallback when git fails, plus LSP capability collection for
+    // the response metadata. The linear structure makes the orchestration explicit.
     pub(crate) async fn get_repo_map_impl(
         &self,
         params: GetRepoMapParams,
@@ -41,33 +71,7 @@ impl PathfinderServer {
             {
                 Ok(files) => {
                     if files.is_empty() {
-                        // No changes found — return a structured empty result
-                        // rather than a skeleton with zero content
-                        let capability_status = self.lawyer.capability_status().await;
-                        let metadata = crate::server::types::GetRepoMapMetadata {
-                            tech_stack: vec![],
-                            files_scanned: 0,
-                            files_truncated: 0,
-                            files_in_scope: 0,
-                            coverage_percent: 100,
-                            version_hashes: std::collections::HashMap::new(),
-                            visibility_degraded: None,
-                            degraded: false,
-                            degraded_reason: None,
-                            capabilities: RepoCapabilities {
-                                edit: true,
-                                search: true,
-                                lsp: LspCapabilities {
-                                    supported: true,
-                                    per_language: capability_status,
-                                },
-                            },
-                        };
-                        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
-                            "No files changed since the specified ref. No skeleton generated.",
-                        )]);
-                        res.structured_content = serialize_metadata(&metadata);
-                        return Ok(res);
+                        return self.empty_changes_response().await;
                     }
                     changed_files = Some(files);
                 }

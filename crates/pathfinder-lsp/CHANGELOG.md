@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.2.6...pathfinder-mcp-lsp-v0.2.7) - 2026-05-01
+
+### Other
+
+- *(lint)* normalize lint suppressions for consistency and clarity
+- *(cleanup)* remove dead code and stale allow(dead_code)
+
+## [0.2.6](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.2.5...pathfinder-mcp-lsp-v0.2.6) - 2026-05-01
+
+### Other
+
+- updated the following local packages: pathfinder-mcp-common
+
 ## [0.2.5](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.2.4...pathfinder-mcp-lsp-v0.2.5) - 2026-04-29
 
 ### Fixed

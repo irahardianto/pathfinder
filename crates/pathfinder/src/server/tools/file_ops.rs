@@ -396,8 +396,14 @@ impl PathfinderServer {
     /// Supports two modes: full-content replacement and surgical search-and-replace
     /// (via [`apply_replacements`]). Includes OCC version checking with a late
     /// TOCTOU re-check before the write, and sandbox authorization.
+    // Orchestrates a multi-phase write sequence with strict consistency guarantees:
+    // 1. Mutual-exclusivity validation (content vs replacements)
+    // 2. Sandbox authorization + OCC pre-check
+    // 3. Content computation (full replacement OR search-and-replace)
+    // 4. TOCTOU late-check (re-read + re-hash immediately before write)
+    // 5. Atomic inode-preserving write + LSP broadcast + cache invalidation
+    // The linear structure makes each phase's ordering and dependency explicit.
     #[tracing::instrument(skip(self, params), fields(filepath = %params.filepath))]
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn write_file_impl(
         &self,
         params: WriteFileParams,
