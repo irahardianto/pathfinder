@@ -1300,7 +1300,10 @@ impl PathfinderServer {
                 // expire after PROBE_NEGATIVE_TTL_SECS (60s) to allow the LSP
                 // to finish starting and be re-probed later.
                 let cache_action = {
-                    let cache = self.probe_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let cache = self
+                        .probe_cache
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match cache.get(&lang_health.language) {
                         Some(entry) if entry.is_valid() && entry.success => {
                             // Valid positive entry — reuse cached result
