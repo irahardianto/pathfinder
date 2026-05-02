@@ -15,26 +15,8 @@ use ignore::WalkBuilder;
 use pathfinder_common::types::VersionHash;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 // ── Helper Functions ─────────────────────────────────────────────────────
-
-/// Recover from mutex poisoning with a warning log.
-///
-/// Mutex poisoning indicates a panic occurred while holding the lock;
-/// the data MAY be in an inconsistent state, but for search result caches
-/// this is acceptable since results will simply be regenerated.
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            tracing::warn!(
-                "mutex poisoned, recovering (possible data inconsistency in search cache)"
-            );
-            e.into_inner()
-        }
-    }
-}
 
 /// Truncate a line to a maximum byte length, ensuring valid UTF-8 boundaries.
 /// Appends `... [TRUNCATED]` if the line was shortened.
@@ -62,9 +44,9 @@ struct MatchCollector<'a> {
     /// Buffer of context lines that appear *before* the next match.
     context_before_buf: VecDeque<String>,
     /// Accumulated matches for this file.
-    matches: &'a Mutex<Vec<SearchMatch>>,
+    matches: &'a mut Vec<SearchMatch>,
     /// Running total of all matches seen (including those already capped).
-    total_count: &'a Mutex<usize>,
+    total_count: &'a mut usize,
     /// Maximum number of matches the caller wants.
     max_results: usize,
     /// Whether we have already hit the cap.
@@ -85,8 +67,8 @@ impl<'a> MatchCollector<'a> {
     #[allow(clippy::similar_names)]
     fn new(
         relative_path: String,
-        matches: &'a Mutex<Vec<SearchMatch>>,
-        total_count: &'a Mutex<usize>,
+        matches: &'a mut Vec<SearchMatch>,
+        total_count: &'a mut usize,
         max_results: usize,
         context_lines: usize,
         matcher: &'a grep_regex::RegexMatcher,
@@ -111,9 +93,8 @@ impl<'a> MatchCollector<'a> {
     ///
     /// Called after the search completes and only if the file had matches,
     /// so we only pay the cost of reading + hashing files that actually matched.
-    fn backfill_hash(&self, hash: &str) {
-        let mut guard = lock_or_recover(self.matches);
-        for m in guard.iter_mut() {
+    fn backfill_hash(&mut self, hash: &str) {
+        for m in self.matches.iter_mut() {
             if m.file == self.relative_path && m.version_hash.is_empty() {
                 m.version_hash = hash.to_string();
             }
@@ -121,7 +102,7 @@ impl<'a> MatchCollector<'a> {
     }
 
     fn current_match_count(&self) -> usize {
-        lock_or_recover(self.matches).len()
+        self.matches.len()
     }
 }
 
@@ -134,10 +115,7 @@ impl Sink for MatchCollector<'_> {
         // We'll handle this in `context()` instead.
 
         // Increment total regardless of cap.
-        {
-            let mut count = lock_or_recover(self.total_count);
-            *count += 1;
-        }
+        *self.total_count += 1;
 
         let current = self.current_match_count();
         if current >= self.max_results {
@@ -148,8 +126,7 @@ impl Sink for MatchCollector<'_> {
 
         // Flush the after-context buffer from the previous match into the last stored match.
         if !self.after_context_buf.is_empty() {
-            let mut guard = lock_or_recover(self.matches);
-            if let Some(last) = guard.last_mut() {
+            if let Some(last) = self.matches.last_mut() {
                 last.context_after = std::mem::take(&mut self.after_context_buf);
             }
         }
@@ -194,10 +171,7 @@ impl Sink for MatchCollector<'_> {
             self.context_before_buf.push_back(content);
         }
 
-        {
-            let mut guard = lock_or_recover(self.matches);
-            guard.push(search_match);
-        }
+        self.matches.push(search_match);
 
         Ok(true)
     }
@@ -241,8 +215,7 @@ impl Sink for MatchCollector<'_> {
     ) -> Result<(), Self::Error> {
         // Flush any remaining after-context into the last match.
         if !self.after_context_buf.is_empty() {
-            let mut guard = lock_or_recover(self.matches);
-            if let Some(last) = guard.last_mut() {
+            if let Some(last) = self.matches.last_mut() {
                 last.context_after = std::mem::take(&mut self.after_context_buf);
             }
         }
@@ -369,8 +342,8 @@ impl Scout for RipgrepScout {
             let matcher = Self::build_matcher(params)?;
             let files = Self::walk_files(params)?;
 
-            let match_buf: Mutex<Vec<SearchMatch>> = Mutex::new(Vec::new());
-            let total_count: Mutex<usize> = Mutex::new(0);
+            let mut match_buf: Vec<SearchMatch> = Vec::new();
+            let mut total_count: usize = 0;
             let mut truncated = false;
 
             let mut searcher = SearcherBuilder::new()
@@ -380,12 +353,12 @@ impl Scout for RipgrepScout {
                 .build();
 
             for (abs_path, relative) in &files {
-                let matches_before = { lock_or_recover(&match_buf).len() };
+                let matches_before = match_buf.len();
 
                 let mut sink = MatchCollector::new(
                     relative.clone(),
-                    &match_buf,
-                    &total_count,
+                    &mut match_buf,
+                    &mut total_count,
                     params.max_results,
                     params.context_lines,
                     &matcher,
@@ -398,13 +371,16 @@ impl Scout for RipgrepScout {
 
                 // Only hash the file when it produced at least one new match.
                 // This avoids reading every file into memory just to compute a hash.
-                let matches_after = { lock_or_recover(&match_buf).len() };
+                let matches_after = sink.current_match_count();
                 if matches_after > matches_before {
                     let Ok(bytes) = std::fs::read(abs_path) else {
                         tracing::warn!(file = %relative, "Scout: failed to read file for hashing; skipping hash");
                         continue;
                     };
                     let hash = VersionHash::compute(&bytes).short().to_owned();
+                    // Because sink borrows match_buf mutably, we must do this using the sink
+                    // before it is dropped, or backfill on match_buf directly.
+                    // backfill_hash method on sink still works because it holds the mut borrow.
                     sink.backfill_hash(&hash);
                 }
 
@@ -415,20 +391,16 @@ impl Scout for RipgrepScout {
                 }
             }
 
-            // ALLOW: lock is only poisoned on panic from within this function
-            let collected = match_buf.into_inner().unwrap_or_default();
-            let total = total_count.into_inner().unwrap_or_default();
-
             tracing::debug!(
-                total_matches = total,
-                returned = collected.len(),
+                total_matches = total_count,
+                returned = match_buf.len(),
                 truncated,
                 "Scout: search complete"
             );
 
             Ok(SearchResult {
-                matches: collected,
-                total_matches: total,
+                matches: match_buf,
+                total_matches: total_count,
                 truncated,
             })
         })
@@ -946,21 +918,6 @@ mod tests {
 mod missing_coverage_tests {
     use super::*;
     use std::io::Write;
-    use std::sync::Mutex;
-
-    #[test]
-    fn test_lock_or_recover_poisoned() {
-        let mutex = Mutex::new(vec![1, 2, 3]);
-
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = mutex.lock().unwrap();
-            panic!("poisoning");
-        });
-
-        let mut guard = lock_or_recover(&mutex);
-        assert_eq!(*guard, vec![1, 2, 3]);
-        guard.push(4);
-    }
 
     #[tokio::test]
     async fn test_search_match_column_invalid_utf8_prefix() {
