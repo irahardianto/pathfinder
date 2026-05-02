@@ -73,3 +73,36 @@
 - [x] Group B: Vue (PATCH-003, PATCH-004) - TS plugin system, @vue/typescript-plugin auto-detection
 - [x] Group C: Observability (PATCH-005, PATCH-006) - Per-language capabilities, probe-based readiness
 - [x] PATCH-007: Python LSP Detection Completeness - pyright -> pylsp -> ruff-lsp -> jedi-language-server fallback chain
+
+---
+
+## 2026-05-02: LSP-HEALTH-001 Reliability Hardening
+
+### Task 1: Decouple Navigation Readiness from Indexing Completion (P0)
+- [x] Add `navigation_ready` field to `LspLanguageStatus`
+- [x] Update `validation_status_from_parts` to set navigation_ready from supports_definition
+- [x] Two-phase readiness in `lsp_health_impl` (navigation_ready gates "ready", indexing_complete is additional signal)
+- [x] Add `indexing_status` to `LspLanguageHealth` response
+- [x] Add navigation_ready tests (3 in mod.rs, 2 in navigation.rs)
+
+### Task 3: Improve Probe Reliability (P0)
+- [x] Recursive depth-4 monorepo scan fallback in `find_probe_file`
+- [x] Probe cache with TTL: positive indefinite, negative 60s expiry
+- [x] `ProbeCacheEntry` struct with `is_valid()` TTL check
+- [x] `ProbeAction` tri-state: UseCachedReady / SkipProbe / Probe
+- [x] Tests for TTL cache behavior (4 new tests)
+
+### Task 4+5: Cache Isolation and Accurate Warnings (P1)
+- [x] gopls: GOCACHE + GOMODCACHE isolation
+- [x] tsserver: TMPDIR isolation
+- [x] Python: PYTHONPYCACHEPREFIX isolation
+- [x] Language-specific isolation descriptions in concurrent LSP warning
+- [x] Auto-add `.pathfinder/` to `.gitignore` via `ensure_pathfinder_in_gitignore()` (4 tests)
+
+### Task 6: Progress Watcher Timeout Fallback (P2)
+- [x] 30s `INDEXING_FALLBACK_TIMEOUT_SECS` sets `indexing_complete = true` if no progress received
+
+### Documentation
+- [x] Updated `docs/LSP-ARCHITECTURE.md` with TTL probe cache docs, auto-gitignore, timeout location
+- [x] Updated `README.md` with concurrent LSP handling note and roadmap items
+- [x] Added LSP-HEALTH-001 spec to `docs/requirements/patches/`

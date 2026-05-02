@@ -181,9 +181,52 @@ fn spawn_lsp_child(
         );
     }
 
+    // LSP-HEALTH-001 Task 4.1: gopls cache isolation
+    // When concurrent gopls instances are detected, isolate GOCACHE and GOMODCACHE
+    // to avoid Go module cache lock contention between IDE's gopls and Pathfinder's gopls.
+    if isolate_target_dir && language_id == "go" {
+        let isolated_cache = project_root.join(".pathfinder").join("gopls-cache");
+        cmd.env("GOCACHE", isolated_cache.join("build"));
+        cmd.env("GOMODCACHE", isolated_cache.join("mod"));
+        tracing::info!(
+            language = language_id,
+            "LSP: set isolated GOCACHE/GOMODCACHE for gopls to avoid cache contention"
+        );
+    }
+
+    // TypeScript cache isolation: tsserver uses TMPDIR for .tsbuildinfo files.
+    // Concurrent tsserver instances (IDE + Pathfinder) sharing the same TMPDIR
+    // can corrupt build info files. Isolate to a per-Pathfinder temp directory.
+    if isolate_target_dir && language_id == "typescript" {
+        let isolated_tmp = project_root.join(".pathfinder").join("tsserver-tmp");
+        cmd.env("TMPDIR", &isolated_tmp);
+        tracing::info!(
+            language = language_id,
+            "LSP: set isolated TMPDIR for tsserver to avoid .tsbuildinfo contention"
+        );
+    }
+
+    // Python cache isolation: isolate __pycache__ output to avoid conflicts
+    // between concurrent pyright/ruff-lsp instances.
+    if isolate_target_dir && language_id == "python" {
+        let isolated_cache = project_root.join(".pathfinder").join("python-cache");
+        cmd.env("PYTHONPYCACHEPREFIX", isolated_cache.join("pyc"));
+        tracing::info!(
+            language = language_id,
+            "LSP: set isolated PYTHONPYCACHEPREFIX for Python LSP to avoid cache contention"
+        );
+    }
+
     // prctl(PR_SET_PDEATHSIG) is Linux-only — not available on macOS/BSD even
     // though they are also "unix". Gate strictly on linux to avoid link errors
     // when cross-compiling for aarch64-apple-darwin / x86_64-apple-darwin.
+
+    // Ensure .pathfinder/ is in .gitignore when isolation creates files there
+    if isolate_target_dir && language_id != "rust" {
+        // Rust uses target/pathfinder-lsp/ which is already covered by target/ in .gitignore
+        ensure_pathfinder_in_gitignore(project_root);
+    }
+
     apply_linux_process_hardening(&mut cmd);
 
     let mut child_group = cmd.group_spawn().map_err(|e: std::io::Error| {
@@ -215,6 +258,39 @@ fn spawn_lsp_child(
     let child = child_group.into_inner();
 
     Ok((child, stdin, stdout))
+}
+
+/// Ensure `.pathfinder/` is listed in the project's `.gitignore`.
+///
+/// Called when cache isolation creates files under `.pathfinder/`.
+/// This prevents the isolated cache directories from being tracked by git.
+/// The function is idempotent — it checks for existing entries before appending.
+fn ensure_pathfinder_in_gitignore(project_root: &Path) {
+    let gitignore_path = project_root.join(".gitignore");
+
+    // Check if .pathfinder/ is already in .gitignore
+    if let Ok(existing) = std::fs::read_to_string(&gitignore_path) {
+        for line in existing.lines() {
+            let trimmed = line.trim();
+            if trimmed == ".pathfinder" || trimmed == ".pathfinder/" || trimmed == "/.pathfinder/" {
+                return; // Already present
+            }
+        }
+        // Append to existing .gitignore
+        let mut content = existing;
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str("\n# Pathfinder LSP cache isolation\n.pathfinder/\n");
+        if std::fs::write(&gitignore_path, content).is_ok() {
+            tracing::info!(path = %gitignore_path.display(), "Appended .pathfinder/ to .gitignore");
+        }
+    } else {
+        // No .gitignore exists — create one with just .pathfinder/
+        if std::fs::write(&gitignore_path, "# Pathfinder LSP cache isolation\n.pathfinder/\n").is_ok() {
+            tracing::info!(path = %gitignore_path.display(), "Created .gitignore with .pathfinder/ entry");
+        }
+    }
 }
 
 /// Build the LSP `initialize` request JSON-RPC message.
@@ -595,5 +671,59 @@ mod process_tests {
             !status.success(),
             "Process should have been killed, but exited successfully"
         );
+    }
+
+    // ── gitignore helper tests ──────────────────────────────────────
+
+    #[test]
+    fn test_ensure_pathfinder_in_gitignore_creates_new() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gitignore = dir.path().join(".gitignore");
+        assert!(!gitignore.exists());
+
+        super::ensure_pathfinder_in_gitignore(dir.path());
+
+        let content = std::fs::read_to_string(&gitignore).expect("read");
+        assert!(content.contains(".pathfinder/"), "should contain .pathfinder/ entry");
+    }
+
+    #[test]
+    fn test_ensure_pathfinder_in_gitignore_appends_to_existing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gitignore = dir.path().join(".gitignore");
+        std::fs::write(&gitignore, "node_modules/\n/target/\n").expect("write");
+
+        super::ensure_pathfinder_in_gitignore(dir.path());
+
+        let content = std::fs::read_to_string(&gitignore).expect("read");
+        assert!(content.contains("node_modules/"), "should preserve existing entries");
+        assert!(content.contains(".pathfinder/"), "should add .pathfinder/ entry");
+    }
+
+    #[test]
+    fn test_ensure_pathfinder_in_gitignore_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gitignore = dir.path().join(".gitignore");
+        std::fs::write(&gitignore, "node_modules/\n.pathfinder/\n").expect("write");
+
+        super::ensure_pathfinder_in_gitignore(dir.path());
+
+        let content = std::fs::read_to_string(&gitignore).expect("read");
+        // Should not duplicate the entry
+        let count = content.matches(".pathfinder/").count();
+        assert_eq!(count, 1, "should not duplicate .pathfinder/ entry");
+    }
+
+    #[test]
+    fn test_ensure_pathfinder_in_gitignore_idempotent_with_slash_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gitignore = dir.path().join(".gitignore");
+        std::fs::write(&gitignore, "node_modules/\n/.pathfinder/\n").expect("write");
+
+        super::ensure_pathfinder_in_gitignore(dir.path());
+
+        let content = std::fs::read_to_string(&gitignore).expect("read");
+        let count = content.matches(".pathfinder/").count();
+        assert_eq!(count, 1, "should not duplicate /.pathfinder/ entry");
     }
 }

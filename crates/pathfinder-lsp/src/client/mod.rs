@@ -128,49 +128,58 @@ fn validation_status_from_parts(
     uptime_seconds: u64,
 ) -> crate::types::LspLanguageStatus {
     if !running {
-        return crate::types::LspLanguageStatus {
-            validation: false,
-            reason: format!("{command} failed to start or crashed repeatedly"),
-            indexing_complete: None,
-            uptime_seconds: None,
-            diagnostics_strategy: None,
-            supports_definition: None,
-            supports_call_hierarchy: None,
-            supports_diagnostics: None,
-            supports_formatting: None,
-        };
-    }
-    match diagnostics_strategy {
-        DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
-            validation: true,
-            reason: format!(
-                "LSP connected and supports validation ({})",
-                match diagnostics_strategy {
-                    DiagnosticsStrategy::Pull => "pull diagnostics",
-                    DiagnosticsStrategy::Push => "push diagnostics",
-                    DiagnosticsStrategy::None => unreachable!(),
-                }
-            ),
-            indexing_complete: Some(indexing_complete),
-            uptime_seconds: Some(uptime_seconds),
-            diagnostics_strategy: Some(diagnostics_strategy.as_str().to_owned()),
-            supports_definition: Some(supports_definition),
-            supports_call_hierarchy: Some(supports_call_hierarchy),
-            supports_diagnostics: Some(true),
-            supports_formatting: Some(supports_formatting),
-        },
-        DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
-            validation: false,
-            reason: "LSP connected but does not support diagnostics".to_owned(),
-            indexing_complete: Some(indexing_complete),
-            uptime_seconds: Some(uptime_seconds),
-            diagnostics_strategy: Some("none".to_owned()),
-            supports_definition: Some(supports_definition),
-            supports_call_hierarchy: Some(supports_call_hierarchy),
-            supports_diagnostics: Some(false),
-            supports_formatting: Some(supports_formatting),
-        },
-    }
+            return crate::types::LspLanguageStatus {
+                validation: false,
+                reason: format!("{command} failed to start or crashed repeatedly"),
+                navigation_ready: None,
+                indexing_complete: None,
+                uptime_seconds: None,
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+            };
+        }
+        // Navigation is ready if supports_definition is true and LSP is running.
+        // This gates on the initialize handshake completing with definitionProvider
+        // capability, NOT on indexing_complete. Navigation tools may return partial
+        // results during indexing but are still functional.
+        let navigation_ready = Some(supports_definition);
+
+        match diagnostics_strategy {
+            DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
+                validation: true,
+                reason: format!(
+                    "LSP connected and supports validation ({})",
+                    match diagnostics_strategy {
+                        DiagnosticsStrategy::Pull => "pull diagnostics",
+                        DiagnosticsStrategy::Push => "push diagnostics",
+                        DiagnosticsStrategy::None => unreachable!(),
+                    }
+                ),
+                navigation_ready,
+                indexing_complete: Some(indexing_complete),
+                uptime_seconds: Some(uptime_seconds),
+                diagnostics_strategy: Some(diagnostics_strategy.as_str().to_owned()),
+                supports_definition: Some(supports_definition),
+                supports_call_hierarchy: Some(supports_call_hierarchy),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(supports_formatting),
+            },
+            DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
+                validation: false,
+                reason: "LSP connected but does not support diagnostics".to_owned(),
+                navigation_ready,
+                indexing_complete: Some(indexing_complete),
+                uptime_seconds: Some(uptime_seconds),
+                diagnostics_strategy: Some("none".to_owned()),
+                supports_definition: Some(supports_definition),
+                supports_call_hierarchy: Some(supports_call_hierarchy),
+                supports_diagnostics: Some(false),
+                supports_formatting: Some(supports_formatting),
+            },
+        }
 }
 
 /// RAII guard that increments in-flight counter on creation and decrements on drop.
@@ -503,6 +512,27 @@ impl LspClient {
             progress_watcher_task(lang_id_for_watcher, dispatcher_for_watcher, indexing_flag).await;
         });
 
+        // LSP-HEALTH-001 Task 6.1: Progress watcher timeout fallback
+        // Non-Rust LSPs (gopls, tsserver, pyright) may not emit WorkDoneProgressEnd
+        // notifications. After 30 seconds, assume indexing is complete if we haven't
+        // heard otherwise. This ensures indexing_status eventually reaches "complete"
+        // and prevents eternal "in_progress" status.
+        const INDEXING_FALLBACK_TIMEOUT_SECS: u64 = 30;
+        let timeout_flag = Arc::clone(&indexing_complete);
+        let timeout_lang = language_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(INDEXING_FALLBACK_TIMEOUT_SECS)).await;
+            if !timeout_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                timeout_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    language = %timeout_lang,
+                    timeout_sec = INDEXING_FALLBACK_TIMEOUT_SECS,
+                    "LSP: no WorkDoneProgressEnd received after {INDEXING_FALLBACK_TIMEOUT_SECS}s — \
+                     assuming indexing complete (timeout fallback for gopls/tsserver/pyright)"
+                );
+            }
+        });
+
         self.processes.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
@@ -546,13 +576,24 @@ impl LspClient {
                 }
                 // We count ourselves too, so >1 means another instance exists
                 if count > 1 {
+                    // LSP-HEALTH-001 Task 5.1: Accurately describe what isolation is actually applied.
+                    // Currently only Rust and Go have isolation.
+                    let isolation_desc = match language_id {
+                        "rust" => "Cargo target directory",
+                        "go" => "Go build cache (GOCACHE/GOMODCACHE)",
+                        "typescript" => "TypeScript temp directory (TMPDIR)",
+                        "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
+                        _ => "No", // Other languages have no isolation yet
+                    };
                     tracing::warn!(
                         language = language_id,
                         binary = binary_name,
                         instances_found = count,
                         "LSP: detected {} concurrent instances of {binary_name} on this workspace. \
-                         Isolating build artifacts to avoid cache lock contention.",
-                        count
+                         {} build artifact isolation will be applied to avoid cache lock contention. \
+                         First-time indexing may take 30-60s for this workspace.",
+                        count,
+                        isolation_desc
                     );
                     return true;
                 }
@@ -1217,6 +1258,7 @@ impl Lawyer for LspClient {
                 || crate::types::LspLanguageStatus {
                     validation: true,
                     reason: format!("{} available (lazy start)", desc.command),
+                    navigation_ready: None,
                     diagnostics_strategy: None,
                     // Process hasn't started yet — indexing status and uptime unknown
                     indexing_complete: None,
@@ -2265,6 +2307,68 @@ mod tests {
         );
         assert!(status.uptime_seconds.is_some());
         assert!(status.indexing_complete.is_some());
+    }
+
+    // ── navigation_ready tests (LSP-HEALTH-001) ──────────────────
+
+    #[test]
+    fn test_navigation_ready_true_when_supports_definition_and_running() {
+        // Pyright scenario: LSP running, supports_definition=true,
+        // but diagnostics_strategy=None AND indexing_complete=false.
+        // Navigation should still be "ready" because initialize handshake completed.
+        let status = validation_status_from_parts(
+            "pyright",
+            true,   // running
+            DiagnosticsStrategy::None,
+            true,   // supports_definition
+            true,   // supports_call_hierarchy
+            false,  // supports_formatting
+            false,  // indexing_complete (still indexing)
+            5,      // uptime_seconds
+        );
+        // Navigation ready regardless of diagnostics and indexing status
+        assert_eq!(status.navigation_ready, Some(true));
+        // But validation is false because no diagnostics
+        assert!(!status.validation);
+        // Indexing is still in progress
+        assert_eq!(status.indexing_complete, Some(false));
+    }
+
+    #[test]
+    fn test_navigation_ready_false_when_supports_definition_false() {
+        // Edge case: LSP running but doesn't support definition at all
+        let status = validation_status_from_parts(
+            "weird-lsp",
+            true,   // running
+            DiagnosticsStrategy::Pull,
+            false,  // supports_definition = false
+            false,  // supports_call_hierarchy
+            false,  // supports_formatting
+            true,   // indexing_complete
+            10,     // uptime_seconds
+        );
+        // Navigation not ready because LSP doesn't have definitionProvider capability
+        assert_eq!(status.navigation_ready, Some(false));
+        // But validation is true because pull diagnostics available
+        assert!(status.validation);
+    }
+
+    #[test]
+    fn test_navigation_ready_none_when_not_running() {
+        // When LSP is not running (crashed, failed to start), navigation_ready is None
+        let status = validation_status_from_parts(
+            "gopls",
+            false,  // NOT running
+            DiagnosticsStrategy::None,  // irrelevant when !running
+            true,   // irrelevant when !running
+            true,   // irrelevant when !running
+            false,  // irrelevant when !running
+            false,  // irrelevant when !running
+            0,      // irrelevant when !running
+        );
+        assert_eq!(status.navigation_ready, None);
+        assert_eq!(status.indexing_complete, None);
+        assert!(!status.validation);
     }
 
     // ── WP-1: LspClient Test Harness ──────────────────────────────

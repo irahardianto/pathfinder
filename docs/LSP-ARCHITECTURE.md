@@ -212,21 +212,69 @@ typescript_plugins = ["@vue/typescript-plugin"]
 
 ### `lsp_health` Tool
 
-The `lsp_health` tool provides a comprehensive view of all LSP servers:
+The `lsp_health` tool provides a comprehensive view of all LSP servers.
+It uses a **two-phase readiness model** (LSP-HEALTH-001) that separates
+navigation capability from indexing completion.
 
 **Per-language information:**
 - Status: `ready`, `warming_up`, `starting`, `unavailable`
+- `navigation_ready`: Whether navigation tools (`get_definition`, `analyze_impact`)
+  are functional. `true` once the LSP `initialize` handshake completes with
+  `definitionProvider: true`. Independent of indexing status.
+- `indexing_status`: `"complete"`, `"in_progress"`, or absent. Background
+  indexing signal — an LSP can be `"ready"` for navigation while still indexing.
 - Uptime: How long the LSP process has been running
 - Diagnostics strategy: `pull`, `push`, or none
 - Capabilities: call hierarchy, diagnostics, definition, formatting
 - Degraded tools: Which tools lose LSP support
 - Validation latency: Estimated time for validation (push: ~10s, pull: ~2s)
+- `probe_verified`: Whether status was confirmed by a live probe (vs capability detection)
 - Install hint: How to install the LSP when unavailable
 
-**Probe-based readiness:**
+**Confidence gradient for agents:**
+
+Agents should use BOTH `navigation_ready` and `indexing_status` to decide
+how much to trust LSP results:
+
+| navigation_ready | indexing_status | Meaning | Agent strategy |
+|---|---|---|---|
+| true | complete | Full confidence | Use LSP results for refactoring |
+| true | in_progress | Navigation works, indexing ongoing | Use for exploration; verify before destructive edits |
+| true | absent | No progress notifications emitted | Trust navigation; indexing status unknown |
+| false | in_progress | LSP running but capabilities unclear | Wait or use probe fallback |
+| None | absent | Process not started or lazy start | Wait for start |
+
+**Status determination (two-phase model):**
+
+```
+navigation_ready == Some(true)  -> status = "ready"
+navigation_ready == Some(false) OR indexing_complete == Some(false)
+                                -> status = "warming_up"
+uptime_seconds.is_some()       -> status = "starting"
+otherwise                       -> status = "unavailable"
+```
+
+The old model gated `"ready"` entirely on `indexing_complete == Some(true)`,
+which required `$/progress` notifications with `WorkDoneProgressEnd`. Non-Rust
+LSPs (gopls, tsserver, pyright) often don't emit these, causing permanent
+`"warming_up"` status even though navigation tools worked correctly.
+
+**Probe-based readiness fallback:**
 - Languages running over 10s but still "warming_up" get a live probe
 - Probe sends `goto_definition` to a workspace file to verify LSP responsiveness
-- Successful probe upgrades status to "ready"
+- Successful probe upgrades status to "ready" and caches the result indefinitely
+- Failed probe caches the negative result with a 60s TTL — prevents hammering
+  a still-starting LSP while allowing re-probe after it finishes initializing
+- Probe file discovery: hardcoded candidates first, then depth-4 recursive scan
+  (skips `.git`, `node_modules`, `target`, `__pycache__`, etc.)
+
+**Indexing timeout fallback:**
+- After 30 seconds, if no `WorkDoneProgressEnd` was received, `indexing_complete`
+  is set to `true` automatically
+- Prevents eternal `"in_progress"` for LSPs that don't emit `$/progress`
+- The 30s constant (`INDEXING_FALLBACK_TIMEOUT_SECS`) is hardcoded in
+  `crates/pathfinder-lsp/src/client/mod.rs` and can be adjusted if needed
+  for very large workspaces
 
 ### Missing Language Detection
 
@@ -234,6 +282,24 @@ When marker files exist but no LSP binary is found on PATH:
 - Language appears in `lsp_health` as "unavailable"
 - Install hint provides actionable commands
 - All tools listed as degraded
+
+### Cache Isolation (Concurrent LSP Protection)
+
+When Pathfinder detects concurrent LSP instances (e.g., IDE + Pathfinder both
+running gopls), it isolates build artifacts to avoid cache lock contention:
+
+| Language | Isolated Env Vars | Isolation Directory |
+|---|---|---|
+| Rust | `CARGO_TARGET_DIR` | `target/pathfinder-lsp/` |
+| Go | `GOCACHE`, `GOMODCACHE` | `.pathfinder/gopls-cache/{build,mod}/` |
+| TypeScript | `TMPDIR` | `.pathfinder/tsserver-tmp/` |
+| Python | `PYTHONPYCACHEPREFIX` | `.pathfinder/python-cache/pyc/` |
+
+Detection uses `/proc` scanning on Linux (`detect_concurrent_lsp()`).
+The warning message accurately describes what isolation is applied per language.
+
+> **Note:** The `.pathfinder/` directory is automatically added to your project's
+> `.gitignore` when cache isolation is activated. No manual setup required.
 
 ---
 
@@ -278,6 +344,27 @@ explanation. Silent skipping hides real problems.
 6. **Diagnostics strategy is detected, not configured**. The strategy (pull vs
 push) comes from the LSP's `initialize` response capabilities. Never hardcode
 it per language.
+
+7. **Navigation readiness is separate from indexing completion**.
+`navigation_ready` gates the "ready" status; `indexing_complete` is an
+additional signal. Never regress to gating "ready" on `indexing_complete`
+alone — non-Rust LSPs may never emit `WorkDoneProgressEnd`.
+
+8. **Cache isolation for concurrent LSP instances**. When concurrent LSP
+processes are detected, ALL languages must have appropriate cache isolation
+(not just Rust). Each new language integration MUST add isolation env vars
+in `spawn_lsp_child()` and update the warning message in
+`detect_concurrent_lsp()`.
+
+9. **Probe results must be cached with TTL**. The probe sends real LSP requests
+(`goto_definition`) which are expensive. Never re-probe on every
+`lsp_health` call — cache successful results indefinitely and negative
+results with a 60s TTL to allow the LSP to finish starting.
+
+10. **`navigation_ready` flows from `supports_definition`**. The
+`validation_status_from_parts()` function sets `navigation_ready =
+Some(supports_definition)` for running processes. This is the authoritative
+source — never override it per-language in tool handlers.
 
 ---
 
@@ -395,10 +482,12 @@ tree-sitter, health probes, and tests.
 | 2 | `crates/pathfinder-lsp/src/client/detect.rs` tests | Detection, fallback, missing tests |
 | 3 | `crates/pathfinder-treesitter/src/symbols.rs` | Tree-sitter grammar + name_column |
 | 4 | `crates/pathfinder-treesitter/src/language.rs` | `SupportedLanguage` enum variant |
-| 5 | `crates/pathfinder/src/server/tools/navigation.rs` | Probe file candidates |
+| 5 | `crates/pathfinder/src/server/tools/navigation.rs` | Probe file candidates + extensions |
 | 6 | `crates/pathfinder-lsp/tests/lsp_client_integration.rs` | Full pipeline integration test |
+| 7 | `crates/pathfinder-lsp/src/client/process.rs` | Cache isolation env vars |
+| 8 | `crates/pathfinder-lsp/src/client/mod.rs` | Concurrent LSP warning message |
 
-No changes needed: `lawyer.rs`, `validation.rs`, `capabilities.rs`, `process.rs`,
+No changes needed: `lawyer.rs`, `validation.rs`, `capabilities.rs`,
 `mock.rs`, `no_op.rs`, `protocol.rs`, tool handler files.
 
 **Step 1: Register the file extension**
@@ -509,9 +598,14 @@ fn test_java_name_column_points_to_method_name() {
 
 File: `crates/pathfinder/src/server/tools/navigation.rs`
 
-In `find_probe_file()`, add candidate files for the new language:
+In `find_probe_file()`, add candidate files and extensions for the new language:
 
 ```rust
+// In the extensions match:
+"java" => &["java"],
+"ruby" => &["rb"],
+
+// In the candidates match:
 "java" => vec!["src/main/java/Main.java", "src/Main.java"],
 "ruby" => vec!["lib/main.rb", "main.rb"],
 ```
@@ -519,11 +613,18 @@ In `find_probe_file()`, add candidate files for the new language:
 These are used by the probe-based readiness check. When an LSP has been running
 for 10+ seconds but still shows "warming_up" (because it doesn't emit `$/progress`
 notifications), Pathfinder sends a lightweight `goto_definition` probe to one of
-these files. If the probe succeeds, status is upgraded to "ready".
+these files. If the probe succeeds, status is upgraded to "ready" and the result
+is cached for subsequent `lsp_health` calls.
+
+**Recursive scan fallback:** If no hardcoded candidate is found, `find_probe_file`
+automatically falls back to a depth-4 recursive scan of the workspace, looking for
+any file with a matching extension. It skips common directories (`.git`,
+`node_modules`, `target`, `__pycache__`, `build`, `dist`, `vendor`). This handles
+monorepo layouts where source files are at non-standard paths.
 
 Pick files that are very likely to exist in a typical project. Don't pick obscure
-files. The probe is best-effort; if no candidate file exists, the probe is skipped
-and the language stays "warming_up" until it naturally reports ready.
+files. The probe is best-effort; if no candidate file exists, the recursive scan
+may still find one.
 
 **Step 5: Add install hint**
 
@@ -584,6 +685,40 @@ Tests to write:
 - `test_<lang>_not_detected_without_binary`
 - `test_prefers_<primary_lsp>_over_<secondary>`
 
+**Step 8: Add cache isolation**
+
+File: `crates/pathfinder-lsp/src/client/process.rs`
+
+In `spawn_lsp_child()`, add cache isolation for the new language inside the
+`if isolate_target_dir` block. Follow the existing pattern:
+
+```rust
+if isolate_target_dir && language_id == "java" {
+    let isolated_cache = project_root.join(".pathfinder").join("java-cache");
+    cmd.env("JDTLS_WORKSPACE", isolated_cache.join("workspace"));
+    tracing::info!(
+        language = language_id,
+        "LSP: set isolated workspace for jdtls to avoid cache contention"
+    );
+}
+```
+
+Also update the warning message in `detect_concurrent_lsp()` (`mod.rs`) to
+include the new language in the `isolation_desc` match arm.
+
+**Step 9: Verify readiness model**
+
+No code changes needed — the two-phase readiness model is automatic. But verify:
+1. Start Pathfinder with the new language's workspace
+2. Call `lsp_health` immediately after start
+3. Check that `navigation_ready` becomes `true` after `initialize` completes
+4. Check that `indexing_status` eventually reaches `"complete"` (either via
+   `WorkDoneProgressEnd` or the 30-second timeout fallback)
+
+The `navigation_ready` field is set by `validation_status_from_parts()` which
+is language-agnostic. It flows from `supports_definition` in the LSP's
+`initialize` response capabilities. No per-language code needed.
+
 ---
 
 ### Diagnostics Strategy for New Languages
@@ -638,8 +773,10 @@ These are bugs that have actually occurred. Do not reintroduce them.
    When displaying to users, add +1.
 
 3. **Assuming all LSPs emit `$/progress` notifications**.
-   Many don't (gopls, tsserver). The probe-based readiness check in `lsp_health`
-   handles this by sending a `goto_definition` probe after 10 seconds of "warming_up".
+   Many don't (gopls, tsserver). The two-phase readiness model handles this:
+   `navigation_ready` gates "ready" status from the `initialize` handshake,
+   and the 30-second timeout fallback eventually sets `indexing_complete`.
+   Never regress to gating "ready" on `indexing_complete` alone.
 
 4. **Push diagnostics timeout too short**.
    The push collection window is 5 seconds per snapshot (10s total for validation).
@@ -659,6 +796,25 @@ These are bugs that have actually occurred. Do not reintroduce them.
 7. **Forgetting `auto_plugins: vec![]`** when constructing `LanguageLsp`.
    Every detection block must include this field. The TypeScript block is the
    only one that populates it.
+
+8. **Gating status on `indexing_complete` instead of `navigation_ready`**.
+   The old model used `indexing_complete == Some(true)` as the sole gate for
+   "ready". Non-Rust LSPs may never emit `WorkDoneProgressEnd`, causing
+   permanent "warming_up". The two-phase model uses `navigation_ready` as the
+   primary gate; `indexing_complete` is an additional signal.
+
+9. **Not adding cache isolation for new languages**.
+   When adding a new language, you MUST add cache isolation env vars in
+   `spawn_lsp_child()` and update the warning in `detect_concurrent_lsp()`.
+   Without isolation, concurrent LSP instances share build caches and fight
+   over locks, causing both to stall.
+
+10. **Re-probing on every `lsp_health` call**.
+    The probe sends real LSP requests which are expensive. Always cache
+    probe results. Positive results are cached indefinitely; negative results
+    are cached with a 60s TTL to allow the LSP to finish starting and be
+    re-probed later. Never cache negative results indefinitely — the LSP
+    might be ready on the next check.
 
 ---
 
@@ -690,12 +846,20 @@ For each new language or plugin, verify ALL of these:
 
 **Health and Observability:**
 - [ ] `lsp_health` shows correct `status` (ready/warming_up/unavailable)
+- [ ] `lsp_health` shows correct `navigation_ready` (true after initialize)
+- [ ] `lsp_health` shows correct `indexing_status` (eventually reaches "complete")
 - [ ] `lsp_health` shows correct `diagnostics_strategy`
 - [ ] `lsp_health` shows correct `supports_*` capabilities
 - [ ] `lsp_health` shows correct `degraded_tools`
 - [ ] `lsp_health` shows correct `install_hint` when binary missing
 - [ ] Probe upgrades "warming_up" to "ready" after 10s (if LSP doesn't emit progress)
 - [ ] `probe_verified` field is `true` only after a successful probe
+- [ ] Probe results cached with TTL (positive indefinitely, negative 60s)
+- [ ] Negative cache allows re-probe after expiry (LSP recovery)
+- [ ] Cache isolation env vars set when concurrent LSP detected
+- [ ] `.pathfinder/` automatically added to `.gitignore` when isolation activates
+- [ ] 30-second timeout fallback flips `indexing_complete` if no progress notifications
+- [ ] Confidence gradient: `navigation_ready=true` + `indexing_status="in_progress"` visible during warmup
 
 **Edge Cases:**
 - [ ] Empty workspace (no files) -> no languages detected, no crashes
@@ -715,8 +879,8 @@ For each new language or plugin, verify ALL of these:
 | `MissingLanguage` | `detect.rs` | Language with marker but no binary: tried_binaries, install_hint |
 | `DiagnosticsStrategy` | `capabilities.rs` | Pull, Push, or None — auto-detected from LSP capabilities |
 | `DetectedCapabilities` | `capabilities.rs` | LSP capabilities from `initialize` response |
-| `LspLanguageStatus` | `types.rs` (pathfinder-lsp) | Capability status per language (validation, strategy, supports_*) |
-| `LspLanguageHealth` | `types.rs` (pathfinder) | Health response per language (all fields, serialized to JSON) |
+| `LspLanguageStatus` | `types.rs` (pathfinder-lsp) | Capability status per language (validation, navigation_ready, strategy, supports_*) |
+| `LspLanguageHealth` | `types.rs` (pathfinder) | Health response per language (status, navigation_ready, indexing_status, all fields) |
 | `Lawyer` trait | `lawyer.rs` | Integration boundary between tools and LSP |
 | `LspClient` | `mod.rs` | Production Lawyer impl: spawn, lifecycle, routing |
 | `MockLawyer` | `mock.rs` | Test Lawyer impl with configurable responses |
@@ -726,6 +890,8 @@ For each new language or plugin, verify ALL of these:
 | `detect_typescript_plugins()` | `detect.rs` | Auto-detect TS plugins (Vue, future Svelte) |
 | `find_probe_file()` | `navigation.rs` | Well-known files for probe-based readiness |
 | `compute_degraded_tools()` | `navigation.rs` | Compute which tools are degraded from capabilities |
-| `validation_status_from_parts()` | `mod.rs` | Map process state to `LspLanguageStatus` |
+| `validation_status_from_parts()` | `mod.rs` | Map process state to `LspLanguageStatus` (sets `navigation_ready`) |
+| `detect_concurrent_lsp()` | `mod.rs` | Detect concurrent LSP instances via `/proc` scan |
+| `spawn_lsp_child()` | `process.rs` | Spawn LSP process with cache isolation per language |
 | `collect_push_diagnostics()` | `protocol.rs` | Subscribe and collect push diagnostics with timeout |
 | `build_initialize_request()` | `process.rs` | LSP initialize request with plugins and capabilities |

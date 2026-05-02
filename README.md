@@ -361,6 +361,8 @@ To maximise validation coverage, install the language server(s) for your project
 
 > **LSP validation status:** Every edit response includes a `validation` field. If `validation_skipped: true`, inspect `validation_skipped_reason` — possible values are `no_lsp` (no server detected), `lsp_not_on_path` (binary missing), `lsp_start_failed`, `lsp_crash`, `lsp_timeout`, and `pull_diagnostics_unsupported`. Call `get_repo_map` upfront to see which languages have active LSP validation via `capabilities.lsp.per_language`.
 
+> **Concurrent LSP handling:** When Pathfinder detects a concurrent LSP instance (e.g., your IDE is already running `gopls`), it automatically isolates build caches to avoid lock contention. Isolated caches are stored under `.pathfinder/` in your project root, which is automatically added to `.gitignore`. Use the `lsp_health` tool to check per-language readiness, including `navigation_ready` (LSP navigation works), `indexing_status` (background indexing state), and `degraded_tools` (which tools lose LSP support).
+
 <!-- OBSERVABILITY -->
 ## Observability
 
@@ -411,6 +413,9 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] LSP lifecycle management (auto-start, crash recovery, idle termination)
 - [x] Granular LSP skip reasons for actionable agent recovery (v5.1)
 - [x] Proactive capability reporting via `get_repo_map` (`capabilities.lsp.per_language`)
+- [x] Two-phase LSP readiness model (navigation vs indexing) with `lsp_health` tool
+- [x] Concurrent LSP cache isolation (Go, TypeScript, Python, Rust)
+- [x] Probe-based readiness fallback with TTL-cached results
 - [x] 3-tier sandbox security model
 - [x] Per-engine observability and telemetry
 - [x] `get_repo_map` temporal filtering (`changed_since`) and extension filters (E6)

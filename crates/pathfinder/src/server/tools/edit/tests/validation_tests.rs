@@ -545,6 +545,7 @@ async fn test_push_validation_no_errors() {
         pathfinder_lsp::types::LspLanguageStatus {
             validation: true,
             reason: "gopls connected (push diagnostics)".to_string(),
+            navigation_ready: Some(true),
             indexing_complete: Some(true),
             uptime_seconds: Some(30),
             diagnostics_strategy: Some("push".to_string()),
@@ -611,6 +612,7 @@ async fn test_push_validation_clean_pass() {
         pathfinder_lsp::types::LspLanguageStatus {
             validation: true,
             reason: "gopls connected (push diagnostics)".to_string(),
+            navigation_ready: Some(true),
             indexing_complete: Some(true),
             uptime_seconds: Some(30),
             diagnostics_strategy: Some("push".to_string()),
@@ -672,6 +674,7 @@ async fn test_push_validation_introduced_error() {
         pathfinder_lsp::types::LspLanguageStatus {
             validation: true,
             reason: "gopls connected (push diagnostics)".to_string(),
+            navigation_ready: Some(true),
             indexing_complete: Some(true),
             uptime_seconds: Some(30),
             diagnostics_strategy: Some("push".to_string()),
@@ -744,6 +747,7 @@ async fn test_push_validation_pre_fails() {
         pathfinder_lsp::types::LspLanguageStatus {
             validation: true,
             reason: "gopls connected (push diagnostics)".to_string(),
+            navigation_ready: Some(true),
             indexing_complete: Some(true),
             uptime_seconds: Some(30),
             diagnostics_strategy: Some("push".to_string()),
@@ -797,6 +801,7 @@ async fn test_push_validation_post_fails() {
         pathfinder_lsp::types::LspLanguageStatus {
             validation: true,
             reason: "gopls connected (push diagnostics)".to_string(),
+            navigation_ready: Some(true),
             indexing_complete: Some(true),
             uptime_seconds: Some(30),
             diagnostics_strategy: Some("push".to_string()),

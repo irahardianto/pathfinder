@@ -846,6 +846,24 @@ pub struct LspLanguageHealth {
     /// Whether formatting is supported (affects edit tools).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_formatting: Option<bool>,
+    /// Background indexing status: "complete", "in_progress", or None.
+    ///
+    /// Independent of overall status — an LSP can be "ready" for navigation
+    /// while still indexing in the background.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_status: Option<String>,
+    /// Whether navigation (get_definition, analyze_impact) is functional.
+    ///
+    /// `true` once the LSP initialize handshake completes with `definitionProvider: true`.
+    /// Independent of `indexing_status` — navigation works during indexing but
+    /// results may be partial until indexing completes.
+    ///
+    /// Agents should use this signal to decide:
+    /// - `navigation_ready = true` + `indexing_status = "complete"` → full confidence
+    /// - `navigation_ready = true` + `indexing_status = "in_progress"` → results may be partial
+    /// - `navigation_ready = false` or `None` → fall back to Tree-sitter
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub navigation_ready: Option<bool>,
     /// Whether the status was verified by a live probe (rather than just progress notifications).
     /// When true, the agent can trust the status.
     #[serde(skip_serializing_if = "crate::server::types::is_false")]

@@ -13,6 +13,16 @@ pub struct LspLanguageStatus {
     pub validation: bool,
     /// Reason explaining the validation status.
     pub reason: String,
+    /// Whether the LSP is ready for navigation operations (get_definition, analyze_impact).
+    ///
+    /// `Some(true)` — initialize handshake completed with `definitionProvider: true`.
+    /// Navigation tools are functional regardless of `indexing_complete` status.
+    ///
+    /// `Some(false)` — process running but navigation not yet available.
+    ///
+    /// `None` — process not started or unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub navigation_ready: Option<bool>,
     /// Whether the LSP has completed initial workspace indexing.
     ///
     /// `Some(true)` — the LSP emitted a `WorkDoneProgressEnd` for its initial

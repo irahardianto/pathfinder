@@ -12,6 +12,41 @@
 //!   - [`tools::navigation`] — `get_definition`, `analyze_impact`
 //!   - [`tools::file_ops`] — `create_file`, `delete_file`, `read_file`, `write_file`
 
+/// Duration after which a negative probe cache entry expires.
+/// Allows re-probing an LSP that was still starting when first checked.
+const PROBE_NEGATIVE_TTL_SECS: u64 = 60;
+
+/// A cached probe result with optional expiry for negative entries.
+///
+/// Positive entries (success) are cached indefinitely.
+/// Negative entries (failure) expire after `PROBE_NEGATIVE_TTL_SECS` to allow
+/// an LSP that was still starting to be re-probed later.
+#[derive(Clone)]
+pub(crate) struct ProbeCacheEntry {
+    /// Whether the probe succeeded.
+    pub(crate) success: bool,
+    /// When this entry was created. Used to check TTL for negative entries.
+    pub(crate) cached_at: std::time::Instant,
+}
+
+impl ProbeCacheEntry {
+    pub(crate) fn new(success: bool) -> Self {
+        Self {
+            success,
+            cached_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Returns true if this entry is still valid.
+    /// Positive entries never expire. Negative entries expire after `PROBE_NEGATIVE_TTL_SECS`.
+    pub(crate) fn is_valid(&self) -> bool {
+        if self.success {
+            return true;
+        }
+        self.cached_at.elapsed().as_secs() < PROBE_NEGATIVE_TTL_SECS
+    }
+}
+
 mod helpers;
 mod tools;
 /// Module containing type definitions.
@@ -51,6 +86,15 @@ pub struct PathfinderServer {
     surgeon: Arc<dyn Surgeon>,
     lawyer: Arc<dyn Lawyer>,
     tool_router: ToolRouter<Self>,
+    /// Cache of probe results per language to avoid redundant LSP calls.
+    ///
+    /// Positive results (true) are cached indefinitely — once a language's LSP
+    /// responds to a probe, it stays "ready" for the session.
+    ///
+    /// Negative results (false) are cached with a TTL of 60s. This prevents
+    /// hammering a still-starting LSP with probes on every `lsp_health` call,
+    /// while allowing recovery once the LSP finishes initializing.
+    probe_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, ProbeCacheEntry>>>,
 }
 
 impl PathfinderServer {
@@ -140,6 +184,7 @@ impl PathfinderServer {
             surgeon,
             lawyer,
             tool_router: Self::tool_router(),
+            probe_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
