@@ -1204,6 +1204,7 @@ impl PathfinderServer {
     /// Tests whether LSP navigation tools (`get_definition`, `analyze_impact`,
     /// `read_with_deep_context`) will return real data or degraded results.
     /// Agents should call this once at session start to choose their strategy.
+    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip(self, params), fields(language = ?params.language))]
     pub(crate) async fn lsp_health_impl(
         &self,
@@ -1299,7 +1300,7 @@ impl PathfinderServer {
                 // expire after PROBE_NEGATIVE_TTL_SECS (60s) to allow the LSP
                 // to finish starting and be re-probed later.
                 let cache_action = {
-                    let cache = self.probe_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    let cache = self.probe_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     match cache.get(&lang_health.language) {
                         Some(entry) if entry.is_valid() && entry.success => {
                             // Valid positive entry — reuse cached result
@@ -1346,7 +1347,7 @@ impl PathfinderServer {
                             // Cache the successful probe result (indefinite TTL)
                             self.probe_cache
                                 .lock()
-                                .unwrap_or_else(|e| e.into_inner())
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .insert(
                                     lang_health.language.clone(),
                                     crate::server::ProbeCacheEntry::new(true),
@@ -1360,7 +1361,7 @@ impl PathfinderServer {
                             // the LSP finishes starting
                             self.probe_cache
                                 .lock()
-                                .unwrap_or_else(|e| e.into_inner())
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .insert(
                                     lang_health.language.clone(),
                                     crate::server::ProbeCacheEntry::new(false),
@@ -1501,7 +1502,7 @@ impl PathfinderServer {
         self.find_file_by_extension_recursive(self.workspace_root.path(), extensions, 0, 4)
     }
 
-    /// Recursive helper for find_probe_file: depth-limited scan for any file
+    /// Recursive helper for `find_probe_file`: depth-limited scan for any file
     /// with matching extension. Returns relative path from workspace root.
     fn find_file_by_extension_recursive(
         &self,
@@ -1514,16 +1515,14 @@ impl PathfinderServer {
             return None;
         }
 
-        let entries = match std::fs::read_dir(current_dir) {
-            Ok(e) => e,
-            Err(_) => return None,
+        let Ok(entries) = std::fs::read_dir(current_dir) else {
+            return None;
         };
 
         for entry in entries.flatten() {
             let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
+            let Ok(metadata) = entry.metadata() else {
+                continue;
             };
 
             if metadata.is_dir() {
@@ -3142,8 +3141,7 @@ mod tests {
         let probe_path = probe.unwrap();
         assert!(
             probe_path.to_str().unwrap().contains("main.go"),
-            "Should find a main.go file, got: {:?}",
-            probe_path
+            "Should find a main.go file, got: {probe_path:?}"
         );
 
         // Test that node_modules is skipped (should NOT find the TS file there)
@@ -3584,7 +3582,7 @@ mod tests {
         server
             .probe_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 "rust".to_string(),
                 crate::server::ProbeCacheEntry::new(false),
@@ -3634,7 +3632,7 @@ mod tests {
         server
             .probe_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 "rust".to_string(),
                 crate::server::ProbeCacheEntry::new(true),

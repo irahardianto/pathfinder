@@ -846,13 +846,13 @@ pub struct LspLanguageHealth {
     /// Whether formatting is supported (affects edit tools).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_formatting: Option<bool>,
-    /// Background indexing status: "complete", "in_progress", or None.
+    /// Background indexing status: `"complete"`, `"in_progress"`, or None.
     ///
     /// Independent of overall status — an LSP can be "ready" for navigation
     /// while still indexing in the background.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_status: Option<String>,
-    /// Whether navigation (get_definition, analyze_impact) is functional.
+    /// Whether navigation (`get_definition`, `analyze_impact`) is functional.
     ///
     /// `true` once the LSP initialize handshake completes with `definitionProvider: true`.
     /// Independent of `indexing_status` — navigation works during indexing but

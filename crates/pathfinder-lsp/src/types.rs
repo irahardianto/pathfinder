@@ -13,7 +13,7 @@ pub struct LspLanguageStatus {
     pub validation: bool,
     /// Reason explaining the validation status.
     pub reason: String,
-    /// Whether the LSP is ready for navigation operations (get_definition, analyze_impact).
+    /// Whether the LSP is ready for navigation operations (`get_definition`, `analyze_impact`).
     ///
     /// `Some(true)` — initialize handshake completed with `definitionProvider: true`.
     /// Navigation tools are functional regardless of `indexing_complete` status.

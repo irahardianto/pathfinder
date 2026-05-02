@@ -32,6 +32,11 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+/// LSP-HEALTH-001 Task 6.1: Fallback timeout for indexing completion.
+/// Non-Rust LSPs (gopls, tsserver, pyright) may not emit `WorkDoneProgressEnd`
+/// notifications. After this many seconds, assume indexing is complete.
+const INDEXING_FALLBACK_TIMEOUT_SECS: u64 = 30;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -401,6 +406,36 @@ impl LspClient {
         self.start_process(descriptor, 0).await
     }
 
+    /// Spawn a timeout task that sets `indexing_complete` if no `WorkDoneProgressEnd`
+    /// is received within `INDEXING_FALLBACK_TIMEOUT_SECS`.
+    ///
+    /// This is a fallback for LSPs (gopls, tsserver, pyright) that don't emit
+    /// `WorkDoneProgressEnd` notifications. After 30 seconds, assume indexing is
+    /// complete to prevent eternal "`in_progress`" status.
+    fn spawn_indexing_timeout_fallback(
+        language_id: String,
+        indexing_complete: &Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let timeout_flag = Arc::clone(indexing_complete);
+        let timeout_lang = language_id;
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                INDEXING_FALLBACK_TIMEOUT_SECS,
+            ))
+            .await;
+            if !timeout_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                timeout_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    language = %timeout_lang,
+                    timeout_sec = INDEXING_FALLBACK_TIMEOUT_SECS,
+                    "LSP: no WorkDoneProgressEnd received after {INDEXING_FALLBACK_TIMEOUT_SECS}s — \
+                     assuming indexing complete (timeout fallback for gopls/tsserver/pyright)"
+                );
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_lines)]
     /// Spawn a new LSP process, retrying on failure with exponential backoff.
     async fn start_process(&self, descriptor: LspDescriptor, attempt: u32) -> Result<(), LspError> {
         let language_id = descriptor.language_id.clone();
@@ -517,24 +552,7 @@ impl LspClient {
         // notifications. After 30 seconds, assume indexing is complete if we haven't
         // heard otherwise. This ensures indexing_status eventually reaches "complete"
         // and prevents eternal "in_progress" status.
-        const INDEXING_FALLBACK_TIMEOUT_SECS: u64 = 30;
-        let timeout_flag = Arc::clone(&indexing_complete);
-        let timeout_lang = language_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(
-                INDEXING_FALLBACK_TIMEOUT_SECS,
-            ))
-            .await;
-            if !timeout_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                timeout_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                tracing::info!(
-                    language = %timeout_lang,
-                    timeout_sec = INDEXING_FALLBACK_TIMEOUT_SECS,
-                    "LSP: no WorkDoneProgressEnd received after {INDEXING_FALLBACK_TIMEOUT_SECS}s — \
-                     assuming indexing complete (timeout fallback for gopls/tsserver/pyright)"
-                );
-            }
-        });
+        Self::spawn_indexing_timeout_fallback(language_id.clone(), &indexing_complete);
 
         self.processes.insert(
             language_id,
