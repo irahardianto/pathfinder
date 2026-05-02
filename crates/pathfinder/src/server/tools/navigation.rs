@@ -1232,7 +1232,9 @@ impl PathfinderServer {
                 // This makes get_definition, analyze_impact available immediately after
                 // initialize completes, without waiting for WorkDoneProgressEnd.
                 ("ready", status.uptime_seconds.map(format_uptime))
-            } else if status.navigation_ready == Some(false) || status.indexing_complete == Some(false) {
+            } else if status.navigation_ready == Some(false)
+                || status.indexing_complete == Some(false)
+            {
                 // Process is running but navigation is not yet functional (e.g.,
                 // supports_definition=false) OR indexing still in progress but
                 // navigation_ready is not confirmed. Still warming up.
@@ -1297,10 +1299,7 @@ impl PathfinderServer {
                 // expire after PROBE_NEGATIVE_TTL_SECS (60s) to allow the LSP
                 // to finish starting and be re-probed later.
                 let cache_action = {
-                    let cache = self
-                        .probe_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let cache = self.probe_cache.lock().unwrap_or_else(|e| e.into_inner());
                     match cache.get(&lang_health.language) {
                         Some(entry) if entry.is_valid() && entry.success => {
                             // Valid positive entry — reuse cached result
@@ -1499,12 +1498,7 @@ impl PathfinderServer {
         // LSP-HEALTH-001 Task 3.1: Fallback to depth-limited recursive scan for monorepos
         // Scans up to depth 4 looking for any file with matching extension.
         // Returns relative path to first match.
-        self.find_file_by_extension_recursive(
-            self.workspace_root.path(),
-            extensions,
-            0,
-            4,
-        )
+        self.find_file_by_extension_recursive(self.workspace_root.path(), extensions, 0, 4)
     }
 
     /// Recursive helper for find_probe_file: depth-limited scan for any file
@@ -3106,28 +3100,45 @@ mod tests {
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
 
         let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
-        
+
         // Create a monorepo structure: Go file at apps/backend/cmd/server/main.go
         // (not at the standard main.go or cmd/main.go)
-        std::fs::create_dir_all(ws_dir.path().join("apps").join("backend").join("cmd").join("server")).unwrap();
+        std::fs::create_dir_all(
+            ws_dir
+                .path()
+                .join("apps")
+                .join("backend")
+                .join("cmd")
+                .join("server"),
+        )
+        .unwrap();
         std::fs::write(
-            ws_dir.path().join("apps").join("backend").join("cmd").join("server").join("main.go"),
-            "package main\nfunc main() {}"
-        ).unwrap();
+            ws_dir
+                .path()
+                .join("apps")
+                .join("backend")
+                .join("cmd")
+                .join("server")
+                .join("main.go"),
+            "package main\nfunc main() {}",
+        )
+        .unwrap();
 
         // Create a node_modules directory to test that it's skipped
         std::fs::create_dir_all(ws_dir.path().join("node_modules").join("react")).unwrap();
         std::fs::write(
-            ws_dir.path().join("node_modules").join("react").join("index.ts"),
-            "export const React = {};"
-        ).unwrap();
+            ws_dir
+                .path()
+                .join("node_modules")
+                .join("react")
+                .join("index.ts"),
+            "export const React = {};",
+        )
+        .unwrap();
 
         // Test that recursive scan finds the Go file at non-standard path
         let probe = server.find_probe_file("go");
-        assert!(
-            probe.is_some(),
-            "Should find Go file in monorepo structure"
-        );
+        assert!(probe.is_some(), "Should find Go file in monorepo structure");
         let probe_path = probe.unwrap();
         assert!(
             probe_path.to_str().unwrap().contains("main.go"),
@@ -3138,11 +3149,18 @@ mod tests {
         // Test that node_modules is skipped (should NOT find the TS file there)
         // This is a bit tricky to test without other TS files - let's just verify
         // the probe works for a standard pattern too by adding a deeper Python file
-        std::fs::create_dir_all(ws_dir.path().join("tools").join("fath-factory").join("src")).unwrap();
+        std::fs::create_dir_all(ws_dir.path().join("tools").join("fath-factory").join("src"))
+            .unwrap();
         std::fs::write(
-            ws_dir.path().join("tools").join("fath-factory").join("src").join("__init__.py"),
-            ""
-        ).unwrap();
+            ws_dir
+                .path()
+                .join("tools")
+                .join("fath-factory")
+                .join("src")
+                .join("__init__.py"),
+            "",
+        )
+        .unwrap();
 
         let py_probe = server.find_probe_file("python");
         assert!(
@@ -3466,7 +3484,7 @@ mod tests {
             pathfinder_lsp::types::LspLanguageStatus {
                 validation: false, // No diagnostics support
                 reason: "LSP connected but does not support diagnostics".to_string(),
-                navigation_ready: Some(true),  // definitionProvider confirmed
+                navigation_ready: Some(true), // definitionProvider confirmed
                 indexing_complete: Some(false), // Still indexing
                 uptime_seconds: Some(5),
                 diagnostics_strategy: Some("none".to_string()),
@@ -3493,7 +3511,9 @@ mod tests {
         // Diagnostics not available
         assert_eq!(py_health.diagnostics_strategy, Some("none".to_string()));
         // validate_only is degraded because no diagnostics
-        assert!(py_health.degraded_tools.contains(&"validate_only".to_string()));
+        assert!(py_health
+            .degraded_tools
+            .contains(&"validate_only".to_string()));
     }
 
     #[tokio::test]
@@ -3509,8 +3529,8 @@ mod tests {
             pathfinder_lsp::types::LspLanguageStatus {
                 validation: true,
                 reason: "LSP connected".to_string(),
-                navigation_ready: Some(true),   // Navigation ready
-                indexing_complete: Some(true),   // Indexing complete
+                navigation_ready: Some(true),  // Navigation ready
+                indexing_complete: Some(true), // Indexing complete
                 uptime_seconds: Some(120),
                 diagnostics_strategy: Some("pull".to_string()),
                 supports_definition: Some(true),
@@ -3596,7 +3616,10 @@ mod tests {
         let rust_health = &val.languages[0];
         // Status should stay "warming_up" because cached negative result skipped the probe
         assert_eq!(rust_health.status, "warming_up");
-        assert!(!rust_health.probe_verified, "should not be probe-verified when using negative cache");
+        assert!(
+            !rust_health.probe_verified,
+            "should not be probe-verified when using negative cache"
+        );
     }
 
     #[tokio::test]
@@ -3642,6 +3665,9 @@ mod tests {
 
         let rust_health = &val.languages[0];
         assert_eq!(rust_health.status, "ready");
-        assert!(rust_health.probe_verified, "should be probe-verified from cache");
+        assert!(
+            rust_health.probe_verified,
+            "should be probe-verified from cache"
+        );
     }
 }

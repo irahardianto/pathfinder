@@ -128,58 +128,58 @@ fn validation_status_from_parts(
     uptime_seconds: u64,
 ) -> crate::types::LspLanguageStatus {
     if !running {
-            return crate::types::LspLanguageStatus {
-                validation: false,
-                reason: format!("{command} failed to start or crashed repeatedly"),
-                navigation_ready: None,
-                indexing_complete: None,
-                uptime_seconds: None,
-                diagnostics_strategy: None,
-                supports_definition: None,
-                supports_call_hierarchy: None,
-                supports_diagnostics: None,
-                supports_formatting: None,
-            };
-        }
-        // Navigation is ready if supports_definition is true and LSP is running.
-        // This gates on the initialize handshake completing with definitionProvider
-        // capability, NOT on indexing_complete. Navigation tools may return partial
-        // results during indexing but are still functional.
-        let navigation_ready = Some(supports_definition);
+        return crate::types::LspLanguageStatus {
+            validation: false,
+            reason: format!("{command} failed to start or crashed repeatedly"),
+            navigation_ready: None,
+            indexing_complete: None,
+            uptime_seconds: None,
+            diagnostics_strategy: None,
+            supports_definition: None,
+            supports_call_hierarchy: None,
+            supports_diagnostics: None,
+            supports_formatting: None,
+        };
+    }
+    // Navigation is ready if supports_definition is true and LSP is running.
+    // This gates on the initialize handshake completing with definitionProvider
+    // capability, NOT on indexing_complete. Navigation tools may return partial
+    // results during indexing but are still functional.
+    let navigation_ready = Some(supports_definition);
 
-        match diagnostics_strategy {
-            DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
-                validation: true,
-                reason: format!(
-                    "LSP connected and supports validation ({})",
-                    match diagnostics_strategy {
-                        DiagnosticsStrategy::Pull => "pull diagnostics",
-                        DiagnosticsStrategy::Push => "push diagnostics",
-                        DiagnosticsStrategy::None => unreachable!(),
-                    }
-                ),
-                navigation_ready,
-                indexing_complete: Some(indexing_complete),
-                uptime_seconds: Some(uptime_seconds),
-                diagnostics_strategy: Some(diagnostics_strategy.as_str().to_owned()),
-                supports_definition: Some(supports_definition),
-                supports_call_hierarchy: Some(supports_call_hierarchy),
-                supports_diagnostics: Some(true),
-                supports_formatting: Some(supports_formatting),
-            },
-            DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
-                validation: false,
-                reason: "LSP connected but does not support diagnostics".to_owned(),
-                navigation_ready,
-                indexing_complete: Some(indexing_complete),
-                uptime_seconds: Some(uptime_seconds),
-                diagnostics_strategy: Some("none".to_owned()),
-                supports_definition: Some(supports_definition),
-                supports_call_hierarchy: Some(supports_call_hierarchy),
-                supports_diagnostics: Some(false),
-                supports_formatting: Some(supports_formatting),
-            },
-        }
+    match diagnostics_strategy {
+        DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
+            validation: true,
+            reason: format!(
+                "LSP connected and supports validation ({})",
+                match diagnostics_strategy {
+                    DiagnosticsStrategy::Pull => "pull diagnostics",
+                    DiagnosticsStrategy::Push => "push diagnostics",
+                    DiagnosticsStrategy::None => unreachable!(),
+                }
+            ),
+            navigation_ready,
+            indexing_complete: Some(indexing_complete),
+            uptime_seconds: Some(uptime_seconds),
+            diagnostics_strategy: Some(diagnostics_strategy.as_str().to_owned()),
+            supports_definition: Some(supports_definition),
+            supports_call_hierarchy: Some(supports_call_hierarchy),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(supports_formatting),
+        },
+        DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
+            validation: false,
+            reason: "LSP connected but does not support diagnostics".to_owned(),
+            navigation_ready,
+            indexing_complete: Some(indexing_complete),
+            uptime_seconds: Some(uptime_seconds),
+            diagnostics_strategy: Some("none".to_owned()),
+            supports_definition: Some(supports_definition),
+            supports_call_hierarchy: Some(supports_call_hierarchy),
+            supports_diagnostics: Some(false),
+            supports_formatting: Some(supports_formatting),
+        },
+    }
 }
 
 /// RAII guard that increments in-flight counter on creation and decrements on drop.
@@ -521,7 +521,10 @@ impl LspClient {
         let timeout_flag = Arc::clone(&indexing_complete);
         let timeout_lang = language_id.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(INDEXING_FALLBACK_TIMEOUT_SECS)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                INDEXING_FALLBACK_TIMEOUT_SECS,
+            ))
+            .await;
             if !timeout_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 timeout_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(
@@ -2318,13 +2321,13 @@ mod tests {
         // Navigation should still be "ready" because initialize handshake completed.
         let status = validation_status_from_parts(
             "pyright",
-            true,   // running
+            true, // running
             DiagnosticsStrategy::None,
-            true,   // supports_definition
-            true,   // supports_call_hierarchy
-            false,  // supports_formatting
-            false,  // indexing_complete (still indexing)
-            5,      // uptime_seconds
+            true,  // supports_definition
+            true,  // supports_call_hierarchy
+            false, // supports_formatting
+            false, // indexing_complete (still indexing)
+            5,     // uptime_seconds
         );
         // Navigation ready regardless of diagnostics and indexing status
         assert_eq!(status.navigation_ready, Some(true));
@@ -2339,13 +2342,13 @@ mod tests {
         // Edge case: LSP running but doesn't support definition at all
         let status = validation_status_from_parts(
             "weird-lsp",
-            true,   // running
+            true, // running
             DiagnosticsStrategy::Pull,
-            false,  // supports_definition = false
-            false,  // supports_call_hierarchy
-            false,  // supports_formatting
-            true,   // indexing_complete
-            10,     // uptime_seconds
+            false, // supports_definition = false
+            false, // supports_call_hierarchy
+            false, // supports_formatting
+            true,  // indexing_complete
+            10,    // uptime_seconds
         );
         // Navigation not ready because LSP doesn't have definitionProvider capability
         assert_eq!(status.navigation_ready, Some(false));
@@ -2358,13 +2361,13 @@ mod tests {
         // When LSP is not running (crashed, failed to start), navigation_ready is None
         let status = validation_status_from_parts(
             "gopls",
-            false,  // NOT running
-            DiagnosticsStrategy::None,  // irrelevant when !running
-            true,   // irrelevant when !running
-            true,   // irrelevant when !running
-            false,  // irrelevant when !running
-            false,  // irrelevant when !running
-            0,      // irrelevant when !running
+            false,                     // NOT running
+            DiagnosticsStrategy::None, // irrelevant when !running
+            true,                      // irrelevant when !running
+            true,                      // irrelevant when !running
+            false,                     // irrelevant when !running
+            false,                     // irrelevant when !running
+            0,                         // irrelevant when !running
         );
         assert_eq!(status.navigation_ready, None);
         assert_eq!(status.indexing_complete, None);

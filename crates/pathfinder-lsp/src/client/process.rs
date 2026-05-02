@@ -287,7 +287,12 @@ fn ensure_pathfinder_in_gitignore(project_root: &Path) {
         }
     } else {
         // No .gitignore exists — create one with just .pathfinder/
-        if std::fs::write(&gitignore_path, "# Pathfinder LSP cache isolation\n.pathfinder/\n").is_ok() {
+        if std::fs::write(
+            &gitignore_path,
+            "# Pathfinder LSP cache isolation\n.pathfinder/\n",
+        )
+        .is_ok()
+        {
             tracing::info!(path = %gitignore_path.display(), "Created .gitignore with .pathfinder/ entry");
         }
     }
@@ -684,7 +689,10 @@ mod process_tests {
         super::ensure_pathfinder_in_gitignore(dir.path());
 
         let content = std::fs::read_to_string(&gitignore).expect("read");
-        assert!(content.contains(".pathfinder/"), "should contain .pathfinder/ entry");
+        assert!(
+            content.contains(".pathfinder/"),
+            "should contain .pathfinder/ entry"
+        );
     }
 
     #[test]
@@ -696,8 +704,14 @@ mod process_tests {
         super::ensure_pathfinder_in_gitignore(dir.path());
 
         let content = std::fs::read_to_string(&gitignore).expect("read");
-        assert!(content.contains("node_modules/"), "should preserve existing entries");
-        assert!(content.contains(".pathfinder/"), "should add .pathfinder/ entry");
+        assert!(
+            content.contains("node_modules/"),
+            "should preserve existing entries"
+        );
+        assert!(
+            content.contains(".pathfinder/"),
+            "should add .pathfinder/ entry"
+        );
     }
 
     #[test]
