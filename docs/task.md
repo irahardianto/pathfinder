@@ -106,3 +106,69 @@
 - [x] Updated `docs/LSP-ARCHITECTURE.md` with TTL probe cache docs, auto-gitignore, timeout location
 - [x] Updated `README.md` with concurrent LSP handling note and roadmap items
 - [x] Added LSP-HEALTH-001 spec to `docs/requirements/patches/`
+
+---
+## 2026-05-02: GAP-003: Fix dedent_then_reindent for Nested Blocks
+- [x] Phase 1: Research log created (`docs/research_logs/GAP-003-indentation-nested.md`)
+- [x] Phase 2: Implement
+  - [x] Add `anchor_to_column_zero()` helper function
+  - [x] Add `dedent_by()` helper function
+  - [x] Update `normalize_for_body_replace()` to call `anchor_to_column_zero()`
+  - [x] Add tests for nested if-else indentation
+  - [x] Add tests for relative indent preservation
+- [x] Phase 3: Integrate (self-contained normalization change, no external integration needed)
+- [x] Phase 4: Verify (all 137 tests in pathfinder-mcp-common pass)
+
+### GAP-004: Append version_hash to Text Output of Read Tools
+- [x] Phase 1: Research log created (`docs/research_logs/GAP-004-version-hash-text.md`)
+- [x] Phase 2: Implement
+  - [x] Update `read_source_file_impl()` to append version_hash to text output
+  - [x] Update `read_symbol_scope_impl()` to append version_hash to text output
+  - [x] Add tests for version_hash in text output
+- [x] Phase 3: Integrate (self-contained output format change, no external integration needed)
+- [x] Phase 4: Verify (all 202 tests in pathfinder-mcp pass)
+
+---
+
+## 2026-05-03: GAP-005 through GAP-008
+
+### GAP-005: Fix delete_symbol for TypeScript Class Methods
+- [x] Phase 1: Research (`docs/requirements/patches/20260502/GAP-005-delete-symbol-ts.md`)
+- [x] Phase 2: Implement
+  - [x] Replace raw `rg -l -w` with scout search in delete_symbol_impl
+  - [x] Existing test_delete_symbol_cross_file_reference_warning updated for new scout-based check
+- [x] Phase 3: Integrate (scout already used in production, no new adapter)
+- [x] Phase 4: Verify (205 tests pass)
+
+### GAP-006: Warn When insert_into Targets a Rust Struct
+- [x] Phase 1: Research (`docs/requirements/patches/20260502/GAP-006-insert-into-rust-warning.md`)
+- [x] Phase 2: Implement
+  - [x] Add `warning` field to EditResponse
+  - [x] Add `warning` field to FinalizeEditParams
+  - [x] Add Rust struct detection in insert_into_impl
+  - [x] Add test: warning appears for Rust struct target
+  - [x] Add test: no warning for TypeScript class
+  - [x] Add test: no warning for Rust impl block
+- [x] Phase 3: Integrate (response field addition, backward-compatible)
+- [x] Phase 4: Verify (205 tests pass)
+
+### GAP-007: Add Offset Pagination to search_codebase
+- [x] Phase 1: Research (`docs/requirements/patches/20260502/GAP-007-search-pagination.md`)
+- [x] Phase 2: Implement
+  - [x] Add `offset` field to SearchParams (pathfinder-search)
+  - [x] Add global skip counter in MatchCollector (shared across files)
+  - [x] Add `offset` to SearchCodebaseParams MCP handler
+  - [x] Add `next_offset` hint in truncated response
+  - [x] Add tests: pagination, beyond-results, truncation hint
+- [x] Phase 3: Integrate (search layer change, no external adapters)
+- [x] Phase 4: Verify (35 search tests, 205 mcp tests pass)
+
+### GAP-008: Improve Error Responses with Remediation Hints
+- [x] Phase 1: Research (`docs/requirements/patches/20260502/GAP-008-error-responses.md`)
+- [x] Phase 2: Implement
+  - [x] Add LspError hint with timeout/crash/generic branches
+  - [x] Add LspTimeout hint with workaround text
+  - [x] Add NoLspAvailable hint mentioning tree-sitter tools
+  - [x] Add 5 tests for all new hints
+- [x] Phase 3: Integrate (error message change only, no structural changes)
+- [x] Phase 4: Verify (142 common tests pass)
