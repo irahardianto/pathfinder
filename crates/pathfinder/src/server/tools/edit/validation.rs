@@ -225,7 +225,10 @@ impl crate::server::PathfinderServer {
         match diagnostics_strategy.as_deref() {
             Some("push") => {
                 // Push diagnostics: didOpen/didChange → collect → didChange → collect → diff
-                let push_timeout_ms = 5000; // 5 seconds to collect diagnostics
+                // IW-1: Adaptive push diagnostics. The collector waits up to 15s for
+                // the first notification, then exits after a 500ms grace window.
+                // Most servers respond in <2s so this ceiling rarely matters.
+                let push_timeout_ms = 15_000u64;
 
                 // Step 1: Open and collect pre-edit diagnostics
                 let pre_diags = match self
@@ -267,6 +270,7 @@ impl crate::server::PathfinderServer {
                     &post_diags,
                     ignore_validation_failures,
                     file_path,
+                    "push",
                 );
             }
             Some("none") => {
@@ -310,6 +314,7 @@ impl crate::server::PathfinderServer {
             &post_diags,
             ignore_validation_failures,
             file_path,
+            "pull",
         )
     }
 

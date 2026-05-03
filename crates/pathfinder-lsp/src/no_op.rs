@@ -131,6 +131,10 @@ impl Lawyer for NoOpLawyer {
         vec![]
     }
 
+    async fn force_respawn(&self, _language_id: &str) -> Result<(), LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
     async fn did_change_watched_files(&self, _changes: Vec<FileEvent>) -> Result<(), LspError> {
         Ok(())
     }

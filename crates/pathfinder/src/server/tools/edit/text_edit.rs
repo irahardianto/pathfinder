@@ -269,11 +269,15 @@ pub fn build_body_replacement(
 ///
 /// Pure function: diffs the diagnostics, maps them to `DiagnosticError`,
 /// and decides whether the edit should be blocked.
+///
+/// `diagnostics_strategy` is `"pull"` or `"push"` and drives the
+/// `validation_confidence` field in the returned `EditValidation`.
 pub fn build_validation_outcome(
     pre_diags: &[pathfinder_lsp::types::LspDiagnostic],
     post_diags: &[pathfinder_lsp::types::LspDiagnostic],
     ignore_validation_failures: bool,
     file_path: &Path,
+    diagnostics_strategy: &str,
 ) -> ValidationOutcome {
     let diff = diff_diagnostics(pre_diags, post_diags);
     let has_new_errors = diff.has_new_errors();
@@ -295,7 +299,7 @@ pub fn build_validation_outcome(
              — validation_skipped to signal possible LSP warmup"
         );
         return ValidationOutcome {
-            validation: EditValidation::uncertain(),
+            validation: EditValidation::uncertain(), // confidence = "low" via uncertain()
             skipped: true,
             skipped_reason: Some("empty_diagnostics_both_snapshots".to_owned()),
             should_block: false,
@@ -324,11 +328,21 @@ pub fn build_validation_outcome(
     let should_block = has_new_errors && !ignore_validation_failures;
     let status = if should_block { "failed" } else { "passed" };
 
+    // IW-2: confidence reflects which diagnostic strategy was used.
+    // Pull diagnostics are synchronous and authoritative → "high".
+    // Push diagnostics depend on server speed and may miss errors → "medium".
+    let confidence = if diagnostics_strategy == "push" {
+        "medium"
+    } else {
+        "high"
+    };
+
     ValidationOutcome {
         validation: EditValidation {
             status: status.to_owned(),
             introduced_errors: introduced,
             resolved_errors: resolved,
+            validation_confidence: Some(confidence.to_owned()),
         },
         skipped: false,
         skipped_reason: None,

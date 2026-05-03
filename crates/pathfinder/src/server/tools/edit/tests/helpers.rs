@@ -114,6 +114,9 @@ impl Lawyer for UnsupportedDiagLawyer {
     fn missing_languages(&self) -> Vec<pathfinder_lsp::client::MissingLanguage> {
         vec![]
     }
+    async fn force_respawn(&self, _language_id: &str) -> Result<(), LspError> {
+        Ok(())
+    }
     async fn did_change_watched_files(
         &self,
         _changes: Vec<pathfinder_lsp::types::FileEvent>,

@@ -469,6 +469,7 @@ fn test_build_validation_outcome_empty_snapshots_signals_warmup() {
         &[], // post_diags: empty
         false,
         Path::new("src/lib.rs"),
+        "pull",
     );
 
     assert!(
@@ -507,7 +508,7 @@ fn test_build_validation_outcome_non_empty_pre_does_not_skip() {
         end_line: 1,
     }];
 
-    let outcome = build_validation_outcome(&pre, &[], false, Path::new("src/lib.rs"));
+    let outcome = build_validation_outcome(&pre, &[], false, Path::new("src/lib.rs"), "pull");
 
     // pre non-empty → NOT the warmup-skip path
     assert!(

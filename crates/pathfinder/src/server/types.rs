@@ -620,6 +620,17 @@ pub struct EditValidation {
     pub introduced_errors: Vec<pathfinder_common::error::DiagnosticError>,
     /// Errors resolved by the edit.
     pub resolved_errors: Vec<pathfinder_common::error::DiagnosticError>,
+    /// IW-2: Confidence in the validation result.
+    ///
+    /// - `"high"`: LSP pull diagnostics used (definitive result).
+    /// - `"medium"`: LSP push diagnostics used (may miss errors during indexing).
+    /// - `"low"`: Both pre/post diagnostic sets were empty (could be clean or LSP not ready).
+    /// - `"none"`: Validation was skipped entirely.
+    ///
+    /// Agents should use this to decide whether to re-validate or proceed:
+    /// `"high"` → trust the result; `"low"`/`"none"` → consider calling `lsp_health` first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_confidence: Option<String>,
 }
 
 impl EditValidation {
@@ -630,6 +641,7 @@ impl EditValidation {
             status: "skipped".to_owned(),
             introduced_errors: vec![],
             resolved_errors: vec![],
+            validation_confidence: Some("none".to_owned()),
         }
     }
 
@@ -644,6 +656,7 @@ impl EditValidation {
             status: "uncertain".to_owned(),
             introduced_errors: vec![],
             resolved_errors: vec![],
+            validation_confidence: Some("low".to_owned()),
         }
     }
 }
@@ -738,6 +751,13 @@ pub struct ReadWithDeepContextMetadata {
     /// Reason for degradation (e.g., `"no_lsp"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
+    /// IW-2: LSP readiness signal at the time of the call.
+    ///
+    /// - `"ready"`: LSP is fully operational — results are authoritative.
+    /// - `"warming_up"`: LSP is still indexing — results may be partial.
+    /// - `"unavailable"`: No LSP; Tree-sitter fallback used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_readiness: Option<String>,
 }
 
 /// The response for `get_definition`.
@@ -757,6 +777,13 @@ pub struct GetDefinitionResponse {
     /// Reason for degradation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
+    /// IW-2: LSP readiness at the time of the call.
+    ///
+    /// - `"ready"`: LSP operational — definition is authoritative.
+    /// - `"warming_up"`: LSP still indexing — result may be from Tree-sitter fallback.
+    /// - `"unavailable"`: No LSP; result is from ripgrep heuristics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_readiness: Option<String>,
 }
 
 /// A single reference in an impact analysis.
@@ -821,6 +848,13 @@ pub struct LspHealthParams {
     /// If omitted, checks all available languages.
     #[serde(default)]
     pub language: Option<String>,
+    /// IW-4: Optional action to perform.
+    ///
+    /// - `"restart"`: Force-restart the LSP process for the specified language.
+    ///   `language` must be set when using `"restart"`.
+    ///   Returns updated health status after the restart attempt.
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 /// The response for `lsp_health`.

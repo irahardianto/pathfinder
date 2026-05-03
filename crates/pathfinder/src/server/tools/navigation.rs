@@ -285,6 +285,7 @@ impl PathfinderServer {
                     preview: def.preview,
                     degraded: false,
                     degraded_reason: None,
+                    lsp_readiness: Some("ready".to_owned()),
                 }))
             }
             Ok(None) => {
@@ -323,6 +324,7 @@ impl PathfinderServer {
                         preview: def.preview,
                         degraded: false,
                         degraded_reason: None,
+                        lsp_readiness: Some("warming_up".to_owned()),
                     }));
                 }
 
@@ -547,6 +549,7 @@ impl PathfinderServer {
                          Verify with read_source_file."
                             .to_owned(),
                     ),
+                    lsp_readiness: Some("unavailable".to_owned()),
                 });
             }
         }
@@ -609,6 +612,7 @@ impl PathfinderServer {
                                  Verify with read_source_file."
                                     .to_owned(),
                             ),
+                            lsp_readiness: Some("unavailable".to_owned()),
                         });
                     }
                 }
@@ -657,6 +661,7 @@ impl PathfinderServer {
                          may not be the canonical definition. Verify with read_source_file."
                             .to_owned(),
                     ),
+                    lsp_readiness: Some("unavailable".to_owned()),
                 });
             }
         }
@@ -752,6 +757,14 @@ impl PathfinderServer {
         );
 
         let dep_count = dependencies.len();
+        let lsp_readiness = if degraded {
+            match degraded_reason.as_deref() {
+                Some("no_lsp") => Some("unavailable".to_owned()),
+                _ => Some("warming_up".to_owned()),
+            }
+        } else {
+            Some("ready".to_owned())
+        };
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
@@ -760,6 +773,7 @@ impl PathfinderServer {
             dependencies,
             degraded,
             degraded_reason: degraded_reason.clone(),
+            lsp_readiness,
         };
 
         // Prepend degradation notice when in degraded mode
@@ -1325,6 +1339,30 @@ impl PathfinderServer {
         rmcp::handler::server::wrapper::Json<crate::server::types::LspHealthResponse>,
         ErrorData,
     > {
+        // IW-4: Handle action="restart" before the normal health query flow.
+        if params.action.as_deref() == Some("restart") {
+            let lang = match &params.language {
+                Some(l) => l.clone(),
+                None => {
+                    return Err(crate::server::helpers::pathfinder_to_error_data(
+                        &pathfinder_common::error::PathfinderError::IoError {
+                            message: "lsp_health action='restart' requires 'language' to be set".to_owned(),
+                        },
+                    ));
+                }
+            };
+            tracing::info!(language = %lang, "lsp_health: restart requested by agent");
+            match self.lawyer.force_respawn(&lang).await {
+                Ok(()) => {
+                    tracing::info!(language = %lang, "lsp_health: restart successful");
+                }
+                Err(e) => {
+                    tracing::warn!(language = %lang, error = %e, "lsp_health: restart failed");
+                }
+            }
+            // Fall through to return updated health status after restart attempt.
+        }
+
         let capability_status = self.lawyer.capability_status().await;
 
         let mut languages = Vec::new();
@@ -2953,6 +2991,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("go".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -2993,6 +3032,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3087,6 +3127,7 @@ mod tests {
         })));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3144,6 +3185,7 @@ mod tests {
         lawyer.set_goto_definition_result(Err("Connection lost".to_string()));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3193,6 +3235,7 @@ mod tests {
         })));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3242,6 +3285,7 @@ mod tests {
         })));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3470,6 +3514,7 @@ mod tests {
 
         // Filter by language = python
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("python".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3512,6 +3557,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("go".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3566,6 +3612,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3607,6 +3654,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("go".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3652,6 +3700,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3695,6 +3744,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("python".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3740,6 +3790,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3807,6 +3858,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3857,6 +3909,7 @@ mod tests {
         )]));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3920,6 +3973,7 @@ mod tests {
         ));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
@@ -3971,6 +4025,7 @@ mod tests {
         // First call - should probe and cache
         let result1 = server
             .lsp_health_impl(crate::server::types::LspHealthParams {
+                action: None,
                 language: Some("rust".to_string()),
             })
             .await;
@@ -3988,6 +4043,7 @@ mod tests {
         let call_count_before = lawyer.goto_definition_call_count();
         let result2 = server
             .lsp_health_impl(crate::server::types::LspHealthParams {
+                action: None,
                 language: Some("rust".to_string()),
             })
             .await;
@@ -4042,6 +4098,7 @@ mod tests {
         })));
 
         let params = crate::server::types::LspHealthParams {
+            action: None,
             language: Some("rust".to_string()),
         };
 

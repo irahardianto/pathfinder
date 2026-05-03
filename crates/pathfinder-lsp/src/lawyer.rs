@@ -192,6 +192,13 @@ pub trait Lawyer: Send + Sync {
     /// Used to surface actionable install guidance in `lsp_health` responses.
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage>;
 
+    /// IW-4: Force-respawn the LSP process for `language_id`.
+    ///
+    /// Drops the existing process entry and triggers a fresh spawn.
+    /// Returns `Ok(())` on successful start, `Err(LspError::NoLspAvailable)` if
+    /// no descriptor is registered for the language.
+    async fn force_respawn(&self, language_id: &str) -> Result<(), LspError>;
+
     /// Notify all running LSP processes of a filesystem change.
     ///
     /// Broadcasts `workspace/didChangeWatchedFiles` to every running LSP process.

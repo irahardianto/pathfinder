@@ -479,6 +479,11 @@ impl Lawyer for MockLawyer {
             .clone()
     }
 
+    async fn force_respawn(&self, _language_id: &str) -> Result<(), LspError> {
+        // No-op in mock — test can verify call count via a separate field if needed
+        Ok(())
+    }
+
     async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError> {
         self.watched_file_changes
             .lock()
