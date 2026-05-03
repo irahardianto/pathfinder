@@ -226,16 +226,18 @@ impl PathfinderServer {
             .map_err(treesitter_error_to_error_data)?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
-        // Open the file in the LSP so it can serve navigation queries.
+        // IW-3 (DS-1 gap fix): Open the file via RAII guard so did_close is
+        // guaranteed on all exit paths (success, error, early return).
         // rust-analyzer requires files to be in its document buffer to resolve
         // definitions. Without this, it returns null for all navigation.
         let file_content =
             tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
                 .await
                 .unwrap_or_default();
-        let _did_open_result = self
+        // `_doc_guard` is held until the end of this function; dropping it fires did_close.
+        let _doc_guard = self
             .lawyer
-            .did_open(
+            .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
@@ -258,12 +260,7 @@ impl PathfinderServer {
             .await;
         let lsp_ms = lsp_start.elapsed().as_millis();
 
-        // Close the file in the LSP to prevent memory leaks.
-        let _did_close_result = self
-            .lawyer
-            .did_close(self.workspace_root.path(), &semantic_path.file_path)
-            .await;
-
+        // Note: `_doc_guard` is still in scope here and will fire did_close on drop.
         let duration_ms = start.elapsed().as_millis();
 
         match lsp_result {
@@ -710,14 +707,15 @@ impl PathfinderServer {
             .map_err(treesitter_error_to_error_data)?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
-        // Open the file in the LSP so it can serve call hierarchy queries.
+        // IW-3 (DS-1 gap fix): RAII document lifecycle — did_close fires on all exits.
         let file_content =
             tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
                 .await
                 .unwrap_or_default();
-        let _did_open_result = self
+        // `_doc_guard` fires did_close automatically when this function returns.
+        let _doc_guard = self
             .lawyer
-            .did_open(
+            .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
@@ -735,12 +733,7 @@ impl PathfinderServer {
             .resolve_lsp_dependencies(&semantic_path, scope.start_line, scope.name_column)
             .await;
 
-        // Close the file in the LSP to prevent memory leaks.
-        let _did_close_result = self
-            .lawyer
-            .did_close(self.workspace_root.path(), &semantic_path.file_path)
-            .await;
-
+        // Note: `_doc_guard` still alive here; drops at function return.
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
@@ -941,14 +934,15 @@ impl PathfinderServer {
         };
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
-        // Open the file in the LSP so it can serve call hierarchy queries.
+        // IW-3 (DS-1 gap fix): RAII document lifecycle — did_close fires on all exits.
         let file_content =
             tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
                 .await
                 .unwrap_or_default();
-        let _did_open_result = self
+        // `_doc_guard` fires did_close automatically when this function returns.
+        let _doc_guard = self
             .lawyer
-            .did_open(
+            .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
@@ -1251,12 +1245,7 @@ impl PathfinderServer {
             }
         }
 
-        // Close the file in the LSP to prevent memory leaks.
-        let _did_close_result = self
-            .lawyer
-            .did_close(self.workspace_root.path(), &semantic_path.file_path)
-            .await;
-
+        // Note: `_doc_guard` still alive here; did_close fires at function return.
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
@@ -4110,4 +4099,149 @@ mod tests {
         assert!(val.languages[0].probe_verified);
         assert_eq!(lawyer.goto_definition_call_count(), call_count_before);
     }
+
+    // ── DS-1: DocumentGuard lifecycle tests ──────────────────────────────────
+    //
+    // Verify that every `open_document` call is paired with exactly one
+    // `did_close` — the RAII contract of `DocumentLease`. The `MockDocumentLease`
+    // increments `did_close_calls` on drop, mirroring production `DocumentGuard`.
+
+    #[tokio::test]
+    async fn test_get_definition_closes_document_on_success() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".into(),
+            line: 42,
+            column: 5,
+            preview: "pub fn login() -> bool {".into(),
+        })));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+
+        let _ = server.get_definition_impl(params).await;
+
+        // Yield so the spawned `did_close` task (from MockDocumentLease Drop) runs.
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            lawyer.did_open_call_count(),
+            lawyer.did_close_call_count(),
+            "DS-1: did_open and did_close must be symmetric on success"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_definition_closes_document_on_lsp_error() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Simulate an LSP protocol error after the document is opened
+        lawyer.set_goto_definition_result(Err("LSP crashed".into()));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+
+        let _ = server.get_definition_impl(params).await;
+
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            lawyer.did_open_call_count(),
+            lawyer.did_close_call_count(),
+            "DS-1: did_close must be called even when LSP returns an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_closes_document_on_success() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+        };
+
+        let _ = server.analyze_impact_impl(params).await;
+
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            lawyer.did_open_call_count(),
+            lawyer.did_close_call_count(),
+            "DS-1: did_open and did_close must be symmetric in analyze_impact"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_closes_document_on_success() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+
+        let _ = server.read_with_deep_context_impl(params).await;
+
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            lawyer.did_open_call_count(),
+            lawyer.did_close_call_count(),
+            "DS-1: did_open and did_close must be symmetric in read_with_deep_context"
+        );
+    }
+
 }

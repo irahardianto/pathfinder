@@ -18,7 +18,7 @@
 
 use crate::{
     error::LspError,
-    lawyer::Lawyer,
+    lawyer::{DocumentLease, Lawyer},
     types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, FileEvent, LspDiagnostic},
 };
 use async_trait::async_trait;
@@ -26,6 +26,37 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+
+// ── NullDocumentLease ────────────────────────────────────────────────────────
+
+/// A no-op `DocumentLease` used by `MockLawyer`.
+///
+/// `MockLawyer.open_document` tracks the call via `did_open_calls` (matching
+/// production behaviour) and returns this sentinel. On drop, nothing happens
+/// — the mock already records `did_close` via a separate field when callers
+/// drop the lease. Because `MockLawyer.open_document` builds the guard
+/// by calling through `self.did_open()`, the `did_open_calls` counter is
+/// incremented, and a corresponding `did_close_calls` increment happens only
+/// when the caller explicitly drops the lease *and* the guard's Drop fires.
+///
+/// In practice, `MockDocumentLease` stores back-references to the mock's
+/// counters so that dropping it records `did_close` without needing a real
+/// LSP connection.
+pub struct MockDocumentLease {
+    did_close_calls: Arc<Mutex<Vec<String>>>,
+    file_path: String,
+}
+
+impl DocumentLease for MockDocumentLease {}
+
+impl Drop for MockDocumentLease {
+    fn drop(&mut self) {
+        self.did_close_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(self.file_path.clone());
+    }
+}
 
 // ── Fixture types ─────────────────────────────────────────────────────────────
 
@@ -358,6 +389,41 @@ impl Lawyer for MockLawyer {
         _item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
         Self::pop_queued_result(&self.outgoing_call_results).unwrap_or_else(|| Ok(vec![]))
+    }
+
+    /// IW-3 (DS-1 gap fix): RAII document lifecycle.
+    ///
+    /// Records the open via `did_open_calls` and returns a `MockDocumentLease`
+    /// that records `did_close_calls` on drop — mirroring production semantics
+    /// without needing a real LSP. Tests can assert that open and close counts
+    /// match exactly, verifying no lifecycle leaks.
+    async fn open_document(
+        &self,
+        _workspace_root: &Path,
+        file_path: &Path,
+        content: &str,
+    ) -> Result<Box<dyn crate::lawyer::DocumentLease>, LspError> {
+        // If a failure has been configured on did_open, propagate it here too.
+        self.did_open_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((file_path.to_string_lossy().into_owned(), content.to_owned()));
+
+        let maybe_error = {
+            let mut guard = self
+                .did_open_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        if let Some(e) = maybe_error {
+            return Err(e);
+        }
+
+        Ok(Box::new(MockDocumentLease {
+            did_close_calls: self.did_close_calls.clone(),
+            file_path: file_path.to_string_lossy().into_owned(),
+        }))
     }
 
     async fn did_open(

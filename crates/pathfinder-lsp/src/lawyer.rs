@@ -11,6 +11,18 @@ use crate::{
 use async_trait::async_trait;
 use std::path::Path;
 
+/// A live document registration with the LSP.
+///
+/// # IW-3 (DS-1 gap fix)
+///
+/// This trait represents the RAII contract for an open document. When the
+/// value is dropped, the LSP receives `textDocument/didClose` automatically,
+/// preventing memory leaks regardless of early returns or panics in callers.
+///
+/// Navigation tools should obtain this via [`Lawyer::open_document`] rather
+/// than calling `did_open` + `did_close` manually.
+pub trait DocumentLease: Send + Sync {}
+
 /// Abstracts Language Server Protocol operations behind a testable interface.
 ///
 /// # Contract
@@ -65,6 +77,33 @@ pub trait Lawyer: Send + Sync {
         workspace_root: &Path,
         item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError>;
+
+    /// Open a document and return a RAII guard that auto-closes it on drop.
+    ///
+    /// # IW-3 (DS-1 gap fix)
+    ///
+    /// This is the **preferred** way to open documents for transient LSP queries
+    /// (navigation, impact analysis, deep context). The returned `DocumentLease`
+    /// automatically calls `did_close` when dropped, ensuring no document leaks
+    /// regardless of early returns or panics.
+    ///
+    /// Callers **must** hold the returned lease for the duration of their LSP
+    /// query. Dropping it early will trigger `did_close` prematurely.
+    ///
+    /// # Errors
+    /// - `LspError::NoLspAvailable` — no language server for this file type
+    /// - `LspError::ConnectionLost` — LSP process crashed
+    ///
+    /// # Notes
+    /// - When no LSP is available, implementations should return
+    ///   `Err(LspError::NoLspAvailable)`. The caller should handle this
+    ///   gracefully by skipping the LSP query.
+    async fn open_document(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: &str,
+    ) -> Result<Box<dyn DocumentLease>, LspError>;
 
     /// Notify the LSP that a file has been opened with the given content.
     ///

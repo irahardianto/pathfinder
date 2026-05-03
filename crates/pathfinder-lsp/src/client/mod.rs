@@ -262,6 +262,10 @@ impl Drop for DocumentGuard {
         });
     }
 }
+
+// IW-3 (DS-1 gap fix): DocumentGuard satisfies the DocumentLease contract —
+// dropping it fires did_close via the impl above.
+impl crate::lawyer::DocumentLease for DocumentGuard {}
 /// The production `Lawyer` implementation.
 ///
 /// Manages per-language LSP child processes and provides JSON-RPC request
@@ -905,6 +909,22 @@ impl Lawyer for LspClient {
     ) -> Result<(), LspError> {
         Ok(())
     }
+
+    /// IW-3 (DS-1 gap fix): RAII document lifecycle for navigation queries.
+    ///
+    /// Opens the document via `did_open` and returns a `DocumentGuard` boxed as
+    /// `Box<dyn DocumentLease>`. Dropping the lease fires `did_close`
+    /// automatically, ensuring no document leaks regardless of early returns.
+    async fn open_document(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: &str,
+    ) -> Result<Box<dyn crate::lawyer::DocumentLease>, LspError> {
+        let guard = LspClient::open_document(self, workspace_root, file_path, content).await?;
+        Ok(Box::new(guard))
+    }
+
     async fn goto_definition(
         &self,
         workspace_root: &Path,

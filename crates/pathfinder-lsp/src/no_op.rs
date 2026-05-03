@@ -60,6 +60,16 @@ impl Lawyer for NoOpLawyer {
         Err(LspError::NoLspAvailable)
     }
 
+    /// IW-3 (DS-1): No LSP available — callers should skip LSP queries and degrade.
+    async fn open_document(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _content: &str,
+    ) -> Result<Box<dyn crate::lawyer::DocumentLease>, LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
     async fn did_open(
         &self,
         _workspace_root: &Path,

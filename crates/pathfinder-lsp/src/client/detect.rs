@@ -1438,7 +1438,7 @@ mod tests {
             std::fs::write(&path, "[dependencies]\nfoo = \"1.0\"").expect("write");
             let result = validate_marker_file(&path, "rust");
             assert!(result.is_err(), "Cargo.toml with only [dependencies] should fail");
-            assert!(result.unwrap_err().contains("neither [package] nor [workspace]"));
+            assert!(result.expect_err("expected Err").contains("neither [package] nor [workspace]"));
         }
 
         #[test]
@@ -1448,7 +1448,7 @@ mod tests {
             std::fs::write(&path, "this is not toml at all !!!").expect("write");
             let result = validate_marker_file(&path, "rust");
             assert!(result.is_err(), "Malformed TOML should fail validation");
-            assert!(result.unwrap_err().contains("not valid TOML"));
+            assert!(result.expect_err("expected Err").contains("not valid TOML"));
         }
 
         #[test]
@@ -1466,7 +1466,7 @@ mod tests {
             std::fs::write(&path, "// corrupted file").expect("write");
             let result = validate_marker_file(&path, "go");
             assert!(result.is_err(), "go.mod without 'module' should fail");
-            assert!(result.unwrap_err().contains("'module' declaration"));
+            assert!(result.expect_err("expected Err").contains("'module' declaration"));
         }
 
         #[test]
@@ -1484,7 +1484,7 @@ mod tests {
             std::fs::write(&path, "{ this is not json }}").expect("write");
             let result = validate_marker_file(&path, "typescript");
             assert!(result.is_err(), "Malformed JSON tsconfig.json should fail");
-            assert!(result.unwrap_err().contains("not valid JSON"));
+            assert!(result.expect_err("expected Err").contains("not valid JSON"));
         }
 
         #[test]
@@ -1502,7 +1502,7 @@ mod tests {
             std::fs::write(&path, "NOT VALID TOML !!!").expect("write");
             let result = validate_marker_file(&path, "python");
             assert!(result.is_err(), "Malformed pyproject.toml should fail");
-            assert!(result.unwrap_err().contains("not valid TOML"));
+            assert!(result.expect_err("expected Err").contains("not valid TOML"));
         }
 
         #[test]

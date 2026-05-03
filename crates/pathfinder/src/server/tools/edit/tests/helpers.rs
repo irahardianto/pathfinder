@@ -46,12 +46,24 @@ impl Lawyer for UnsupportedDiagLawyer {
     ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, LspError> {
         Err(LspError::NoLspAvailable)
     }
+    /// IW-3 (DS-1): Test double — open_document returns a no-op lease.
+    async fn open_document(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _content: &str,
+    ) -> Result<Box<dyn pathfinder_lsp::lawyer::DocumentLease>, pathfinder_lsp::LspError> {
+        struct NullLease;
+        impl pathfinder_lsp::lawyer::DocumentLease for NullLease {}
+        Ok(Box::new(NullLease))
+    }
+
     async fn did_open(
         &self,
         _workspace_root: &Path,
         _file_path: &Path,
         _content: &str,
-    ) -> Result<(), LspError> {
+    ) -> Result<(), pathfinder_lsp::LspError> {
         Ok(())
     }
     async fn did_change(
