@@ -1,0 +1,3 @@
+## 2024-05-23 - Avoiding Mutex Overhead in Sequential Search
+**Learning:** `RipgrepScout::search` runs within a strictly sequential `tokio::task::spawn_blocking` closure and the `MatchCollector` struct accumulates state for a single search execution. Despite this, it was using `Mutex` to wrap state variables (`match_buf`, `total_count`, `skipped_count`), introducing unnecessary locking overhead on every match.
+**Action:** Replace `Mutex<T>` wrappers with `&mut T` when the closure scope guarantees sequential execution, as `Mutex` is not required for data flow that happens strictly sequentially on a single thread. This eliminates lock contention and lock overhead on hot paths such as search match accumulation.

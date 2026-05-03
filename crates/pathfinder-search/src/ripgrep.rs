@@ -15,26 +15,9 @@ use ignore::WalkBuilder;
 use pathfinder_common::types::VersionHash;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 // ── Helper Functions ─────────────────────────────────────────────────────
 
-/// Recover from mutex poisoning with a warning log.
-///
-/// Mutex poisoning indicates a panic occurred while holding the lock;
-/// the data MAY be in an inconsistent state, but for search result caches
-/// this is acceptable since results will simply be regenerated.
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            tracing::warn!(
-                "mutex poisoned, recovering (possible data inconsistency in search cache)"
-            );
-            e.into_inner()
-        }
-    }
-}
 
 /// Truncate a line to a maximum byte length, ensuring valid UTF-8 boundaries.
 /// Appends `... [TRUNCATED]` if the line was shortened.
@@ -62,16 +45,16 @@ struct MatchCollector<'a> {
     /// Buffer of context lines that appear *before* the next match.
     context_before_buf: VecDeque<String>,
     /// Accumulated matches for this file.
-    matches: &'a Mutex<Vec<SearchMatch>>,
+    matches: &'a mut Vec<SearchMatch>,
     /// Running total of all matches seen (including those already capped).
-    total_count: &'a Mutex<usize>,
+    total_count: &'a mut usize,
     /// Maximum number of matches the caller wants.
     max_results: usize,
     /// Number of matches to skip before storing (for pagination).
     offset: usize,
     /// Global skip counter shared across files — tracks how many matches
     /// have been skipped so far across all files.
-    skipped_count: &'a Mutex<usize>,
+    skipped_count: &'a mut usize,
     /// Whether we have already hit the cap.
     truncated: bool,
     /// Context lines to collect *after* the current match.
@@ -90,11 +73,11 @@ impl<'a> MatchCollector<'a> {
     #[allow(clippy::similar_names, clippy::too_many_arguments)]
     fn new(
         relative_path: String,
-        matches: &'a Mutex<Vec<SearchMatch>>,
-        total_count: &'a Mutex<usize>,
+        matches: &'a mut Vec<SearchMatch>,
+        total_count: &'a mut usize,
         max_results: usize,
         offset: usize,
-        skipped_count: &'a Mutex<usize>,
+        skipped_count: &'a mut usize,
         context_lines: usize,
         matcher: &'a grep_regex::RegexMatcher,
     ) -> Self {
@@ -120,9 +103,8 @@ impl<'a> MatchCollector<'a> {
     ///
     /// Called after the search completes and only if the file had matches,
     /// so we only pay the cost of reading + hashing files that actually matched.
-    fn backfill_hash(&self, hash: &str) {
-        let mut guard = lock_or_recover(self.matches);
-        for m in guard.iter_mut() {
+    fn backfill_hash(&mut self, hash: &str) {
+        for m in self.matches.iter_mut() {
             if m.file == self.relative_path && m.version_hash.is_empty() {
                 m.version_hash = hash.to_string();
             }
@@ -130,7 +112,7 @@ impl<'a> MatchCollector<'a> {
     }
 
     fn current_match_count(&self) -> usize {
-        lock_or_recover(self.matches).len()
+        self.matches.len()
     }
 }
 
@@ -139,19 +121,13 @@ impl Sink for MatchCollector<'_> {
 
     fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
         // Increment total regardless of cap or offset.
-        {
-            let mut count = lock_or_recover(self.total_count);
-            *count += 1;
-        }
+        *self.total_count += 1;
 
         // Skip matches before the offset threshold.
         // Uses a global counter shared across all files so offset works correctly
         // across file boundaries.
-        {
-            let mut skipped = lock_or_recover(self.skipped_count);
-            if *skipped < self.offset {
-                *skipped += 1;
-                drop(skipped);
+        if *self.skipped_count < self.offset {
+            *self.skipped_count += 1;
                 // Still track line for context continuity
                 let line = mat.line_number().unwrap_or(0);
                 if line > self.last_seen_line + 1 {
@@ -159,11 +135,9 @@ impl Sink for MatchCollector<'_> {
                 }
                 self.last_seen_line = line;
                 let bytes = mat.bytes();
-                let content = String::from_utf8_lossy(bytes)
-                    .trim_end_matches('\n')
-                    .trim_end_matches('\r')
-                    .to_owned();
-                let content = truncate_line(&content, 1000);
+                let content = String::from_utf8_lossy(bytes);
+                let content = content.trim_end_matches('\n').trim_end_matches('\r');
+                let content = truncate_line(content, 1000);
                 if self.context_lines > 0 {
                     if self.context_before_buf.len() >= self.context_lines {
                         self.context_before_buf.pop_front();
@@ -172,7 +146,7 @@ impl Sink for MatchCollector<'_> {
                 }
                 return Ok(true);
             }
-        }
+
 
         let current = self.current_match_count();
         if current >= self.max_results {
@@ -183,8 +157,7 @@ impl Sink for MatchCollector<'_> {
 
         // Flush the after-context buffer from the previous match into the last stored match.
         if !self.after_context_buf.is_empty() {
-            let mut guard = lock_or_recover(self.matches);
-            if let Some(last) = guard.last_mut() {
+            if let Some(last) = self.matches.last_mut() {
                 last.context_after = std::mem::take(&mut self.after_context_buf);
             }
         }
@@ -198,11 +171,9 @@ impl Sink for MatchCollector<'_> {
         self.last_seen_line = line;
 
         let bytes = mat.bytes();
-        let content = String::from_utf8_lossy(bytes)
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_owned();
-        let content = truncate_line(&content, 1000);
+        let content = String::from_utf8_lossy(bytes);
+        let content = content.trim_end_matches('\n').trim_end_matches('\r');
+        let content = truncate_line(content, 1000);
 
         // Column is 1-indexed per PRD §3.1.
         let mut column = 1_u64;
@@ -229,10 +200,7 @@ impl Sink for MatchCollector<'_> {
             self.context_before_buf.push_back(content);
         }
 
-        {
-            let mut guard = lock_or_recover(self.matches);
-            guard.push(search_match);
-        }
+        self.matches.push(search_match);
 
         Ok(true)
     }
@@ -248,11 +216,9 @@ impl Sink for MatchCollector<'_> {
         }
         self.last_seen_line = line_num;
 
-        let line = String::from_utf8_lossy(ctx.bytes())
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_owned();
-        let line = truncate_line(&line, 1000);
+        let line = String::from_utf8_lossy(ctx.bytes());
+        let line = line.trim_end_matches('\n').trim_end_matches('\r');
+        let line = truncate_line(line, 1000);
 
         if self.context_lines > 0 {
             if self.context_before_buf.len() >= self.context_lines {
@@ -276,8 +242,7 @@ impl Sink for MatchCollector<'_> {
     ) -> Result<(), Self::Error> {
         // Flush any remaining after-context into the last match.
         if !self.after_context_buf.is_empty() {
-            let mut guard = lock_or_recover(self.matches);
-            if let Some(last) = guard.last_mut() {
+            if let Some(last) = self.matches.last_mut() {
                 last.context_after = std::mem::take(&mut self.after_context_buf);
             }
         }
@@ -404,9 +369,9 @@ impl Scout for RipgrepScout {
             let matcher = Self::build_matcher(params)?;
             let files = Self::walk_files(params)?;
 
-            let match_buf: Mutex<Vec<SearchMatch>> = Mutex::new(Vec::new());
-            let total_count: Mutex<usize> = Mutex::new(0);
-            let skipped_count: Mutex<usize> = Mutex::new(0);
+            let mut match_buf: Vec<SearchMatch> = Vec::new();
+            let mut total_count: usize = 0;
+            let mut skipped_count: usize = 0;
             let mut truncated = false;
 
             let mut searcher = SearcherBuilder::new()
@@ -416,15 +381,15 @@ impl Scout for RipgrepScout {
                 .build();
 
             for (abs_path, relative) in &files {
-                let matches_before = { lock_or_recover(&match_buf).len() };
+                let matches_before = match_buf.len();
 
                 let mut sink = MatchCollector::new(
                     relative.clone(),
-                    &match_buf,
-                    &total_count,
+                    &mut match_buf,
+                    &mut total_count,
                     params.max_results,
                     params.offset,
-                    &skipped_count,
+                    &mut skipped_count,
                     params.context_lines,
                     &matcher,
                 );
@@ -436,7 +401,7 @@ impl Scout for RipgrepScout {
 
                 // Only hash the file when it produced at least one new match.
                 // This avoids reading every file into memory just to compute a hash.
-                let matches_after = { lock_or_recover(&match_buf).len() };
+                let matches_after = sink.current_match_count();
                 if matches_after > matches_before {
                     let Ok(bytes) = std::fs::read(abs_path) else {
                         tracing::warn!(file = %relative, "Scout: failed to read file for hashing; skipping hash");
@@ -453,9 +418,8 @@ impl Scout for RipgrepScout {
                 }
             }
 
-            // ALLOW: lock is only poisoned on panic from within this function
-            let collected = match_buf.into_inner().unwrap_or_default();
-            let total = total_count.into_inner().unwrap_or_default();
+            let collected = match_buf;
+            let total = total_count;
 
             tracing::debug!(
                 total_matches = total,
@@ -1150,21 +1114,7 @@ mod tests {
 mod missing_coverage_tests {
     use super::*;
     use std::io::Write;
-    use std::sync::Mutex;
 
-    #[test]
-    fn test_lock_or_recover_poisoned() {
-        let mutex = Mutex::new(vec![1, 2, 3]);
-
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = mutex.lock().unwrap();
-            panic!("poisoning");
-        });
-
-        let mut guard = lock_or_recover(&mutex);
-        assert_eq!(*guard, vec![1, 2, 3]);
-        guard.push(4);
-    }
 
     #[tokio::test]
     async fn test_search_match_column_invalid_utf8_prefix() {
