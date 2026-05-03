@@ -114,11 +114,13 @@ pub fn normalize_line_endings(input: &str) -> Cow<'_, str> {
 /// 1. Strip markdown fences
 /// 2. Strip outer braces (for `replace_body`)
 /// 3. Normalize CRLF → LF
+/// 4. Anchor to column 0 (GAP-003: prevent over-indentation for nested blocks)
 #[must_use]
 pub fn normalize_for_body_replace(input: &str) -> String {
     let step1 = strip_markdown_fences(input);
     let step2 = strip_outer_braces(step1);
-    normalize_line_endings(step2).into_owned()
+    let step3 = normalize_line_endings(step2).into_owned();
+    anchor_to_column_zero(&step3)
 }
 
 /// Run input normalizations for tools that do NOT strip outer braces.
@@ -131,6 +133,57 @@ pub fn normalize_for_body_replace(input: &str) -> String {
 pub fn normalize_for_full_replace(input: &str) -> String {
     let step1 = strip_markdown_fences(input);
     normalize_line_endings(step1).into_owned()
+}
+
+/// Strip leading whitespace from the first non-empty line and adjust all
+/// subsequent lines by the same amount. This ensures the code block starts
+/// at column 0 while preserving relative indentation.
+///
+/// # Example
+/// ```
+/// use pathfinder_common::normalize::anchor_to_column_zero;
+/// let input = "    let x = if cond {\n        val1\n    } else {\n        val2\n    }";
+/// let result = anchor_to_column_zero(input);
+/// assert_eq!(result, "let x = if cond {\n    val1\n} else {\n    val2\n}");
+/// ```
+#[must_use]
+pub fn anchor_to_column_zero(code: &str) -> String {
+    // Check if all lines are empty/whitespace
+    let all_empty = code.lines().all(|l| l.trim().is_empty());
+    if all_empty {
+        return String::new();
+    }
+
+    let first_indent = code
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map_or(0, |l| l.len() - l.trim_start().len());
+
+    if first_indent == 0 {
+        return code.to_owned();
+    }
+
+    // Dedent by the first line's indent — this anchors at column 0
+    // while preserving all relative indentation within the block.
+    code.lines()
+        .map(|line| {
+            let expanded = crate::indent::expand_tabs(line);
+            let leading_spaces = expanded.len() - expanded.trim_start().len();
+
+            if expanded.trim().is_empty() {
+                String::new() // blank lines stay blank
+            } else if leading_spaces >= first_indent {
+                // Line has enough leading spaces, dedent by first_indent
+                expanded[first_indent..].to_owned()
+            } else {
+                // Line has fewer leading spaces, preserve its relative position
+                // by keeping it at (leading_spaces) spaces
+                // (it will be to the left of the first line's anchor point)
+                expanded.trim_start().to_owned()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -239,7 +292,9 @@ mod tests {
         let input = "```go\n{ return 42; }\n```";
         let result = normalize_for_body_replace(input);
         // Fence stripped → `{ return 42; }` → outer braces stripped → ` return 42; `
-        assert_eq!(result, " return 42; ");
+        // Then anchor_to_column_zero → strips leading space → `return 42; `
+        // Note: trailing space is preserved from the original input
+        assert_eq!(result, "return 42; ");
     }
 
     #[test]
@@ -254,6 +309,28 @@ mod tests {
         let input = "x := 1\r\nreturn x";
         let result = normalize_for_body_replace(input);
         assert_eq!(result, "x := 1\nreturn x");
+    }
+
+    #[test]
+    fn test_normalize_body_replace_anchors_nested_blocks() {
+        // GAP-003: verify that normalize_for_body_replace anchors code to column 0
+        // before it's passed to dedent_then_reindent, preventing over-indentation.
+        let input = "    let greeting = if name.is_empty() {\n        \"Hello, stranger!\".to_owned()\n    } else {\n        format!(\"Hello, {}!\", name)\n    };\n    greeting";
+        let result = normalize_for_body_replace(input);
+        // After anchoring, the code should start at column 0
+        assert!(
+            result.starts_with("let greeting = if name.is_empty() {"),
+            "code should be anchored at column 0"
+        );
+        // Relative indentation should be preserved (nested content at 4 spaces relative to if)
+        assert!(
+            result.contains("    \"Hello, stranger!\".to_owned()"),
+            "nested content should be at column 4 (relative to if block at column 0)"
+        );
+        assert!(
+            result.contains("} else {"),
+            "else branch should be at column 0"
+        );
     }
 
     // ── L39-40 uncovered branch: closing fence unreachable after lang-tag split ─
@@ -308,4 +385,77 @@ mod tests {
         let result = normalize_for_full_replace(input);
         assert_eq!(result, "func Hello() {}");
     }
+
+    // ── GAP-003: anchor_to_column_zero ───────────────────────────────────────
+
+    #[test]
+    fn test_anchor_to_column_zero_nested_if_else() {
+        // First line starts at column 4, so everything shifts left by 4
+        let input =
+            "    let x = if cond {\n        val1\n    } else {\n        val2\n    };\n    result";
+        let result = anchor_to_column_zero(input);
+        assert!(
+            result.starts_with("let x = if cond {"),
+            "first line should be at column 0"
+        );
+        assert!(
+            result.contains("    val1"),
+            "val1 should be at column 4 (was 8, shifted by 4)"
+        );
+        assert!(
+            result.contains("} else {"),
+            "else branch should be at column 0"
+        );
+        assert!(result.contains("    val2"), "val2 should be at column 4");
+        assert!(
+            result.ends_with("result"),
+            "last line should be at column 0"
+        );
+    }
+
+    #[test]
+    fn test_anchor_preserves_relative_indent() {
+        let input = "    line1\n        nested\n    line3";
+        let result = anchor_to_column_zero(input);
+        assert_eq!(result, "line1\n    nested\nline3");
+    }
+
+    #[test]
+    fn test_anchor_already_at_column_zero_is_noop() {
+        let input = "let x = 1;\nreturn x;";
+        let result = anchor_to_column_zero(input);
+        assert_eq!(result, input, "already at column 0 should be unchanged");
+    }
+
+    #[test]
+    fn test_anchor_empty_string_returns_empty() {
+        let input = "";
+        let result = anchor_to_column_zero(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_anchor_only_whitespace_returns_empty() {
+        let input = "    \n    \n    ";
+        let result = anchor_to_column_zero(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_anchor_blank_lines_preserved() {
+        let input = "    line1\n\n    line2";
+        let result = anchor_to_column_zero(input);
+        assert_eq!(result, "line1\n\nline2", "blank lines should be preserved");
+    }
+
+    #[test]
+    fn test_anchor_mixed_indentation_uses_first_line() {
+        // First line has 4 spaces, so dedent by 4 even though some lines have 0
+        // Lines with fewer spaces than the dedent amount get all leading spaces stripped
+        let input = "    first\nzero\n    third";
+        let result = anchor_to_column_zero(input);
+        assert_eq!(result, "first\nzero\nthird");
+    }
+
+    // ── GAP-003: dedent_by ─────────────────────────────────────────────────────
 }

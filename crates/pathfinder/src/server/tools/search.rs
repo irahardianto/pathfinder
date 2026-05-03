@@ -78,6 +78,7 @@ impl PathfinderServer {
             path_glob: params.path_glob.clone(),
             exclude_glob: params.exclude_glob.clone(),
             max_results: params.max_results as usize,
+            offset: params.offset as usize,
             context_lines: params.context_lines as usize,
         };
 
@@ -173,6 +174,12 @@ impl PathfinderServer {
                     file_groups,
                     degraded,
                     degraded_reason,
+                    next_offset: if result.truncated {
+                        #[allow(clippy::cast_possible_truncation)]
+                        Some(params.offset + (returned_count as u32))
+                    } else {
+                        None
+                    },
                 }))
             }
             Err(err) => {
@@ -393,6 +400,7 @@ mod tests {
             is_regex: false,
             path_glob: "**/*.xyz".to_owned(),
             exclude_glob: String::default(),
+            offset: 0,
             max_results: 10,
             context_lines: 0,
             known_files: vec![],
@@ -475,6 +483,7 @@ mod tests {
             is_regex: false,
             path_glob: "**/*.rs".to_owned(),
             exclude_glob: String::default(),
+            offset: 0,
             max_results: 10,
             context_lines: 0,
             // KEY: file is in known_files + group_by_file: true
@@ -683,6 +692,7 @@ mod tests {
             is_regex: false,
             path_glob: "**/*.xyz".to_owned(),
             exclude_glob: String::default(),
+            offset: 0,
             max_results: 10,
             context_lines: 0,
             known_files: vec![],

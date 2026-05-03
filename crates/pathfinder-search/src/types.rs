@@ -20,6 +20,9 @@ pub struct SearchParams {
     pub exclude_glob: String,
     /// Maximum number of matches to return.
     pub max_results: usize,
+    /// Number of matches to skip before returning results (for pagination).
+    /// Defaults to 0 (start from first match).
+    pub offset: usize,
     /// Lines of surrounding context to include above and below each match.
     pub context_lines: usize,
 }
@@ -33,6 +36,7 @@ impl Default for SearchParams {
             path_glob: "**/*".to_owned(),
             exclude_glob: String::default(),
             max_results: 50,
+            offset: 0,
             context_lines: 2,
         }
     }

@@ -67,6 +67,11 @@ struct MatchCollector<'a> {
     total_count: &'a Mutex<usize>,
     /// Maximum number of matches the caller wants.
     max_results: usize,
+    /// Number of matches to skip before storing (for pagination).
+    offset: usize,
+    /// Global skip counter shared across files — tracks how many matches
+    /// have been skipped so far across all files.
+    skipped_count: &'a Mutex<usize>,
     /// Whether we have already hit the cap.
     truncated: bool,
     /// Context lines to collect *after* the current match.
@@ -82,12 +87,14 @@ struct MatchCollector<'a> {
 }
 
 impl<'a> MatchCollector<'a> {
-    #[allow(clippy::similar_names)]
+    #[allow(clippy::similar_names, clippy::too_many_arguments)]
     fn new(
         relative_path: String,
         matches: &'a Mutex<Vec<SearchMatch>>,
         total_count: &'a Mutex<usize>,
         max_results: usize,
+        offset: usize,
+        skipped_count: &'a Mutex<usize>,
         context_lines: usize,
         matcher: &'a grep_regex::RegexMatcher,
     ) -> Self {
@@ -98,6 +105,8 @@ impl<'a> MatchCollector<'a> {
             matches,
             total_count,
             max_results,
+            offset,
+            skipped_count,
             truncated: false,
             context_lines,
             pending_after_context: 0,
@@ -129,14 +138,40 @@ impl Sink for MatchCollector<'_> {
     type Error = std::io::Error;
 
     fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
-        // Flush pending after-context to the *previous* match (if any).
-        // (grep-searcher delivers CONTEXT_KIND_AFTER before the next match.)
-        // We'll handle this in `context()` instead.
-
-        // Increment total regardless of cap.
+        // Increment total regardless of cap or offset.
         {
             let mut count = lock_or_recover(self.total_count);
             *count += 1;
+        }
+
+        // Skip matches before the offset threshold.
+        // Uses a global counter shared across all files so offset works correctly
+        // across file boundaries.
+        {
+            let mut skipped = lock_or_recover(self.skipped_count);
+            if *skipped < self.offset {
+                *skipped += 1;
+                drop(skipped);
+                // Still track line for context continuity
+                let line = mat.line_number().unwrap_or(0);
+                if line > self.last_seen_line + 1 {
+                    self.context_before_buf.clear();
+                }
+                self.last_seen_line = line;
+                let bytes = mat.bytes();
+                let content = String::from_utf8_lossy(bytes)
+                    .trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_owned();
+                let content = truncate_line(&content, 1000);
+                if self.context_lines > 0 {
+                    if self.context_before_buf.len() >= self.context_lines {
+                        self.context_before_buf.pop_front();
+                    }
+                    self.context_before_buf.push_back(content);
+                }
+                return Ok(true);
+            }
         }
 
         let current = self.current_match_count();
@@ -371,6 +406,7 @@ impl Scout for RipgrepScout {
 
             let match_buf: Mutex<Vec<SearchMatch>> = Mutex::new(Vec::new());
             let total_count: Mutex<usize> = Mutex::new(0);
+            let skipped_count: Mutex<usize> = Mutex::new(0);
             let mut truncated = false;
 
             let mut searcher = SearcherBuilder::new()
@@ -387,6 +423,8 @@ impl Scout for RipgrepScout {
                     &match_buf,
                     &total_count,
                     params.max_results,
+                    params.offset,
+                    &skipped_count,
                     params.context_lines,
                     &matcher,
                 );
@@ -938,6 +976,172 @@ mod tests {
             .expect("search should succeed");
 
         assert_eq!(result.matches[0].known, None);
+    }
+
+    // ── GAP-007: Offset pagination tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_offset_pagination() {
+        let ws = make_workspace(&[
+            ("a.rs", "needle\n"),
+            ("b.rs", "needle\n"),
+            ("c.rs", "needle\n"),
+            ("d.rs", "needle\n"),
+            ("e.rs", "needle\n"),
+            ("f.rs", "needle\n"),
+            ("g.rs", "needle\n"),
+            ("h.rs", "needle\n"),
+            ("i.rs", "needle\n"),
+            ("j.rs", "needle\n"),
+        ]);
+        let scout = RipgrepScout;
+
+        // Page 1: offset=0, max_results=3
+        let p1 = scout
+            .search(&SearchParams {
+                workspace_root: ws.path().to_path_buf(),
+                query: "needle".to_owned(),
+                max_results: 3,
+                offset: 0,
+                ..Default::default()
+            })
+            .await
+            .expect("search should succeed");
+        assert_eq!(p1.matches.len(), 3, "page 1 should have 3 matches");
+        assert!(p1.truncated, "page 1 should be truncated");
+
+        // Page 2: offset=3, max_results=3
+        let p2 = scout
+            .search(&SearchParams {
+                workspace_root: ws.path().to_path_buf(),
+                query: "needle".to_owned(),
+                max_results: 3,
+                offset: 3,
+                ..Default::default()
+            })
+            .await
+            .expect("search should succeed");
+        assert_eq!(p2.matches.len(), 3, "page 2 should have 3 matches");
+        assert!(p2.truncated, "page 2 should be truncated");
+
+        // Verify pages don't overlap (different files)
+        let p1_files: std::collections::HashSet<_> =
+            p1.matches.iter().map(|m| m.file.clone()).collect();
+        let p2_files: std::collections::HashSet<_> =
+            p2.matches.iter().map(|m| m.file.clone()).collect();
+        assert_eq!(
+            p1_files.intersection(&p2_files).count(),
+            0,
+            "pages should not overlap"
+        );
+
+        // Page 3: offset=6, max_results=3
+        let p3 = scout
+            .search(&SearchParams {
+                workspace_root: ws.path().to_path_buf(),
+                query: "needle".to_owned(),
+                max_results: 3,
+                offset: 6,
+                ..Default::default()
+            })
+            .await
+            .expect("search should succeed");
+        assert_eq!(p3.matches.len(), 3, "page 3 should have 3 matches");
+        assert!(p3.truncated, "page 3 should be truncated");
+
+        // Page 4: offset=9, max_results=3
+        let p4 = scout
+            .search(&SearchParams {
+                workspace_root: ws.path().to_path_buf(),
+                query: "needle".to_owned(),
+                max_results: 3,
+                offset: 9,
+                ..Default::default()
+            })
+            .await
+            .expect("search should succeed");
+        assert_eq!(p4.matches.len(), 1, "page 4 should have 1 match");
+        assert!(!p4.truncated, "page 4 should not be truncated");
+
+        // Verify all 10 files were covered across pages
+        let all_files: std::collections::HashSet<_> = p1
+            .matches
+            .iter()
+            .chain(p2.matches.iter())
+            .chain(p3.matches.iter())
+            .chain(p4.matches.iter())
+            .map(|m| m.file.clone())
+            .collect();
+        assert_eq!(
+            all_files.len(),
+            10,
+            "all 10 files should be covered by pagination"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_offset_beyond_results() {
+        let ws = make_workspace(&[
+            ("a.rs", "needle\n"),
+            ("b.rs", "needle\n"),
+            ("c.rs", "needle\n"),
+            ("d.rs", "needle\n"),
+            ("e.rs", "needle\n"),
+        ]);
+        let scout = RipgrepScout;
+        let result = scout
+            .search(&SearchParams {
+                workspace_root: ws.path().to_path_buf(),
+                query: "needle".to_owned(),
+                max_results: 50,
+                offset: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("search should succeed");
+        assert_eq!(
+            result.matches.len(),
+            0,
+            "offset beyond results should be empty"
+        );
+        assert_eq!(
+            result.total_matches, 5,
+            "total_matches should still report 5"
+        );
+        assert!(!result.truncated, "should not be truncated");
+    }
+
+    #[tokio::test]
+    async fn test_search_offset_with_truncation() {
+        let ws = make_workspace(&[
+            ("a.rs", "needle\n"),
+            ("b.rs", "needle\n"),
+            ("c.rs", "needle\n"),
+            ("d.rs", "needle\n"),
+            ("e.rs", "needle\n"),
+            ("f.rs", "needle\n"),
+            ("g.rs", "needle\n"),
+            ("h.rs", "needle\n"),
+        ]);
+        let scout = RipgrepScout;
+        let result = scout
+            .search(&SearchParams {
+                workspace_root: ws.path().to_path_buf(),
+                query: "needle".to_owned(),
+                max_results: 3,
+                offset: 0,
+                ..Default::default()
+            })
+            .await
+            .expect("search should succeed");
+        assert_eq!(result.matches.len(), 3);
+        assert!(result.truncated);
+        // total_matches includes the match that triggered truncation but not remaining files
+        assert!(
+            result.total_matches >= 4,
+            "total_matches should include at least 4: {}",
+            result.total_matches
+        );
     }
 }
 

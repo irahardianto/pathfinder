@@ -55,6 +55,10 @@ pub struct SearchCodebaseParams {
     /// never read. Can be combined with `path_glob` include patterns.
     #[serde(default)]
     pub exclude_glob: String,
+    /// Number of matches to skip before returning results (for pagination).
+    /// Use with `max_results` to page through large result sets.
+    #[serde(default)]
+    pub offset: u32,
 }
 
 /// Parameters for `get_repo_map`.
@@ -387,6 +391,10 @@ pub struct SearchCodebaseResponse {
     /// Reason for degradation, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
+    /// When results are truncated, this field provides the `offset` value
+    /// to use for the next page of results. Absent when not truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u32>,
 }
 
 /// A minimal match entry for files already in the agent's context (`known_files`)
@@ -593,6 +601,9 @@ pub struct EditResponse {
     /// Machine-readable reason why validation was skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation_skipped_reason: Option<String>,
+    /// Warning about the edit operation (e.g., targeting a Rust struct instead of impl block).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// The result of LSP validation for an edit operation.

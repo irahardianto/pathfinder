@@ -888,7 +888,17 @@ async fn test_delete_symbol_cross_file_reference_warning() {
 
     let hash = VersionHash::compute(auth_src.as_bytes());
     let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
-    let server = make_server_dyn(&ws_dir, real_surgeon);
+    let ws = pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).unwrap();
+    let config = pathfinder_common::config::PathfinderConfig::default();
+    let sandbox = pathfinder_common::sandbox::Sandbox::new(ws.path(), &config.sandbox);
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        std::sync::Arc::new(pathfinder_search::RipgrepScout),
+        real_surgeon,
+        std::sync::Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
 
     // 1. Without override — should be blocked (Login is referenced in main.go)
     let params = DeleteSymbolParams {
@@ -941,4 +951,148 @@ async fn test_delete_symbol_cross_file_reference_warning() {
 
     // main_abs exists to set up the cross-file reference; not read post-test.
     let _ = main_abs;
+}
+
+// ── GAP-006: Warn when insert_into targets a Rust struct ───────────
+
+// ── GAP-006: Warn when insert_into targets a Rust struct ───────────
+
+#[tokio::test]
+async fn test_insert_into_rust_struct_includes_warning() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    // Write a Rust file with a struct
+    let src = "pub struct Calculator {\n    pub last_result: i32,\n}\n";
+    let filepath = "src/calc.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).unwrap(),
+        pathfinder_common::config::PathfinderConfig::default(),
+        pathfinder_common::sandbox::Sandbox::new(
+            ws_dir.path(),
+            &pathfinder_common::config::PathfinderConfig::default().sandbox,
+        ),
+        std::sync::Arc::new(pathfinder_search::RipgrepScout),
+        std::sync::Arc::new(TreeSitterSurgeon::new(10)),
+        std::sync::Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::Calculator"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "    pub fn reset(&mut self) { self.last_result = 0; }".to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("insert_into should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+    assert!(
+        result.0.warning.is_some(),
+        "should include warning for Rust struct target"
+    );
+    let warning = result.0.warning.unwrap();
+    assert!(
+        warning.contains("impl"),
+        "warning should mention impl blocks: {warning}"
+    );
+}
+
+#[tokio::test]
+async fn test_insert_into_non_rust_no_warning() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    // Write a TypeScript file with a class
+    let src = "class Calculator {\n    result: number = 0;\n}\n";
+    let filepath = "src/calc.ts";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).unwrap(),
+        pathfinder_common::config::PathfinderConfig::default(),
+        pathfinder_common::sandbox::Sandbox::new(
+            ws_dir.path(),
+            &pathfinder_common::config::PathfinderConfig::default().sandbox,
+        ),
+        std::sync::Arc::new(pathfinder_search::RipgrepScout),
+        std::sync::Arc::new(TreeSitterSurgeon::new(10)),
+        std::sync::Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::Calculator"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "    reset() { this.result = 0; }".to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("insert_into should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+    assert!(
+        result.0.warning.is_none(),
+        "non-Rust file should not produce struct warning"
+    );
+}
+
+#[tokio::test]
+async fn test_insert_into_rust_impl_no_warning() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    // Write a Rust file with an impl block
+    let src = "pub struct Calc {}\nimpl Calc {\n    pub fn add(&self) {}\n}\n";
+    let filepath = "src/calc.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).unwrap(),
+        pathfinder_common::config::PathfinderConfig::default(),
+        pathfinder_common::sandbox::Sandbox::new(
+            ws_dir.path(),
+            &pathfinder_common::config::PathfinderConfig::default().sandbox,
+        ),
+        std::sync::Arc::new(pathfinder_search::RipgrepScout),
+        std::sync::Arc::new(TreeSitterSurgeon::new(10)),
+        std::sync::Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::impl Calc"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "    pub fn reset(&mut self) { }".to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("insert_into should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+    assert!(
+        result.0.warning.is_none(),
+        "impl block target should not produce struct warning"
+    );
 }

@@ -38,6 +38,7 @@ pub(crate) struct FinalizeEditParams<'a> {
     ignore_validation_failures: bool,
     start_time: std::time::Instant,
     resolve_ms: u128,
+    warning: Option<String>,
 }
 
 /// Selects which end of a resolved symbol range is used as the insertion point.

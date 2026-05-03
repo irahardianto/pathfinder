@@ -477,6 +477,7 @@ impl crate::server::PathfinderServer {
             validation: validation_outcome.validation,
             validation_skipped: validation_outcome.skipped,
             validation_skipped_reason: validation_outcome.skipped_reason,
+            warning: params.warning,
         }))
     }
 }

@@ -182,6 +182,7 @@ impl PathfinderError {
     /// `SYMBOL_NOT_FOUND` hints are dynamic and built from the `did_you_mean` suggestions.
     /// All other hints are static strings referencing specific Pathfinder tools.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn hint(&self) -> Option<String> {
         match self {
             Self::SymbolNotFound { did_you_mean, .. } => {
@@ -250,6 +251,38 @@ impl PathfinderError {
                 "Path traversal is not allowed. Use a relative path without '..' components or absolute paths."
                     .to_owned(),
             ),
+            Self::LspError { message } => {
+                let hint = if message.contains("timed out") || message.contains("timeout") {
+                    format!(
+                        "LSP timed out. The language server may still be indexing, under memory pressure, or deadlocked. \
+                         Workaround: use search_codebase + read_symbol_scope (tree-sitter) instead of \
+                         LSP-dependent tools (get_definition, analyze_impact, read_with_deep_context). \
+                         Original error: {message}"
+                    )
+                } else if message.contains("connection lost") || message.contains("crashed") {
+                    format!(
+                        "LSP process crashed or disconnected. Pathfinder will attempt to restart it. \
+                         Workaround: use tree-sitter-based tools (search_codebase, read_symbol_scope, read_source_file). \
+                         Original error: {message}"
+                    )
+                } else {
+                    format!(
+                        "LSP error: {message}. Workaround: use search_codebase for text-based navigation \
+                         or check lsp_health for current status."
+                    )
+                };
+                Some(hint)
+            }
+            Self::LspTimeout { timeout_ms } => Some(format!(
+                "LSP timed out after {timeout_ms}ms. The language server may still be indexing, under memory pressure, or deadlocked. \
+                 Workaround: use search_codebase + read_symbol_scope (tree-sitter) instead of \
+                 LSP-dependent tools (get_definition, analyze_impact, read_with_deep_context). \
+                 Check lsp_health for current status."
+            )),
+            Self::NoLspAvailable { language } => Some(format!(
+                "No LSP available for {language}. Install a language server to enable LSP-dependent features. \
+                 Tree-sitter tools (read_symbol_scope, search_codebase, read_source_file) still work without LSP."
+            )),
             _ => None,
         }
     }
@@ -482,6 +515,95 @@ mod tests {
     fn test_hint_file_already_exists() {
         let err = PathfinderError::FileAlreadyExists { path: "a".into() };
         assert!(err.hint().is_none());
+    }
+
+    // ── GAP-008: LSP error hints ────────────────────────────────────
+
+    #[test]
+    fn test_lsp_error_hint_timeout_includes_workaround() {
+        let err = PathfinderError::LspError {
+            message: "LSP timed out on 'textDocument/definition' after 10000ms".to_owned(),
+        };
+        let hint = err.hint().expect("LspError should have a hint");
+        assert!(
+            hint.contains("search_codebase"),
+            "hint should mention search_codebase: {hint}"
+        );
+        assert!(
+            hint.contains("tree-sitter"),
+            "hint should mention tree-sitter: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_lsp_error_hint_connection_lost() {
+        let err = PathfinderError::LspError {
+            message: "connection lost to language server".to_owned(),
+        };
+        let hint = err.hint().expect("LspError should have a hint");
+        assert!(
+            hint.contains("crashed or disconnected"),
+            "hint should mention crash: {hint}"
+        );
+        assert!(
+            hint.contains("read_source_file"),
+            "hint should mention tree-sitter tools: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_lsp_error_hint_generic() {
+        let err = PathfinderError::LspError {
+            message: "unexpected internal error".to_owned(),
+        };
+        let hint = err.hint().expect("LspError should have a hint");
+        assert!(
+            hint.contains("search_codebase"),
+            "hint should mention search_codebase: {hint}"
+        );
+        assert!(
+            hint.contains("lsp_health"),
+            "hint should mention lsp_health: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_lsp_timeout_hint_includes_workaround() {
+        let err = PathfinderError::LspTimeout { timeout_ms: 10000 };
+        let hint = err.hint().expect("LspTimeout should have a hint");
+        assert!(
+            hint.contains("10000ms"),
+            "hint should include timeout duration: {hint}"
+        );
+        assert!(
+            hint.contains("search_codebase"),
+            "hint should mention search_codebase: {hint}"
+        );
+        assert!(
+            hint.contains("tree-sitter"),
+            "hint should mention tree-sitter: {hint}"
+        );
+        assert!(
+            hint.contains("lsp_health"),
+            "hint should mention lsp_health: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_no_lsp_hint_mentions_tree_sitter() {
+        let err = PathfinderError::NoLspAvailable {
+            language: "go".to_owned(),
+        };
+        let hint = err.hint().expect("NoLspAvailable should have a hint");
+        assert!(hint.contains("go"), "hint should mention language: {hint}");
+        assert!(
+            hint.to_lowercase().contains("tree-sitter"),
+            "hint should mention tree-sitter: {hint}"
+        );
+        assert!(
+            hint.contains("read_symbol_scope"),
+            "hint should mention read_symbol_scope: {hint}"
+        );
     }
 
     #[test]

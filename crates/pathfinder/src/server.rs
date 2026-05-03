@@ -18,32 +18,46 @@ const PROBE_NEGATIVE_TTL_SECS: u64 = 60;
 
 /// A cached probe result with optional expiry for negative entries.
 ///
-/// Positive entries (success) are cached indefinitely.
+/// Positive entries (success) are cached indefinitely for liveness re-probe.
 /// Negative entries (failure) expire after `PROBE_NEGATIVE_TTL_SECS` to allow
 /// an LSP that was still starting to be re-probed later.
 #[derive(Clone)]
 pub(crate) struct ProbeCacheEntry {
     /// Whether the probe succeeded.
     pub(crate) success: bool,
-    /// When this entry was created. Used to check TTL for negative entries.
-    pub(crate) cached_at: std::time::Instant,
+    /// When this entry was created. Used to check TTL for negative entries and age for liveness re-probe.
+    pub(crate) created_at: std::time::Instant,
+    /// Optional TTL for expiration (negative entries only). Positive entries use age-based re-probe.
+    pub(crate) ttl: Option<std::time::Duration>,
 }
 
 impl ProbeCacheEntry {
     pub(crate) fn new(success: bool) -> Self {
         Self {
             success,
-            cached_at: std::time::Instant::now(),
+            created_at: std::time::Instant::now(),
+            ttl: if success {
+                None // Positive entries: use age-based re-probe instead of expiry
+            } else {
+                Some(std::time::Duration::from_secs(PROBE_NEGATIVE_TTL_SECS))
+            },
         }
     }
 
     /// Returns true if this entry is still valid.
-    /// Positive entries never expire. Negative entries expire after `PROBE_NEGATIVE_TTL_SECS`.
+    /// Positive entries never expire (liveness re-probe handles staleness).
+    /// Negative entries expire after `PROBE_NEGATIVE_TTL_SECS`.
     pub(crate) fn is_valid(&self) -> bool {
-        if self.success {
-            return true;
+        match self.ttl {
+            Some(ttl) => self.created_at.elapsed() < ttl,
+            None => true, // Positive entries never expire (liveness re-probe handles staleness)
         }
-        self.cached_at.elapsed().as_secs() < PROBE_NEGATIVE_TTL_SECS
+    }
+
+    /// How old is this cache entry in seconds?
+    /// Used by liveness probe to determine when to re-probe "ready" languages.
+    pub(crate) fn age_secs(&self) -> u64 {
+        self.created_at.elapsed().as_secs()
     }
 }
 
@@ -1149,7 +1163,13 @@ mod tests {
         let rmcp::model::RawContent::Text(t) = &val.content[0].raw else {
             panic!("Expected text content");
         };
-        assert_eq!(t.text, expected_scope.content);
+        // After GAP-004, the text content includes a version_hash footer
+        let expected_text = format!(
+            "{}\n---\nversion_hash: {}",
+            expected_scope.content,
+            expected_scope.version_hash.short()
+        );
+        assert_eq!(t.text, expected_text);
 
         let metadata: crate::server::types::ReadSymbolScopeMetadata =
             serde_json::from_value(val.structured_content.expect("missing structured_content"))

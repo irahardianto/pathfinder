@@ -420,6 +420,7 @@ impl crate::server::PathfinderServer {
             ignore_validation_failures: params.ignore_validation_failures,
             start_time: start,
             resolve_ms,
+            warning: None,
         })
         .await
     }

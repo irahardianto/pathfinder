@@ -10,7 +10,7 @@
 ///
 /// Each `\t` is replaced with spaces to advance to the next multiple of 4.
 /// This normalises mixed whitespace before measuring byte-based indentation.
-fn expand_tabs(s: &str) -> String {
+pub(crate) fn expand_tabs(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut col = 0usize;
     for ch in s.chars() {

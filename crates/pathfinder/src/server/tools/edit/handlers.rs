@@ -84,6 +84,7 @@ impl crate::server::PathfinderServer {
             ignore_validation_failures: params.ignore_validation_failures,
             start_time: start,
             resolve_ms,
+            warning: None,
         })
         .await
     }
@@ -154,6 +155,7 @@ impl crate::server::PathfinderServer {
             new_content: new_bytes,
             ignore_validation_failures: params.ignore_validation_failures,
             start_time: start,
+            warning: None,
             resolve_ms,
         })
         .await
@@ -204,6 +206,7 @@ impl crate::server::PathfinderServer {
             original_hash: &current_hash,
             new_content: new_bytes,
             ignore_validation_failures: params.ignore_validation_failures,
+            warning: None,
             start_time: start,
             resolve_ms,
         })
@@ -254,6 +257,7 @@ impl crate::server::PathfinderServer {
             source: &source,
             original_hash: &current_hash,
             new_content: new_bytes,
+            warning: None,
             ignore_validation_failures: params.ignore_validation_failures,
             start_time: start,
             resolve_ms,
@@ -298,6 +302,29 @@ impl crate::server::PathfinderServer {
             semantic_path.file_path.clone(),
         )?;
 
+        // GAP-006: Warn when insert_into targets a Rust struct.
+        // Methods should go in impl blocks, not struct bodies.
+        let is_rust_struct_target = semantic_path
+            .file_path
+            .extension()
+            .is_some_and(|ext| ext == "rs")
+            && !params.semantic_path.contains("impl ");
+        let warning = if is_rust_struct_target {
+            tracing::warn!(
+                tool = "insert_into",
+                semantic_path = %params.semantic_path,
+                "insert_into targeting a Rust struct — methods should go in an impl block"
+            );
+            Some(
+                "Target appears to be a Rust struct. Methods should be inserted into \
+                 an impl block (e.g., 'file.rs::impl MyStruct'), not the struct body. \
+                 Structs contain fields; methods belong in impl blocks."
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+
         let resolve_ms = start.elapsed().as_millis();
         self.finalize_edit(FinalizeEditParams {
             tool_name: "insert_into",
@@ -305,6 +332,7 @@ impl crate::server::PathfinderServer {
             raw_semantic_path_str: &params.semantic_path,
             source: &source,
             original_hash: &current_hash,
+            warning,
             new_content: new_bytes,
             ignore_validation_failures: params.ignore_validation_failures,
             start_time: start,
@@ -382,67 +410,53 @@ impl crate::server::PathfinderServer {
         // P2-1: Cross-File Reference Warning.
         //
         // Before deleting, check whether the symbol is still referenced elsewhere in the
-        // workspace. We use `rg -l -w <name>` as a fast heuristic. False positives are
-        // possible (e.g., identically-named symbols in unrelated code), but false negatives
-        // are not — which is the safe direction.
+        // workspace. We use the scout search infrastructure (ripgrep + tree-sitter enrichment)
+        // to find cross-file references. This avoids false positives from raw `rg -w` which
+        // would match the symbol name in comments, imports, and type annotations.
         //
         // The agent can bypass this check with `ignore_validation_failures: true`.
         if !params.ignore_validation_failures {
             if let Some(symbol_chain) = &semantic_path.symbol_chain {
                 if let Some(symbol) = symbol_chain.segments.last() {
                     let symbol_name = &symbol.name;
-                    let workspace_path = self.workspace_root.path().to_string_lossy().to_string();
 
-                    // Resolve the target file to an absolute path so we can exclude it
-                    // from the rg results reliably (relative path suffix matching is fragile).
-                    let absolute_target = self
-                        .workspace_root
-                        .path()
-                        .join(&semantic_path.file_path)
-                        .to_string_lossy()
-                        .to_string();
+                    let search_result = self
+                        .scout
+                        .search(&pathfinder_search::SearchParams {
+                            workspace_root: self.workspace_root.path().to_path_buf(),
+                            query: symbol_name.clone(),
+                            is_regex: false,
+                            path_glob: "**/*".to_owned(),
+                            exclude_glob: String::default(),
+                            max_results: 50,
+                            offset: 0,
+                            context_lines: 0,
+                        })
+                        .await;
 
-                    let mut cmd = tokio::process::Command::new("rg");
-                    cmd.arg("-l")
-                        .arg("-w")
-                        .arg("--")
-                        .arg(symbol_name)
-                        .arg(&workspace_path)
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::null());
+                    if let Ok(result) = search_result {
+                        // Filter out matches in the target file (its own definition
+                        // is not a "cross-file reference").
+                        let target_file = semantic_path.file_path.to_string_lossy().to_string();
+                        let reference_count = result
+                            .matches
+                            .iter()
+                            .filter(|m| m.file != target_file)
+                            .count();
 
-                    if let Ok(out) = cmd.output().await {
-                        if out.status.success() {
-                            let stdout = String::from_utf8_lossy(&out.stdout);
-                            let mut reference_count = 0u32;
-
-                            for line in stdout.lines() {
-                                let line = line.trim();
-                                if line.is_empty() {
-                                    continue;
-                                }
-                                // Exclude the file being deleted — its own definition
-                                // is not a "cross-file reference".
-                                if line != absolute_target {
-                                    reference_count += 1;
-                                }
-                            }
-
-                            if reference_count > 0 {
-                                let err =
-                                    pathfinder_common::error::PathfinderError::InvalidTarget {
-                                        semantic_path: params.semantic_path.clone(),
-                                        reason: format!(
-                                            "Symbol '{symbol_name}' is still referenced in \
+                        if reference_count > 0 {
+                            let err = pathfinder_common::error::PathfinderError::InvalidTarget {
+                                semantic_path: params.semantic_path.clone(),
+                                reason: format!(
+                                    "Symbol '{symbol_name}' is still referenced in \
                                          {reference_count} other file(s). Delete or update \
                                          those references first, or pass \
                                          'ignore_validation_failures: true' to force deletion."
-                                        ),
-                                        edit_index: None,
-                                        valid_edit_types: None,
-                                    };
-                                return Err(crate::server::helpers::pathfinder_to_error_data(&err));
-                            }
+                                ),
+                                edit_index: None,
+                                valid_edit_types: None,
+                            };
+                            return Err(crate::server::helpers::pathfinder_to_error_data(&err));
                         }
                     }
                 }
@@ -461,6 +475,7 @@ impl crate::server::PathfinderServer {
             semantic_path: &semantic_path,
             raw_semantic_path_str: &params.semantic_path,
             source: &source,
+            warning: None,
             original_hash: &current_hash,
             new_content: new_bytes,
             ignore_validation_failures: params.ignore_validation_failures,
@@ -535,6 +550,7 @@ impl crate::server::PathfinderServer {
             validation: validation_outcome.validation,
             validation_skipped: validation_outcome.skipped,
             validation_skipped_reason: validation_outcome.skipped_reason,
+            warning: None,
         }))
     }
 
