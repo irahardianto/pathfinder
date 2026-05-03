@@ -4,10 +4,11 @@
 //! Processes are started lazily on first use and terminated automatically
 //! after an idle timeout.
 //!
-//! # Crash Recovery (PRD §6.3)
+//! # Crash Recovery
 //! When a crash is detected the client restarts the process with exponential
-//! back-off (1s → 2s → 4s, 3 attempts). After 3 failures the language is
-//! marked `LSP_UNAVAILABLE` and all subsequent calls degrade gracefully.
+//! back-off capped at 60 seconds (1s → 2s → 4s → … → 60s). The process
+//! is never permanently marked unavailable — each backoff window is computed
+//! from `backoff_attempt` so recovery is always attempted.
 
 mod capabilities;
 mod detect;
@@ -44,12 +45,10 @@ use url::Url;
 
 /// Default idle timeout: 15 minutes for standard LSPs.
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(15);
-/// Maximum restart attempts before marking a language as unavailable.
-const MAX_RESTART_ATTEMPTS: u32 = 3;
+/// Maximum exponential backoff cap: never wait longer than 60 seconds between retries.
+const MAX_BACKOFF_SECS: u64 = 60;
 /// Grace period between idle checks.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_mins(1);
-/// Recovery cooldown: time to wait before retrying a permanently unavailable LSP.
-const RECOVERY_COOLDOWN: Duration = Duration::from_mins(5);
 
 struct LanguageState {
     /// The running LSP process.
@@ -71,10 +70,16 @@ struct LanguageState {
     indexing_complete: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Marks a language as permanently unavailable after repeated crashes.
+/// Tracks backoff state for a language whose last spawn attempt failed.
+///
+/// The language is never permanently dead — `ensure_process` will retry once
+/// the exponential backoff window has elapsed.
 struct UnavailableState {
-    /// When this language was marked unavailable (for cooldown recovery).
+    /// When this language last failed to start (start of current backoff window).
     unavailable_since: Instant,
+    /// Number of consecutive failed spawn attempts. Used to compute backoff:
+    /// `min(1 << backoff_attempt, MAX_BACKOFF_SECS)` seconds.
+    backoff_attempt: u32,
 }
 
 enum ProcessEntry {
@@ -205,6 +210,58 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// RAII guard that automatically sends `textDocument/didClose` when dropped.
+///
+/// # IW-3 DocumentGuard
+///
+/// Wraps a `did_open` call and ensures the corresponding `did_close` is always
+/// sent, even if the caller panics or returns early. This eliminates the class
+/// of document-leak bugs where `did_close` is forgotten after an early return.
+///
+/// ## Usage
+///
+/// ```ignore
+/// let _guard = client.open_document(&workspace, &file_path, &content).await?;
+/// // do LSP work…
+/// // `_guard` drops here → `did_close` sent automatically
+/// ```
+///
+/// The guard is `!Send` because it holds a reference to the `LspClient` arc
+/// for the async drop helper. All LSP operations are `async`, so the drop
+/// itself is fire-and-forget (it spawns a task internally).
+pub struct DocumentGuard {
+    client: LspClient,
+    workspace_root: std::path::PathBuf,
+    file_path: std::path::PathBuf,
+}
+
+impl DocumentGuard {
+    fn new(
+        client: LspClient,
+        workspace_root: std::path::PathBuf,
+        file_path: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            client,
+            workspace_root,
+            file_path,
+        }
+    }
+}
+
+impl Drop for DocumentGuard {
+    fn drop(&mut self) {
+        // Fire-and-forget `did_close`. We cannot `.await` in `Drop`, so we
+        // spawn a detached task. If the runtime is already shutting down this
+        // is a no-op — acceptable during process exit.
+        let client = self.client.clone();
+        let workspace = self.workspace_root.clone();
+        let path = self.file_path.clone();
+        tokio::spawn(async move {
+            let _ = client.did_close(&workspace, &path).await;
+        });
+    }
+}
 /// The production `Lawyer` implementation.
 ///
 /// Manages per-language LSP child processes and provides JSON-RPC request
@@ -225,6 +282,13 @@ pub struct LspClient {
     dispatcher: Arc<RequestDispatcher>,
     /// Broadcast channel for shutdown signals.
     shutdown_tx: Arc<broadcast::Sender<()>>,
+    /// Per-file document version counter (ST-4).
+    ///
+    /// Keyed by the file URI string. `did_open` sets version 1; `did_change`
+    /// atomically increments it. `did_close` removes the entry.
+    /// This avoids hardcoded version numbers (1, 2, 3) that conflict under
+    /// concurrent operations on the same file.
+    doc_versions: Arc<DashMap<String, std::sync::atomic::AtomicI32>>,
 }
 
 impl LspClient {
@@ -260,6 +324,7 @@ impl LspClient {
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::clone(&shutdown_tx),
+            doc_versions: Arc::new(DashMap::new()),
         };
 
         // Spawn idle-timeout background task
@@ -328,32 +393,91 @@ impl LspClient {
     pub fn shutdown(&self) {
         tracing::info!("LspClient: shutdown requested");
         let _ = self.shutdown_tx.send(());
+    }    /// Open a document and return a `DocumentGuard` that auto-closes it.
+    ///
+    /// # IW-3
+    ///
+    /// This is the preferred way to open documents for transient LSP queries.
+    /// The returned guard calls `did_close` when it goes out of scope, ensuring
+    /// no document leaks regardless of early returns or panics.
+    ///
+    /// # Errors
+    /// Returns `Err` if `did_open` fails (process not running, I/O error, etc.).
+    pub async fn open_document(
+        &self,
+        workspace_root: &std::path::Path,
+        file_path: &std::path::Path,
+        content: &str,
+    ) -> Result<DocumentGuard, LspError> {
+        self.did_open(workspace_root, file_path, content).await?;
+        Ok(DocumentGuard::new(
+            self.clone(),
+            workspace_root.to_path_buf(),
+            file_path.to_path_buf(),
+        ))
+    }
+
+    /// Force-respawn the LSP process for the given language.
+    ///
+    /// # IW-4
+    ///
+    /// Removes any existing `Running` or `Unavailable` entry for `language_id`
+    /// and triggers a fresh spawn. The old process is **not** gracefully shut
+    /// down — use this only when the process is believed to be stuck.
+    ///
+    /// Returns `Ok(())` when the new process successfully initializes.
+    /// Returns `Err(LspError::NoLspAvailable)` if no descriptor is registered.
+    pub async fn force_respawn(&self, language_id: &str) -> Result<(), LspError> {
+        tracing::info!(language = %language_id, "LspClient: force_respawn requested");
+
+        // Find the descriptor before removing the entry (borrow checker)
+        let descriptor = self
+            .descriptors
+            .iter()
+            .find(|d| d.language_id == language_id)
+            .ok_or(LspError::NoLspAvailable)?
+            .clone();
+
+        // Remove existing entry (Running or Unavailable)
+        self.processes.remove(language_id);
+
+        // Spawn fresh at attempt 0 (no backoff delay)
+        self.start_process(descriptor, 0).await
     }
 
     /// Ensure an LSP process is running for `language_id`, starting it if needed.
     ///
-    /// Returns `Err(LspError::NoLspAvailable)` if:
-    /// - No descriptor found for this language
-    /// - The language has been marked unavailable after repeated crashes
+    /// Returns `Err(LspError::NoLspAvailable)` if no descriptor is found for
+    /// this language. If a previous spawn failed, retries once the exponential
+    /// backoff window (`min(2^attempt, 60)` seconds) has elapsed.
     async fn ensure_process(&self, language_id: &str) -> Result<(), LspError> {
         // Fast path: already running
         if let Some(entry) = self.processes.get(language_id) {
             return match entry.value() {
                 ProcessEntry::Running(_) => Ok(()),
                 ProcessEntry::Unavailable(state) => {
-                    // Check if cooldown has elapsed for recovery
-                    let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
-                    if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
-                        // Attempt recovery: remove unavailable entry and proceed to spawn
+                    // ST-1: Compute backoff window from attempt count (capped at MAX_BACKOFF_SECS)
+                    let backoff_secs =
+                        std::cmp::min(1u64 << state.backoff_attempt, MAX_BACKOFF_SECS);
+                    let elapsed_secs = state.unavailable_since.elapsed().as_secs();
+                    if elapsed_secs >= backoff_secs {
+                        // Backoff window elapsed — attempt recovery
                         drop(entry);
                         tracing::info!(
                             language = %language_id,
-                            cooldown_elapsed_secs,
-                            "LSP: recovery cooldown elapsed, attempting restart"
+                            backoff_secs,
+                            elapsed_secs,
+                            "LSP: backoff elapsed, attempting recovery"
                         );
                         self.processes.remove(language_id);
                         Ok(())
                     } else {
+                        tracing::debug!(
+                            language = %language_id,
+                            backoff_secs,
+                            elapsed_secs,
+                            "LSP: in backoff window, returning NoLspAvailable"
+                        );
                         Err(LspError::NoLspAvailable)
                     }
                 }
@@ -375,15 +499,16 @@ impl LspClient {
             return match entry.value() {
                 ProcessEntry::Running(_) => Ok(()),
                 ProcessEntry::Unavailable(state) => {
-                    // Check if cooldown has elapsed for recovery
-                    let cooldown_elapsed_secs = state.unavailable_since.elapsed().as_secs();
-                    if state.unavailable_since.elapsed() > RECOVERY_COOLDOWN {
-                        // Attempt recovery: remove unavailable entry and proceed to spawn
+                    let backoff_secs =
+                        std::cmp::min(1u64 << state.backoff_attempt, MAX_BACKOFF_SECS);
+                    let elapsed_secs = state.unavailable_since.elapsed().as_secs();
+                    if elapsed_secs >= backoff_secs {
                         drop(entry);
                         tracing::info!(
                             language = %language_id,
-                            cooldown_elapsed_secs,
-                            "LSP: recovery cooldown elapsed, attempting restart"
+                            backoff_secs,
+                            elapsed_secs,
+                            "LSP: backoff elapsed (post-lock check), attempting recovery"
                         );
                         self.processes.remove(language_id);
                         Ok(())
@@ -402,7 +527,7 @@ impl LspClient {
             .ok_or(LspError::NoLspAvailable)?
             .clone();
 
-        // Spawn the process
+        // Spawn the process (attempt 0 = first try, no backoff delay)
         self.start_process(descriptor, 0).await
     }
 
@@ -440,23 +565,11 @@ impl LspClient {
     async fn start_process(&self, descriptor: LspDescriptor, attempt: u32) -> Result<(), LspError> {
         let language_id = descriptor.language_id.clone();
 
-        if attempt >= MAX_RESTART_ATTEMPTS {
-            tracing::error!(
-                language = %language_id,
-                "LSP: max restart attempts reached, marking unavailable"
-            );
-            self.processes.insert(
-                language_id.clone(),
-                ProcessEntry::Unavailable(UnavailableState {
-                    unavailable_since: Instant::now(),
-                }),
-            );
-            return Err(LspError::NoLspAvailable);
-        }
-
-        // Exponential backoff: 1s, 2s, 4s
+        // ST-1: No upper limit on attempts. On failure, insert Unavailable
+        // with backoff_attempt = attempt + 1 and return. ensure_process will
+        // re-enter once the backoff window elapses — no permanent death.
         if attempt > 0 {
-            let delay = Duration::from_secs(1u64 << (attempt - 1));
+            let delay = Duration::from_secs(std::cmp::min(1u64 << (attempt - 1), MAX_BACKOFF_SECS));
             tracing::info!(
                 language = %language_id,
                 attempt,
@@ -476,6 +589,7 @@ impl LspClient {
         let isolate_target_dir = self.detect_concurrent_lsp(&language_id, &descriptor.command);
 
         let plugins = descriptor.auto_plugins.clone();
+        let python_path = descriptor.python_path.clone();
         let spawn_result = spawn_and_initialize(
             &descriptor.command,
             &descriptor.args,
@@ -485,33 +599,32 @@ impl LspClient {
             descriptor.init_timeout_secs,
             isolate_target_dir,
             plugins,
+            python_path,
         )
         .await;
 
         let (process, reader_handle) = match spawn_result {
             Ok(res) => res,
             Err(e) => {
+                // ST-1: Record failure with incremented backoff_attempt.
+                // ensure_process uses this to compute the next retry window.
+                let next_attempt = attempt.saturating_add(1);
+                let next_backoff_secs = std::cmp::min(1u64 << next_attempt, MAX_BACKOFF_SECS);
                 tracing::error!(
                     language = %language_id,
                     error = %e,
                     attempt,
-                    "LSP: initialization failed — retrying"
+                    next_backoff_secs,
+                    "LSP: initialization failed — will retry after backoff"
                 );
-                // On recovery failure (attempt > 0), reset the unavailable_since timestamp
-                if attempt > 0 {
-                    if let Some(mut entry) = self.processes.get_mut(&language_id) {
-                        if let ProcessEntry::Unavailable(state) = entry.value_mut() {
-                            state.unavailable_since = Instant::now();
-                            tracing::info!(
-                                language = %language_id,
-                                "LSP: recovery failed, cooldown reset"
-                            );
-                        }
-                    }
-                }
-                // Recurse with attempt+1; the guard at the top of this function handles
-                // exhaustion (attempt >= MAX_RESTART_ATTEMPTS) by inserting Unavailable.
-                return Box::pin(self.start_process(descriptor, attempt + 1)).await;
+                self.processes.insert(
+                    language_id,
+                    ProcessEntry::Unavailable(UnavailableState {
+                        unavailable_since: Instant::now(),
+                        backoff_attempt: next_attempt,
+                    }),
+                );
+                return Err(LspError::NoLspAvailable);
             }
         };
 
@@ -528,7 +641,8 @@ impl LspClient {
         if attempt > 0 {
             tracing::info!(
                 language = %language_id,
-                "LSP: recovery successful"
+                attempt,
+                "LSP: recovery successful after backoff"
             );
         }
 
@@ -539,7 +653,6 @@ impl LspClient {
 
         // Spawn a background task that monitors $/progress notifications from the
         // LSP and sets indexing_complete when the initial indexing token closes.
-        // This gives agents an unambiguous binary signal when LSP navigation is ready.
         let indexing_flag = Arc::clone(&indexing_complete);
         let lang_id_for_watcher = language_id.clone();
         let dispatcher_for_watcher = Arc::clone(&self.dispatcher);
@@ -549,9 +662,7 @@ impl LspClient {
 
         // LSP-HEALTH-001 Task 6.1: Progress watcher timeout fallback
         // Non-Rust LSPs (gopls, tsserver, pyright) may not emit WorkDoneProgressEnd
-        // notifications. After 30 seconds, assume indexing is complete if we haven't
-        // heard otherwise. This ensures indexing_status eventually reaches "complete"
-        // and prevents eternal "in_progress" status.
+        // notifications. After 30 seconds, assume indexing is complete.
         Self::spawn_indexing_timeout_fallback(language_id.clone(), &indexing_complete);
 
         self.processes.insert(
@@ -957,6 +1068,12 @@ impl Lawyer for LspClient {
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
+        // ST-4: Set version to 1 on open; did_change will atomically increment.
+        self.doc_versions.insert(
+            file_uri.to_string(),
+            std::sync::atomic::AtomicI32::new(1),
+        );
+
         let params = json!({
             "textDocument": {
                 "uri": file_uri.as_str(),
@@ -971,6 +1088,8 @@ impl Lawyer for LspClient {
             .await
         {
             tracing::error!(tool = "did_open", language = language_id, error = %e, "textDocument/didOpen failed");
+            // Clean up version entry on failure to avoid stale tracking
+            self.doc_versions.remove(&file_uri.to_string());
             return Err(e);
         }
         self.touch(language_id);
@@ -982,7 +1101,7 @@ impl Lawyer for LspClient {
         workspace_root: &Path,
         file_path: &Path,
         content: &str,
-        version: i32,
+        _version: i32,
     ) -> Result<(), LspError> {
         tracing::info!(tool = "did_change", file = %file_path.display(), "LSP operation started");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -992,11 +1111,20 @@ impl Lawyer for LspClient {
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
+        // ST-4: Atomically increment the tracked version, ignoring the caller-supplied
+        // `version` argument. This ensures monotonicity even under concurrent edits.
+        let tracked_version = self
+            .doc_versions
+            .entry(file_uri.to_string())
+            .or_insert_with(|| std::sync::atomic::AtomicI32::new(1))
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+
         // Full content sync (TextDocumentSyncKind.Full = 1)
         let params = json!({
             "textDocument": {
                 "uri": file_uri.as_str(),
-                "version": version
+                "version": tracked_version
             },
             "contentChanges": [{ "text": content }]
         });
@@ -1020,6 +1148,9 @@ impl Lawyer for LspClient {
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        // ST-4: Remove version tracking entry on close.
+        self.doc_versions.remove(&file_uri.to_string());
 
         let params = json!({
             "textDocument": {
@@ -1299,6 +1430,10 @@ impl Lawyer for LspClient {
 
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage> {
         self.missing_languages.iter().cloned().collect()
+    }
+
+    async fn force_respawn(&self, language_id: &str) -> Result<(), LspError> {
+        LspClient::force_respawn(self, language_id).await
     }
 }
 
@@ -2234,6 +2369,7 @@ mod tests {
     #[test]
     fn test_process_entry_unavailable_status() {
         let entry = ProcessEntry::Unavailable(UnavailableState {
+                backoff_attempt: 0,
             unavailable_since: std::time::Instant::now(),
         });
         let status = entry.to_validation_status("gopls");
@@ -2411,6 +2547,7 @@ mod tests {
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
+            doc_versions: Arc::new(DashMap::new()),
         }
     }
 
@@ -2429,6 +2566,7 @@ mod tests {
                 root: std::env::temp_dir(),
                 init_timeout_secs: None,
                 auto_plugins: vec![],
+                python_path: None,
             })
             .collect();
 
@@ -2445,6 +2583,7 @@ mod tests {
             init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
+            doc_versions: Arc::new(DashMap::new()),
         }
     }
 
@@ -2462,6 +2601,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
+                    backoff_attempt: 0,
                 unavailable_since: Instant::now(), // Just now → cooldown NOT elapsed
             }),
         )]);
@@ -2480,6 +2620,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
+                    backoff_attempt: 0,
                 unavailable_since: Instant::now().checked_sub(Duration::from_mins(10)).unwrap(),
             }),
         )]);
@@ -2521,6 +2662,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
+                    backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);
@@ -2550,6 +2692,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
+                    backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);
@@ -2574,6 +2717,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
+                    backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);
@@ -2599,6 +2743,7 @@ mod tests {
         let processes = HashMap::from([(
             "go".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
+                    backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);

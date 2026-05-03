@@ -152,10 +152,26 @@ impl RequestDispatcher {
     ) -> Vec<serde_json::Value> {
         let mut rx = self.subscribe_notifications();
         let mut collected = Vec::new();
-        let deadline = tokio::time::Instant::now() + timeout;
+        let max_deadline = tokio::time::Instant::now() + timeout;
+
+        // IW-1: Two-phase adaptive collection.
+        //
+        // Phase 1: Wait up to `timeout` for the *first* publishDiagnostics
+        //          notification matching `file_uri`. Return early (phase 2) on match.
+        //
+        // Phase 2: After the first match, collect additional notifications for a
+        //          short 500ms grace window to capture any follow-up batches, then
+        //          return without waiting the full timeout.
+        //
+        // If no notification arrives before `timeout`, return empty.
+        const GRACE_PERIOD: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+        let mut grace_deadline: Option<tokio::time::Instant> = None;
 
         loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let now = tokio::time::Instant::now();
+            // In grace phase: use grace deadline; otherwise max deadline.
+            let effective_deadline = grace_deadline.unwrap_or(max_deadline);
+            let remaining = effective_deadline.saturating_duration_since(now);
             if remaining.is_zero() {
                 break;
             }
@@ -171,6 +187,12 @@ impl RequestDispatcher {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if uri == file_uri {
+                        if grace_deadline.is_none() {
+                            // First match: switch to grace phase
+                            let grace_end = tokio::time::Instant::now() + GRACE_PERIOD;
+                            // Don't exceed the original max deadline
+                            grace_deadline = Some(grace_end.min(max_deadline));
+                        }
                         collected.push(msg);
                     }
                 }
