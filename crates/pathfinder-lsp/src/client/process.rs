@@ -646,7 +646,15 @@ mod process_tests {
     #[tokio::test]
     async fn test_shutdown_terminates_process() {
         // Arrange
-        let mut child_process = tokio::process::Command::new("sleep")
+        // Use absolute path to avoid failures when PATH is temporarily replaced
+        // by another test (e.g. detect::tests::test_with_fake_python_binaries).
+        let sleep_bin = which::which("sleep")
+            .or_else(|_| {
+                which::which("/usr/bin/sleep").map(|_| std::path::PathBuf::from("/usr/bin/sleep"))
+            })
+            .or_else(|_| which::which("/bin/sleep").map(|_| std::path::PathBuf::from("/bin/sleep")))
+            .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/sleep"));
+        let mut child_process = tokio::process::Command::new(&sleep_bin)
             .arg("10")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

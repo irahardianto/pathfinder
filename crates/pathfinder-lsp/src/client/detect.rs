@@ -789,6 +789,11 @@ mod tests {
 
     #[test]
     fn test_resolve_command_found_returns_some() {
+        // Acquire PATH_MUTEX to avoid racing with tests that temporarily replace PATH.
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         let result = resolve_command("sh", "shell");
         assert!(
             result.is_some(),
