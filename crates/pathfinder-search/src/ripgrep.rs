@@ -18,7 +18,6 @@ use std::path::PathBuf;
 
 // ── Helper Functions ─────────────────────────────────────────────────────
 
-
 /// Truncate a line to a maximum byte length, ensuring valid UTF-8 boundaries.
 /// Appends `... [TRUNCATED]` if the line was shortened.
 fn truncate_line(line: &str, limit: usize) -> String {
@@ -128,25 +127,24 @@ impl Sink for MatchCollector<'_> {
         // across file boundaries.
         if *self.skipped_count < self.offset {
             *self.skipped_count += 1;
-                // Still track line for context continuity
-                let line = mat.line_number().unwrap_or(0);
-                if line > self.last_seen_line + 1 {
-                    self.context_before_buf.clear();
-                }
-                self.last_seen_line = line;
-                let bytes = mat.bytes();
-                let content = String::from_utf8_lossy(bytes);
-                let content = content.trim_end_matches('\n').trim_end_matches('\r');
-                let content = truncate_line(content, 1000);
-                if self.context_lines > 0 {
-                    if self.context_before_buf.len() >= self.context_lines {
-                        self.context_before_buf.pop_front();
-                    }
-                    self.context_before_buf.push_back(content);
-                }
-                return Ok(true);
+            // Still track line for context continuity
+            let line = mat.line_number().unwrap_or(0);
+            if line > self.last_seen_line + 1 {
+                self.context_before_buf.clear();
             }
-
+            self.last_seen_line = line;
+            let bytes = mat.bytes();
+            let content = String::from_utf8_lossy(bytes);
+            let content = content.trim_end_matches('\n').trim_end_matches('\r');
+            let content = truncate_line(content, 1000);
+            if self.context_lines > 0 {
+                if self.context_before_buf.len() >= self.context_lines {
+                    self.context_before_buf.pop_front();
+                }
+                self.context_before_buf.push_back(content);
+            }
+            return Ok(true);
+        }
 
         let current = self.current_match_count();
         if current >= self.max_results {
@@ -1114,7 +1112,6 @@ mod tests {
 mod missing_coverage_tests {
     use super::*;
     use std::io::Write;
-
 
     #[tokio::test]
     async fn test_search_match_column_invalid_utf8_prefix() {
