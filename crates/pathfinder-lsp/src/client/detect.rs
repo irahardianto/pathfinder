@@ -96,6 +96,137 @@ pub struct LanguageLsp {
     /// Auto-detected TypeScript plugins to load during initialization.
     /// Populated by detect.rs when scanning the workspace for Vue, Svelte, etc.
     pub auto_plugins: Vec<String>,
+    /// ST-5: Python interpreter path detected from the workspace virtual environment.
+    ///
+    /// Passed to Pyright via `initializationOptions.python.pythonPath` during
+    /// `initialize` so it inspects the venv's site-packages rather than the
+    /// system interpreter.  `None` for all non-Python languages.
+    pub python_path: Option<std::path::PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
+// ST-2: Manifest pre-flight validation
+// ---------------------------------------------------------------------------
+
+/// Validate a marker file before starting an LSP process.
+///
+/// Returns `Ok(())` when the file is structurally valid. Returns `Err(reason)`
+/// when the file is malformed — `start_process` uses this to short-circuit
+/// before spawning a process that would fail during initialize anyway.
+///
+/// # Supported languages
+/// - **Rust**: Cargo.toml must be parseable TOML and contain `[package]` or `[workspace]`
+/// - **Go**: go.mod must start with the `module` keyword
+/// - **TypeScript**: tsconfig.json must be parseable JSON
+/// - **Python**: pyproject.toml (if present) must be parseable TOML
+pub(crate) fn validate_marker_file(
+    marker_path: &std::path::Path,
+    language_id: &str,
+) -> Result<(), String> {
+    let file_name = marker_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    let contents = match std::fs::read_to_string(marker_path) {
+        Ok(c) => c,
+        Err(e) => return Err(format!("cannot read {file_name}: {e}")),
+    };
+
+    match (language_id, file_name) {
+        ("rust", "Cargo.toml") => {
+            match toml::from_str::<toml::Value>(&contents) {
+                Ok(v) => {
+                    if v.get("package").is_some() || v.get("workspace").is_some() {
+                        Ok(())
+                    } else {
+                        Err("Cargo.toml has neither [package] nor [workspace] section".to_owned())
+                    }
+                }
+                Err(e) => Err(format!("Cargo.toml is not valid TOML: {e}")),
+            }
+        }
+        ("go", "go.mod") => {
+            let first_line = contents.lines().next().unwrap_or("").trim();
+            if first_line.starts_with("module ") || first_line == "module" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "go.mod does not start with 'module' declaration (got: {first_line:?})"
+                ))
+            }
+        }
+        ("typescript", "tsconfig.json") => {
+            match serde_json::from_str::<serde_json::Value>(&contents) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("tsconfig.json is not valid JSON: {e}")),
+            }
+        }
+        ("python", "pyproject.toml") => {
+            match toml::from_str::<toml::Value>(&contents) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("pyproject.toml is not valid TOML: {e}")),
+            }
+        }
+        // package.json, setup.py, requirements.txt — too loose/executable to validate structurally
+        _ => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ST-5: Python virtual environment detection
+// ---------------------------------------------------------------------------
+
+/// Detect the Python interpreter from the workspace's virtual environment.
+///
+/// Checks well-known venv locations in priority order:
+/// 1. `.venv/bin/python` (standard `python -m venv .venv`)
+/// 2. `venv/bin/python` / `env/bin/python` / `.env/bin/python`
+/// 3. `$CONDA_PREFIX/bin/python` (Conda/Mamba)
+/// 4. `$VIRTUAL_ENV/bin/python` (activated venv in parent shell)
+///
+/// Returns `None` when no venv is detected — Pyright/pylsp then fall back to
+/// the system interpreter, which is correct for non-venv projects.
+#[must_use]
+pub(crate) fn detect_venv(workspace_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidates = [
+        ".venv/bin/python",
+        ".venv/Scripts/python.exe", // Windows
+        "venv/bin/python",
+        "venv/Scripts/python.exe",
+        "env/bin/python",
+        ".env/bin/python",
+    ];
+
+    for relative in &candidates {
+        let path = workspace_root.join(relative);
+        if path.exists() {
+            tracing::debug!(path = %path.display(), "ST-5: detected Python venv interpreter");
+            return Some(path);
+        }
+    }
+
+    // Conda: $CONDA_PREFIX/bin/python
+    if let Ok(conda_prefix) = std::env::var("CONDA_PREFIX") {
+        let path = std::path::PathBuf::from(&conda_prefix)
+            .join("bin")
+            .join("python");
+        if path.exists() {
+            tracing::debug!(path = %path.display(), "ST-5: detected Conda Python interpreter");
+            return Some(path);
+        }
+    }
+
+    // $VIRTUAL_ENV: already-activated venv in the shell that launched Pathfinder
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let path = std::path::PathBuf::from(&venv).join("bin").join("python");
+        if path.exists() {
+            tracing::debug!(path = %path.display(), "ST-5: detected activated venv via $VIRTUAL_ENV");
+            return Some(path);
+        }
+    }
+
+    None
 }
 
 /// Resolve a bare binary name to its absolute path using `which`.
@@ -341,14 +472,27 @@ pub async fn detect_languages(
         let cmd =
             get_command_override!("rust").or_else(|| resolve_command("rust-analyzer", "rust"));
         if let Some(command) = cmd {
-            detected.push(LanguageLsp {
-                language_id: "rust".to_owned(),
-                command,
-                args: get_args!("rust", vec![]),
-                root,
-                init_timeout_secs: None,
-                auto_plugins: vec![],
-            });
+            // ST-2: validate Cargo.toml before spending time spawning the process
+            let marker_path = root.join("Cargo.toml");
+            if let Err(reason) = validate_marker_file(&marker_path, "rust") {
+                tracing::warn!(language = "rust", %reason, "ST-2: invalid manifest — skipping LSP start");
+                missing.push(MissingLanguage {
+                    language_id: "rust".to_owned(),
+                    marker_file: "Cargo.toml".to_string(),
+                    tried_binaries: vec!["rust-analyzer".to_string()],
+                    install_hint: format!("Fix Cargo.toml: {reason}"),
+                });
+            } else {
+                detected.push(LanguageLsp {
+                    language_id: "rust".to_owned(),
+                    command,
+                    args: get_args!("rust", vec![]),
+                    root,
+                    init_timeout_secs: None,
+                    auto_plugins: vec![],
+                    python_path: None,
+                });
+            }
         } else if !has_override {
             // Marker found but no binary, and no custom command configured
             missing.push(MissingLanguage {
@@ -369,14 +513,27 @@ pub async fn detect_languages(
         let has_override = get_command_override!("go").is_some();
         let cmd = get_command_override!("go").or_else(|| resolve_command("gopls", "go"));
         if let Some(command) = cmd {
-            detected.push(LanguageLsp {
-                language_id: "go".to_owned(),
-                command,
-                args: get_args!("go", vec![]),
-                root,
-                init_timeout_secs: None,
-                auto_plugins: vec![],
-            });
+            // ST-2: validate go.mod before spawning gopls
+            let marker_path = root.join("go.mod");
+            if let Err(reason) = validate_marker_file(&marker_path, "go") {
+                tracing::warn!(language = "go", %reason, "ST-2: invalid manifest — skipping LSP start");
+                missing.push(MissingLanguage {
+                    language_id: "go".to_owned(),
+                    marker_file: "go.mod".to_string(),
+                    tried_binaries: vec!["gopls".to_string()],
+                    install_hint: format!("Fix go.mod: {reason}"),
+                });
+            } else {
+                detected.push(LanguageLsp {
+                    language_id: "go".to_owned(),
+                    command,
+                    args: get_args!("go", vec![]),
+                    root,
+                    init_timeout_secs: None,
+                    auto_plugins: vec![],
+                    python_path: None,
+                });
+            }
         } else if !has_override {
             missing.push(MissingLanguage {
                 language_id: "go".to_owned(),
@@ -404,14 +561,40 @@ pub async fn detect_languages(
             .or_else(|| resolve_command("typescript-language-server", "typescript"));
         if let Some(command) = cmd {
             let auto_plugins = detect_typescript_plugins(workspace_root, config).await;
-            detected.push(LanguageLsp {
-                language_id: "typescript".to_owned(),
-                command,
-                args: get_args!("typescript", vec!["--stdio".to_owned()]),
-                root,
-                init_timeout_secs: None,
-                auto_plugins,
-            });
+            // ST-2: validate tsconfig.json before spawning tsserver
+            if let Some(marker) = ts_marker {
+                let marker_path = root.join(marker);
+                if let Err(reason) = validate_marker_file(&marker_path, "typescript") {
+                    tracing::warn!(language = "typescript", %reason, "ST-2: invalid manifest — skipping LSP start");
+                    missing.push(MissingLanguage {
+                        language_id: "typescript".to_owned(),
+                        marker_file: marker.to_string(),
+                        tried_binaries: vec!["typescript-language-server".to_string()],
+                        install_hint: format!("Fix {marker}: {reason}"),
+                    });
+                } else {
+                    detected.push(LanguageLsp {
+                        language_id: "typescript".to_owned(),
+                        command,
+                        args: get_args!("typescript", vec!["--stdio".to_owned()]),
+                        root,
+                        init_timeout_secs: None,
+                        auto_plugins,
+                        python_path: None,
+                    });
+                }
+            } else {
+                // config root_override — no marker to validate
+                detected.push(LanguageLsp {
+                    language_id: "typescript".to_owned(),
+                    command,
+                    args: get_args!("typescript", vec!["--stdio".to_owned()]),
+                    root,
+                    init_timeout_secs: None,
+                    auto_plugins,
+                    python_path: None,
+                });
+            }
         } else if !has_override {
             missing.push(MissingLanguage {
                 language_id: "typescript".to_owned(),
@@ -468,14 +651,47 @@ pub async fn detect_languages(
         };
 
         if let Some((command, default_args)) = maybe_command_and_args {
-            detected.push(LanguageLsp {
-                language_id: "python".to_owned(),
-                command,
-                args: get_args!("python", default_args),
-                root,
-                init_timeout_secs: None,
-                auto_plugins: vec![],
-            });
+            // ST-2: validate pyproject.toml before spawning
+            let maybe_marker_path = py_marker
+                .filter(|m| *m == "pyproject.toml")
+                .map(|m| root.join(m));
+            let manifest_ok = if let Some(mp) = maybe_marker_path {
+                match validate_marker_file(&mp, "python") {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        tracing::warn!(language = "python", %reason, "ST-2: invalid manifest — skipping LSP start");
+                        missing.push(MissingLanguage {
+                            language_id: "python".to_owned(),
+                            marker_file: "pyproject.toml".to_string(),
+                            tried_binaries: vec![command.clone()],
+                            install_hint: format!("Fix pyproject.toml: {reason}"),
+                        });
+                        false
+                    }
+                }
+            } else {
+                true // setup.py / requirements.txt — no structural validation
+            };
+
+            if manifest_ok {
+                // ST-5: detect Python venv for Pyright's initializationOptions
+                let python_path = detect_venv(workspace_root);
+                if python_path.is_some() {
+                    tracing::info!(
+                        path = ?python_path,
+                        "ST-5: Python venv detected — will pass pythonPath to LSP"
+                    );
+                }
+                detected.push(LanguageLsp {
+                    language_id: "python".to_owned(),
+                    command,
+                    args: get_args!("python", default_args),
+                    root,
+                    init_timeout_secs: None,
+                    auto_plugins: vec![],
+                    python_path,
+                });
+            }
         } else if !has_override {
             // No binary found and no custom command configured — add to missing
             missing.push(MissingLanguage {
@@ -1196,4 +1412,186 @@ mod tests {
         })
         .await;
     }
+
+    // ── ST-2: validate_marker_file tests ────────────────────────────────────
+
+        #[test]
+        fn test_validate_marker_file_valid_cargo_toml() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("Cargo.toml");
+            std::fs::write(&path, "[package]\nname = \"foo\"").expect("write");
+            assert!(validate_marker_file(&path, "rust").is_ok());
+        }
+
+        #[test]
+        fn test_validate_marker_file_valid_cargo_workspace() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("Cargo.toml");
+            std::fs::write(&path, "[workspace]\nmembers = []").expect("write");
+            assert!(validate_marker_file(&path, "rust").is_ok());
+        }
+
+        #[test]
+        fn test_validate_marker_file_invalid_cargo_toml_no_sections() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("Cargo.toml");
+            std::fs::write(&path, "[dependencies]\nfoo = \"1.0\"").expect("write");
+            let result = validate_marker_file(&path, "rust");
+            assert!(result.is_err(), "Cargo.toml with only [dependencies] should fail");
+            assert!(result.unwrap_err().contains("neither [package] nor [workspace]"));
+        }
+
+        #[test]
+        fn test_validate_marker_file_invalid_cargo_toml_syntax() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("Cargo.toml");
+            std::fs::write(&path, "this is not toml at all !!!").expect("write");
+            let result = validate_marker_file(&path, "rust");
+            assert!(result.is_err(), "Malformed TOML should fail validation");
+            assert!(result.unwrap_err().contains("not valid TOML"));
+        }
+
+        #[test]
+        fn test_validate_marker_file_valid_go_mod() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("go.mod");
+            std::fs::write(&path, "module github.com/foo/bar\n\ngo 1.21").expect("write");
+            assert!(validate_marker_file(&path, "go").is_ok());
+        }
+
+        #[test]
+        fn test_validate_marker_file_invalid_go_mod() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("go.mod");
+            std::fs::write(&path, "// corrupted file").expect("write");
+            let result = validate_marker_file(&path, "go");
+            assert!(result.is_err(), "go.mod without 'module' should fail");
+            assert!(result.unwrap_err().contains("'module' declaration"));
+        }
+
+        #[test]
+        fn test_validate_marker_file_valid_tsconfig() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("tsconfig.json");
+            std::fs::write(&path, r#"{"compilerOptions":{"strict":true}}"#).expect("write");
+            assert!(validate_marker_file(&path, "typescript").is_ok());
+        }
+
+        #[test]
+        fn test_validate_marker_file_invalid_tsconfig() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("tsconfig.json");
+            std::fs::write(&path, "{ this is not json }}").expect("write");
+            let result = validate_marker_file(&path, "typescript");
+            assert!(result.is_err(), "Malformed JSON tsconfig.json should fail");
+            assert!(result.unwrap_err().contains("not valid JSON"));
+        }
+
+        #[test]
+        fn test_validate_marker_file_valid_pyproject_toml() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("pyproject.toml");
+            std::fs::write(&path, "[tool.poetry]\nname = \"app\"").expect("write");
+            assert!(validate_marker_file(&path, "python").is_ok());
+        }
+
+        #[test]
+        fn test_validate_marker_file_invalid_pyproject_toml() {
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("pyproject.toml");
+            std::fs::write(&path, "NOT VALID TOML !!!").expect("write");
+            let result = validate_marker_file(&path, "python");
+            assert!(result.is_err(), "Malformed pyproject.toml should fail");
+            assert!(result.unwrap_err().contains("not valid TOML"));
+        }
+
+        #[test]
+        fn test_validate_marker_file_package_json_always_ok() {
+            // package.json is too loose to validate structurally — always passes
+            let dir = tempdir().expect("temp dir");
+            let path = dir.path().join("package.json");
+            std::fs::write(&path, "not even json").expect("write");
+            assert!(validate_marker_file(&path, "typescript").is_ok());
+        }
+
+        // ── ST-5: detect_venv tests ──────────────────────────────────────────────
+
+        #[test]
+        fn test_detect_venv_finds_dot_venv() {
+            let dir = tempdir().expect("temp dir");
+            let bin = dir.path().join(".venv").join("bin");
+            std::fs::create_dir_all(&bin).expect("create .venv/bin");
+            let python = bin.join("python");
+            std::fs::write(&python, "#!/bin/sh").expect("write fake python");
+            let result = detect_venv(dir.path());
+            assert_eq!(result, Some(python), "should detect .venv/bin/python");
+        }
+
+        #[test]
+        fn test_detect_venv_finds_venv_fallback() {
+            let dir = tempdir().expect("temp dir");
+            let bin = dir.path().join("venv").join("bin");
+            std::fs::create_dir_all(&bin).expect("create venv/bin");
+            let python = bin.join("python");
+            std::fs::write(&python, "#!/bin/sh").expect("write fake python");
+            let result = detect_venv(dir.path());
+            assert_eq!(result, Some(python), "should detect venv/bin/python");
+        }
+
+        #[test]
+        fn test_detect_venv_prefers_dot_venv_over_venv() {
+            let dir = tempdir().expect("temp dir");
+            for subdir in &[".venv/bin", "venv/bin"] {
+                let bin = dir.path().join(subdir);
+                std::fs::create_dir_all(&bin).expect("create bin");
+                std::fs::write(bin.join("python"), "#!/bin/sh").expect("write fake python");
+            }
+            let result = detect_venv(dir.path());
+            assert_eq!(
+                result,
+                Some(dir.path().join(".venv").join("bin").join("python")),
+                ".venv must be preferred over venv"
+            );
+        }
+
+        #[test]
+        fn test_detect_venv_returns_none_when_no_venv() {
+            let dir = tempdir().expect("temp dir");
+            let result = detect_venv(dir.path());
+            assert!(result.is_none(), "should return None when no venv exists");
+        }
+
+        #[tokio::test]
+        async fn test_detect_invalid_cargo_toml_adds_to_missing() {
+            test_with_fake_python_binaries(&["rust-analyzer"], || async {
+                let dir = tempdir().expect("temp dir");
+                // ST-2: Cargo.toml with no [package] or [workspace] should be rejected
+                std::fs::write(
+                    dir.path().join("Cargo.toml"),
+                    "[dependencies]\nfoo = \"1.0\"",
+                )
+                .expect("write");
+
+                let result = detect_languages(dir.path(), &make_ts_config())
+                    .await
+                    .expect("detect");
+
+                assert!(
+                    result.detected.iter().all(|l| l.language_id != "rust"),
+                    "invalid Cargo.toml should not produce a detected Rust LSP"
+                );
+                let maybe_missing = result.missing.iter().find(|m| m.language_id == "rust");
+                assert!(
+                    maybe_missing.is_some(),
+                    "invalid Cargo.toml should add rust to missing"
+                );
+                let hint = &maybe_missing.expect("checked above").install_hint;
+                assert!(
+                    hint.contains("Fix Cargo.toml"),
+                    "install_hint should tell user to fix the manifest, got: {hint}"
+                );
+            })
+            .await;
+        }
+
 }

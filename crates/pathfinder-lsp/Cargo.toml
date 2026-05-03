@@ -33,6 +33,9 @@ command-group = { version = "5", features = ["with-tokio"] }
 # Resolve LSP binary names to absolute paths at detection time so that GUI
 # launchers (which strip ~/.cargo/bin etc. from $PATH) still find the server.
 which = "7"
+# ST-2: Manifest validation — parse TOML marker files (Cargo.toml, pyproject.toml)
+# before spawning LSP processes to fail fast on malformed manifests.
+toml = "0.8"
 
 # prctl(PR_SET_PDEATHSIG) — kernel-level parent-death signal for Unix.
 # Ensures the LSP child is killed even if Pathfinder is SIGKILLed (Drop

@@ -96,6 +96,7 @@ pub(super) async fn spawn_and_initialize(
     init_timeout_secs: Option<u64>,
     isolate_target_dir: bool,
     plugins: Vec<String>,
+    python_path: Option<std::path::PathBuf>,
 ) -> Result<(ManagedProcess, tokio::task::JoinHandle<()>), LspError> {
     let (child, stdin, stdout) =
         spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)?;
@@ -110,7 +111,7 @@ pub(super) async fn spawn_and_initialize(
     let reader_handle = start_reader_task(stdout, Arc::clone(&dispatcher));
 
     let (id, rx) = dispatcher.register();
-    let init_request = build_initialize_request(id, project_root, &plugins).await?;
+    let init_request = build_initialize_request(id, project_root, &plugins, python_path).await?;
     write_message(&mut writer, &init_request).await?;
 
     let timeout_secs = init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
@@ -303,6 +304,7 @@ async fn build_initialize_request(
     id: u64,
     project_root: &Path,
     plugins: &[String],
+    python_path: Option<std::path::PathBuf>,
 ) -> Result<Value, LspError> {
     let workspace_uri = path_to_file_uri(project_root).await?;
     let workspace_name = project_root
@@ -310,9 +312,7 @@ async fn build_initialize_request(
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
 
-    let initialization_options = if plugins.is_empty() {
-        json!({})
-    } else {
+    let initialization_options = if !plugins.is_empty() {
         // Build plugins array for typescript-language-server
         let plugin_entries: Vec<Value> = plugins
             .iter()
@@ -332,6 +332,15 @@ async fn build_initialize_request(
                 ]
             }
         })
+    } else if let Some(py_path) = python_path {
+        // ST-5: pass Python venv interpreter path to Pyright
+        json!({
+            "python": {
+                "pythonPath": py_path.to_string_lossy().as_ref()
+            }
+        })
+    } else {
+        json!({})
     };
 
     Ok(RequestDispatcher::make_request(
@@ -500,7 +509,7 @@ mod process_tests {
     #[tokio::test]
     async fn test_build_initialize_request_structure() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(42, dir.path(), &[])
+        let request = build_initialize_request(42, dir.path(), &[], None)
             .await
             .expect("ok");
 
@@ -530,7 +539,7 @@ mod process_tests {
         let named_dir = dir.path().join("my_project");
         std::fs::create_dir_all(&named_dir).expect("create dir");
 
-        let request = build_initialize_request(1, &named_dir, &[])
+        let request = build_initialize_request(1, &named_dir, &[], None)
             .await
             .expect("ok");
         let folders = request["params"]["workspaceFolders"]
@@ -542,7 +551,7 @@ mod process_tests {
     #[tokio::test]
     async fn test_build_initialize_request_capabilities() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(1, dir.path(), &[])
+        let request = build_initialize_request(1, dir.path(), &[], None)
             .await
             .expect("ok");
 
@@ -565,7 +574,7 @@ mod process_tests {
     async fn test_initialize_includes_plugins_when_present() {
         let dir = tempdir().expect("temp dir");
         let plugins = vec!["@vue/typescript-plugin".to_owned()];
-        let request = build_initialize_request(1, dir.path(), &plugins)
+        let request = build_initialize_request(1, dir.path(), &plugins, None)
             .await
             .expect("ok");
 
@@ -598,7 +607,7 @@ mod process_tests {
     #[tokio::test]
     async fn test_initialize_empty_when_no_plugins() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(1, dir.path(), &[])
+        let request = build_initialize_request(1, dir.path(), &[], None)
             .await
             .expect("ok");
 
@@ -613,7 +622,7 @@ mod process_tests {
     async fn test_initialize_includes_vue_file_extension() {
         let dir = tempdir().expect("temp dir");
         let plugins = vec!["@vue/typescript-plugin".to_owned()];
-        let request = build_initialize_request(1, dir.path(), &plugins)
+        let request = build_initialize_request(1, dir.path(), &plugins, None)
             .await
             .expect("ok");
 
