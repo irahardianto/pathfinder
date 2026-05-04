@@ -73,6 +73,15 @@ struct LanguageState {
     /// Protected by `RwLock` so the `registration_watcher_task` can mutate it
     /// from its background task while the main thread reads it from `capabilities_for`.
     live_capabilities: Arc<std::sync::RwLock<DetectedCapabilities>>,
+    /// COEX-1: Set when another LSP instance is detected on the same workspace.
+    ///
+    /// When `true`, LSP diagnostics validation is automatically skipped to avoid
+    /// resource contention with the co-existing instance (e.g. VS Code's LSP).
+    /// Navigation (`goto_definition`, `analyze_impact`) still works normally — only
+    /// the expensive `didOpen/didChange/pull_diagnostics` validation cycle is
+    /// bypassed. This prevents the resource-contention rabbit hole where both
+    /// LSP instances fight over inotify watches and module locks.
+    in_coexistence_mode: bool,
 }
 
 /// Tracks backoff state for a language whose last spawn attempt failed.
@@ -103,10 +112,17 @@ impl ProcessEntry {
                     .live_capabilities
                     .read()
                     .expect("live_capabilities lock");
+                // COEX-1: Override diagnostics_strategy to None when in coexistence mode
+                // to prevent the costly validation cycle from racing with the external LSP.
+                let effective_diag_strategy = if state.in_coexistence_mode {
+                    DiagnosticsStrategy::None
+                } else {
+                    caps.diagnostics_strategy
+                };
                 validation_status_from_parts(
                     command,
                     true,
-                    caps.diagnostics_strategy,
+                    effective_diag_strategy,
                     caps.definition_provider,
                     caps.call_hierarchy_provider,
                     caps.formatting_provider,
@@ -511,9 +527,8 @@ impl LspClient {
     ///
     /// # IW-4
     ///
-    /// Removes any existing `Running` or `Unavailable` entry for `language_id`
-    /// and triggers a fresh spawn. The old process is **not** gracefully shut
-    /// down — use this only when the process is believed to be stuck.
+    /// Gracefully shuts down any existing `Running` process for `language_id`
+    /// before starting a fresh one. Removes any `Unavailable` entry directly.
     ///
     /// Returns `Ok(())` when the new process successfully initializes.
     ///
@@ -530,8 +545,21 @@ impl LspClient {
             .ok_or(LspError::NoLspAvailable)?
             .clone();
 
-        // Remove existing entry (Running or Unavailable)
-        self.processes.remove(language_id);
+        // ZOMBIE-1: Kill existing Running process before removing entry.
+        // Without this, the old child process becomes an OS zombie —
+        // it is removed from our tracking map but still occupies a PID
+        // in the process table until the parent calls wait().
+        if let Some((_, ProcessEntry::Running(mut state))) = self.processes.remove(language_id) {
+            tracing::info!(
+                language = %language_id,
+                "LSP: force_respawn — killing existing process before respawn"
+            );
+            state.reader_handle.abort();
+            shutdown(&mut state.process, &self.dispatcher).await;
+        } else {
+            // Unavailable entry — just remove it
+            self.processes.remove(language_id);
+        }
 
         // Spawn fresh at attempt 0 (no backoff delay)
         self.start_process(descriptor, 0).await
@@ -677,8 +705,14 @@ impl LspClient {
             "LSP: spawning process"
         );
 
-        // Warn about concurrent instances (e.g., VS Code's RA)
-        let isolate_target_dir = self.detect_concurrent_lsp(&language_id, &descriptor.command);
+        // COEX-1: Detect concurrent LSP instances and activate coexistence mode.
+        // `in_coexistence_mode` controls both build-artifact isolation (env vars)
+        // and validation suppression. When another LSP is detected on the same
+        // workspace, Pathfinder will still spawn its own instance for navigation
+        // (goto_definition, analyze_impact) but will skip validation to avoid
+        // fighting over inotify watches, module download locks, and module graphs.
+        let in_coexistence_mode = self.detect_concurrent_lsp(&language_id, &descriptor.command);
+        let isolate_target_dir = in_coexistence_mode;
 
         let plugins = descriptor.auto_plugins.clone();
         let python_path = descriptor.python_path.clone();
@@ -778,6 +812,14 @@ impl LspClient {
             .await;
         });
 
+        if in_coexistence_mode {
+            tracing::warn!(
+                language = %language_id,
+                "LSP: coexistence mode active — LSP validation disabled to prevent resource \
+                 contention. Navigation (goto_definition, analyze_impact) still works normally."
+            );
+        }
+
         self.processes.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
@@ -787,6 +829,7 @@ impl LspClient {
                 spawned_at,
                 indexing_complete,
                 live_capabilities,
+                in_coexistence_mode,
             })),
         );
 
@@ -810,20 +853,68 @@ impl LspClient {
         // exist in the system process table.
         #[cfg(target_os = "linux")]
         {
+            // GAP-Z2: Filter out Pathfinder's own children.
+            //
+            // The old detection counted ALL matching processes, including:
+            // 1. Processes we previously spawned (before force_respawn cleaned them up)
+            // 2. Any new process we just spawned (not yet in the map)
+            //
+            // We fix this by reading /proc/<pid>/status to get the PPid field.
+            // Only count processes whose parent PID is *not* Pathfinder's own PID.
+            // This correctly identifies IDE-launched LSPs while ignoring our own children.
+            let our_pid = std::process::id();
+
             if let Ok(entries) = std::fs::read_dir("/proc") {
-                let mut count = 0;
+                let mut external_count = 0;
                 for entry in entries.flatten() {
-                    let cmdline_path = entry.path().join("cmdline");
-                    if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
-                        if cmdline.contains(binary_name) {
-                            count += 1;
-                        }
+                    let path = entry.path();
+                    // Only look at numeric /proc/<pid> directories
+                    let is_numeric = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+                    if !is_numeric {
+                        continue;
                     }
+
+                    let cmdline_path = path.join("cmdline");
+                    let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) else {
+                        continue;
+                    };
+                    if !cmdline.contains(binary_name) {
+                        continue;
+                    }
+
+                    // This process matches the binary name. Check if it's our child.
+                    // Read /proc/<pid>/status to find the PPid line.
+                    let status_path = path.join("status");
+                    let parent_pid: u32 = std::fs::read_to_string(&status_path)
+                        .ok()
+                        .and_then(|status| {
+                            status
+                                .lines()
+                                .find(|l| l.starts_with("PPid:"))
+                                .and_then(|l| l.split_whitespace().nth(1))
+                                .and_then(|v| v.parse().ok())
+                        })
+                        .unwrap_or(0);
+
+                    if parent_pid == our_pid {
+                        // This is one of our own children — skip it.
+                        // Happens when the old process is still in /proc but
+                        // already signalled for termination (e.g., during force_respawn).
+                        tracing::trace!(
+                            binary = binary_name,
+                            "detect_concurrent_lsp: skipping own child process"
+                        );
+                        continue;
+                    }
+
+                    external_count += 1;
                 }
-                // We count ourselves too, so >1 means another instance exists
-                if count > 1 {
-                    // LSP-HEALTH-001 Task 5.1: Accurately describe what isolation is actually applied.
-                    // Currently only Rust and Go have isolation.
+
+                if external_count > 0 {
+                    // LSP-HEALTH-001 Task 5.1: Accurately describe what isolation is applied.
                     let isolation_desc = match language_id {
                         "rust" => "Cargo target directory",
                         "go" => "Go build cache (GOCACHE/GOMODCACHE)",
@@ -834,11 +925,11 @@ impl LspClient {
                     tracing::warn!(
                         language = language_id,
                         binary = binary_name,
-                        instances_found = count,
-                        "LSP: detected {} concurrent instances of {binary_name} on this workspace. \
+                        external_instances = external_count,
+                        "LSP: detected {} external concurrent instances of {binary_name}. \
                          {} build artifact isolation will be applied to avoid cache lock contention. \
                          First-time indexing may take 30-60s for this workspace.",
-                        count,
+                        external_count,
                         isolation_desc
                     );
                     return true;
@@ -1906,32 +1997,81 @@ fn parse_call_hierarchy_calls_response(
 
 /// Reader task supervisor: monitors the reader handle and cleans up on crash.
 ///
-/// When the reader task exits (EOF or crash), this supervisor removes the
-/// process entry from the map, allowing future requests to attempt recovery
-/// via the cooldown mechanism.
+/// When the reader task exits (EOF or crash), this supervisor:
+/// 1. Removes the process entry from the map.
+/// 2. **Calls `child.wait()`** on the removed child to fully reap the OS zombie
+///    and free its PID slot. Without this, dropped `Child` objects linger in the
+///    process table as zombies until Pathfinder exits.
+/// 3. On *crash* (non-zero exit / panic), inserts an `UnavailableState` with
+///    `backoff_attempt = 1` so the next `ensure_process` call uses exponential
+///    backoff rather than immediately re-spawning at full speed (GAP-Z3).
 async fn reader_supervisor_task(
     language_id: String,
     reader_handle: tokio::task::JoinHandle<()>,
     processes: Arc<DashMap<String, ProcessEntry>>,
 ) {
-    match reader_handle.await {
+    let crashed = match reader_handle.await {
         Ok(()) => {
+            // Normal EOF — LSP exited cleanly (e.g., idle timeout, shutdown request).
             tracing::warn!(
                 language = %language_id,
                 "LSP: reader task exited normally (EOF), removing process entry"
             );
+            false
         }
         Err(e) => {
+            // Panic or abort — unexpected crash.
             tracing::error!(
                 language = %language_id,
                 error = %e,
                 "LSP: reader task crashed (panic or abort), removing process entry"
             );
+            true
         }
+    };
+
+    // GAP-Z1: Remove the entry and reap the OS zombie.
+    //
+    // `processes.remove()` returns the evicted value. Extracting the child and
+    // calling `wait()` on it frees the PID slot immediately rather than leaving
+    // the process as a zombie until the next idle-loop sweep (up to 60s later)
+    // or until Pathfinder itself exits.
+    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&language_id) {
+        tracing::debug!(
+            language = %language_id,
+            "LSP: supervisor reaping child process to free PID slot"
+        );
+        state.reader_handle.abort();
+        // Reap the OS zombie. Ignore the result — we just need to call wait().
+        let _ = state.process.child.wait().await;
+
+        // GAP-Z3: On crash, insert UnavailableState so ensure_process applies
+        // exponential backoff on the next recovery attempt. Without this, a
+        // rapidly-crashing LSP would be re-spawned at full speed on every
+        // incoming agent request with no delay (attempt=0 bypass).
+        if crashed {
+            tracing::warn!(
+                language = %language_id,
+                "LSP: inserting Unavailable entry after crash for backoff protection"
+            );
+            processes.insert(
+                language_id,
+                ProcessEntry::Unavailable(UnavailableState {
+                    unavailable_since: std::time::Instant::now(),
+                    backoff_attempt: 1, // start at attempt 1 → 1s minimum backoff
+                }),
+            );
+        }
+        // On clean EOF (idle timeout / graceful shutdown), no Unavailable entry
+        // is inserted. The next request will call start_process(descriptor, 0)
+        // with no backoff delay — correct, because the LSP was healthy when it exited.
+    } else {
+        // Entry was already removed by the idle-loop or force_respawn before we got here.
+        tracing::debug!(
+            language = %language_id,
+            "LSP: supervisor found entry already removed (raced with idle-loop or force_respawn)"
+        );
     }
-    // Remove the process entry — this allows future requests to retry
-    // via the recovery cooldown mechanism in ensure_process()
-    processes.remove(&language_id);
 }
 
 /// Background task: watch `$/progress` notifications for indexing completion.
@@ -2136,6 +2276,41 @@ async fn idle_timeout_task(
                 break;
             }
             () = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
+                // ZOMBIE-1: Proactively reap dead processes.
+                //
+                // A Running entry can persist after the child dies if the reader
+                // task hasn't flushed EOF yet (small race window). We poll
+                // try_wait() here so dead processes are reaped within one
+                // IDLE_CHECK_INTERVAL (60s) rather than accumulating as OS zombies.
+                let dead_languages: Vec<String> = processes
+                    .iter_mut()
+                    .filter_map(|mut entry| {
+                        if let ProcessEntry::Running(state) = entry.value_mut() {
+                            // is_alive() returns true if still running → we want the dead ones
+                            if state.process.is_alive() {
+                                None
+                            } else {
+                                Some(entry.key().clone())
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                for lang in dead_languages {
+                    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&lang) {
+                        tracing::error!(
+                            language = %lang,
+                            "LSP: zombie reap — process died outside reader task, \
+                             removing entry so recovery can proceed"
+                        );
+                        state.reader_handle.abort();
+                        // Fully reap the OS zombie to free its PID slot.
+                        let _ = state.process.child.wait().await;
+                    }
+                }
+
                 // Check for idle processes
                 let languages_to_remove: Vec<String> = processes
                     .iter()

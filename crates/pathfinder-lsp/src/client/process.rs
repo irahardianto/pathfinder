@@ -66,6 +66,38 @@ pub(super) struct ManagedProcess {
     /// Number of in-flight requests (prevents idle timeout during active ops).
     pub(super) in_flight: Arc<AtomicU32>,
 }
+impl ManagedProcess {
+    /// Poll whether the child process is still alive **without blocking**.
+    ///
+    /// Uses [`Child::try_wait`] — returns immediately:
+    /// - `true`  → process is still running (no exit status yet)
+    /// - `false` → process has exited (zombie or fully reaped)
+    ///
+    /// Used by the idle-timeout loop to proactively detect dead LSP processes
+    /// and evict them before they accumulate as zombies in the process table.
+    pub(super) fn is_alive(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => true, // still running
+            Ok(Some(status)) => {
+                tracing::debug!(
+                    pid = ?self.child.id(),
+                    exit_status = ?status,
+                    "ManagedProcess::is_alive: child has exited"
+                );
+                false
+            }
+            Err(e) => {
+                // try_wait only fails on I/O error (e.g., ECHILD after double-wait).
+                // Treat as dead — the process is unmanageable in this state.
+                tracing::warn!(
+                    error = %e,
+                    "ManagedProcess::is_alive: try_wait failed — treating as dead"
+                );
+                false
+            }
+        }
+    }
+}
 
 /// Initialize timeout — 120 seconds (2 minutes) as per PRD §6.1.
 const INIT_TIMEOUT_SECS: u64 = 120;
@@ -720,6 +752,66 @@ mod process_tests {
 
     // ── gitignore helper tests ──────────────────────────────────────
 
+    // ── ManagedProcess::is_alive tests ───────────────────────────
+
+    /// Helper: spawn a sleep process and wrap it in a `ManagedProcess`.
+    fn make_managed_process(sleep_secs: &str) -> ManagedProcess {
+        let sleep_bin = which::which("sleep")
+            .or_else(|_| {
+                which::which("/usr/bin/sleep").map(|_| std::path::PathBuf::from("/usr/bin/sleep"))
+            })
+            .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/sleep"));
+        let mut child = tokio::process::Command::new(&sleep_bin)
+            .arg(sleep_secs)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("Failed to spawn sleep");
+        let stdin = child.stdin.take().expect("stdin piped");
+        ManagedProcess {
+            child,
+            stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
+            capabilities: crate::client::capabilities::DetectedCapabilities::default(),
+            last_used: std::time::Instant::now(),
+            in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_alive_returns_true_for_running_process() {
+        let mut process = make_managed_process("10");
+        assert!(
+            process.is_alive(),
+            "Running sleep process should report alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_alive_returns_false_after_kill() {
+        let mut process = make_managed_process("10");
+        // Kill the process
+        let _ = process.child.kill().await;
+        // Give OS time to mark it as exited
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !process.is_alive(),
+            "Killed process should report not alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_alive_returns_false_for_exited_process() {
+        // Use sleep 0 so the process exits immediately
+        let mut process = make_managed_process("0");
+        // Wait for it to exit naturally
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !process.is_alive(),
+            "Naturally exited process should report not alive"
+        );
+    }
     #[test]
     fn test_ensure_pathfinder_in_gitignore_creates_new() {
         let dir = tempfile::tempdir().expect("tempdir");
