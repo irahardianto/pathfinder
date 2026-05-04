@@ -114,13 +114,28 @@ pub struct SymbolRange {
     pub indent_column: usize,
 }
 
-/// The byte range used by `insert_into` to append code to a symbol's body.
 #[derive(Debug, Clone)]
 pub struct BodyEndRange {
     /// Byte offset just before the closing `}` (or `end`, etc.) of the body.
     pub insert_byte: usize,
     /// Indentation column for newly inserted content.
     pub body_indent_column: usize,
+    /// The kind of the container symbol being targeted.
+    /// Used by `insert_into` to emit warnings (e.g., struct vs impl in Rust).
+    pub container_kind: SymbolKind,
+}
+
+/// The raw file content and OCC version hash, shared across all range-resolution methods.
+///
+/// Bundles the two values that are always returned together with a range,
+/// eliminating the boilerplate of a 3-element tuple and providing named fields
+/// for clarity at every call site.
+#[derive(Debug, Clone)]
+pub struct ResolvedFile {
+    /// The raw file content as bytes.
+    pub source: std::sync::Arc<[u8]>,
+    /// The OCC version hash computed from the file content.
+    pub version_hash: VersionHash,
 }
 
 /// The `Surgeon` trait — testability boundary for AST-aware operations.
@@ -188,7 +203,7 @@ pub trait Surgeon: Send + Sync {
     /// Resolve the body byte range and indent column for a symbol.
     ///
     /// Returns the `BodyRange` (brace positions + indent column) along with
-    /// the raw file source bytes and the current `VersionHash` for OCC.
+    /// a [`ResolvedFile`] containing the raw file bytes and current `VersionHash` for OCC.
     ///
     /// # Errors
     /// - `SurgeonError::SymbolNotFound` — semantic path does not resolve
@@ -199,7 +214,7 @@ pub trait Surgeon: Send + Sync {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(BodyRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
+    ) -> Result<(BodyRange, ResolvedFile), SurgeonError>;
 
     /// Resolve the body end byte range and indent column for a container symbol.
     ///
@@ -209,7 +224,7 @@ pub trait Surgeon: Send + Sync {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(BodyEndRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
+    ) -> Result<(BodyEndRange, ResolvedFile), SurgeonError>;
 
     /// Read an entire source file and extract its symbols.
     ///
@@ -228,7 +243,7 @@ pub trait Surgeon: Send + Sync {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(FullRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
+    ) -> Result<(FullRange, ResolvedFile), SurgeonError>;
 
     /// Resolve the symbol byte range for insertion operations.
     ///
@@ -237,7 +252,7 @@ pub trait Surgeon: Send + Sync {
         &self,
         workspace_root: &Path,
         semantic_path: &SemanticPath,
-    ) -> Result<(SymbolRange, std::sync::Arc<[u8]>, VersionHash), SurgeonError>;
+    ) -> Result<(SymbolRange, ResolvedFile), SurgeonError>;
 
     /// Evict `path` from the AST cache, forcing a full re-parse on the next read.
     ///

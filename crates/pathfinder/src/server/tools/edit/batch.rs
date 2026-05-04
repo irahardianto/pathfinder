@@ -87,7 +87,7 @@ impl crate::server::PathfinderServer {
         new_code: &str,
         source: &[u8],
     ) -> Result<ResolvedEdit, ErrorData> {
-        let (body_range, ..) = self
+        let (body_range, _) = self
             .surgeon
             .resolve_body_range(self.workspace_root.path(), semantic_path)
             .await
@@ -145,7 +145,7 @@ impl crate::server::PathfinderServer {
             });
         }
 
-        let (full_range, ..) = self
+        let (full_range, _) = self
             .surgeon
             .resolve_full_range(self.workspace_root.path(), semantic_path)
             .await
@@ -171,7 +171,7 @@ impl crate::server::PathfinderServer {
         let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
             (0, 0)
         } else {
-            let (symbol_range, ..) = self
+            let (symbol_range, _) = self
                 .surgeon
                 .resolve_symbol_range(self.workspace_root.path(), semantic_path)
                 .await
@@ -209,7 +209,7 @@ impl crate::server::PathfinderServer {
         let (insert_byte, indent_column) = if semantic_path.is_bare_file() {
             (source.len(), 0)
         } else {
-            let (symbol_range, ..) = self
+            let (symbol_range, _) = self
                 .surgeon
                 .resolve_symbol_range(self.workspace_root.path(), semantic_path)
                 .await
@@ -221,7 +221,15 @@ impl crate::server::PathfinderServer {
         let indented = dedent_then_reindent(&normalized, indent_column);
 
         let before = &source[..insert_byte];
-        let before_sep = if before.ends_with(b"\n\n") {
+        let after = &source[insert_byte..];
+
+        // WP5: Match the standalone insert_after spacing logic: check both `before`
+        // AND `after` content so that inserting between two top-level items doesn't
+        // produce `}\npub fn` without the required blank line.
+        let before_sep = if before.ends_with(b"\n\n")
+            || after.starts_with(b"\n\n")
+            || (before.ends_with(b"\n") && after.starts_with(b"\n"))
+        {
             ""
         } else if before.ends_with(b"\n") {
             "\n"
@@ -243,7 +251,7 @@ impl crate::server::PathfinderServer {
         semantic_path: &SemanticPath,
         source: &[u8],
     ) -> Result<ResolvedEdit, ErrorData> {
-        let (full_range, ..) = self
+        let (full_range, _) = self
             .surgeon
             .resolve_full_range(self.workspace_root.path(), semantic_path)
             .await
@@ -353,6 +361,41 @@ impl crate::server::PathfinderServer {
         Ok(new_bytes)
     }
 
+    /// WP3: Post-apply structural validation.
+    ///
+    /// Re-parses both the original source and the edited result with Tree-sitter,
+    /// then compares `ERROR` node counts. If the edit introduces new parse errors,
+    /// it's likely due to nesting corruption (e.g., adjacent `replace_full` edits
+    /// consuming each other's closing braces).
+    ///
+    /// Returns `Ok(())` if the edit is structurally sound, or an `ErrorData` with
+    /// a clear message suggesting sequential edits as a fallback.
+    fn verify_no_new_parse_errors(
+        original: &[u8],
+        edited: &[u8],
+        file_path: &Path,
+    ) -> Result<(), ErrorData> {
+        let original_errors =
+            pathfinder_treesitter::language::count_parse_errors(original, file_path);
+        let edited_errors = pathfinder_treesitter::language::count_parse_errors(edited, file_path);
+
+        let (Some(orig), Some(edited_count)) = (original_errors, edited_errors) else {
+            return Ok(());
+        };
+
+        if edited_count > orig {
+            let new_errors = edited_count - orig;
+            let err = PathfinderError::BatchStructuralCorruption {
+                filepath: file_path.display().to_string(),
+                original_errors: orig,
+                new_errors,
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        Ok(())
+    }
+
     /// Core logic for the `replace_batch` tool (PRD Epic 5).
     ///
     /// Executes multiple edits on the same file atomically. Edits are resolved,
@@ -394,6 +437,13 @@ impl crate::server::PathfinderServer {
         }
 
         let new_bytes = Self::apply_sorted_edits(&source, resolved_edits)?;
+
+        // WP3: Post-apply structural validation — re-parse the result with
+        // Tree-sitter and reject if it introduces parse errors that weren't
+        // in the original source. This catches nesting corruption from
+        // overlapping or adjacent symbol replacements.
+        Self::verify_no_new_parse_errors(&source, &new_bytes, file_path)?;
+
         let resolve_ms = start.elapsed().as_millis();
 
         // C1: Log when SemanticPath::parse fails and falls back to bare file

@@ -287,13 +287,10 @@ impl crate::server::PathfinderServer {
             &params.semantic_path,
         )?;
 
-        let (source, current_hash, new_bytes) = self
-            .resolve_edit_content(
-                &semantic_path,
-                &params.semantic_path,
-                "insert_into",
-                Some(&params.new_code),
-            )
+        // Call resolve_insert_into directly (not via resolve_edit_content)
+        // to get the container_kind for the GAP-006 warning check.
+        let (source, current_hash, new_bytes, container_kind) = self
+            .resolve_insert_into(&semantic_path, Some(&params.new_code))
             .await?;
 
         check_occ(
@@ -304,11 +301,12 @@ impl crate::server::PathfinderServer {
 
         // GAP-006: Warn when insert_into targets a Rust struct.
         // Methods should go in impl blocks, not struct bodies.
+        // Uses the actual resolved SymbolKind instead of string heuristics.
         let is_rust_struct_target = semantic_path
             .file_path
             .extension()
             .is_some_and(|ext| ext == "rs")
-            && !params.semantic_path.contains("impl ");
+            && container_kind == pathfinder_treesitter::surgeon::SymbolKind::Struct;
         let warning = if is_rust_struct_target {
             tracing::warn!(
                 tool = "insert_into",
@@ -367,7 +365,7 @@ impl crate::server::PathfinderServer {
             return Ok((offset, 0, std::sync::Arc::from(bytes), hash));
         }
 
-        let (symbol_range, source, hash) = self
+        let (symbol_range, resolved) = self
             .surgeon
             .resolve_symbol_range(self.workspace_root.path(), semantic_path)
             .await
@@ -378,7 +376,12 @@ impl crate::server::PathfinderServer {
             InsertEdge::After => symbol_range.end_byte,
         };
 
-        Ok((insert_byte, symbol_range.indent_column, source, hash))
+        Ok((
+            insert_byte,
+            symbol_range.indent_column,
+            resolved.source,
+            resolved.version_hash,
+        ))
     }
 
     /// Core logic for the `delete_symbol` tool (PRD Epic 5, Story 5.6).
@@ -591,7 +594,11 @@ impl crate::server::PathfinderServer {
                 self.resolve_insert(semantic_path, new_code, InsertEdge::After)
                     .await
             }
-            "insert_into" => self.resolve_insert_into(semantic_path, new_code).await,
+            "insert_into" => {
+                let (source, hash, bytes, _container_kind) =
+                    self.resolve_insert_into(semantic_path, new_code).await?;
+                Ok((source, hash, bytes))
+            }
             "delete" => self.resolve_delete(semantic_path, raw_semantic_path).await,
             unknown => Err(Self::unsupported_edit_type_error(
                 raw_semantic_path,
@@ -609,7 +616,7 @@ impl crate::server::PathfinderServer {
     ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
         require_symbol_target(semantic_path, raw_semantic_path)?;
         let new_code = new_code.unwrap_or_default();
-        let (body_range, source, current_hash) = self
+        let (body_range, resolved) = self
             .surgeon
             .resolve_body_range(self.workspace_root.path(), semantic_path)
             .await
@@ -621,8 +628,12 @@ impl crate::server::PathfinderServer {
             body_range.body_indent_column,
         );
         let new_content =
-            super::text_edit::build_body_replacement(&source, &body_range, &indented)?;
-        Ok((source, current_hash, new_content.as_bytes().to_vec()))
+            super::text_edit::build_body_replacement(&resolved.source, &body_range, &indented)?;
+        Ok((
+            resolved.source,
+            resolved.version_hash,
+            new_content.as_bytes().to_vec(),
+        ))
     }
 
     /// Resolve a `replace_full` edit.
@@ -686,7 +697,7 @@ impl crate::server::PathfinderServer {
         semantic_path: &pathfinder_common::types::SemanticPath,
         new_code: &str,
     ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
-        let (full_range, source, current_hash) = self
+        let (full_range, resolved) = self
             .surgeon
             .resolve_full_range(self.workspace_root.path(), semantic_path)
             .await
@@ -695,15 +706,15 @@ impl crate::server::PathfinderServer {
         let normalized = normalize_for_full_replace(new_code);
         let indented = dedent_then_reindent(&normalized, full_range.indent_column);
 
-        let before = &source[..full_range.start_byte];
-        let after = &source[full_range.end_byte..];
+        let before = &resolved.source[..full_range.start_byte];
+        let after = &resolved.source[full_range.end_byte..];
 
         let mut new_bytes = Vec::with_capacity(before.len() + indented.len() + after.len());
         new_bytes.extend_from_slice(before);
         new_bytes.extend_from_slice(indented.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        Ok((source, current_hash, new_bytes))
+        Ok((resolved.source, resolved.version_hash, new_bytes))
     }
 
     /// Resolve an `insert_before` or `insert_after` edit.
@@ -826,24 +837,33 @@ impl crate::server::PathfinderServer {
         Ok((source, current_hash, new_bytes))
     }
 
-    /// Resolve an `insert_into` edit.
     async fn resolve_insert_into(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
         new_code: Option<&str>,
-    ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
+    ) -> Result<
+        (
+            std::sync::Arc<[u8]>,
+            VersionHash,
+            Vec<u8>,
+            pathfinder_treesitter::surgeon::SymbolKind,
+        ),
+        ErrorData,
+    > {
         let new_code = new_code.unwrap_or_default();
-        let (body_end, source, current_hash) = self
+        let (body_end, resolved) = self
             .surgeon
             .resolve_body_end_range(self.workspace_root.path(), semantic_path)
             .await
             .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
 
+        let container_kind = body_end.container_kind;
+
         let normalized = normalize_for_full_replace(new_code);
         let indented = dedent_then_reindent(&normalized, body_end.body_indent_column);
 
-        let before = &source[..body_end.insert_byte];
-        let after = &source[body_end.insert_byte..];
+        let before = &resolved.source[..body_end.insert_byte];
+        let after = &resolved.source[body_end.insert_byte..];
 
         // Add blank line separator before inserted code if needed
         let sep = if before.ends_with(b"\n\n") || before.ends_with(b"{\n") {
@@ -862,7 +882,12 @@ impl crate::server::PathfinderServer {
         new_bytes.extend_from_slice(trailing.as_bytes());
         new_bytes.extend_from_slice(after);
 
-        Ok((source, current_hash, new_bytes))
+        Ok((
+            resolved.source,
+            resolved.version_hash,
+            new_bytes,
+            container_kind,
+        ))
     }
 
     /// Resolve a `delete` edit.
@@ -872,25 +897,25 @@ impl crate::server::PathfinderServer {
         raw_semantic_path: &str,
     ) -> Result<(std::sync::Arc<[u8]>, VersionHash, Vec<u8>), ErrorData> {
         require_symbol_target(semantic_path, raw_semantic_path)?;
-        let (full_range, source, current_hash) = self
+        let (full_range, resolved) = self
             .surgeon
             .resolve_full_range(self.workspace_root.path(), semantic_path)
             .await
             .map_err(crate::server::helpers::treesitter_error_to_error_data)?;
 
-        let before_end = strip_orphaned_doc_comment(&source, full_range.start_byte);
+        let before_end = strip_orphaned_doc_comment(&resolved.source, full_range.start_byte);
         let mut b_end = before_end;
-        while b_end > 0 && source[b_end - 1].is_ascii_whitespace() {
+        while b_end > 0 && resolved.source[b_end - 1].is_ascii_whitespace() {
             b_end -= 1;
         }
 
         let mut a_start = full_range.end_byte;
-        while a_start < source.len() && source[a_start].is_ascii_whitespace() {
+        while a_start < resolved.source.len() && resolved.source[a_start].is_ascii_whitespace() {
             a_start += 1;
         }
 
-        let before = &source[..b_end];
-        let after = &source[a_start..];
+        let before = &resolved.source[..b_end];
+        let after = &resolved.source[a_start..];
 
         let sep = if before.is_empty() || after.is_empty() {
             b"\n" as &[u8]
@@ -903,7 +928,7 @@ impl crate::server::PathfinderServer {
         new_bytes.extend_from_slice(sep);
         new_bytes.extend_from_slice(after);
 
-        Ok((source, current_hash, new_bytes))
+        Ok((resolved.source, resolved.version_hash, new_bytes))
     }
 
     /// Build an `InvalidTarget` error for an unsupported edit type.

@@ -301,7 +301,7 @@ pub fn build_validation_outcome(
         return ValidationOutcome {
             validation: EditValidation::uncertain(), // confidence = "low" via uncertain()
             skipped: true,
-            skipped_reason: Some("empty_diagnostics_both_snapshots".to_owned()),
+            skipped_reason: Some("empty_diagnostics_both_snapshots_possible_warmup".to_owned()),
             should_block: false,
         };
     }

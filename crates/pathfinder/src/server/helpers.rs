@@ -46,7 +46,8 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
         | pathfinder_common::error::PathfinderError::TokenBudgetExceeded { .. }
         | pathfinder_common::error::PathfinderError::MatchNotFound { .. }
         | pathfinder_common::error::PathfinderError::AmbiguousMatch { .. }
-        | pathfinder_common::error::PathfinderError::TextNotFound { .. } => {
+        | pathfinder_common::error::PathfinderError::TextNotFound { .. }
+        | pathfinder_common::error::PathfinderError::BatchStructuralCorruption { .. } => {
             ErrorCode::INVALID_PARAMS
         }
 

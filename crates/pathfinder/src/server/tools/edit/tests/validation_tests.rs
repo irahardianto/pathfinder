@@ -55,8 +55,10 @@ fn setup_full_replace_fixture(
                 end_byte: src_bytes.len(),
                 indent_column: 0,
             },
-            std::sync::Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     (mock_surgeon, hash)
@@ -505,7 +507,7 @@ fn test_build_validation_outcome_empty_snapshots_signals_warmup() {
     );
     assert_eq!(
         outcome.skipped_reason.as_deref(),
-        Some("empty_diagnostics_both_snapshots"),
+        Some("empty_diagnostics_both_snapshots_possible_warmup"),
         "skipped_reason must identify the warmup signal"
     );
     assert_eq!(
@@ -627,7 +629,7 @@ async fn test_push_validation_no_errors() {
     );
     assert_eq!(
         resp.validation_skipped_reason.as_deref(),
-        Some("empty_diagnostics_both_snapshots"),
+        Some("empty_diagnostics_both_snapshots_possible_warmup"),
         "skip reason should indicate empty snapshots"
     );
 }

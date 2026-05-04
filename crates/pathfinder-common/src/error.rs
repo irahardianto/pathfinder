@@ -147,6 +147,18 @@ pub enum PathfinderError {
         path: PathBuf,
         workspace_root: PathBuf,
     },
+
+    /// `replace_batch` post-apply structural validation detected that the
+    /// combined edits introduced parse errors not present in the original source.
+    /// This typically indicates nesting corruption from adjacent symbol replacements.
+    #[error(
+        "batch structural corruption in {filepath}: {new_errors} new parse error(s) introduced"
+    )]
+    BatchStructuralCorruption {
+        filepath: String,
+        original_errors: usize,
+        new_errors: usize,
+    },
 }
 
 impl PathfinderError {
@@ -174,6 +186,7 @@ impl PathfinderError {
             Self::TextNotFound { .. } => "TEXT_NOT_FOUND",
             Self::InvalidSemanticPath { .. } => "INVALID_SEMANTIC_PATH",
             Self::PathTraversal { .. } => "PATH_TRAVERSAL",
+            Self::BatchStructuralCorruption { .. } => "BATCH_STRUCTURAL_CORRUPTION",
         }
     }
 
@@ -185,13 +198,38 @@ impl PathfinderError {
     #[allow(clippy::too_many_lines)]
     pub fn hint(&self) -> Option<String> {
         match self {
-            Self::SymbolNotFound { did_you_mean, .. } => {
+            Self::SymbolNotFound {
+                semantic_path,
+                did_you_mean,
+            } => {
+                // Detect path separator confusion: agent may have used `.` instead of `::`
+                // (e.g., `src/lib.rs.MyStruct.method` instead of `src/lib.rs::MyStruct.method`)
+                // or used `::` between nested symbols where `.` is expected.
+                let separator_hint = if !semantic_path.contains("::") {
+                    Some(
+                        " Note: semantic paths require '::' between the file and symbol \
+                         (e.g., 'src/lib.rs::MyStruct.method'). \
+                         Nested symbols within the same file use '.' (e.g., 'MyStruct.method')."
+                    )
+                } else if semantic_path.matches("::").count() > 1 {
+                    Some(
+                        " Note: only one '::' is allowed — between the file path and the symbol. \
+                         Nested symbols within the file use '.' (e.g., 'src/lib.rs::Outer.Inner.method')."
+                    )
+                } else {
+                    None
+                };
+
                 if did_you_mean.is_empty() {
-                    Some("Use read_source_file to see available symbols in this file.".to_owned())
+                    Some(format!(
+                        "Use read_source_file to see available symbols in this file.{}",
+                        separator_hint.unwrap_or("")
+                    ))
                 } else {
                     Some(format!(
-                        "Did you mean: {}? Use read_source_file to see available symbols.",
-                        did_you_mean.join(", ")
+                        "Did you mean: {}? Use read_source_file to see available symbols.{}",
+                        did_you_mean.join(", "),
+                        separator_hint.unwrap_or("")
                     ))
                 }
             }
@@ -218,11 +256,28 @@ impl PathfinderError {
                 "Verify the file path is relative to the workspace root and the file exists."
                     .to_owned(),
             ),
-            Self::ValidationFailed { .. } => Some(
-                "Set ignore_validation_failures=true to write despite errors, or fix the \
-                 introduced errors before retrying."
-                    .to_owned(),
-            ),
+            Self::ValidationFailed {
+                count,
+                introduced_errors,
+                ..
+            } => {
+                let first_error = introduced_errors.first().map(|e| {
+                    format!(
+                        " First error: \"{}\" in {} (line ~{}).",
+                        e.message.chars().take(120).collect::<String>(),
+                        e.file,
+                        // DiagnosticError doesn't carry a line number directly;
+                        // the message often contains it — surface what we have.
+                        e.code
+                    )
+                });
+                Some(format!(
+                    "Validation failed: {count} new error(s) introduced.{} \
+                     Set ignore_validation_failures=true to write despite errors, \
+                     or fix the introduced errors before retrying.",
+                    first_error.as_deref().unwrap_or("")
+                ))
+            }
             Self::MatchNotFound { .. } => Some(
                 "The old_text was not found in the file. Use read_file to verify the exact text \
                  before retrying."
@@ -283,6 +338,13 @@ impl PathfinderError {
                 "No LSP available for {language}. Install a language server to enable LSP-dependent features. \
                  Tree-sitter tools (read_symbol_scope, search_codebase, read_source_file) still work without LSP."
             )),
+            Self::BatchStructuralCorruption { .. } => Some(
+                "The combined batch edits produced structurally invalid code. \
+                 This usually happens when adjacent symbol replacements interact (e.g., \
+                 consuming each other's closing braces). Use sequential individual edit \
+                 tools (replace_full, replace_body) instead of replace_batch for these edits."
+                    .to_string(),
+            ),
             _ => None,
         }
     }
@@ -371,6 +433,17 @@ impl PathfinderError {
                 workspace_root,
             } => {
                 serde_json::json!({ "path": path, "workspace_root": workspace_root })
+            }
+            Self::BatchStructuralCorruption {
+                filepath,
+                original_errors,
+                new_errors,
+            } => {
+                serde_json::json!({
+                    "filepath": filepath,
+                    "original_errors": original_errors,
+                    "new_errors": new_errors,
+                })
             }
             _ => serde_json::Value::Object(serde_json::Map::new()),
         }

@@ -281,15 +281,23 @@ fn extract_symbols_recursive(
 /// - TS `type_alias_declaration` → `SymbolKind::Class` (type alias).
 /// - All others → `SymbolKind::Class`.
 fn refine_class_kind(node: Node) -> SymbolKind {
-    if node.kind() == "enum_declaration" {
-        return SymbolKind::Enum;
+    match node.kind() {
+        // TypeScript `enum_declaration` / Rust `enum_item`
+        "enum_declaration" | "enum_item" => SymbolKind::Enum,
+        // Rust struct_item → Struct (not Class)
+        "struct_item" => SymbolKind::Struct,
+        // Rust trait_item → Interface
+        "trait_item" => SymbolKind::Interface,
+        _ => {
+            // Go type_spec: refine based on the `type` field
+            node.child_by_field_name("type")
+                .map_or(SymbolKind::Class, |type_node| match type_node.kind() {
+                    "interface_type" => SymbolKind::Interface,
+                    "struct_type" => SymbolKind::Struct,
+                    _ => SymbolKind::Class,
+                })
+        }
     }
-    node.child_by_field_name("type")
-        .map_or(SymbolKind::Class, |type_node| match type_node.kind() {
-            "interface_type" => SymbolKind::Interface,
-            "struct_type" => SymbolKind::Struct,
-            _ => SymbolKind::Class,
-        })
 }
 
 /// Refine constant kind to detect arrow functions in JS/TS.

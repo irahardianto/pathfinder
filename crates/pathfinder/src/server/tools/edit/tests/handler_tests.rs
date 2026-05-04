@@ -37,8 +37,10 @@ async fn test_replace_body_success() {
         .unwrap()
         .push(Ok((
             make_body_range(open, close, 0, 4),
-            std::sync::Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -98,8 +100,10 @@ async fn test_replace_body_version_mismatch() {
         .unwrap()
         .push(Ok((
             make_body_range(open, close, 0, 4),
-            std::sync::Arc::from(src_bytes),
-            real_hash,
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(src_bytes),
+                version_hash: real_hash,
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -218,8 +222,10 @@ async fn test_replace_body_brace_leniency() {
         .unwrap()
         .push(Ok((
             make_body_range(open, close, 0, 4),
-            std::sync::Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -643,8 +649,10 @@ async fn test_validate_only_replace_body() {
         .unwrap()
         .push(Ok((
             make_body_range(open, close, 0, 4),
-            std::sync::Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -707,8 +715,10 @@ async fn test_validate_only_version_mismatch() {
         .unwrap()
         .push(Ok((
             make_body_range(open, close, 0, 4),
-            std::sync::Arc::from(src_bytes),
-            real_hash,
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(src_bytes),
+                version_hash: real_hash,
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -773,8 +783,10 @@ async fn test_validate_only_delete() {
                 end_byte: src_bytes.len(),
                 indent_column: 0,
             },
-            std::sync::Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -1104,5 +1116,205 @@ async fn test_insert_into_rust_impl_no_warning() {
     assert!(
         result.0.warning.is_none(),
         "impl block target should not produce struct warning"
+    );
+}
+
+// ── WP1: Verify insert_into on Rust `mod` does NOT produce struct warning ─
+
+#[tokio::test]
+async fn test_insert_into_rust_mod_no_warning() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    let src = "mod tests {\n    fn test_a() {}\n}\n";
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).unwrap(),
+        pathfinder_common::config::PathfinderConfig::default(),
+        pathfinder_common::sandbox::Sandbox::new(
+            ws_dir.path(),
+            &pathfinder_common::config::PathfinderConfig::default().sandbox,
+        ),
+        std::sync::Arc::new(pathfinder_search::RipgrepScout),
+        std::sync::Arc::new(TreeSitterSurgeon::new(10)),
+        std::sync::Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::tests"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "fn test_b() {}".to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("insert_into should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+    assert!(
+        result.0.warning.is_none(),
+        "Rust `mod` target should NOT produce struct warning"
+    );
+}
+
+// ── WP2: Python insert_into tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_insert_into_python_class_appends_method() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    let src = "class Calculator:\n    def add(self, a, b):\n        return a + b\n";
+    let filepath = "src/calc.py";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+    let server = make_server_dyn(&ws_dir, real_surgeon);
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::Calculator"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "def subtract(self, a, b):\n    return a - b".to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("insert_into should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+
+    let written = std::fs::read_to_string(&abs).unwrap();
+    assert!(
+        written.contains("def subtract(self, a, b):"),
+        "new method should be inserted: {written}"
+    );
+    assert!(
+        written.contains("def add(self, a, b):"),
+        "existing method should be preserved: {written}"
+    );
+    // New method should come after the existing one
+    let add_pos = written.find("def add").unwrap();
+    let sub_pos = written.find("def subtract").unwrap();
+    assert!(
+        sub_pos > add_pos,
+        "subtract should come after add: {written}"
+    );
+}
+
+#[tokio::test]
+async fn test_insert_into_python_class_with_pass_body_no_corruption() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    // The reported bug scenario: a class with a method that has only `pass` as body.
+    // insert_into should NOT displace the `pass` statement.
+    let src = "class Calculator:\n    def reset(self):\n        pass\n";
+    let filepath = "src/calc.py";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+    let server = make_server_dyn(&ws_dir, real_surgeon);
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::Calculator"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "def add(self, a, b):\n    return a + b".to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("insert_into should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+
+    let written = std::fs::read_to_string(&abs).unwrap();
+    // `pass` must still be inside the `reset` method, not displaced
+    assert!(
+        written.contains("def reset(self):\n        pass"),
+        "pass should remain inside reset method body: {written}"
+    );
+    assert!(
+        written.contains("def add(self, a, b):"),
+        "new method should be inserted: {written}"
+    );
+    // New method should come after reset
+    let reset_pos = written.find("def reset").unwrap();
+    let add_pos = written.find("def add").unwrap();
+    assert!(
+        add_pos > reset_pos,
+        "add should come after reset: {written}"
+    );
+}
+
+#[tokio::test]
+async fn test_insert_into_python_class_with_multiple_methods() {
+    use pathfinder_treesitter::treesitter_surgeon::TreeSitterSurgeon;
+    let ws_dir = tempdir().expect("temp dir");
+
+    let src = "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def multiply(self, a, b):\n        return a * b\n";
+    let filepath = "src/calc.py";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+
+    let hash = VersionHash::compute(src.as_bytes());
+
+    let real_surgeon = Arc::new(TreeSitterSurgeon::new(10));
+    let server = make_server_dyn(&ws_dir, real_surgeon);
+
+    let params = crate::server::types::InsertIntoParams {
+        semantic_path: format!("{filepath}::Calculator"),
+        base_version: hash.as_str().to_owned(),
+        new_code: "def subtract(self, a, b):\n    return a - b".to_owned(),
+        ignore_validation_failures: true,
+    };
+
+    let result = server
+        .insert_into(Parameters(params))
+        .await
+        .expect("insert_into should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+
+    let written = std::fs::read_to_string(&abs).unwrap();
+    assert!(
+        written.contains("def subtract(self, a, b):"),
+        "new method should be inserted: {written}"
+    );
+    // All three methods should be present
+    assert!(
+        written.contains("def add(self, a, b):"),
+        "add should be preserved: {written}"
+    );
+    assert!(
+        written.contains("def multiply(self, a, b):"),
+        "multiply should be preserved: {written}"
+    );
+    // subtract should come after multiply (appended at end)
+    let multiply_pos = written.find("def multiply").unwrap();
+    let sub_pos = written.find("def subtract").unwrap();
+    assert!(
+        sub_pos > multiply_pos,
+        "subtract should come after multiply: {written}"
     );
 }

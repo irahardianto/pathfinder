@@ -80,8 +80,10 @@ fn foo() -> i32 {
         .unwrap()
         .push(Ok((
             make_body_range(open, close, 0, 4),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -143,8 +145,10 @@ fn baz() -> i32 {
         .unwrap()
         .push(Ok((
             make_body_range(foo_open, foo_close, 0, 4),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     // baz: find the last function
@@ -157,8 +161,10 @@ fn baz() -> i32 {
         .unwrap()
         .push(Ok((
             make_body_range(baz_open, baz_close, 0, 4),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -367,8 +373,10 @@ async fn test_batch_large_multi_edit() {
             .unwrap()
             .push(Ok((
                 make_body_range(open, close, 0, 0),
-                Arc::from(src_bytes),
-                hash.clone(),
+                pathfinder_treesitter::surgeon::ResolvedFile {
+                    source: Arc::from(src_bytes),
+                    version_hash: hash.clone(),
+                },
             )));
 
         edits.push(make_replace_body_edit(
@@ -515,8 +523,10 @@ fn bar() -> i32 {
                 end_byte: bar_start + 20, // approximate
                 indent_column: 0,
             },
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -582,8 +592,10 @@ fn bar() -> i32 {
                 end_byte: foo_end,
                 indent_column: 0,
             },
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -654,8 +666,10 @@ fn baz() -> i32 {
                 end_byte: baz_start,
                 indent_column: 0,
             },
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -737,8 +751,10 @@ fn func_c() -> i32 {
         .unwrap()
         .push(Ok((
             make_body_range(func_a_open, func_b_open + 5, 0, 4), // Overlap with func_b
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     mock_surgeon
@@ -747,8 +763,10 @@ fn func_c() -> i32 {
         .unwrap()
         .push(Ok((
             make_body_range(func_b_open, func_b_close, 0, 4),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -820,8 +838,10 @@ async fn test_batch_adjacent_edits_allowed() {
         .unwrap()
         .push(Ok((
             make_body_range(pos_a, pos_a + 3, 0, 0),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     mock_surgeon
@@ -830,8 +850,10 @@ async fn test_batch_adjacent_edits_allowed() {
         .unwrap()
         .push(Ok((
             make_body_range(pos_c, pos_c + 3, 0, 0),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -890,8 +912,10 @@ async fn test_batch_many_edits_no_overflow() {
             .unwrap()
             .push(Ok((
                 make_body_range(pos, pos + 1, 0, 0),
-                Arc::from(src_bytes),
-                hash.clone(),
+                pathfinder_treesitter::surgeon::ResolvedFile {
+                    source: Arc::from(src_bytes),
+                    version_hash: hash.clone(),
+                },
             )));
 
         edits.push(make_replace_body_edit(
@@ -960,8 +984,10 @@ fn func_b() -> i32 { 2 }
         .unwrap()
         .push(Ok((
             make_body_range(func_a_open, func_b_open + 5, 0, 0),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     mock_surgeon
@@ -970,8 +996,10 @@ fn func_b() -> i32 { 2 }
         .unwrap()
         .push(Ok((
             make_body_range(func_b_open, source.len(), 0, 0),
-            Arc::from(src_bytes),
-            hash.clone(),
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: Arc::from(src_bytes),
+                version_hash: hash.clone(),
+            },
         )));
 
     let server = make_server(&ws_dir, mock_surgeon);
@@ -1008,4 +1036,86 @@ fn func_b() -> i32 { 2 }
     // Verify file was NOT modified
     let written = std::fs::read_to_string(&abs).unwrap();
     assert_eq!(written, source);
+}
+
+// ── WP5: Batch insert_after blank-line spacing ───────────────────────────────
+
+/// WP5 regression: inserting after a top-level Rust function should produce
+/// a blank line between the closing `}` of the existing function and the new code.
+/// Previously `resolve_batch_insert_after` only checked `before` content, not
+/// `after` — producing `}\npub fn` without the required blank line separator.
+#[tokio::test]
+async fn test_batch_insert_after_adds_blank_line_between_top_level_items() {
+    use pathfinder_treesitter::surgeon::SymbolRange;
+
+    let ws_dir = tempdir().expect("temp dir");
+
+    // Two adjacent functions with a single newline between them (no blank line).
+    let source = "fn foo() -> i32 {\n    1\n}\nfn bar() -> i32 {\n    2\n}\n";
+    let filepath = "src/lib.rs";
+    let abs = ws_dir.path().join(filepath);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, source).unwrap();
+
+    let hash = VersionHash::compute(source.as_bytes());
+
+    // foo ends at the first `}`
+    let foo_end = source.find('}').unwrap() + 1;
+
+    let mock_surgeon = MockSurgeon::new();
+    mock_surgeon
+        .resolve_symbol_range_results
+        .lock()
+        .unwrap()
+        .push(Ok((
+            SymbolRange {
+                start_byte: 0,
+                end_byte: foo_end,
+                indent_column: 0,
+            },
+            pathfinder_treesitter::surgeon::ResolvedFile {
+                source: std::sync::Arc::from(source.as_bytes()),
+                version_hash: hash.clone(),
+            },
+        )));
+
+    let server = make_server(&ws_dir, mock_surgeon);
+
+    let result = server
+        .replace_batch(Parameters(crate::server::types::ReplaceBatchParams {
+            filepath: filepath.to_owned(),
+            base_version: hash.as_str().to_owned(),
+            edits: vec![BatchEdit {
+                semantic_path: format!("{filepath}::foo"),
+                old_text: None,
+                edit_type: "insert_after".to_string(),
+                new_code: Some("fn baz() -> i32 {\n    3\n}".to_string()),
+                replacement_text: None,
+                context_line: None,
+                normalize_whitespace: false,
+            }],
+            ignore_validation_failures: true,
+        }))
+        .await
+        .expect("insert_after should succeed");
+
+    assert!(result.0.success, "edit should succeed");
+
+    let written = std::fs::read_to_string(&abs).unwrap();
+    assert!(
+        written.contains("fn baz()"),
+        "new function should be present: {written}"
+    );
+
+    // Verify that `baz` is not directly glued to `foo` without a blank line.
+    // The pattern `}\nfn` (one newline only) should NOT appear.
+    assert!(
+        !written.contains("}\nfn baz"),
+        "must have blank line between top-level items, got: {written}"
+    );
+    // Instead, `}\n\nfn` (blank line) or `}\n\nfn baz` should be present.
+    assert!(
+        written.contains("}\n\nfn baz"),
+        "expected blank line between foo and baz, got: {written}"
+    );
 }
