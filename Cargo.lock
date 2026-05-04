@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "pathfinder-mcp-search"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "globset",

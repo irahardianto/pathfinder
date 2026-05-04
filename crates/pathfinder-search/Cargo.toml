@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder-mcp-search"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 license.workspace = true
 description = "The Scout — Ripgrep-powered text search engine for Pathfinder"
