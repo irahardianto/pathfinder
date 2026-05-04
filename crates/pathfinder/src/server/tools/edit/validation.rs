@@ -184,6 +184,7 @@ impl crate::server::PathfinderServer {
     /// `ValidationOutcome` even if new errors are introduced.
     ///
     /// Gracefully degrades to `validation_skipped` on all LSP errors.
+    #[allow(clippy::too_many_lines)] // Validation pipeline; splitting it would reduce readability
     pub(crate) async fn run_lsp_validation(
         &self,
         file_path: &Path,

@@ -193,7 +193,7 @@ impl DetectedCapabilities {
                 grace_ms: 3_000,
             },
             // pyright occasionally batches two notifications; a 1s grace is enough.
-            Some("pyright") | Some("pylsp") => PushDiagnosticsConfig {
+            Some("pyright" | "pylsp") => PushDiagnosticsConfig {
                 ceiling_ms: 15_000,
                 grace_ms: 1_000,
             },
@@ -222,7 +222,7 @@ impl DetectedCapabilities {
                 ceiling_ms: 30_000,
                 grace_ms: 3_000,
             },
-            Some("pyright") | Some("pylsp") => PushDiagnosticsConfig {
+            Some("pyright" | "pylsp") => PushDiagnosticsConfig {
                 ceiling_ms: 15_000,
                 grace_ms: 1_000,
             },
@@ -262,7 +262,7 @@ impl DetectedCapabilities {
                 // also service workspace-wide diagnostic requests.
                 if options
                     .get("workspaceDiagnostics")
-                    .and_then(|v| v.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
                     self.workspace_diagnostic_provider = true;

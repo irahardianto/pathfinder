@@ -227,7 +227,7 @@ impl Drop for InFlightGuard {
 
 /// RAII guard that automatically sends `textDocument/didClose` when dropped.
 ///
-/// # IW-3 DocumentGuard
+/// # IW-3 `DocumentGuard`
 ///
 /// Wraps a `did_open` call and ensures the corresponding `did_close` is always
 /// sent, even if the caller panics or returns early. This eliminates the class
@@ -516,6 +516,8 @@ impl LspClient {
     /// down — use this only when the process is believed to be stuck.
     ///
     /// Returns `Ok(())` when the new process successfully initializes.
+    ///
+    /// # Errors
     /// Returns `Err(LspError::NoLspAvailable)` if no descriptor is registered.
     pub async fn force_respawn(&self, language_id: &str) -> Result<(), LspError> {
         tracing::info!(language = %language_id, "LspClient: force_respawn requested");
@@ -2031,10 +2033,9 @@ async fn registration_watcher_task(
                                 let reg_id = reg.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 let reg_method =
                                     reg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                                let opts = reg
-                                    .get("registerOptions")
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                                let opts = reg.get("registerOptions").cloned().unwrap_or(
+                                    serde_json::Value::Object(serde_json::Map::default()),
+                                );
                                 if caps.apply_registration(reg_method, reg_id, &opts) {
                                     tracing::info!(
                                         language = %language_id,

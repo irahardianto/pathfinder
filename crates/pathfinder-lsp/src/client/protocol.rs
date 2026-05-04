@@ -624,8 +624,8 @@ mod tests {
         dispatcher.dispatch_response(&response);
 
         // The request was fulfilled normally
-        let _ = rx; // receiver still valid
-                    // Server request channel remains empty
+        std::mem::drop(rx); // receiver still valid — drop explicitly to avoid let_underscore_future lint
+                            // Server request channel remains empty
         assert!(
             server_rx.try_recv().is_err(),
             "normal response must not appear on server_request channel"
