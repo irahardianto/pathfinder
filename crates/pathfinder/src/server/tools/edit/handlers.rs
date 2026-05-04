@@ -534,12 +534,25 @@ impl crate::server::PathfinderServer {
             .run_lsp_validation(&semantic_path.file_path, original_str, new_str, false)
             .await;
 
+        // TS-1: Apply Tree-sitter fallback when LSP is unavailable.
+        // Upgrades skipped validation confidence from "none" to "syntax_only".
+        let validation_outcome = if validation_outcome.skipped {
+            Self::apply_treesitter_fallback(&semantic_path.file_path, new_str, validation_outcome)
+        } else {
+            validation_outcome
+        };
+
         let duration_ms = start.elapsed().as_millis();
+        let engines_used = if validation_outcome.skipped {
+            vec!["tree-sitter"]
+        } else {
+            vec!["tree-sitter", "lsp"]
+        };
         tracing::info!(
             tool = "validate_only",
             semantic_path = %params.semantic_path,
             duration_ms,
-            engines_used = ?if validation_outcome.skipped { vec!["tree-sitter"] } else { vec!["tree-sitter", "lsp"] },
+            engines_used = ?engines_used,
             "validate_only: complete"
         );
 

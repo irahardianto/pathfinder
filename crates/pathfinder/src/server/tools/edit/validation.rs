@@ -383,8 +383,99 @@ impl crate::server::PathfinderServer {
         Ok(VersionHash::compute(new_bytes))
     }
 
+    /// TS-1: Run Tree-sitter syntax validation on `new_content`.
+    ///
+    /// Used as a fallback when LSP validation is skipped (no LSP available,
+    /// coexistence mode, or LSP warming up). Tree-sitter can detect structural
+    /// syntax errors — unmatched braces, malformed expressions, incomplete
+    /// statements — without requiring a running language server.
+    ///
+    /// # Return value
+    /// - `Ok(true)`  → Tree-sitter parsed the file and found **no** syntax errors
+    /// - `Ok(false)` → Tree-sitter parsed the file and found **syntax errors** (`has_error = true`)
+    /// - `Err(msg)`  → Language unsupported or parse timed out (treat as no-op)
+    ///
+    /// This does NOT block the edit — the result is surfaced in the response as
+    /// `validation_confidence: "syntax_only"` so agents can distinguish it from
+    /// a full LSP validation result.
+    pub(crate) fn run_treesitter_validation(
+        file_path: &Path,
+        new_content: &str,
+    ) -> Result<bool, String> {
+        use pathfinder_treesitter::language::SupportedLanguage;
+        use pathfinder_treesitter::parser::AstParser;
+
+        let lang = SupportedLanguage::detect(file_path)
+            .ok_or_else(|| format!("unsupported language for {}", file_path.display()))?;
+
+        let tree = AstParser::parse_source(file_path, lang, new_content.as_bytes())
+            .map_err(|e| format!("tree-sitter parse failed: {e}"))?;
+
+        Ok(!tree.root_node().has_error())
+    }
+
+    /// TS-1: Upgrade a skipped `ValidationOutcome` with a Tree-sitter syntax check.
+    ///
+    /// When LSP validation is skipped (no LSP, coexistence mode, warmup), this
+    /// method attempts a Tree-sitter parse of `new_content`. If the parse succeeds
+    /// without errors, the outcome is upgraded to `validation_confidence: "syntax_only"`
+    /// so agents can distinguish it from a silent skip.
+    ///
+    /// The edit is **never blocked** by this check — Tree-sitter detects structural
+    /// errors but cannot evaluate type safety or import validity.
+    pub(crate) fn apply_treesitter_fallback(
+        file_path: &Path,
+        new_content: &str,
+        mut outcome: ValidationOutcome,
+    ) -> ValidationOutcome {
+        match Self::run_treesitter_validation(file_path, new_content) {
+            Ok(no_errors) => {
+                if no_errors {
+                    tracing::debug!(
+                        file = %file_path.display(),
+                        "TS-1: Tree-sitter validation passed (no syntax errors)"
+                    );
+                    // Upgrade confidence from "none" to "syntax_only"
+                    "syntax_only".clone_into(
+                        outcome
+                            .validation
+                            .validation_confidence
+                            .get_or_insert(String::new()),
+                    );
+                    "passed".clone_into(&mut outcome.validation.status);
+                } else {
+                    tracing::warn!(
+                        file = %file_path.display(),
+                        "TS-1: Tree-sitter detected syntax errors in new content"
+                    );
+                    "syntax_only".clone_into(
+                        outcome
+                            .validation
+                            .validation_confidence
+                            .get_or_insert(String::new()),
+                    );
+                    "uncertain".clone_into(&mut outcome.validation.status);
+                    outcome.validation.recovery_action = Some(
+                        "Tree-sitter detected syntax errors. \
+                         Run lsp_health to check if a full LSP validation is available."
+                            .to_owned(),
+                    );
+                }
+            }
+            Err(reason) => {
+                tracing::debug!(
+                    file = %file_path.display(),
+                    reason = %reason,
+                    "TS-1: Tree-sitter validation skipped (unsupported language or parse error)"
+                );
+                // Leave outcome unchanged — not all languages are supported
+            }
+        }
+        outcome
+    }
     /// Helper function to perform LSP validation, TOCTOU check, and disk write.
     /// This dries up the tail end of the edit tools.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn finalize_edit(
         &self,
         params: FinalizeEditParams<'_>,
@@ -442,6 +533,23 @@ impl crate::server::PathfinderServer {
             }
         };
         let validate_ms = validate_start.elapsed().as_millis();
+
+        // TS-1: When LSP validation was skipped, attempt Tree-sitter syntax check
+        // as a zero-cost fallback. This upgrades confidence from "none" to "syntax_only"
+        // so agents can distinguish "LSP not available" from "definitely no syntax errors".
+        let validation_outcome = if validation_outcome.skipped {
+            if let Ok(new) = new_str {
+                Self::apply_treesitter_fallback(
+                    &params.semantic_path.file_path,
+                    new,
+                    validation_outcome,
+                )
+            } else {
+                validation_outcome // can't parse invalid UTF-8
+            }
+        } else {
+            validation_outcome
+        };
 
         if validation_outcome.should_block {
             let introduced = validation_outcome.validation.introduced_errors.clone();

@@ -58,7 +58,12 @@ async fn test_replace_body_success() {
 
     assert!(resp.success);
     assert!(resp.new_version_hash.is_some());
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
 
     // Verify the file was actually written
@@ -659,7 +664,12 @@ async fn test_validate_only_replace_body() {
 
     assert!(resp.success);
     assert!(resp.new_version_hash.is_none());
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
 
     // Verify the file was NOT written

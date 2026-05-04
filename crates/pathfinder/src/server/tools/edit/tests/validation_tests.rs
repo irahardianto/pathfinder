@@ -89,7 +89,14 @@ async fn test_run_lsp_validation_no_lsp() {
     let resp = result.0;
 
     assert!(resp.success);
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status from "skipped" to "passed" for valid Go code.
+    // validation_skipped remains true (LSP was still unavailable), but status reflects
+    // the Tree-sitter syntax check result.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
     assert_eq!(resp.validation_skipped_reason.as_deref(), Some("no_lsp"));
 }
@@ -122,7 +129,12 @@ async fn test_run_lsp_validation_unsupported() {
         .expect("should succeed — unsupported gracefully degrades");
     let resp = result.0;
 
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
     assert_eq!(
         resp.validation_skipped_reason.as_deref(),
@@ -160,7 +172,12 @@ async fn test_run_lsp_validation_pre_diag_timeout() {
     let resp = result.0;
 
     assert!(resp.success);
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
     assert_eq!(
         resp.validation_skipped_reason.as_deref(),
@@ -207,7 +224,12 @@ async fn test_run_lsp_validation_pull_diagnostics_unsupported() {
         .expect("should succeed — pull_diagnostics_unsupported degrades");
     let resp = result.0;
 
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert_eq!(
         resp.validation_skipped_reason.as_deref(),
         Some("pull_diagnostics_unsupported")
@@ -244,7 +266,12 @@ async fn test_run_lsp_validation_post_diag_timeout() {
     let resp = result.0;
 
     assert!(resp.success);
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
     assert_eq!(
         resp.validation_skipped_reason.as_deref(),
@@ -582,9 +609,17 @@ async fn test_push_validation_no_errors() {
         resp.success,
         "edit should succeed when push validation finds no new errors"
     );
+    // TS-1: Tree-sitter fallback upgrades status from "uncertain" to "passed" for valid Go code.
+    // The warmup skip path triggers first (both snapshots empty), then Tree-sitter runs
+    // and sees valid syntax, upgrading status to "passed" with "syntax_only" confidence.
     assert_eq!(
-        resp.validation.status, "uncertain",
-        "push validation with empty pre and post should be 'uncertain' (warmup signal)"
+        resp.validation.status, "passed",
+        "TS-1 fallback should upgrade status to 'passed' for valid Go syntax"
+    );
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only"),
+        "confidence must be syntax_only when upgraded by Tree-sitter"
     );
     assert!(
         resp.validation_skipped,
@@ -785,7 +820,12 @@ async fn test_push_validation_pre_fails() {
     let resp = result.0;
 
     assert!(resp.success, "edit should succeed despite pre-diag failure");
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
     assert_eq!(
         resp.validation_skipped_reason.as_deref(),
@@ -847,7 +887,12 @@ async fn test_push_validation_post_fails() {
         resp.success,
         "edit should succeed despite post-diag failure"
     );
-    assert_eq!(resp.validation.status, "skipped");
+    // TS-1: Tree-sitter fallback upgrades status for valid Go syntax.
+    assert_eq!(resp.validation.status, "passed");
+    assert_eq!(
+        resp.validation.validation_confidence.as_deref(),
+        Some("syntax_only")
+    );
     assert!(resp.validation_skipped);
     assert_eq!(
         resp.validation_skipped_reason.as_deref(),
