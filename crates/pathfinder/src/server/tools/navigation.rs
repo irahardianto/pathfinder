@@ -448,6 +448,10 @@ impl PathfinderServer {
                 }))
             }
             Err(e) => {
+                // GAP-C2: Generic LSP error — attempt grep fallback before giving up.
+                // Covers connection resets, protocol errors, and any other LspError variants
+                // not handled by the specific arms above. This prevents agent stalls when
+                // an unexpected LSP failure occurs mid-session.
                 tracing::warn!(
                     tool = "get_definition",
                     error = %e,
@@ -455,7 +459,34 @@ impl PathfinderServer {
                     lsp_ms,
                     duration_ms,
                     engines_used = ?["lsp"],
-                    "get_definition: LSP error"
+                    "get_definition: LSP error — attempting grep fallback"
+                );
+
+                if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
+                    def.degraded = true;
+                    def.degraded_reason = Some(format!(
+                        "lsp_error_grep_fallback: LSP returned error ({e}); result from Ripgrep \
+                         pattern search — may not be the canonical definition. \
+                         Verify with read_source_file."
+                    ));
+                    tracing::info!(
+                        tool = "get_definition",
+                        file = %def.file,
+                        line = def.line,
+                        duration_ms,
+                        degraded = true,
+                        degraded_reason = "lsp_error_grep_fallback",
+                        engines_used = ?["tree-sitter", "lsp", "ripgrep"],
+                        "get_definition: degraded complete (grep fallback after LSP error)"
+                    );
+                    return Ok(Json(def));
+                }
+
+                tracing::warn!(
+                    tool = "get_definition",
+                    error = %e,
+                    duration_ms,
+                    "get_definition: LSP error and grep fallback found no match"
                 );
                 Err(pathfinder_to_error_data(&PathfinderError::LspError {
                     message: e.to_string(),
@@ -2289,7 +2320,8 @@ mod tests {
     // ── get_definition LSP error path ──────────────────────────────────
 
     #[tokio::test]
-    async fn test_get_definition_lsp_error_returns_lsp_error() {
+    async fn test_get_definition_lsp_error_no_grep_match_returns_lsp_error() {
+        // When a generic LSP error fires AND grep returns nothing, the original error is surfaced.
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2317,6 +2349,141 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert_eq!(code, "LSP_ERROR");
+    }
+
+    // ── GAP-C2: catch-all Err(e) grep fallback ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_definition_generic_lsp_error_falls_back_to_grep() {
+        // When a generic LSP error fires and grep DOES find a match,
+        // the result should be Ok with degraded=true and reason containing "lsp_error_grep_fallback".
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        // Scout returns a match so the fallback succeeds
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn login() -> bool { true }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+        }));
+
+        // Lawyer returns a generic LSP error (not NoLspAvailable)
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_goto_definition_result(Err("protocol violation".to_string()));
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Ok(res) = result else {
+            panic!("expected Ok with grep fallback, got Err");
+        };
+        assert!(res.0.degraded, "should be degraded");
+        assert_eq!(res.0.file, "src/auth.rs");
+        assert!(
+            res.0
+                .degraded_reason
+                .as_ref()
+                .unwrap()
+                .contains("lsp_error_grep_fallback"),
+            "degraded_reason should mention lsp_error_grep_fallback: {:?}",
+            res.0.degraded_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_definition_connection_lost_falls_back_to_grep() {
+        // Same as above but with a "connection lost" error message — exercises
+        // the same code path with a different error variant text.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn login() -> bool { true }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+        }));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_goto_definition_result(Err("connection lost to language server".to_string()));
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Ok(res) = result else {
+            panic!("expected Ok with grep fallback, got Err");
+        };
+        assert!(res.0.degraded, "should be degraded");
+        assert!(
+            res.0
+                .degraded_reason
+                .as_ref()
+                .unwrap()
+                .contains("lsp_error_grep_fallback"),
+            "degraded_reason: {:?}",
+            res.0.degraded_reason
+        );
     }
 
     #[tokio::test]
