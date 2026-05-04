@@ -46,7 +46,7 @@ impl Lawyer for UnsupportedDiagLawyer {
     ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, LspError> {
         Err(LspError::NoLspAvailable)
     }
-    /// IW-3 (DS-1): Test double — open_document returns a no-op lease.
+    /// IW-3 (DS-1): Test double — `open_document` returns a no-op lease.
     async fn open_document(
         &self,
         _workspace_root: &Path,

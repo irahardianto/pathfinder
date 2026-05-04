@@ -23,6 +23,10 @@ pub mod lawyer;
 pub mod mock;
 /// The `no_op` module provides no-operation stub implementations.
 pub mod no_op;
+
+/// LT-2: Language Plugin trait — per-language behaviour abstraction.
+pub mod plugin;
+
 /// Module containing type definitions for the language server protocol.
 pub mod types;
 
@@ -32,3 +36,8 @@ pub use lawyer::Lawyer;
 pub use mock::MockLawyer;
 pub use no_op::NoOpLawyer;
 pub use types::{DefinitionLocation, LspDiagnostic, LspDiagnosticSeverity};
+
+pub use plugin::{
+    all_plugins, plugin_for_extension, plugin_for_language, GoPlugin, LanguagePlugin, LspCandidate,
+    PythonPlugin, RustPlugin, TypeScriptPlugin,
+};

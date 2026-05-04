@@ -26,15 +26,24 @@ pub(super) struct RequestDispatcher {
     /// Broadcast channel for unsolicited server notifications (no `id`).
     /// Subscribers receive a clone of each incoming notification `Value`.
     notification_tx: broadcast::Sender<Value>,
+    /// MT-3: Broadcast channel for server-to-client *requests* (has both `id`
+    /// and `method`, but the `id` is NOT in the pending map).
+    ///
+    /// Used by `registration_watcher_task` to receive `client/registerCapability`
+    /// and `client/unregisterCapability` messages. The task must send a JSON-RPC
+    /// response with the same `id` and `result: null` back to the server.
+    server_request_tx: broadcast::Sender<Value>,
 }
 
 impl RequestDispatcher {
     pub(super) fn new() -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        let (server_request_tx, _) = broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY);
         Self {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             notification_tx,
+            server_request_tx,
         }
     }
 
@@ -80,7 +89,7 @@ impl RequestDispatcher {
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(super) fn dispatch_response(&self, message: &Value) {
         let Some(id_val) = message.get("id") else {
-            // Server notification — forward to broadcast channel for subscribers.
+            // Server notification (no id) — forward to notification broadcast channel.
             // Ignore send errors (no active subscribers is fine).
             let _ = self.notification_tx.send(message.clone());
             return;
@@ -92,6 +101,7 @@ impl RequestDispatcher {
         let tx = self.pending.lock().expect("dispatcher lock").remove(&id);
 
         if let Some(sender) = tx {
+            // Normal response to a request we sent: resolve the waiting oneshot.
             let result = if message.get("error").is_some() {
                 let err_msg = message["error"]["message"]
                     .as_str()
@@ -103,7 +113,13 @@ impl RequestDispatcher {
             };
             // Ignore send error — the caller may have timed out and dropped the rx
             let _ = sender.send(result);
+        } else if message.get("method").is_some() {
+            // MT-3: Server-to-client request (has id AND method, NOT in pending).
+            // Examples: client/registerCapability, client/unregisterCapability.
+            // Forward to the server_request channel for registration_watcher_task.
+            let _ = self.server_request_tx.send(message.clone());
         }
+        // Else: unmatched response id with no method — silently ignore.
     }
 
     /// Subscribe to unsolicited server notifications.
@@ -113,6 +129,15 @@ impl RequestDispatcher {
     /// to detect `$/progress` events for LSP indexing completion.
     pub(super) fn subscribe_notifications(&self) -> broadcast::Receiver<Value> {
         self.notification_tx.subscribe()
+    }
+    /// MT-3: Subscribe to server-to-client requests.
+    ///
+    /// Returns a `broadcast::Receiver` for messages that have both `id` and
+    /// `method` but were NOT initiated by us (i.e., not in the pending map).
+    /// Used by `registration_watcher_task` to handle `client/registerCapability`
+    /// and `client/unregisterCapability` from the LSP server.
+    pub(super) fn subscribe_server_requests(&self) -> broadcast::Receiver<Value> {
+        self.server_request_tx.subscribe()
     }
 
     /// Remove a pending request by ID (e.g. after a timeout).
@@ -140,36 +165,28 @@ impl RequestDispatcher {
         }
     }
 
-    /// Subscribe to `textDocument/publishDiagnostics` notifications for a
-    /// specific file URI. Returns collected diagnostics after `timeout`.
+    /// Collect `textDocument/publishDiagnostics` notifications for a file.
     ///
-    /// This is a one-shot collector: it subscribes, waits for notifications,
-    /// and returns whatever was received within the timeout window.
+    /// MT-2: `grace_period` is now caller-supplied (per-server config) instead of
+    /// a hardcoded constant. Pass `caps.push_collection_config().grace_ms` to adapt
+    /// the window per LSP server identity (gopls and tsserver need longer windows).
+    ///
+    /// Two-phase adaptive collection:
+    /// - Phase 1: wait up to `timeout` for the first matching notification.
+    /// - Phase 2: collect follow-up batches for `grace_period`, then return.
     pub(super) async fn collect_push_diagnostics(
         &self,
         file_uri: &str,
         timeout: tokio::time::Duration,
+        grace_period: tokio::time::Duration,
     ) -> Vec<serde_json::Value> {
         let mut rx = self.subscribe_notifications();
         let mut collected = Vec::new();
         let max_deadline = tokio::time::Instant::now() + timeout;
-
-        // IW-1: Two-phase adaptive collection.
-        //
-        // Phase 1: Wait up to `timeout` for the *first* publishDiagnostics
-        //          notification matching `file_uri`. Return early (phase 2) on match.
-        //
-        // Phase 2: After the first match, collect additional notifications for a
-        //          short 500ms grace window to capture any follow-up batches, then
-        //          return without waiting the full timeout.
-        //
-        // If no notification arrives before `timeout`, return empty.
-        const GRACE_PERIOD: tokio::time::Duration = tokio::time::Duration::from_millis(500);
         let mut grace_deadline: Option<tokio::time::Instant> = None;
 
         loop {
             let now = tokio::time::Instant::now();
-            // In grace phase: use grace deadline; otherwise max deadline.
             let effective_deadline = grace_deadline.unwrap_or(max_deadline);
             let remaining = effective_deadline.saturating_duration_since(now);
             if remaining.is_zero() {
@@ -188,9 +205,7 @@ impl RequestDispatcher {
                         .unwrap_or("");
                     if uri == file_uri {
                         if grace_deadline.is_none() {
-                            // First match: switch to grace phase
-                            let grace_end = tokio::time::Instant::now() + GRACE_PERIOD;
-                            // Don't exceed the original max deadline
+                            let grace_end = tokio::time::Instant::now() + grace_period;
                             grace_deadline = Some(grace_end.min(max_deadline));
                         }
                         collected.push(msg);
@@ -373,7 +388,11 @@ mod tests {
         let dispatcher = RequestDispatcher::new();
         // Short timeout — no notifications sent
         let result = dispatcher
-            .collect_push_diagnostics("file:///test.rs", tokio::time::Duration::from_millis(10))
+            .collect_push_diagnostics(
+                "file:///test.rs",
+                tokio::time::Duration::from_millis(10),
+                tokio::time::Duration::from_millis(50),
+            )
             .await;
         assert!(result.is_empty());
     }
@@ -402,7 +421,11 @@ mod tests {
 
         // Start collecting with timeout longer than the dispatch delay
         let result = dispatcher
-            .collect_push_diagnostics(test_uri, tokio::time::Duration::from_millis(150))
+            .collect_push_diagnostics(
+                test_uri,
+                tokio::time::Duration::from_millis(150),
+                tokio::time::Duration::from_millis(50),
+            )
             .await;
 
         let _ = handle.await;
@@ -440,7 +463,11 @@ mod tests {
 
         // Collect for test_uri — should NOT include the other_uri notification
         let result = dispatcher
-            .collect_push_diagnostics(test_uri, tokio::time::Duration::from_millis(150))
+            .collect_push_diagnostics(
+                test_uri,
+                tokio::time::Duration::from_millis(150),
+                tokio::time::Duration::from_millis(50),
+            )
             .await;
 
         let _ = handle.await;
@@ -481,7 +508,11 @@ mod tests {
         });
 
         let result = dispatcher
-            .collect_push_diagnostics(test_uri, tokio::time::Duration::from_millis(150))
+            .collect_push_diagnostics(
+                test_uri,
+                tokio::time::Duration::from_millis(150),
+                tokio::time::Duration::from_millis(50),
+            )
             .await;
 
         let _ = handle.await;
@@ -492,5 +523,112 @@ mod tests {
             "should only collect diagnostics notifications"
         );
         assert_eq!(result[0]["method"], "textDocument/publishDiagnostics");
+    }
+
+    // ── MT-3: server-to-client request channel ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_server_request_client_register_capability_is_forwarded() {
+        // When the server sends client/registerCapability (has id AND method),
+        // dispatch_response must emit it on the server_request channel rather than
+        // silently dropping it or treating it as a normal notification.
+        let dispatcher = RequestDispatcher::new();
+        let mut rx = dispatcher.subscribe_server_requests();
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "reg-001",
+                    "method": "textDocument/diagnostic",
+                    "registerOptions": {}
+                }]
+            }
+        });
+        dispatcher.dispatch_response(&req);
+
+        let msg = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("should not time out")
+            .expect("should receive");
+
+        assert_eq!(
+            msg["method"].as_str().unwrap_or(""),
+            "client/registerCapability"
+        );
+        assert_eq!(msg["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_server_request_not_delivered_as_notification() {
+        // client/registerCapability must NOT be broadcast on the notification channel.
+        let dispatcher = RequestDispatcher::new();
+        let mut notif_rx = dispatcher.subscribe_notifications();
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "client/registerCapability",
+            "params": { "registrations": [] }
+        });
+        dispatcher.dispatch_response(&req);
+
+        // The notification channel should remain empty
+        let received = notif_rx.try_recv();
+        assert!(
+            received.is_err(),
+            "client/registerCapability must not be broadcast to notification subscribers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_request_unregister_capability_forwarded() {
+        let dispatcher = RequestDispatcher::new();
+        let mut rx = dispatcher.subscribe_server_requests();
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "client/unregisterCapability",
+            "params": {
+                "unregisterations": [{ "id": "reg-001", "method": "textDocument/diagnostic" }]
+            }
+        });
+        dispatcher.dispatch_response(&req);
+
+        let msg = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("should not time out")
+            .expect("should receive");
+
+        assert_eq!(
+            msg["method"].as_str().unwrap_or(""),
+            "client/unregisterCapability"
+        );
+    }
+
+    #[test]
+    fn test_normal_response_not_forwarded_to_server_request_channel() {
+        // A normal response (no method field) should not leak to the server_request channel.
+        let dispatcher = RequestDispatcher::new();
+        let (id, rx) = dispatcher.register();
+        let mut server_rx = dispatcher.subscribe_server_requests();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        });
+        dispatcher.dispatch_response(&response);
+
+        // The request was fulfilled normally
+        let _ = rx; // receiver still valid
+                    // Server request channel remains empty
+        assert!(
+            server_rx.try_recv().is_err(),
+            "normal response must not appear on server_request channel"
+        );
     }
 }

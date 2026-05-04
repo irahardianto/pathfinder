@@ -5,6 +5,7 @@ use crate::server::types::{GetRepoMapParams, LspCapabilities, RepoCapabilities};
 use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
+use std::sync::Arc;
 
 impl PathfinderServer {
     /// Build an empty-changes response when `changed_since` finds no diffs.
@@ -122,6 +123,16 @@ impl PathfinderServer {
             engines_used = "treesitter",
             "get_repo_map: complete"
         );
+
+        // LT-4: Pre-warm LSP processes for languages found in the project skeleton.
+        // This runs in the background so get_repo_map returns immediately.
+        if !result.tech_stack.is_empty() {
+            let lawyer = Arc::clone(&self.lawyer);
+            let languages = result.tech_stack.clone();
+            tokio::spawn(async move {
+                lawyer.warm_start_for_languages(&languages);
+            });
+        }
 
         let capability_status = self.lawyer.capability_status().await;
 
@@ -361,5 +372,30 @@ mod tests {
             Some(true),
             "degraded flag should be set on git failure"
         );
+    }
+
+    /// LT-4: Verify that `get_repo_map` triggers pre-warm for detected languages.
+    ///
+    /// This test verifies that the warmup spawn doesn't panic even with
+    /// a `NoOpLawyer` (which has default no-op `warm_start_for_languages`).
+    #[tokio::test]
+    async fn test_get_repo_map_triggers_lt4_prewarm() {
+        let mut result = ok_result();
+        result.tech_stack = vec!["rust".to_owned(), "go".to_owned()];
+
+        let surgeon = MockSurgeon::default();
+        surgeon
+            .generate_skeleton_results
+            .lock()
+            .unwrap()
+            .push(Ok(result));
+        let (server, _dir) = make_server(surgeon);
+
+        let result = server.get_repo_map_impl(default_params()).await;
+        assert!(result.is_ok(), "get_repo_map should succeed: {result:?}");
+
+        // Give the spawned warm_start_for_languages task a chance to run.
+        // With NoOpLawyer, it's a no-op, but we verify no panics occur.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }

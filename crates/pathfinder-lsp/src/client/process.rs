@@ -54,7 +54,11 @@ pub(super) struct ManagedProcess {
     /// The child process handle — kept alive until explicitly dropped.
     pub(super) child: Child,
     /// Exclusive write handle to the LSP's stdin.
-    pub(super) stdin: Mutex<tokio::io::BufWriter<ChildStdin>>,
+    ///
+    /// Wrapped in `Arc` so that `registration_watcher_task` (MT-3) can obtain
+    /// a clone and write `client/registerCapability` responses without holding
+    /// a reference to the full `ManagedProcess`.
+    pub(super) stdin: Arc<Mutex<tokio::io::BufWriter<ChildStdin>>>,
     /// Capabilities negotiated during `initialize`.
     pub(super) capabilities: DetectedCapabilities,
     /// Last time this process was used (for idle-timeout tracking).
@@ -140,7 +144,7 @@ pub(super) async fn spawn_and_initialize(
 
     let process = ManagedProcess {
         child,
-        stdin: Mutex::new(writer),
+        stdin: Arc::new(Mutex::new(writer)),
         capabilities,
         last_used: Instant::now(),
         in_flight: Arc::new(AtomicU32::new(0)),
@@ -377,6 +381,25 @@ pub(super) async fn send(process: &ManagedProcess, message: &Value) -> Result<()
     .await
     .map_err(|_| LspError::Timeout {
         operation: "send".to_owned(),
+        timeout_ms: 10_000,
+    })?
+}
+/// Write a JSON-RPC response to a shared stdin handle.
+///
+/// Used by `registration_watcher_task` (MT-3) to send `{}` responses to
+/// `client/registerCapability` / `client/unregisterCapability` server requests
+/// without needing a full `&ManagedProcess` borrow.
+pub(super) async fn send_via_stdin(
+    stdin: &Arc<Mutex<tokio::io::BufWriter<ChildStdin>>>,
+    message: &Value,
+) -> Result<(), LspError> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut guard = stdin.lock().await;
+        write_message(&mut *guard, message).await
+    })
+    .await
+    .map_err(|_| LspError::Timeout {
+        operation: "send_via_stdin".to_owned(),
         timeout_ms: 10_000,
     })?
 }
@@ -675,7 +698,7 @@ mod process_tests {
 
         let mut process = ManagedProcess {
             child: child_process,
-            stdin: tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin)),
+            stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
             capabilities: crate::client::capabilities::DetectedCapabilities::default(),
             last_used: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),

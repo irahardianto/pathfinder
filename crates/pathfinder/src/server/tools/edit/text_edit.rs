@@ -343,6 +343,7 @@ pub fn build_validation_outcome(
             introduced_errors: introduced,
             resolved_errors: resolved,
             validation_confidence: Some(confidence.to_owned()),
+            recovery_action: None,
         },
         skipped: false,
         skipped_reason: None,

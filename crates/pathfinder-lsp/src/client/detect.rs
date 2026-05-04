@@ -134,18 +134,16 @@ pub(crate) fn validate_marker_file(
     };
 
     match (language_id, file_name) {
-        ("rust", "Cargo.toml") => {
-            match toml::from_str::<toml::Value>(&contents) {
-                Ok(v) => {
-                    if v.get("package").is_some() || v.get("workspace").is_some() {
-                        Ok(())
-                    } else {
-                        Err("Cargo.toml has neither [package] nor [workspace] section".to_owned())
-                    }
+        ("rust", "Cargo.toml") => match toml::from_str::<toml::Value>(&contents) {
+            Ok(v) => {
+                if v.get("package").is_some() || v.get("workspace").is_some() {
+                    Ok(())
+                } else {
+                    Err("Cargo.toml has neither [package] nor [workspace] section".to_owned())
                 }
-                Err(e) => Err(format!("Cargo.toml is not valid TOML: {e}")),
             }
-        }
+            Err(e) => Err(format!("Cargo.toml is not valid TOML: {e}")),
+        },
         ("go", "go.mod") => {
             let first_line = contents.lines().next().unwrap_or("").trim();
             if first_line.starts_with("module ") || first_line == "module" {
@@ -162,12 +160,10 @@ pub(crate) fn validate_marker_file(
                 Err(e) => Err(format!("tsconfig.json is not valid JSON: {e}")),
             }
         }
-        ("python", "pyproject.toml") => {
-            match toml::from_str::<toml::Value>(&contents) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("pyproject.toml is not valid TOML: {e}")),
-            }
-        }
+        ("python", "pyproject.toml") => match toml::from_str::<toml::Value>(&contents) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("pyproject.toml is not valid TOML: {e}")),
+        },
         // package.json, setup.py, requirements.txt — too loose/executable to validate structurally
         _ => Ok(()),
     }
@@ -1415,183 +1411,189 @@ mod tests {
 
     // ── ST-2: validate_marker_file tests ────────────────────────────────────
 
-        #[test]
-        fn test_validate_marker_file_valid_cargo_toml() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("Cargo.toml");
-            std::fs::write(&path, "[package]\nname = \"foo\"").expect("write");
-            assert!(validate_marker_file(&path, "rust").is_ok());
+    #[test]
+    fn test_validate_marker_file_valid_cargo_toml() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "[package]\nname = \"foo\"").expect("write");
+        assert!(validate_marker_file(&path, "rust").is_ok());
+    }
+
+    #[test]
+    fn test_validate_marker_file_valid_cargo_workspace() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "[workspace]\nmembers = []").expect("write");
+        assert!(validate_marker_file(&path, "rust").is_ok());
+    }
+
+    #[test]
+    fn test_validate_marker_file_invalid_cargo_toml_no_sections() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "[dependencies]\nfoo = \"1.0\"").expect("write");
+        let result = validate_marker_file(&path, "rust");
+        assert!(
+            result.is_err(),
+            "Cargo.toml with only [dependencies] should fail"
+        );
+        assert!(result
+            .expect_err("expected Err")
+            .contains("neither [package] nor [workspace]"));
+    }
+
+    #[test]
+    fn test_validate_marker_file_invalid_cargo_toml_syntax() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "this is not toml at all !!!").expect("write");
+        let result = validate_marker_file(&path, "rust");
+        assert!(result.is_err(), "Malformed TOML should fail validation");
+        assert!(result.expect_err("expected Err").contains("not valid TOML"));
+    }
+
+    #[test]
+    fn test_validate_marker_file_valid_go_mod() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("go.mod");
+        std::fs::write(&path, "module github.com/foo/bar\n\ngo 1.21").expect("write");
+        assert!(validate_marker_file(&path, "go").is_ok());
+    }
+
+    #[test]
+    fn test_validate_marker_file_invalid_go_mod() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("go.mod");
+        std::fs::write(&path, "// corrupted file").expect("write");
+        let result = validate_marker_file(&path, "go");
+        assert!(result.is_err(), "go.mod without 'module' should fail");
+        assert!(result
+            .expect_err("expected Err")
+            .contains("'module' declaration"));
+    }
+
+    #[test]
+    fn test_validate_marker_file_valid_tsconfig() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("tsconfig.json");
+        std::fs::write(&path, r#"{"compilerOptions":{"strict":true}}"#).expect("write");
+        assert!(validate_marker_file(&path, "typescript").is_ok());
+    }
+
+    #[test]
+    fn test_validate_marker_file_invalid_tsconfig() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("tsconfig.json");
+        std::fs::write(&path, "{ this is not json }}").expect("write");
+        let result = validate_marker_file(&path, "typescript");
+        assert!(result.is_err(), "Malformed JSON tsconfig.json should fail");
+        assert!(result.expect_err("expected Err").contains("not valid JSON"));
+    }
+
+    #[test]
+    fn test_validate_marker_file_valid_pyproject_toml() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("pyproject.toml");
+        std::fs::write(&path, "[tool.poetry]\nname = \"app\"").expect("write");
+        assert!(validate_marker_file(&path, "python").is_ok());
+    }
+
+    #[test]
+    fn test_validate_marker_file_invalid_pyproject_toml() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("pyproject.toml");
+        std::fs::write(&path, "NOT VALID TOML !!!").expect("write");
+        let result = validate_marker_file(&path, "python");
+        assert!(result.is_err(), "Malformed pyproject.toml should fail");
+        assert!(result.expect_err("expected Err").contains("not valid TOML"));
+    }
+
+    #[test]
+    fn test_validate_marker_file_package_json_always_ok() {
+        // package.json is too loose to validate structurally — always passes
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("package.json");
+        std::fs::write(&path, "not even json").expect("write");
+        assert!(validate_marker_file(&path, "typescript").is_ok());
+    }
+
+    // ── ST-5: detect_venv tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_venv_finds_dot_venv() {
+        let dir = tempdir().expect("temp dir");
+        let bin = dir.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).expect("create .venv/bin");
+        let python = bin.join("python");
+        std::fs::write(&python, "#!/bin/sh").expect("write fake python");
+        let result = detect_venv(dir.path());
+        assert_eq!(result, Some(python), "should detect .venv/bin/python");
+    }
+
+    #[test]
+    fn test_detect_venv_finds_venv_fallback() {
+        let dir = tempdir().expect("temp dir");
+        let bin = dir.path().join("venv").join("bin");
+        std::fs::create_dir_all(&bin).expect("create venv/bin");
+        let python = bin.join("python");
+        std::fs::write(&python, "#!/bin/sh").expect("write fake python");
+        let result = detect_venv(dir.path());
+        assert_eq!(result, Some(python), "should detect venv/bin/python");
+    }
+
+    #[test]
+    fn test_detect_venv_prefers_dot_venv_over_venv() {
+        let dir = tempdir().expect("temp dir");
+        for subdir in &[".venv/bin", "venv/bin"] {
+            let bin = dir.path().join(subdir);
+            std::fs::create_dir_all(&bin).expect("create bin");
+            std::fs::write(bin.join("python"), "#!/bin/sh").expect("write fake python");
         }
+        let result = detect_venv(dir.path());
+        assert_eq!(
+            result,
+            Some(dir.path().join(".venv").join("bin").join("python")),
+            ".venv must be preferred over venv"
+        );
+    }
 
-        #[test]
-        fn test_validate_marker_file_valid_cargo_workspace() {
+    #[test]
+    fn test_detect_venv_returns_none_when_no_venv() {
+        let dir = tempdir().expect("temp dir");
+        let result = detect_venv(dir.path());
+        assert!(result.is_none(), "should return None when no venv exists");
+    }
+
+    #[tokio::test]
+    async fn test_detect_invalid_cargo_toml_adds_to_missing() {
+        test_with_fake_python_binaries(&["rust-analyzer"], || async {
             let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("Cargo.toml");
-            std::fs::write(&path, "[workspace]\nmembers = []").expect("write");
-            assert!(validate_marker_file(&path, "rust").is_ok());
-        }
+            // ST-2: Cargo.toml with no [package] or [workspace] should be rejected
+            std::fs::write(
+                dir.path().join("Cargo.toml"),
+                "[dependencies]\nfoo = \"1.0\"",
+            )
+            .expect("write");
 
-        #[test]
-        fn test_validate_marker_file_invalid_cargo_toml_no_sections() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("Cargo.toml");
-            std::fs::write(&path, "[dependencies]\nfoo = \"1.0\"").expect("write");
-            let result = validate_marker_file(&path, "rust");
-            assert!(result.is_err(), "Cargo.toml with only [dependencies] should fail");
-            assert!(result.expect_err("expected Err").contains("neither [package] nor [workspace]"));
-        }
+            let result = detect_languages(dir.path(), &make_ts_config())
+                .await
+                .expect("detect");
 
-        #[test]
-        fn test_validate_marker_file_invalid_cargo_toml_syntax() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("Cargo.toml");
-            std::fs::write(&path, "this is not toml at all !!!").expect("write");
-            let result = validate_marker_file(&path, "rust");
-            assert!(result.is_err(), "Malformed TOML should fail validation");
-            assert!(result.expect_err("expected Err").contains("not valid TOML"));
-        }
-
-        #[test]
-        fn test_validate_marker_file_valid_go_mod() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("go.mod");
-            std::fs::write(&path, "module github.com/foo/bar\n\ngo 1.21").expect("write");
-            assert!(validate_marker_file(&path, "go").is_ok());
-        }
-
-        #[test]
-        fn test_validate_marker_file_invalid_go_mod() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("go.mod");
-            std::fs::write(&path, "// corrupted file").expect("write");
-            let result = validate_marker_file(&path, "go");
-            assert!(result.is_err(), "go.mod without 'module' should fail");
-            assert!(result.expect_err("expected Err").contains("'module' declaration"));
-        }
-
-        #[test]
-        fn test_validate_marker_file_valid_tsconfig() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("tsconfig.json");
-            std::fs::write(&path, r#"{"compilerOptions":{"strict":true}}"#).expect("write");
-            assert!(validate_marker_file(&path, "typescript").is_ok());
-        }
-
-        #[test]
-        fn test_validate_marker_file_invalid_tsconfig() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("tsconfig.json");
-            std::fs::write(&path, "{ this is not json }}").expect("write");
-            let result = validate_marker_file(&path, "typescript");
-            assert!(result.is_err(), "Malformed JSON tsconfig.json should fail");
-            assert!(result.expect_err("expected Err").contains("not valid JSON"));
-        }
-
-        #[test]
-        fn test_validate_marker_file_valid_pyproject_toml() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("pyproject.toml");
-            std::fs::write(&path, "[tool.poetry]\nname = \"app\"").expect("write");
-            assert!(validate_marker_file(&path, "python").is_ok());
-        }
-
-        #[test]
-        fn test_validate_marker_file_invalid_pyproject_toml() {
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("pyproject.toml");
-            std::fs::write(&path, "NOT VALID TOML !!!").expect("write");
-            let result = validate_marker_file(&path, "python");
-            assert!(result.is_err(), "Malformed pyproject.toml should fail");
-            assert!(result.expect_err("expected Err").contains("not valid TOML"));
-        }
-
-        #[test]
-        fn test_validate_marker_file_package_json_always_ok() {
-            // package.json is too loose to validate structurally — always passes
-            let dir = tempdir().expect("temp dir");
-            let path = dir.path().join("package.json");
-            std::fs::write(&path, "not even json").expect("write");
-            assert!(validate_marker_file(&path, "typescript").is_ok());
-        }
-
-        // ── ST-5: detect_venv tests ──────────────────────────────────────────────
-
-        #[test]
-        fn test_detect_venv_finds_dot_venv() {
-            let dir = tempdir().expect("temp dir");
-            let bin = dir.path().join(".venv").join("bin");
-            std::fs::create_dir_all(&bin).expect("create .venv/bin");
-            let python = bin.join("python");
-            std::fs::write(&python, "#!/bin/sh").expect("write fake python");
-            let result = detect_venv(dir.path());
-            assert_eq!(result, Some(python), "should detect .venv/bin/python");
-        }
-
-        #[test]
-        fn test_detect_venv_finds_venv_fallback() {
-            let dir = tempdir().expect("temp dir");
-            let bin = dir.path().join("venv").join("bin");
-            std::fs::create_dir_all(&bin).expect("create venv/bin");
-            let python = bin.join("python");
-            std::fs::write(&python, "#!/bin/sh").expect("write fake python");
-            let result = detect_venv(dir.path());
-            assert_eq!(result, Some(python), "should detect venv/bin/python");
-        }
-
-        #[test]
-        fn test_detect_venv_prefers_dot_venv_over_venv() {
-            let dir = tempdir().expect("temp dir");
-            for subdir in &[".venv/bin", "venv/bin"] {
-                let bin = dir.path().join(subdir);
-                std::fs::create_dir_all(&bin).expect("create bin");
-                std::fs::write(bin.join("python"), "#!/bin/sh").expect("write fake python");
-            }
-            let result = detect_venv(dir.path());
-            assert_eq!(
-                result,
-                Some(dir.path().join(".venv").join("bin").join("python")),
-                ".venv must be preferred over venv"
+            assert!(
+                result.detected.iter().all(|l| l.language_id != "rust"),
+                "invalid Cargo.toml should not produce a detected Rust LSP"
             );
-        }
-
-        #[test]
-        fn test_detect_venv_returns_none_when_no_venv() {
-            let dir = tempdir().expect("temp dir");
-            let result = detect_venv(dir.path());
-            assert!(result.is_none(), "should return None when no venv exists");
-        }
-
-        #[tokio::test]
-        async fn test_detect_invalid_cargo_toml_adds_to_missing() {
-            test_with_fake_python_binaries(&["rust-analyzer"], || async {
-                let dir = tempdir().expect("temp dir");
-                // ST-2: Cargo.toml with no [package] or [workspace] should be rejected
-                std::fs::write(
-                    dir.path().join("Cargo.toml"),
-                    "[dependencies]\nfoo = \"1.0\"",
-                )
-                .expect("write");
-
-                let result = detect_languages(dir.path(), &make_ts_config())
-                    .await
-                    .expect("detect");
-
-                assert!(
-                    result.detected.iter().all(|l| l.language_id != "rust"),
-                    "invalid Cargo.toml should not produce a detected Rust LSP"
-                );
-                let maybe_missing = result.missing.iter().find(|m| m.language_id == "rust");
-                assert!(
-                    maybe_missing.is_some(),
-                    "invalid Cargo.toml should add rust to missing"
-                );
-                let hint = &maybe_missing.expect("checked above").install_hint;
-                assert!(
-                    hint.contains("Fix Cargo.toml"),
-                    "install_hint should tell user to fix the manifest, got: {hint}"
-                );
-            })
-            .await;
-        }
-
+            let maybe_missing = result.missing.iter().find(|m| m.language_id == "rust");
+            assert!(
+                maybe_missing.is_some(),
+                "invalid Cargo.toml should add rust to missing"
+            );
+            let hint = &maybe_missing.expect("checked above").install_hint;
+            assert!(
+                hint.contains("Fix Cargo.toml"),
+                "install_hint should tell user to fix the manifest, got: {hint}"
+            );
+        })
+        .await;
+    }
 }

@@ -189,6 +189,22 @@ impl PathfinderServer {
                     "read_source_file: complete"
                 );
 
+                // LT-4: Extend idle timer for the language matching this file.
+                // This prevents the LSP from timing out while the agent is
+                // actively reading source files.
+                if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+                    let lang_id = match ext {
+                        "rs" => Some("rust"),
+                        "go" => Some("go"),
+                        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Some("typescript"),
+                        "py" | "pyi" => Some("python"),
+                        _ => None,
+                    };
+                    if let Some(lang) = lang_id {
+                        self.lawyer.touch_language(lang);
+                    }
+                }
+
                 let metadata = ReadSourceFileMetadata {
                     version_hash: version_hash.short().to_owned(),
                     language,
@@ -499,5 +515,65 @@ mod tests {
         } else {
             panic!("Expected structured_content");
         }
+    }
+
+    /// LT-4: Verify that `read_source_file` calls `touch_language` for the file's language.
+    ///
+    /// With `NoOpLawyer` (default `touch_language` is a no-op), this validates
+    /// that the call path doesn't panic.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn test_read_source_file_triggers_lt4_idle_touch() {
+        use pathfinder_common::config::PathfinderConfig;
+        use pathfinder_common::sandbox::Sandbox;
+        use pathfinder_common::types::{VersionHash, WorkspaceRoot};
+        use pathfinder_search::MockScout;
+        use pathfinder_treesitter::mock::MockSurgeon;
+
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a Rust file — should trigger touch_language("rust")
+        let content = "fn main() {}\n";
+        let version_hash = VersionHash::compute(content.as_bytes());
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .read_source_file_results
+            .lock()
+            .unwrap()
+            .push(Ok((
+                content.to_owned(),
+                version_hash,
+                "rust".to_owned(),
+                vec![],
+            )));
+
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon),
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = ReadSourceFileParams {
+            filepath: "main.rs".to_owned(),
+            start_line: 1,
+            end_line: None,
+            detail_level: "compact".to_owned(),
+        };
+
+        let result = server.read_source_file_impl(params).await;
+        assert!(
+            result.is_ok(),
+            "read_source_file should succeed with touch_language"
+        );
     }
 }

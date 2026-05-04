@@ -38,46 +38,49 @@ impl crate::server::PathfinderServer {
         }
     }
 
+    /// MT-4: Returns `(machine_reason, recovery_hint)` for a skip response.
+    pub(crate) fn lsp_error_to_skip_pair(e: &LspError) -> (&'static str, Option<String>) {
+        (Self::lsp_error_to_skip_reason(e), e.recovery_hint())
+    }
+
     /// Helper: Open LSP document and collect pre-edit diagnostics.
     ///
-    /// Returns `Err` with a skip reason on any failure, calling `did_close` when needed.
+    /// Returns `Err((machine_reason, recovery_hint))` on any failure.
+    /// MT-4: The tuple pairs the skip code with an actionable agent hint.
     pub(crate) async fn lsp_open_and_pre_diags(
         &self,
         workspace: &Path,
         relative: &Path,
         original_content: &str,
-    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, &'static str> {
-        // ── did_open (original content, version 1) ──
+    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, (&'static str, Option<String>)> {
+        // \u2500\u2500 did_open (original content, version 1) \u2500\u2500
         if let Err(e) = self
             .lawyer
             .did_open(workspace, relative, original_content)
             .await
         {
-            let skipped_reason = Self::lsp_error_to_skip_reason(&e);
             let should_log = !matches!(
                 &e,
                 LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }
             );
-
             if should_log {
                 tracing::warn!(error = %e, "validation: did_open failed");
             }
-            return Err(skipped_reason);
+            return Err(Self::lsp_error_to_skip_pair(&e));
         }
 
-        // ── pre-edit diagnostics ──
+        // \u2500\u2500 pre-edit diagnostics \u2500\u2500
         let mut pre_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
             Ok(d) => d,
             Err(LspError::UnsupportedCapability { .. }) => {
-                // LSP running but doesn't support Pull Diagnostics — close the document
+                // LSP running but doesn't support Pull Diagnostics \u2014 close the document
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return Err("pull_diagnostics_unsupported");
+                return Err(("pull_diagnostics_unsupported", None));
             }
             Err(e) => {
-                let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: pre-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return Err(skipped_reason);
+                return Err(Self::lsp_error_to_skip_pair(&e));
             }
         };
 
@@ -104,33 +107,32 @@ impl crate::server::PathfinderServer {
 
     /// Helper: Apply LSP change and collect post-edit diagnostics.
     ///
-    /// Returns `Err` with a skip reason on any failure, calling `did_close` when needed.
+    /// Returns `Err((machine_reason, recovery_hint))` on any failure.
+    /// MT-4: The tuple pairs the skip code with an actionable agent hint.
     pub(crate) async fn lsp_change_and_post_diags(
         &self,
         workspace: &Path,
         relative: &Path,
         new_content: &str,
-    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, &'static str> {
-        // ── did_change (new content, version 2) ──
+    ) -> Result<Vec<pathfinder_lsp::types::LspDiagnostic>, (&'static str, Option<String>)> {
+        // \u2500\u2500 did_change (new content, version 2) \u2500\u2500
         if let Err(e) = self
             .lawyer
             .did_change(workspace, relative, new_content, 2)
             .await
         {
-            let skipped_reason = Self::lsp_error_to_skip_reason(&e);
             tracing::warn!(error = %e, "validation: did_change failed");
             let _ = self.lawyer.did_close(workspace, relative).await;
-            return Err(skipped_reason);
+            return Err(Self::lsp_error_to_skip_pair(&e));
         }
 
-        // ── post-edit diagnostics ──
+        // \u2500\u2500 post-edit diagnostics \u2500\u2500
         let mut post_diags = match self.lawyer.pull_diagnostics(workspace, relative).await {
             Ok(d) => d,
             Err(e) => {
-                let skipped_reason = Self::lsp_error_to_skip_reason(&e);
                 tracing::warn!(error = %e, "validation: post-edit pull_diagnostics failed");
                 let _ = self.lawyer.did_close(workspace, relative).await;
-                return Err(skipped_reason);
+                return Err(Self::lsp_error_to_skip_pair(&e));
             }
         };
 
@@ -192,7 +194,9 @@ impl crate::server::PathfinderServer {
         let relative = file_path;
         let workspace = self.workspace_root.path();
 
-        let return_skip = |reason: &str| -> ValidationOutcome {
+        // MT-4: return_skip now accepts a recovery_action hint.
+        // Use `lsp_error_to_skip_pair(&e)` to produce both fields.
+        let return_skip = |reason: &str, recovery_action: Option<String>| -> ValidationOutcome {
             let ext = relative.extension().and_then(|e| e.to_str()).unwrap_or("");
             let lang = pathfinder_lsp::client::language_id_for_extension(ext).unwrap_or("unknown");
             tracing::debug!(
@@ -202,7 +206,7 @@ impl crate::server::PathfinderServer {
                 "validation skip"
             );
             ValidationOutcome {
-                validation: EditValidation::skipped(),
+                validation: EditValidation::skipped_with_recovery(recovery_action),
                 skipped: true,
                 skipped_reason: Some(reason.to_owned()),
                 should_block: false,
@@ -225,10 +229,15 @@ impl crate::server::PathfinderServer {
         match diagnostics_strategy.as_deref() {
             Some("push") => {
                 // Push diagnostics: didOpen/didChange → collect → didChange → collect → diff
-                // IW-1: Adaptive push diagnostics. The collector waits up to 15s for
-                // the first notification, then exits after a 500ms grace window.
-                // Most servers respond in <2s so this ceiling rarely matters.
-                let push_timeout_ms = 15_000u64;
+                // MT-2: Use per-server push collection config.
+                // gopls/tsserver need extended grace windows for progressive batches.
+                // The ceiling_ms replaces the old hardcoded 15s for known servers.
+                let push_cfg = {
+                    let server =
+                        lang.and_then(|l| caps.get(l).and_then(|s| s.server_name.as_deref()));
+                    pathfinder_lsp::client::DetectedCapabilities::push_collection_config_for(server)
+                };
+                let push_timeout_ms = push_cfg.ceiling_ms;
 
                 // Step 1: Open and collect pre-edit diagnostics
                 let pre_diags = match self
@@ -238,9 +247,9 @@ impl crate::server::PathfinderServer {
                 {
                     Ok(d) => d,
                     Err(e) => {
-                        let reason = Self::lsp_error_to_skip_reason(&e);
+                        let (reason, hint) = Self::lsp_error_to_skip_pair(&e);
                         tracing::warn!(error = %e, "validation: push pre-diagnostics collection failed");
-                        return return_skip(reason);
+                        return return_skip(reason, hint);
                     }
                 };
 
@@ -252,11 +261,11 @@ impl crate::server::PathfinderServer {
                 {
                     Ok(d) => d,
                     Err(e) => {
-                        let reason = Self::lsp_error_to_skip_reason(&e);
+                        let (reason, hint) = Self::lsp_error_to_skip_pair(&e);
                         tracing::warn!(error = %e, "validation: push post-diagnostics collection failed");
                         self.lsp_revert_and_close(workspace, relative, original_content)
                             .await;
-                        return return_skip(reason);
+                        return return_skip(reason, hint);
                     }
                 };
 
@@ -274,7 +283,7 @@ impl crate::server::PathfinderServer {
                 );
             }
             Some("none") => {
-                return return_skip("no_diagnostics_support");
+                return return_skip("no_diagnostics_support", None);
             }
             // "pull", unknown values, or None → proceed with pull diagnostics flow
             // (unknown/None lets lazy start and test mocks work as before)
@@ -287,7 +296,7 @@ impl crate::server::PathfinderServer {
             .await
         {
             Ok(d) => d,
-            Err(reason) => return return_skip(reason),
+            Err((reason, hint)) => return return_skip(reason, hint),
         };
 
         // Step 2: Apply change and collect post-edit diagnostics
@@ -296,11 +305,11 @@ impl crate::server::PathfinderServer {
             .await
         {
             Ok(d) => d,
-            Err(reason) => {
+            Err((reason, hint)) => {
                 // Clean up LSP state before returning
                 self.lsp_revert_and_close(workspace, relative, original_content)
                     .await;
-                return return_skip(reason);
+                return return_skip(reason, hint);
             }
         };
 

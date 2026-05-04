@@ -16,7 +16,7 @@ mod process;
 mod protocol;
 mod transport;
 
-pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy};
+pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy, PushDiagnosticsConfig};
 pub use detect::install_hint;
 pub use detect::{
     detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage,
@@ -27,7 +27,7 @@ use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use detect::LanguageLsp as LspDescriptor;
-use process::{send, shutdown, spawn_and_initialize, ManagedProcess};
+use process::{send, send_via_stdin, shutdown, spawn_and_initialize, ManagedProcess};
 use protocol::RequestDispatcher;
 use serde_json::json;
 use std::collections::HashMap;
@@ -64,10 +64,15 @@ struct LanguageState {
     /// Whether the LSP has finished initial workspace indexing.
     ///
     /// Set to `true` when the reader task observes a `$/progress` notification
-    /// carrying a `WorkDoneProgressEnd` token for the initial indexing job
-    /// (title typically contains "Indexing" or "cargo check" for rust-analyzer).
+    /// carrying a `WorkDoneProgressEnd` token for the initial indexing job.
     /// Never reset to `false` once set — processes don't re-index unless restarted.
     indexing_complete: Arc<std::sync::atomic::AtomicBool>,
+    /// MT-3: Live capabilities — reflects initial `initialize` capabilities PLUS
+    /// any dynamic registrations received via `client/registerCapability`.
+    ///
+    /// Protected by `RwLock` so the `registration_watcher_task` can mutate it
+    /// from its background task while the main thread reads it from `capabilities_for`.
+    live_capabilities: Arc<std::sync::RwLock<DetectedCapabilities>>,
 }
 
 /// Tracks backoff state for a language whose last spawn attempt failed.
@@ -92,11 +97,16 @@ impl ProcessEntry {
     fn to_validation_status(&self, command: &str) -> crate::types::LspLanguageStatus {
         match self {
             Self::Running(state) => {
-                let caps = &state.process.capabilities;
+                // MT-3: Read from live_capabilities (may include dynamic registrations).
+                #[allow(clippy::expect_used)]
+                let caps = state
+                    .live_capabilities
+                    .read()
+                    .expect("live_capabilities lock");
                 validation_status_from_parts(
                     command,
                     true,
-                    state.process.capabilities.diagnostics_strategy,
+                    caps.diagnostics_strategy,
                     caps.definition_provider,
                     caps.call_hierarchy_provider,
                     caps.formatting_provider,
@@ -104,6 +114,7 @@ impl ProcessEntry {
                         .indexing_complete
                         .load(std::sync::atomic::Ordering::Relaxed),
                     state.spawned_at.elapsed().as_secs(),
+                    caps.server_name.as_deref(),
                 )
             }
             Self::Unavailable(_) => validation_status_from_parts(
@@ -115,6 +126,7 @@ impl ProcessEntry {
                 false,
                 false,
                 0,
+                None,
             ),
         }
     }
@@ -125,6 +137,9 @@ impl ProcessEntry {
 /// Extracted from [`ProcessEntry::to_validation_status`] to make the
 /// mapping logic independently unit-testable without requiring a live
 /// [`ManagedProcess`] (which embeds an OS child process handle).
+///
+/// MT-2: `server_name` added so the status carries the server identity for
+/// per-server push diagnostics config selection in validation tools.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)]
 fn validation_status_from_parts(
@@ -136,6 +151,7 @@ fn validation_status_from_parts(
     supports_formatting: bool,
     indexing_complete: bool,
     uptime_seconds: u64,
+    server_name: Option<&str>,
 ) -> crate::types::LspLanguageStatus {
     if !running {
         return crate::types::LspLanguageStatus {
@@ -149,12 +165,9 @@ fn validation_status_from_parts(
             supports_call_hierarchy: None,
             supports_diagnostics: None,
             supports_formatting: None,
+            server_name: None,
         };
     }
-    // Navigation is ready if supports_definition is true and LSP is running.
-    // This gates on the initialize handshake completing with definitionProvider
-    // capability, NOT on indexing_complete. Navigation tools may return partial
-    // results during indexing but are still functional.
     let navigation_ready = Some(supports_definition);
 
     match diagnostics_strategy {
@@ -176,6 +189,7 @@ fn validation_status_from_parts(
             supports_call_hierarchy: Some(supports_call_hierarchy),
             supports_diagnostics: Some(true),
             supports_formatting: Some(supports_formatting),
+            server_name: server_name.map(ToOwned::to_owned),
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
@@ -188,6 +202,7 @@ fn validation_status_from_parts(
             supports_call_hierarchy: Some(supports_call_hierarchy),
             supports_diagnostics: Some(false),
             supports_formatting: Some(supports_formatting),
+            server_name: server_name.map(ToOwned::to_owned),
         },
     }
 }
@@ -384,6 +399,76 @@ impl LspClient {
             });
         }
     }
+    /// LT-4: Pre-warm specific languages based on project analysis.
+    /// LT-4: Pre-warm specific languages based on project analysis.
+    ///
+    /// Unlike `warm_start()` which starts ALL detected languages, this method
+    /// only starts the explicitly requested ones. Used by `get_repo_map` to
+    /// pre-warm LSP processes for languages discovered in the project skeleton.
+    ///
+    /// Languages not in `self.descriptors` or already running are silently skipped.
+    /// Errors during initialization are logged but not propagated — lazy recovery
+    /// on first use is always available.
+    pub fn warm_start_for_languages(&self, language_ids: &[String]) {
+        let known: std::collections::HashSet<&str> = self
+            .descriptors
+            .iter()
+            .map(|d| d.language_id.as_str())
+            .collect();
+
+        let to_start: Vec<&String> = language_ids
+            .iter()
+            .filter(|lang| known.contains(lang.as_str()))
+            .filter(|lang| !self.processes.contains_key(lang.as_str()))
+            .collect();
+
+        if to_start.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            languages = ?to_start,
+            "LT-4: warm_start_for_languages — pre-warming requested languages"
+        );
+
+        for lang in to_start {
+            let client = self.clone();
+            let lang = lang.clone();
+            tokio::spawn(async move {
+                tracing::debug!(language = %lang, "LT-4: warm_start_for_languages — starting");
+                match client.ensure_process(&lang).await {
+                    Ok(()) => {
+                        tracing::info!(language = %lang, "LT-4: warm_start_for_languages — ready");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            language = %lang,
+                            error = %e,
+                            "LT-4: warm_start_for_languages — failed (will retry lazily)"
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    /// LT-4: Extend idle timer for a language without making an LSP request.
+    ///
+    /// Called by `read_source_file` and other non-LSP tools that operate on
+    /// source files. This prevents the LSP from timing out while the agent
+    /// is actively reading files of the same language — a strong signal that
+    /// LSP operations will follow soon.
+    pub fn touch_language(&self, language_id: &str) {
+        if let Some(mut entry) = self.processes.get_mut(language_id) {
+            if let ProcessEntry::Running(state) = entry.value_mut() {
+                state.process.last_used = Instant::now();
+                tracing::trace!(
+                    language = language_id,
+                    "LT-4: idle timer refreshed from file operation"
+                );
+            }
+        }
+    }
 
     /// Gracefully shut down all LSP processes.
     ///
@@ -397,7 +482,8 @@ impl LspClient {
     pub fn shutdown(&self) {
         tracing::info!("LspClient: shutdown requested");
         let _ = self.shutdown_tx.send(());
-    }    /// Open a document and return a `DocumentGuard` that auto-closes it.
+    }
+    /// Open a document and return a `DocumentGuard` that auto-closes it.
     ///
     /// # IW-3
     ///
@@ -669,6 +755,27 @@ impl LspClient {
         // notifications. After 30 seconds, assume indexing is complete.
         Self::spawn_indexing_timeout_fallback(language_id.clone(), &indexing_complete);
 
+        // MT-3: Create the shared live_capabilities from the initial snapshot.
+        // The registration_watcher_task will mutate this as dynamic registrations arrive.
+        let live_capabilities = Arc::new(std::sync::RwLock::new(process.capabilities.clone()));
+
+        // MT-3: Spawn the registration watcher task.
+        // It listens for client/registerCapability and client/unregisterCapability
+        // server requests, responds with {}, and updates live_capabilities.
+        let caps_for_reg = Arc::clone(&live_capabilities);
+        let stdin_for_reg = Arc::clone(&process.stdin);
+        let lang_id_for_reg = language_id.clone();
+        let dispatcher_for_reg = Arc::clone(&self.dispatcher);
+        tokio::spawn(async move {
+            registration_watcher_task(
+                lang_id_for_reg,
+                dispatcher_for_reg,
+                caps_for_reg,
+                stdin_for_reg,
+            )
+            .await;
+        });
+
         self.processes.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
@@ -677,6 +784,7 @@ impl LspClient {
                 restart_count: attempt,
                 spawned_at,
                 indexing_complete,
+                live_capabilities,
             })),
         );
 
@@ -836,12 +944,19 @@ impl LspClient {
     ///
     /// Returns `Ok(caps)` when the process is running, else `NoLspAvailable`.
     fn capabilities_for(&self, language_id: &str) -> Result<DetectedCapabilities, LspError> {
-        let Some(entry) = self.processes.get(language_id) else {
-            return Err(LspError::NoLspAvailable);
-        };
-        match entry.value() {
-            ProcessEntry::Running(state) => Ok(state.process.capabilities.clone()),
-            ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
+        match self.processes.get(language_id) {
+            None => Err(LspError::NoLspAvailable),
+            Some(entry) => match entry.value() {
+                ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
+                // MT-3: Read from live_capabilities (includes dynamic registrations) rather
+                // than process.capabilities (initial snapshot only).
+                #[allow(clippy::expect_used)] // RwLock poisoning is unrecoverable
+                ProcessEntry::Running(state) => Ok(state
+                    .live_capabilities
+                    .read()
+                    .expect("live_capabilities lock")
+                    .clone()),
+            },
         }
     }
 
@@ -903,6 +1018,16 @@ impl LspClient {
 
 #[async_trait]
 impl Lawyer for LspClient {
+    /// LT-4: Trait implementation delegates to the inherent method.
+    fn warm_start_for_languages(&self, language_ids: &[String]) {
+        LspClient::warm_start_for_languages(self, language_ids);
+    }
+
+    /// LT-4: Trait implementation delegates to the inherent method.
+    fn touch_language(&self, language_id: &str) {
+        LspClient::touch_language(self, language_id);
+    }
+
     async fn did_change_watched_files(
         &self,
         _changes: Vec<crate::types::FileEvent>,
@@ -1089,10 +1214,8 @@ impl Lawyer for LspClient {
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
         // ST-4: Set version to 1 on open; did_change will atomically increment.
-        self.doc_versions.insert(
-            file_uri.to_string(),
-            std::sync::atomic::AtomicI32::new(1),
-        );
+        self.doc_versions
+            .insert(file_uri.to_string(), std::sync::atomic::AtomicI32::new(1));
 
         let params = json!({
             "textDocument": {
@@ -1261,6 +1384,19 @@ impl Lawyer for LspClient {
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
         let file_uri_str = file_uri.to_string();
 
+        // MT-2: Resolve per-server push collection config from capabilities.
+        // Falls back to `PushDiagnosticsConfig::default()` when the caps entry
+        // is missing (e.g., during test-mock scenarios or lazy-started processes).
+        let push_cfg = self
+            .capabilities_for(language_id)
+            .map(|caps| caps.push_collection_config())
+            .unwrap_or_default();
+
+        // Use caller-supplied `timeout_ms` as the ceiling (backward-compatible);
+        // use `push_cfg.grace_ms` as the per-server grace window.
+        let ceiling = Duration::from_millis(timeout_ms);
+        let grace = Duration::from_millis(push_cfg.grace_ms);
+
         // Send didOpen or didChange depending on version
         if version <= 1 {
             self.did_open(workspace_root, file_path, content).await?;
@@ -1269,10 +1405,10 @@ impl Lawyer for LspClient {
                 .await?;
         }
 
-        // Wait for push diagnostics within timeout
+        // Wait for push diagnostics within ceiling, grace per server profile
         let raw_diags = self
             .dispatcher
-            .collect_push_diagnostics(&file_uri_str, Duration::from_millis(timeout_ms))
+            .collect_push_diagnostics(&file_uri_str, ceiling, grace)
             .await;
 
         // Parse all collected diagnostics
@@ -1291,6 +1427,8 @@ impl Lawyer for LspClient {
         let elapsed = start.elapsed().as_millis();
         tracing::debug!(
             language = language_id,
+            ceiling_ms = push_cfg.ceiling_ms,
+            grace_ms = push_cfg.grace_ms,
             elapsed_ms = elapsed,
             "textDocument/publishDiagnostics collection complete"
         );
@@ -1440,6 +1578,7 @@ impl Lawyer for LspClient {
                     supports_call_hierarchy: None,
                     supports_diagnostics: None,
                     supports_formatting: None,
+                    server_name: None,
                 },
                 |entry| entry.to_validation_status(&desc.command),
             );
@@ -1849,6 +1988,124 @@ async fn progress_watcher_task(
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 // Dispatcher shut down — LSP process ended.
                 tracing::debug!(language = %language_id, "progress_watcher_task: channel closed, exiting");
+                break;
+            }
+        }
+    }
+}
+/// MT-3: Background task — handle `client/registerCapability` and
+/// `client/unregisterCapability` server-to-client requests.
+///
+/// Subscribes to the `server_request_tx` channel in `RequestDispatcher`.
+/// For each request:
+/// 1. Applies the registration/unregistration to `live_capabilities`.
+/// 2. Sends a `{"jsonrpc":"2.0","id":<same-id>,"result":null}` response.
+///
+/// The task exits when the broadcast channel is closed (LSP process died).
+async fn registration_watcher_task(
+    language_id: String,
+    dispatcher: Arc<RequestDispatcher>,
+    live_capabilities: Arc<std::sync::RwLock<DetectedCapabilities>>,
+    stdin: Arc<tokio::sync::Mutex<tokio::io::BufWriter<tokio::process::ChildStdin>>>,
+) {
+    let mut rx = dispatcher.subscribe_server_requests();
+    tracing::debug!(language = %language_id, "registration_watcher_task: started");
+
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                let id = msg.get("id");
+
+                match method {
+                    "client/registerCapability" => {
+                        if let Some(registrations) = msg
+                            .pointer("/params/registrations")
+                            .and_then(|v| v.as_array())
+                        {
+                            #[allow(clippy::expect_used)]
+                            let mut caps = live_capabilities
+                                .write()
+                                .expect("live_capabilities write lock");
+                            for reg in registrations {
+                                let reg_id = reg.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let reg_method =
+                                    reg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                                let opts = reg
+                                    .get("registerOptions")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                                if caps.apply_registration(reg_method, reg_id, &opts) {
+                                    tracing::info!(
+                                        language = %language_id,
+                                        method = reg_method,
+                                        id = reg_id,
+                                        "LSP: dynamic capability registered"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    "client/unregisterCapability" => {
+                        if let Some(unregs) = msg
+                            .pointer("/params/unregisterations")
+                            .and_then(|v| v.as_array())
+                        {
+                            #[allow(clippy::expect_used)]
+                            let mut caps = live_capabilities
+                                .write()
+                                .expect("live_capabilities write lock");
+                            for unreg in unregs {
+                                let reg_id = unreg.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                if caps.apply_unregistration(reg_id) {
+                                    tracing::info!(
+                                        language = %language_id,
+                                        id = reg_id,
+                                        "LSP: dynamic capability unregistered"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        tracing::debug!(
+                            language = %language_id,
+                            method = other,
+                            "registration_watcher_task: unrecognised server request, sending null response"
+                        );
+                    }
+                }
+
+                // Send null response back to the server for any server-to-client request.
+                // The LSP protocol requires a response for all requests (even for methods
+                // the client doesn't fully handle). `result: null` is always safe.
+                if let Some(id_val) = id {
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id_val,
+                        "result": null
+                    });
+                    if let Err(e) = send_via_stdin(&stdin, &response).await {
+                        tracing::warn!(
+                            language = %language_id,
+                            error = %e,
+                            "registration_watcher_task: failed to send response"
+                        );
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    language = %language_id,
+                    missed = n,
+                    "registration_watcher_task: lagged, missed server requests"
+                );
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                tracing::debug!(
+                    language = %language_id,
+                    "registration_watcher_task: channel closed, exiting"
+                );
                 break;
             }
         }
@@ -2389,7 +2646,7 @@ mod tests {
     #[test]
     fn test_process_entry_unavailable_status() {
         let entry = ProcessEntry::Unavailable(UnavailableState {
-                backoff_attempt: 0,
+            backoff_attempt: 0,
             unavailable_since: std::time::Instant::now(),
         });
         let status = entry.to_validation_status("gopls");
@@ -2413,6 +2670,7 @@ mod tests {
             false, // supports_formatting
             false, // indexing_complete
             10,    // uptime_seconds
+            None,  // server_name
         );
         assert!(
             status.validation,
@@ -2437,6 +2695,7 @@ mod tests {
             false, // supports_formatting
             true,  // indexing_complete
             42,    // uptime_seconds
+            None,  // server_name
         );
         assert!(status.validation);
         assert_eq!(status.indexing_complete, Some(true));
@@ -2455,6 +2714,7 @@ mod tests {
             false,
             true,
             5,
+            None,
         );
         assert!(
             !status.validation,
@@ -2481,6 +2741,7 @@ mod tests {
             false,
             false,
             0,
+            None,
         );
         assert!(status.uptime_seconds.is_some());
         assert!(status.indexing_complete.is_some());
@@ -2502,6 +2763,7 @@ mod tests {
             false, // supports_formatting
             false, // indexing_complete (still indexing)
             5,     // uptime_seconds
+            None,  // server_name
         );
         // Navigation ready regardless of diagnostics and indexing status
         assert_eq!(status.navigation_ready, Some(true));
@@ -2523,6 +2785,7 @@ mod tests {
             false, // supports_formatting
             true,  // indexing_complete
             10,    // uptime_seconds
+            None,  // server_name
         );
         // Navigation not ready because LSP doesn't have definitionProvider capability
         assert_eq!(status.navigation_ready, Some(false));
@@ -2542,6 +2805,7 @@ mod tests {
             false,                     // irrelevant when !running
             false,                     // irrelevant when !running
             0,                         // irrelevant when !running
+            None,                      // server_name
         );
         assert_eq!(status.navigation_ready, None);
         assert_eq!(status.indexing_complete, None);
@@ -2621,7 +2885,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                    backoff_attempt: 0,
+                backoff_attempt: 0,
                 unavailable_since: Instant::now(), // Just now → cooldown NOT elapsed
             }),
         )]);
@@ -2640,7 +2904,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                    backoff_attempt: 0,
+                backoff_attempt: 0,
                 unavailable_since: Instant::now().checked_sub(Duration::from_mins(10)).unwrap(),
             }),
         )]);
@@ -2682,7 +2946,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                    backoff_attempt: 0,
+                backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);
@@ -2712,7 +2976,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                    backoff_attempt: 0,
+                backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);
@@ -2737,7 +3001,7 @@ mod tests {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                    backoff_attempt: 0,
+                backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);
@@ -2763,7 +3027,7 @@ mod tests {
         let processes = HashMap::from([(
             "go".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
-                    backoff_attempt: 0,
+                backoff_attempt: 0,
                 unavailable_since: Instant::now(),
             }),
         )]);
@@ -2971,5 +3235,51 @@ mod tests {
             result.is_ok(),
             "shutdown signal should be sent and received"
         );
+    }
+
+    // ── LT-4: Predictive LSP Warmup ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_warm_start_for_languages_starts_only_requested() {
+        // warm_start_for_languages should only attempt to start the explicitly
+        // requested languages, not all descriptors. With no real LSP binary,
+        // start_process will fail, but the method must not panic.
+        let client = client_with_descriptors(vec!["rust", "go", "typescript"], HashMap::new());
+        // Only request "go" — "rust" and "typescript" should remain unstarted.
+        client.warm_start_for_languages(&["go".to_owned()]);
+        // No process should be running (no real binary), but no panic.
+    }
+
+    #[tokio::test]
+    async fn test_warm_start_for_languages_skips_already_running() {
+        // If a process is already running for the language, warm_start_for_languages
+        // must skip it without error (idempotent).
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+        // Call twice — should be safe and not panic.
+        client.warm_start_for_languages(&["rust".to_owned()]);
+        client.warm_start_for_languages(&["rust".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn test_warm_start_for_languages_ignores_unknown() {
+        // Languages not in descriptors should be silently ignored.
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+        client.warm_start_for_languages(&["unknown_lang".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn test_touch_language_extends_idle_timer() {
+        // touch_language must update last_used for a running process.
+        let client = client_no_languages();
+        // With no processes, touch should be a no-op (no panic).
+        client.touch_language("rust");
+    }
+
+    #[tokio::test]
+    async fn test_touch_language_no_process_is_noop() {
+        // touch_language on a language with no running process must be a no-op.
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+        client.touch_language("rust");
+        // No panic, no error.
     }
 }

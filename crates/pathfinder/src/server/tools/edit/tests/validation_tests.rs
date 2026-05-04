@@ -554,6 +554,8 @@ async fn test_push_validation_no_errors() {
             supports_call_hierarchy: Some(true),
             supports_diagnostics: Some(true),
             supports_formatting: Some(false),
+
+            server_name: None,
         },
     )]));
 
@@ -621,6 +623,8 @@ async fn test_push_validation_clean_pass() {
             supports_call_hierarchy: Some(true),
             supports_diagnostics: Some(true),
             supports_formatting: Some(false),
+
+            server_name: None,
         },
     )]));
 
@@ -683,6 +687,8 @@ async fn test_push_validation_introduced_error() {
             supports_call_hierarchy: Some(true),
             supports_diagnostics: Some(true),
             supports_formatting: Some(false),
+
+            server_name: None,
         },
     )]));
 
@@ -756,6 +762,8 @@ async fn test_push_validation_pre_fails() {
             supports_call_hierarchy: Some(true),
             supports_diagnostics: Some(true),
             supports_formatting: Some(false),
+
+            server_name: None,
         },
     )]));
 
@@ -810,6 +818,8 @@ async fn test_push_validation_post_fails() {
             supports_call_hierarchy: Some(true),
             supports_diagnostics: Some(true),
             supports_formatting: Some(false),
+
+            server_name: None,
         },
     )]));
 

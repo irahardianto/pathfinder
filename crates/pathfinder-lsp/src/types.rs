@@ -14,38 +14,15 @@ pub struct LspLanguageStatus {
     /// Reason explaining the validation status.
     pub reason: String,
     /// Whether the LSP is ready for navigation operations (`get_definition`, `analyze_impact`).
-    ///
-    /// `Some(true)` — initialize handshake completed with `definitionProvider: true`.
-    /// Navigation tools are functional regardless of `indexing_complete` status.
-    ///
-    /// `Some(false)` — process running but navigation not yet available.
-    ///
-    /// `None` — process not started or unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub navigation_ready: Option<bool>,
     /// Whether the LSP has completed initial workspace indexing.
-    ///
-    /// `Some(true)` — the LSP emitted a `WorkDoneProgressEnd` for its initial
-    /// indexing token, indicating the workspace index is fully built and navigation
-    /// tools (`get_definition`, `analyze_impact`) should return reliable results.
-    ///
-    /// `Some(false)` — the process is running but indexing is still in progress.
-    ///
-    /// `None` — the process has not started yet, is unavailable, or does not
-    /// report `WorkDoneProgress` (e.g., some LSPs omit it). Agents should treat
-    /// `None` the same as `Some(false)` and prefer `validation_skipped_reason` in
-    /// edit responses as the authoritative per-operation LSP health signal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_complete: Option<bool>,
     /// Seconds since the LSP process was spawned.
-    ///
-    /// Useful alongside `indexing_complete = Some(false)` to gauge warmup progress.
-    /// `None` when the process has not started or is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_seconds: Option<u64>,
     /// How this LSP provides diagnostics ("pull", "push", or "none").
-    ///
-    /// `None` when the process hasn't started yet (lazy start).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics_strategy: Option<String>,
     /// LSP supports textDocument/definition (`get_definition`).
@@ -60,6 +37,12 @@ pub struct LspLanguageStatus {
     /// LSP supports textDocument/rangeFormatting (edit formatting).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_formatting: Option<bool>,
+    /// MT-2: The server identity reported in `serverInfo.name` during initialize.
+    ///
+    /// Examples: `"rust-analyzer"`, `"gopls"`, `"typescript-language-server"`.
+    /// `None` when the server omits `serverInfo` or the process is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
 }
 
 /// The location of a symbol's definition in the workspace.

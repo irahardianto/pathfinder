@@ -1335,7 +1335,8 @@ impl PathfinderServer {
                 None => {
                     return Err(crate::server::helpers::pathfinder_to_error_data(
                         &pathfinder_common::error::PathfinderError::IoError {
-                            message: "lsp_health action='restart' requires 'language' to be set".to_owned(),
+                            message: "lsp_health action='restart' requires 'language' to be set"
+                                .to_owned(),
                         },
                     ));
                 }
@@ -2976,6 +2977,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(false),
+
+                server_name: None,
             },
         )]));
 
@@ -3017,6 +3020,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3058,6 +3063,8 @@ mod tests {
                 supports_call_hierarchy: Some(true), // TS supports call hierarchy
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(false), // TS doesn't have formatting
+
+                server_name: None,
             },
         )]));
 
@@ -3104,6 +3111,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3167,6 +3176,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3212,6 +3223,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3262,6 +3275,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3424,6 +3439,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(false),
+
+                server_name: None,
             },
         )]));
 
@@ -3542,6 +3559,8 @@ mod tests {
                 supports_call_hierarchy: None,
                 supports_diagnostics: None,
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3597,6 +3616,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3639,6 +3660,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3685,6 +3708,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3729,6 +3754,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(false),
                 supports_formatting: Some(false),
+
+                server_name: None,
             },
         )]));
 
@@ -3775,6 +3802,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3843,6 +3872,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3894,6 +3925,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -3953,6 +3986,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -4000,6 +4035,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -4067,6 +4104,8 @@ mod tests {
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
                 supports_formatting: Some(true),
+
+                server_name: None,
             },
         )]));
 
@@ -4243,5 +4282,4 @@ mod tests {
             "DS-1: did_open and did_close must be symmetric in read_with_deep_context"
         );
     }
-
 }

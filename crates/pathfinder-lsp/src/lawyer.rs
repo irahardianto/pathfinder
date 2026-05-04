@@ -246,4 +246,20 @@ pub trait Lawyer: Send + Sync {
     /// they don't watch, and routing by extension is unreliable when files are
     /// being created or deleted.
     async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError>;
+
+    /// LT-4: Pre-warm LSP processes for specific languages.
+    ///
+    /// Called after `get_repo_map` to start LSPs for languages found in the
+    /// project skeleton before the agent explicitly requests LSP operations.
+    ///
+    /// Default implementation is a no-op (used by `NoOpLawyer` and `MockLawyer`).
+    fn warm_start_for_languages(&self, _language_ids: &[String]) {}
+
+    /// LT-4: Extend idle timer for a language without making an LSP request.
+    ///
+    /// Called by `read_source_file` to prevent the LSP from timing out while
+    /// the agent is actively reading files.
+    ///
+    /// Default implementation is a no-op.
+    fn touch_language(&self, _language_id: &str) {}
 }

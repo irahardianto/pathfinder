@@ -631,6 +631,17 @@ pub struct EditValidation {
     /// `"high"` → trust the result; `"low"`/`"none"` → consider calling `lsp_health` first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation_confidence: Option<String>,
+    /// MT-4: Actionable recovery instruction for the agent.
+    ///
+    /// Present when validation was skipped or degraded due to an LSP error.
+    /// Tells the agent *what to do next* to recover or validate externally.
+    ///
+    /// Examples:
+    /// - `"Call lsp_health to check server status"`
+    /// - `"LSP request timed out. Call lsp_health(action='restart')."`
+    /// - `"No LSP configured. Install a language server or run cargo check externally."`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<String>,
 }
 
 impl EditValidation {
@@ -642,6 +653,23 @@ impl EditValidation {
             introduced_errors: vec![],
             resolved_errors: vec![],
             validation_confidence: Some("none".to_owned()),
+            recovery_action: None,
+        }
+    }
+
+    /// Return a skipped validation result enriched with a recovery hint.
+    ///
+    /// Use this instead of `skipped()` whenever an `LspError` is the cause —
+    /// pass `lsp_error.recovery_hint()` as the `recovery_action` argument.
+    /// This is the MT-4 telemetry path.
+    #[must_use]
+    pub fn skipped_with_recovery(recovery_action: Option<String>) -> Self {
+        Self {
+            status: "skipped".to_owned(),
+            introduced_errors: vec![],
+            resolved_errors: vec![],
+            validation_confidence: Some("none".to_owned()),
+            recovery_action,
         }
     }
 
@@ -657,6 +685,7 @@ impl EditValidation {
             introduced_errors: vec![],
             resolved_errors: vec![],
             validation_confidence: Some("low".to_owned()),
+            recovery_action: None,
         }
     }
 }
