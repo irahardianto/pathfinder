@@ -848,6 +848,27 @@ impl LspClient {
             .and_then(|n| n.to_str())
             .unwrap_or(command);
 
+        // GUARD: If the command is an absolute path inside a build-artifact
+        // directory (target/ or .cargo/), it is a compiled test binary or a
+        // development build — never an IDE-external process. Parallel integration
+        // tests (nextest) each spawn their own mock LSP instance from target/;
+        // without this guard, sibling test processes would wrongly trigger
+        // coexistence mode on each other because the sibling mock's parent PID
+        // is a different nextest worker, not our own PID.
+        let cmd_path = Path::new(command);
+        if cmd_path.is_absolute() {
+            let is_build_artifact = cmd_path.components().any(|c| {
+                matches!(c, std::path::Component::Normal(n) if n == "target" || n == ".cargo")
+            });
+            if is_build_artifact {
+                tracing::trace!(
+                    binary = binary_name,
+                    "detect_concurrent_lsp: command is a build artifact path — skipping detection"
+                );
+                return false;
+            }
+        }
+
         // Check if there's already a process with this binary name running
         // that we didn't spawn. We do this by counting how many instances
         // exist in the system process table.
