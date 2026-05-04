@@ -569,8 +569,7 @@ mod tests {
             let from_fn = language_id_for_extension(ext);
             let from_plugin = plugin_for_extension(ext).map(LanguagePlugin::language_id);
             assert_eq!(
-                from_fn,
-                from_plugin,
+                from_fn, from_plugin,
                 "Mismatch for extension .{ext}: fn={from_fn:?}, plugin={from_plugin:?}"
             );
         }
