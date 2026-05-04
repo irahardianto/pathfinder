@@ -857,9 +857,9 @@ impl LspClient {
         // is a different nextest worker, not our own PID.
         let cmd_path = Path::new(command);
         if cmd_path.is_absolute() {
-            let is_build_artifact = cmd_path.components().any(|c| {
-                matches!(c, std::path::Component::Normal(n) if n == "target" || n == ".cargo")
-            });
+            let is_build_artifact = cmd_path.components().any(
+                |c| matches!(c, std::path::Component::Normal(n) if n == "target" || n == ".cargo"),
+            );
             if is_build_artifact {
                 tracing::trace!(
                     binary = binary_name,
