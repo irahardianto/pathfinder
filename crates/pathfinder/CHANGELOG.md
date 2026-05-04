@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/irahardianto/pathfinder/compare/v0.5.0...v0.6.0) - 2026-05-04
+
+### Added
+
+- *(lsp)* complete phase 0-5 of pathfinder LSP roadmap
+- *(lsp)* DS-1 DocumentGuard RAII lifecycle for navigation tools
+- *(mcp)* surface lsp_readiness and validation_confidence signals (IW-2)
+- *(lsp)* pre-flight manifest validation and python venv detection
+- *(lsp)* core lifecycle, diagnostics reliability, and backoff improvements
+
+### Fixed
+
+- *(lsp)* resolve all CI Clippy -D warnings and fmt violations
+- *(lsp)* apply rustfmt style to assert_eq! in plugin tests
+
+### Other
+
+- *(server)* expand get_repo_map test coverage
+- format codebase and remediate Clippy lints across all crates
+- *(lsp)* resolve flakiness in process lifecycle tests
+
 ## [0.5.0](https://github.com/irahardianto/pathfinder/compare/v0.4.0...v0.5.0) - 2026-05-02
 
 ### Fixed
