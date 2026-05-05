@@ -1,0 +1,4 @@
+## 2023-10-27 - Removed unnecessary Mutex in RipgrepScout search\n**Learning:** The  implementation spawned a blocking task, but processed files sequentially inside the loop. State variables (, , ) were wrapped in  for no benefit, causing unnecessary atomic synchronization overhead per match.\n**Action:** Avoid using  to wrap state variables that are entirely bounded to a single thread/execution scope.
+## 2023-10-27 - Removed unnecessary Mutex in RipgrepScout search
+**Learning:** The `RipgrepScout::search` implementation spawned a blocking task, but processed files sequentially inside the loop. State variables (`match_buf`, `total_count`, `skipped_count`) were wrapped in `Mutex` for no benefit, causing unnecessary atomic synchronization overhead per match.
+**Action:** Avoid using `Mutex` to wrap state variables that are entirely bounded to a single thread/execution scope.
