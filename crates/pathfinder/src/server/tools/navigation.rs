@@ -872,7 +872,6 @@ impl PathfinderServer {
                                 snippet: referenced_item
                                     .detail
                                     .unwrap_or_else(|| referenced_item.name.clone()),
-                                version_hash: String::default(), // Populated at higher layer if needed
                                 direction: match direction {
                                     CallDirection::Incoming => "incoming".to_owned(),
                                     CallDirection::Outgoing => "outgoing".to_owned(),
@@ -1116,7 +1115,6 @@ impl PathfinderServer {
                                         file: m.file,
                                         line: usize::try_from(m.line).unwrap_or(usize::MAX),
                                         snippet: m.content,
-                                        version_hash: m.version_hash,
                                         // Grep fallback: heuristic, direction is assumed incoming
                                         direction: "incoming_heuristic".to_owned(),
                                         depth: 0,
@@ -1183,7 +1181,6 @@ impl PathfinderServer {
                                     file: m.file,
                                     line: usize::try_from(m.line).unwrap_or(usize::MAX),
                                     snippet: m.content,
-                                    version_hash: m.version_hash,
                                     // Grep fallback: heuristic, direction is assumed incoming
                                     direction: "incoming_heuristic".to_owned(),
                                     depth: 0,
@@ -1248,7 +1245,6 @@ impl PathfinderServer {
                                     file: m.file,
                                     line: usize::try_from(m.line).unwrap_or(usize::MAX),
                                     snippet: m.content,
-                                    version_hash: m.version_hash,
                                     // Grep fallback: heuristic, direction is assumed incoming
                                     direction: "incoming_heuristic".to_owned(),
                                     depth: 0,
@@ -1279,27 +1275,6 @@ impl PathfinderServer {
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
-        // Compute version hashes for all referenced files + the target file itself.
-        // This allows agents to immediately edit any impacted file without a separate read.
-        let mut version_hashes = std::collections::HashMap::new();
-        // Always include the target file
-        let target_file_path = self.workspace_root.path().join(&semantic_path.file_path);
-        if let Ok(bytes) = tokio::fs::read(&target_file_path).await {
-            let hash = pathfinder_common::types::VersionHash::compute(&bytes);
-            version_hashes.insert(
-                semantic_path.file_path.to_string_lossy().to_string(),
-                hash.short().to_owned(),
-            );
-        }
-        // Include all files from the call graph
-        for file_ref in &files_referenced {
-            let abs_path = self.workspace_root.path().join(file_ref);
-            if let Ok(bytes) = tokio::fs::read(&abs_path).await {
-                let hash = pathfinder_common::types::VersionHash::compute(&bytes);
-                version_hashes.insert(file_ref.clone(), hash.short().to_owned());
-            }
-        }
-
         tracing::info!(
             tool = "analyze_impact",
             semantic_path = %params.semantic_path,
@@ -1323,7 +1298,6 @@ impl PathfinderServer {
             files_referenced: files_referenced.len(),
             degraded,
             degraded_reason,
-            version_hashes,
         };
 
         // Build honest text output based on actual results
@@ -1444,15 +1418,11 @@ impl PathfinderServer {
                 supports_call_hierarchy: status.supports_call_hierarchy,
                 supports_diagnostics: status.supports_diagnostics,
                 supports_definition: status.supports_definition,
-                supports_formatting: status.supports_formatting,
                 indexing_status,
                 navigation_ready: status.navigation_ready,
                 probe_verified: false,
                 install_hint: None,
                 degraded_tools: compute_degraded_tools(status),
-                validation_latency_ms: compute_validation_latency(
-                    status.diagnostics_strategy.as_deref(),
-                ),
             });
         }
 
@@ -1647,7 +1617,6 @@ impl PathfinderServer {
                 supports_call_hierarchy: None,
                 supports_diagnostics: None,
                 supports_definition: None,
-                supports_formatting: None,
                 indexing_status: None,
                 navigation_ready: None,
                 probe_verified: false,
@@ -1656,7 +1625,6 @@ impl PathfinderServer {
                     "analyze_impact".to_owned(),
                     "read_with_deep_context".to_owned(),
                 ],
-                validation_latency_ms: None,
             });
         }
 
@@ -1855,23 +1823,16 @@ enum ProbeAction {
 fn compute_degraded_tools(status: &pathfinder_lsp::types::LspLanguageStatus) -> Vec<String> {
     let mut degraded = Vec::new();
 
+    if status.supports_definition != Some(true) {
+        degraded.push("get_definition".to_owned());
+    }
+
     if status.supports_call_hierarchy != Some(true) {
         degraded.push("analyze_impact".to_owned());
         degraded.push("read_with_deep_context".to_owned());
     }
 
     degraded
-}
-
-/// Compute approximate validation latency based on diagnostics strategy.
-///
-/// Returns estimated time in milliseconds for validation to complete.
-fn compute_validation_latency(strategy: Option<&str>) -> Option<u64> {
-    match strategy {
-        Some("push") => Some(10_000), // ~10s for push collection (5s pre + 5s post)
-        Some("pull") => Some(2_000),  // ~2s for pull request
-        _ => None,
-    }
 }
 
 fn parse_uptime_to_seconds(uptime: Option<&str>) -> Option<u64> {
@@ -3082,11 +3043,6 @@ mod tests {
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0].file, "src/caller.rs");
         assert_eq!(incoming[0].direction, "incoming_heuristic");
-        // Version hashes should include the target file and the match file
-        assert!(
-            val.version_hashes.contains_key("src/auth.rs"),
-            "version_hashes must include the referenced file"
-        );
     }
 
     // ── PATCH-005: Per-Language Capabilities Tests ─────────────────────
@@ -3129,8 +3085,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(false),
 
+                supports_formatting: Some(false),
                 server_name: None,
             },
         )]));
@@ -3172,8 +3128,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3215,8 +3171,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true), // TS supports call hierarchy
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(false), // TS doesn't have formatting
 
+                supports_formatting: Some(false),
                 server_name: None,
             },
         )]));
@@ -3231,7 +3187,6 @@ mod tests {
         assert_eq!(ts_health.supports_definition, Some(true));
         assert_eq!(ts_health.supports_call_hierarchy, Some(true));
         assert_eq!(ts_health.supports_diagnostics, Some(true));
-        assert_eq!(ts_health.supports_formatting, Some(false));
     }
 
     // ── PATCH-006: Probe-Based Readiness Tests ─────────────────────────
@@ -3263,8 +3218,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3328,8 +3283,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3375,8 +3330,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3427,8 +3382,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3591,8 +3546,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(false),
 
+                supports_formatting: Some(false),
                 server_name: None,
             },
         )]));
@@ -3711,8 +3666,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: None,
                 supports_diagnostics: None,
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3769,8 +3724,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3813,8 +3768,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3830,11 +3785,6 @@ mod tests {
         assert_eq!(val.languages.len(), 1);
         let go_health = &val.languages[0];
         assert_eq!(go_health.language, "go");
-        assert_eq!(
-            go_health.validation_latency_ms,
-            Some(10_000),
-            "push diagnostics should have ~10s validation latency"
-        );
         assert!(
             go_health.degraded_tools.is_empty(),
             "fully capable LSP should have no degraded tools"
@@ -3861,8 +3811,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -3872,15 +3822,7 @@ mod tests {
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
-        let call_res = result.expect("should succeed");
-        let val = call_res.0;
-
-        let rust_health = &val.languages[0];
-        assert_eq!(
-            rust_health.validation_latency_ms,
-            Some(2_000),
-            "pull diagnostics should have ~2s validation latency"
-        );
+        result.expect("pull-diagnostics language should return successfully");
     }
 
     // ── LSP-HEALTH-001: Confidence Gradient Tests ─────────────────────────────
@@ -3907,8 +3849,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(false),
-                supports_formatting: Some(false),
 
+                supports_formatting: Some(false),
                 server_name: None,
             },
         )]));
@@ -3955,8 +3897,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -4025,8 +3967,8 @@ mod tests {
                 supports_definition: Some(false),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -4078,8 +4020,8 @@ mod tests {
                 supports_definition: Some(false),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -4139,8 +4081,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -4188,8 +4130,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));
@@ -4257,8 +4199,8 @@ mod tests {
                 supports_definition: Some(true),
                 supports_call_hierarchy: Some(true),
                 supports_diagnostics: Some(true),
-                supports_formatting: Some(true),
 
+                supports_formatting: Some(true),
                 server_name: None,
             },
         )]));

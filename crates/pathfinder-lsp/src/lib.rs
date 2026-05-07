@@ -35,7 +35,7 @@ pub use error::LspError;
 pub use lawyer::Lawyer;
 pub use mock::MockLawyer;
 pub use no_op::NoOpLawyer;
-pub use types::{DefinitionLocation, LspDiagnostic, LspDiagnosticSeverity};
+pub use types::DefinitionLocation;
 
 pub use plugin::{
     all_plugins, plugin_for_extension, plugin_for_language, GoPlugin, LanguagePlugin, LspCandidate,
