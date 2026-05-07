@@ -301,11 +301,16 @@ fn build_file_groups(
     known_set: &std::collections::HashSet<String>,
 ) -> Vec<SearchResultGroup> {
     // Preserve insertion order by tracking the file sequence separately.
-    let mut order: Vec<String> = Vec::new();
-    let mut groups: HashMap<String, SearchResultGroup> = HashMap::new();
+    let mut order: Vec<String> = Vec::with_capacity(matches.len());
+    let mut groups: HashMap<String, SearchResultGroup> = HashMap::with_capacity(matches.len());
 
     for m in matches {
         let key = normalize_path(&m.file);
+
+        // First check if it exists using the Entry API directly, but we only want to
+        // clone the key if it does NOT exist.
+        // Sadly, the standard library `entry` takes `K: Into<K>`, not `&K`, so we
+        // must use standard lookup, but we can do it safely.
         if !groups.contains_key(&key) {
             order.push(key.clone());
             groups.insert(
@@ -319,6 +324,7 @@ fn build_file_groups(
                 },
             );
         }
+
         if let Some(group) = groups.get_mut(&key) {
             if known_set.contains(&key) {
                 group.known_matches.push(GroupedKnownMatch {

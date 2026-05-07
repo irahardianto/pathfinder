@@ -169,11 +169,12 @@ impl Sink for MatchCollector<'_> {
         self.last_seen_line = line;
 
         let bytes = mat.bytes();
-        let content = String::from_utf8_lossy(bytes)
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_owned();
-        let content = truncate_line(&content, 1000);
+        // PERF: Avoid allocating a full String just to trim and truncate.
+        // String::from_utf8_lossy returns a Cow, we borrow its slice, trim, and then pass to truncate_line
+        // which allocates the final String just once.
+        let raw_content = String::from_utf8_lossy(bytes);
+        let trimmed_content = raw_content.trim_end_matches('\n').trim_end_matches('\r');
+        let content = truncate_line(trimmed_content, 1000);
 
         // Column is 1-indexed per PRD §3.1.
         let mut column = 1_u64;
@@ -216,20 +217,29 @@ impl Sink for MatchCollector<'_> {
         }
         self.last_seen_line = line_num;
 
-        let line = String::from_utf8_lossy(ctx.bytes())
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_owned();
-        let line = truncate_line(&line, 1000);
+        // PERF: Avoid double-allocation by trimming the borrowed Cow before passing to truncate_line.
+        let raw_line = String::from_utf8_lossy(ctx.bytes());
+        let trimmed_line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
+        let line = truncate_line(trimmed_line, 1000);
 
-        if self.context_lines > 0 {
+        let is_after = *ctx.kind() == SinkContextKind::After;
+        let needs_after = is_after && self.pending_after_context > 0;
+        let needs_before = self.context_lines > 0;
+
+        if needs_before {
             if self.context_before_buf.len() >= self.context_lines {
                 self.context_before_buf.pop_front();
             }
-            self.context_before_buf.push_back(line.clone());
+            // PERF: Only clone if we also need it for after_context_buf
+            if needs_after {
+                self.context_before_buf.push_back(line.clone());
+            } else {
+                self.context_before_buf.push_back(line);
+                return Ok(true);
+            }
         }
 
-        if *ctx.kind() == SinkContextKind::After && self.pending_after_context > 0 {
+        if needs_after {
             self.after_context_buf.push(line);
             self.pending_after_context -= 1;
         }
