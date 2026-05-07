@@ -792,7 +792,6 @@ impl PathfinderServer {
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
-            version_hash: scope.version_hash.short().to_owned(),
             language: scope.language,
             dependencies,
             degraded,
@@ -1656,7 +1655,6 @@ impl PathfinderServer {
                 degraded_tools: vec![
                     "analyze_impact".to_owned(),
                     "read_with_deep_context".to_owned(),
-                    "validate_only".to_owned(),
                 ],
                 validation_latency_ms: None,
             });
@@ -1689,17 +1687,12 @@ impl PathfinderServer {
 
         let _ = self
             .lawyer
-            .did_open(self.workspace_root.path(), &file_path, &content)
+            .open_document(self.workspace_root.path(), &file_path, &content)
             .await;
 
         let result = self
             .lawyer
             .goto_definition(self.workspace_root.path(), &file_path, 1, 1)
-            .await;
-
-        let _ = self
-            .lawyer
-            .did_close(self.workspace_root.path(), &file_path)
             .await;
 
         // Any response (even Ok(None)) means the LSP is alive and processing requests.
@@ -1858,7 +1851,6 @@ enum ProbeAction {
     Probe,
 }
 
-///
 /// Returns a list of tool names that lose LSP support for this language.
 fn compute_degraded_tools(status: &pathfinder_lsp::types::LspLanguageStatus) -> Vec<String> {
     let mut degraded = Vec::new();
@@ -1866,11 +1858,6 @@ fn compute_degraded_tools(status: &pathfinder_lsp::types::LspLanguageStatus) -> 
     if status.supports_call_hierarchy != Some(true) {
         degraded.push("analyze_impact".to_owned());
         degraded.push("read_with_deep_context".to_owned());
-    }
-    if status.supports_diagnostics != Some(true)
-        && status.diagnostics_strategy.as_deref() != Some("push")
-    {
-        degraded.push("validate_only".to_owned());
     }
 
     degraded
@@ -1940,7 +1927,7 @@ mod tests {
     };
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
-    use pathfinder_common::types::{SymbolScope, VersionHash, WorkspaceRoot};
+    use pathfinder_common::types::{SymbolScope, WorkspaceRoot};
     use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem};
     use pathfinder_lsp::{DefinitionLocation, MockLawyer};
     use pathfinder_search::MockScout;
@@ -1973,7 +1960,6 @@ mod tests {
             start_line: 9,
             end_line: 9,
             name_column: 0,
-            version_hash: VersionHash::compute(b"fn login() { }"),
             language: "rust".to_owned(),
         }
     }
@@ -3754,11 +3740,12 @@ mod tests {
                 .contains(&"read_with_deep_context".to_owned()),
             "degraded_tools should include read_with_deep_context when call hierarchy unsupported"
         );
+        // validate_only no longer exists — degraded_tools only contains LSP navigation tools
         assert!(
-            go_health
+            !go_health
                 .degraded_tools
                 .contains(&"validate_only".to_owned()),
-            "degraded_tools should include validate_only when diagnostics unsupported"
+            "degraded_tools must not include the removed validate_only tool"
         );
     }
 
@@ -3942,8 +3929,8 @@ mod tests {
         assert_eq!(py_health.navigation_ready, Some(true));
         // Diagnostics not available
         assert_eq!(py_health.diagnostics_strategy, Some("none".to_string()));
-        // validate_only is degraded because no diagnostics
-        assert!(py_health
+        // validate_only no longer exists — diagnostics absence only affects call hierarchy tools
+        assert!(!py_health
             .degraded_tools
             .contains(&"validate_only".to_string()));
     }

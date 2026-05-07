@@ -4,10 +4,9 @@
 //! used by `read_file`.
 
 use pathfinder_common::error::PathfinderError;
-use pathfinder_common::sandbox::Sandbox;
-use pathfinder_common::types::{SemanticPath, VersionHash};
+use pathfinder_common::types::SemanticPath;
 use rmcp::model::{ErrorCode, ErrorData};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // ── Error Helpers ─────────────────────────────────────────────────
 
@@ -30,35 +29,20 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
     // JSON-RPC error code allocation (-320xx range, implementation-defined):
     // -32602  INVALID_PARAMS     Client errors (file not found, bad paths, etc.)
     // -32001  ACCESS_DENIED      Sandbox violation
-    // -32002  [reserved by rmcp] RESOURCE_NOT_FOUND
-    // -32003  VERSION_MISMATCH   OCC conflict
-    // -32004  VALIDATION_FAILED  LSP errors introduced by edit
     // -32603  INTERNAL_ERROR     Genuine server failures (I/O, parse, LSP crash)
     let error_code = match err {
         // Client errors (invalid parameters) -> INVALID_PARAMS (-32602)
         pathfinder_common::error::PathfinderError::FileNotFound { .. }
-        | pathfinder_common::error::PathfinderError::FileAlreadyExists { .. }
         | pathfinder_common::error::PathfinderError::SymbolNotFound { .. }
         | pathfinder_common::error::PathfinderError::AmbiguousSymbol { .. }
         | pathfinder_common::error::PathfinderError::InvalidSemanticPath { .. }
         | pathfinder_common::error::PathfinderError::UnsupportedLanguage { .. }
-        | pathfinder_common::error::PathfinderError::InvalidTarget { .. }
-        | pathfinder_common::error::PathfinderError::TokenBudgetExceeded { .. }
-        | pathfinder_common::error::PathfinderError::MatchNotFound { .. }
-        | pathfinder_common::error::PathfinderError::AmbiguousMatch { .. }
-        | pathfinder_common::error::PathfinderError::TextNotFound { .. }
-        | pathfinder_common::error::PathfinderError::BatchStructuralCorruption { .. } => {
+        | pathfinder_common::error::PathfinderError::TokenBudgetExceeded { .. } => {
             ErrorCode::INVALID_PARAMS
         }
 
         // Access control -> custom error -32001
         pathfinder_common::error::PathfinderError::AccessDenied { .. } => ErrorCode(-32001),
-
-        // OCC/conflict -> custom error -32003 (avoid -32002, used by rmcp for RESOURCE_NOT_FOUND)
-        pathfinder_common::error::PathfinderError::VersionMismatch { .. } => ErrorCode(-32003),
-
-        // Validation -> custom error -32004
-        pathfinder_common::error::PathfinderError::ValidationFailed { .. } => ErrorCode(-32004),
 
         // Genuine internal errors -> INTERNAL_ERROR (-32603)
         pathfinder_common::error::PathfinderError::IoError { .. }
@@ -83,55 +67,6 @@ pub(crate) fn treesitter_error_to_error_data(e: pathfinder_treesitter::SurgeonEr
 /// Wrap a plain IO / infrastructure message in an [`ErrorData`].
 pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
     ErrorData::internal_error(msg, None)
-}
-
-/// OCC guard: verify the agent's `base_version` matches the current file hash.
-///
-/// Delegates to [`VersionHash::matches`] which accepts all formats:
-/// - `"e3dc7f9"` — 7-char short form (no prefix, preferred)
-/// - `"sha256:e3dc7f9"` — short form with legacy prefix
-/// - `"sha256:<64 hex>"` — full hash (backward compatible)
-///
-/// Returns `VERSION_MISMATCH` (`-32003`) if the hash does not match or the
-/// supplied prefix is shorter than 7 hex chars.
-pub(crate) fn check_occ(
-    base_version: &str,
-    current_hash: &VersionHash,
-    path: PathBuf,
-) -> Result<(), ErrorData> {
-    if !current_hash.matches(base_version) {
-        return Err(pathfinder_to_error_data(
-            &PathfinderError::VersionMismatch {
-                path,
-                current_version_hash: current_hash.as_str().to_owned(),
-                lines_changed: None,
-            },
-        ));
-    }
-    Ok(())
-}
-
-/// Sandbox access guard with structured logging.
-///
-/// Checks whether `relative_path` is accessible per the sandbox rules.
-/// On denial, logs a structured warning and returns `Err(ACCESS_DENIED)`.
-/// Centralises the 7-line sandbox-check preamble duplicated across edit handlers.
-pub(crate) fn check_sandbox_access(
-    sandbox: &Sandbox,
-    relative_path: &Path,
-    tool_name: &str,
-    raw_semantic_path: &str,
-) -> Result<(), ErrorData> {
-    if let Err(e) = sandbox.check(relative_path) {
-        tracing::warn!(
-            tool = tool_name,
-            semantic_path = raw_semantic_path,
-            error = %e,
-            "{tool_name}: access denied"
-        );
-        return Err(pathfinder_to_error_data(&e));
-    }
-    Ok(())
 }
 
 // ── Language Detection ──────────────────────────────────────────────
@@ -227,9 +162,6 @@ mod tests {
             PathfinderError::FileNotFound {
                 path: "src/main.rs".into(),
             },
-            PathfinderError::FileAlreadyExists {
-                path: "src/main.rs".into(),
-            },
             PathfinderError::SymbolNotFound {
                 semantic_path: "src/auth.ts::login".into(),
                 did_you_mean: vec![],
@@ -245,29 +177,9 @@ mod tests {
             PathfinderError::UnsupportedLanguage {
                 path: "data.xyz".into(),
             },
-            PathfinderError::InvalidTarget {
-                semantic_path: "src/lib.rs::CONST".into(),
-                reason: "not a block construct".into(),
-                edit_index: None,
-                valid_edit_types: None,
-            },
             PathfinderError::TokenBudgetExceeded {
                 used: 1000,
                 budget: 500,
-            },
-            PathfinderError::MatchNotFound {
-                filepath: "config.yaml".into(),
-            },
-            PathfinderError::AmbiguousMatch {
-                filepath: "config.yaml".into(),
-                occurrences: 2,
-            },
-            PathfinderError::TextNotFound {
-                filepath: "src/main.rs".into(),
-                old_text: "fn main()".into(),
-                context_line: 10,
-                actual_content: None,
-                closest_match: None,
             },
         ];
 
@@ -291,29 +203,6 @@ mod tests {
 
         let error_data = pathfinder_to_error_data(&err);
         assert_eq!(error_data.code, ErrorCode(-32001));
-    }
-
-    #[test]
-    fn test_error_code_mapping_version_mismatch_to_custom_code() {
-        let err = PathfinderError::VersionMismatch {
-            path: "src/main.rs".into(),
-            current_version_hash: "sha256:abc123".into(),
-            lines_changed: None,
-        };
-
-        let error_data = pathfinder_to_error_data(&err);
-        assert_eq!(error_data.code, ErrorCode(-32003));
-    }
-
-    #[test]
-    fn test_error_code_mapping_validation_failed_to_custom_code() {
-        let err = PathfinderError::ValidationFailed {
-            count: 2,
-            introduced_errors: vec![],
-        };
-
-        let error_data = pathfinder_to_error_data(&err);
-        assert_eq!(error_data.code, ErrorCode(-32004));
     }
 
     #[test]
@@ -344,63 +233,6 @@ mod tests {
                 err.error_code()
             );
         }
-    }
-
-    #[test]
-    fn test_check_occ_full_hash_match() {
-        let hash = VersionHash::compute(b"hello world");
-        let result = check_occ(hash.as_str(), &hash, PathBuf::from("test.rs"));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_check_occ_short_7_char_prefix_matches() {
-        let hash = VersionHash::compute(b"hello world");
-        // Legacy format: "sha256:" + 7 hex chars
-        let short_with_prefix = &hash.as_str()[..14]; // 7 + 7 = 14 chars
-        let result = check_occ(short_with_prefix, &hash, PathBuf::from("test.rs"));
-        assert!(
-            result.is_ok(),
-            "7-char prefix with sha256: should be accepted"
-        );
-
-        // Preferred format: just 7 hex chars, no prefix — what short() emits
-        let short_no_prefix = hash.short();
-        let result2 = check_occ(short_no_prefix, &hash, PathBuf::from("test.rs"));
-        assert!(
-            result2.is_ok(),
-            "7-char no-prefix short hash must be accepted"
-        );
-    }
-
-    #[test]
-    fn test_check_occ_wrong_prefix_fails() {
-        let hash = VersionHash::compute(b"hello world");
-        let result = check_occ("sha256:0000000", &hash, PathBuf::from("test.rs"));
-        assert!(result.is_err(), "wrong prefix must fail");
-    }
-
-    #[test]
-    fn test_check_occ_prefix_too_short_is_rejected() {
-        let hash = VersionHash::compute(b"hello world");
-        let result = check_occ("sha256:4ec", &hash, PathBuf::from("test.rs")); // only 3 hex chars
-        assert!(result.is_err(), "prefix < 7 hex chars must be rejected");
-    }
-
-    #[test]
-    fn test_check_occ_full_hash_mismatch_fails() {
-        let hash_a = VersionHash::compute(b"hello world");
-        let hash_b = VersionHash::compute(b"different content");
-        let result = check_occ(hash_a.as_str(), &hash_b, PathBuf::from("test.rs"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_check_occ_8_char_prefix_matches() {
-        let hash = VersionHash::compute(b"hello world");
-        let prefix_8 = &hash.as_str()[..15]; // "sha256:" + 8 hex chars
-        let result = check_occ(prefix_8, &hash, PathBuf::from("test.rs"));
-        assert!(result.is_ok(), "8-char prefix should also be accepted");
     }
 
     /// Regression test: `SurgeonError::FileNotFound` must surface as

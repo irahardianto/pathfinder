@@ -137,119 +137,6 @@ pub struct AnalyzeImpactParams {
     pub max_depth: u32,
 }
 
-/// Parameters for `replace_body`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReplaceBodyParams {
-    /// Full semantic path to the target (e.g., `src/mod.rs::func`).
-    pub semantic_path: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-    /// Replacement body content (without outer braces).
-    pub new_code: String,
-    /// Write to disk even if validation fails.
-    #[serde(default)]
-    pub ignore_validation_failures: bool,
-}
-
-/// Parameters for `replace_full`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReplaceFullParams {
-    /// Full semantic path to the target (e.g., `src/mod.rs::func`).
-    pub semantic_path: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-    /// Complete replacement declaration.
-    pub new_code: String,
-    /// Write to disk even if validation fails.
-    #[serde(default)]
-    pub ignore_validation_failures: bool,
-}
-
-/// Parameters for `insert_before`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct InsertBeforeParams {
-    /// Full semantic path or bare file path for BOF (e.g., `src/mod.rs::func` or `src/mod.rs`).
-    pub semantic_path: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-    /// Code block to insert.
-    pub new_code: String,
-    /// Write to disk even if validation fails.
-    #[serde(default)]
-    pub ignore_validation_failures: bool,
-}
-
-/// Parameters for `insert_after`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct InsertAfterParams {
-    /// Full semantic path or bare file path for EOF (e.g., `src/mod.rs::func` or `src/mod.rs`).
-    pub semantic_path: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-    /// Code block to insert.
-    pub new_code: String,
-    /// Write to disk even if validation fails.
-    #[serde(default)]
-    pub ignore_validation_failures: bool,
-}
-
-/// Parameters for `insert_into`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct InsertIntoParams {
-    /// Full semantic path to the container target (e.g., `src/lib.rs::tests`).
-    pub semantic_path: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-    /// Code block to insert.
-    pub new_code: String,
-    /// Write to disk even if validation fails.
-    #[serde(default)]
-    pub ignore_validation_failures: bool,
-}
-
-/// Parameters for `delete_symbol`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct DeleteSymbolParams {
-    /// Full semantic path to the target (e.g., `src/auth.ts::AuthService.login`).
-    pub semantic_path: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-    /// Write to disk even if validation fails.
-    #[serde(default)]
-    pub ignore_validation_failures: bool,
-}
-
-/// Parameters for `validate_only`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ValidateOnlyParams {
-    /// Full semantic path to the target (e.g., `src/mod.rs::func`).
-    pub semantic_path: String,
-    /// Edit type: `replace_body`, `replace_full`, `insert_before`, `insert_after`, `insert_into`, or `delete`.
-    pub edit_type: String,
-    /// Replacement code (required for all types except `delete`).
-    pub new_code: Option<String>,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-}
-
-/// Parameters for `create_file`.
-#[derive(Debug, Default, Clone, serde::Deserialize, schemars::JsonSchema)]
-pub struct CreateFileParams {
-    /// Relative file path.
-    pub filepath: String,
-    /// Initial file content.
-    pub content: String,
-}
-
-/// Parameters for `delete_file`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct DeleteFileParams {
-    /// Relative file path.
-    pub filepath: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-}
-
 /// Parameters for `read_file`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadFileParams {
@@ -261,28 +148,6 @@ pub struct ReadFileParams {
     /// Maximum lines to return.
     #[serde(default = "default_max_lines")]
     pub max_lines: u32,
-}
-
-/// Parameters for `write_file`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct WriteFileParams {
-    /// Relative file path.
-    pub filepath: String,
-    /// SHA-256 hash from previous read (OCC).
-    pub base_version: String,
-    /// Full replacement content. Mutually exclusive with `replacements`.
-    pub content: Option<String>,
-    /// Search-and-replace operations. Mutually exclusive with `content`.
-    pub replacements: Option<Vec<Replacement>>,
-}
-
-/// A search-and-replace operation for `write_file`.
-#[derive(Debug, Default, Clone, serde::Deserialize, schemars::JsonSchema)]
-pub struct Replacement {
-    /// Exact text to find.
-    pub old_text: String,
-    /// Replacement text.
-    pub new_text: String,
 }
 
 /// Parameters for `read_source_file`.
@@ -299,63 +164,6 @@ pub struct ReadSourceFileParams {
     /// Last line to return (1-indexed, inclusive).
     #[serde(default)]
     pub end_line: Option<u32>,
-}
-
-/// A single edit in a `replace_batch` call.
-///
-/// Each edit specifies **either** semantic targeting (Option A) OR text targeting (Option B):
-///
-/// **Option A — Semantic targeting:** Set `semantic_path`, `edit_type`, and optionally `new_code`.
-/// Use for source-code constructs that have a parseable AST symbol.
-///
-/// **Option B — Text targeting:** Set `old_text`, `context_line`, and optionally `replacement_text`.
-/// Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path.
-/// The search scans ±25 lines around `context_line` for an exact match of `old_text`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct BatchEdit {
-    // ── Semantic targeting (Option A) ─────────────────────────────────────
-    /// Full semantic path to the target (e.g., `file.vue::script::check`).
-    /// Required when using semantic targeting.
-    #[serde(default)]
-    pub semantic_path: String,
-    /// Edit type: `replace_body`, `replace_full`, `insert_before`, `insert_after`, or `delete`.
-    /// Required when using semantic targeting.
-    #[serde(default)]
-    pub edit_type: String,
-    /// Replacement code (required for all semantic types except `delete`).
-    pub new_code: Option<String>,
-
-    // ── Text targeting (Option B) ──────────────────────────────────────────
-    /// Exact text to find and replace. Set this for template/style edits that have no
-    /// semantic path (e.g., Vue `<template>`, `<style>` zones, embedded SQL).
-    /// When set, `semantic_path` and `edit_type` are ignored.
-    /// The search scans ±25 lines around `context_line` for an exact match.
-    pub old_text: Option<String>,
-    /// Line number (1-indexed) to anchor the `old_text` search window.
-    /// Required when `old_text` is set. The search scans ±25 lines around this line.
-    pub context_line: Option<u32>,
-    /// Replacement text when using text targeting. Required when `old_text` is set.
-    pub replacement_text: Option<String>,
-    // ── Shared options ─────────────────────────────────────────────────────
-    /// When `true`, collapses `\s+` to a single space before matching `old_text`.
-    /// Useful for HTML/template contexts where indentation may be inconsistent.
-    /// Do NOT use for Python, YAML, or other whitespace-significant languages.
-    #[serde(default)]
-    pub normalize_whitespace: bool,
-}
-
-/// Parameters for `replace_batch`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReplaceBatchParams {
-    /// Relative file path.
-    pub filepath: String,
-    /// SHA-256 hash from previous read (OCC) for the entire file.
-    pub base_version: String,
-    /// List of edits to apply atomically.
-    pub edits: Vec<BatchEdit>,
-    /// Write to disk even if validation fails.
-    #[serde(default)]
-    pub ignore_validation_failures: bool,
 }
 
 // ── Response Types ──────────────────────────────────────────────────
@@ -500,8 +308,6 @@ pub struct GetRepoMapMetadata {
 /// The overall capabilities of the Pathfinder system.
 #[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct RepoCapabilities {
-    /// Whether AST-aware edit tools are supported.
-    pub edit: bool,
     /// Whether the search engine is supported.
     pub search: bool,
     /// LSP-specific capabilities and status.
@@ -530,8 +336,6 @@ pub struct ReadSymbolScopeMetadata {
     pub start_line: usize,
     /// Ending line number of the symbol in the source.
     pub end_line: usize,
-    /// Version hash of the file containing the symbol.
-    pub version_hash: String,
     /// Programming language of the source symbol.
     pub language: String,
 }
@@ -572,142 +376,11 @@ pub struct SourceSymbol {
 /// The metadata embedded in `structured_content` for `read_source_file`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSourceFileMetadata {
-    /// Version hash of the source file.
-    pub version_hash: String,
     /// Programming language of the source file.
     pub language: String,
     /// Symbols extracted from the source file.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub symbols: Vec<SourceSymbol>,
-}
-
-/// The response for all AST-aware edit tools:
-/// `replace_body`, `replace_full`, `insert_before`, `insert_after`,
-/// `delete_symbol`, and `validate_only`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct EditResponse {
-    /// Whether the edit succeeded (always `true` for non-`validate_only` tools).
-    pub success: bool,
-    /// SHA-256 hash of the file after the edit. `None` for `validate_only`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_version_hash: Option<String>,
-    /// Whether the code was reformatted (always `false` until LSP formatting is wired).
-    pub formatted: bool,
-    /// LSP validation result.
-    pub validation: EditValidation,
-    /// `true` when LSP validation was skipped (no language server available).
-    #[serde(default)]
-    pub validation_skipped: bool,
-    /// Machine-readable reason why validation was skipped.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validation_skipped_reason: Option<String>,
-    /// Warning about the edit operation (e.g., targeting a Rust struct instead of impl block).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warning: Option<String>,
-}
-
-/// The result of LSP validation for an edit operation.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct EditValidation {
-    /// `"passed"`, `"failed"`, `"skipped"`, or `"uncertain"`.
-    ///
-    /// - `"passed"`: validation ran and detected no new errors
-    /// - `"failed"`: validation ran and detected new errors
-    /// - `"skipped"`: validation was not performed (no LSP available)
-    /// - `"uncertain"`: validation ran but results are unreliable (LSP warmup)
-    pub status: String,
-    /// Errors introduced by the edit.
-    pub introduced_errors: Vec<pathfinder_common::error::DiagnosticError>,
-    /// Errors resolved by the edit.
-    pub resolved_errors: Vec<pathfinder_common::error::DiagnosticError>,
-    /// IW-2: Confidence in the validation result.
-    ///
-    /// - `"high"`: LSP pull diagnostics used (definitive result).
-    /// - `"medium"`: LSP push diagnostics used (may miss errors during indexing).
-    /// - `"low"`: Both pre/post diagnostic sets were empty (could be clean or LSP not ready).
-    /// - `"none"`: Validation was skipped entirely.
-    ///
-    /// Agents should use this to decide whether to re-validate or proceed:
-    /// `"high"` → trust the result; `"low"`/`"none"` → consider calling `lsp_health` first.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validation_confidence: Option<String>,
-    /// MT-4: Actionable recovery instruction for the agent.
-    ///
-    /// Present when validation was skipped or degraded due to an LSP error.
-    /// Tells the agent *what to do next* to recover or validate externally.
-    ///
-    /// Examples:
-    /// - `"Call lsp_health to check server status"`
-    /// - `"LSP request timed out. Call lsp_health(action='restart')."`
-    /// - `"No LSP configured. Install a language server or run cargo check externally."`
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recovery_action: Option<String>,
-}
-
-impl EditValidation {
-    /// Return a skipped validation result (no LSP available).
-    #[must_use]
-    pub fn skipped() -> Self {
-        Self {
-            status: "skipped".to_owned(),
-            introduced_errors: vec![],
-            resolved_errors: vec![],
-            validation_confidence: Some("none".to_owned()),
-            recovery_action: None,
-        }
-    }
-
-    /// Return a skipped validation result enriched with a recovery hint.
-    ///
-    /// Use this instead of `skipped()` whenever an `LspError` is the cause —
-    /// pass `lsp_error.recovery_hint()` as the `recovery_action` argument.
-    /// This is the MT-4 telemetry path.
-    #[must_use]
-    pub fn skipped_with_recovery(recovery_action: Option<String>) -> Self {
-        Self {
-            status: "skipped".to_owned(),
-            introduced_errors: vec![],
-            resolved_errors: vec![],
-            validation_confidence: Some("none".to_owned()),
-            recovery_action,
-        }
-    }
-
-    /// Return an uncertain validation result (LSP ran but results are unreliable).
-    ///
-    /// Use when both pre- and post-edit diagnostics are empty, which could mean
-    /// either (a) the code is genuinely clean, or (b) the LSP hasn't finished
-    /// indexing. Agents should treat "uncertain" as "possibly correct but unverified".
-    #[must_use]
-    pub fn uncertain() -> Self {
-        Self {
-            status: "uncertain".to_owned(),
-            introduced_errors: vec![],
-            resolved_errors: vec![],
-            validation_confidence: Some("low".to_owned()),
-            recovery_action: None,
-        }
-    }
-}
-
-/// The response for `create_file`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct CreateFileResponse {
-    /// Whether the file creation succeeded.
-    pub success: bool,
-    /// Hash of the file version after creation.
-    pub version_hash: String,
-    /// Results of validation after file creation.
-    pub validation: ValidationResult,
-}
-
-/// The response for `delete_file`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct DeleteFileResponse {
-    /// Whether the file deletion succeeded.
-    pub success: bool,
-    /// Short hash of the file version that was deleted (for audit/OCC chain).
-    pub version_hash: String,
 }
 
 /// The metadata embedded in `structured_content` for `read_file`.
@@ -721,28 +394,8 @@ pub struct ReadFileMetadata {
     pub total_lines: u32,
     /// Whether the output was truncated.
     pub truncated: bool,
-    /// Version hash of the file.
-    pub version_hash: String,
     /// Detected language of the file.
     pub language: String,
-}
-
-/// The metadata embedded in `structured_content` for `write_file`.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct WriteFileMetadata {
-    /// Whether the write operation succeeded.
-    pub success: bool,
-    /// New version hash after writing.
-    pub new_version_hash: String,
-}
-
-/// Validation result for edits.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ValidationResult {
-    /// Status of the validation (`"passed"`, `"failed"`, or `"skipped"`).
-    pub status: String,
-    /// Errors that were introduced in the edits.
-    pub introduced_errors: Vec<pathfinder_common::error::DiagnosticError>,
 }
 
 // ── Navigation Tool Response Types ─────────────────────────────────
@@ -767,8 +420,6 @@ pub struct ReadWithDeepContextMetadata {
     pub start_line: usize,
     /// End line of the symbol (1-indexed).
     pub end_line: usize,
-    /// OCC version hash for the symbol's file.
-    pub version_hash: String,
     /// Detected language.
     pub language: String,
     /// Signatures of all symbols called by this one.
@@ -826,7 +477,7 @@ pub struct ImpactReference {
     pub line: usize,
     /// A short code snippet showing the call site or declaration.
     pub snippet: String,
-    /// OCC version hash for this file.
+    /// SHA-256 content fingerprint for this file.
     pub version_hash: String,
     /// Direction of the reference relative to the target symbol.
     ///
@@ -862,8 +513,8 @@ pub struct AnalyzeImpactMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
     /// SHA-256 version hashes for all referenced files (including the target file itself),
-    /// keyed by relative file path. Agents can use these as `base_version` for immediate
-    /// editing without a separate read call.
+    /// keyed by relative file path. Agents can use these as content fingerprints to detect
+    /// file changes without a separate read call.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty", default)]
     pub version_hashes: std::collections::HashMap<String, String>,
 }
@@ -911,13 +562,13 @@ pub struct LspLanguageHealth {
     /// Whether call hierarchy is supported (affects `analyze_impact`, `read_with_deep_context`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_call_hierarchy: Option<bool>,
-    /// Whether validation is supported (affects `validate_only`, edit tools).
+    /// Whether diagnostics are supported (affects LSP health quality).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_diagnostics: Option<bool>,
     /// Whether definition is supported (affects `get_definition`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_definition: Option<bool>,
-    /// Whether formatting is supported (affects edit tools).
+    /// Whether formatting is supported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_formatting: Option<bool>,
     /// Background indexing status: `"complete"`, `"in_progress"`, or None.

@@ -16,7 +16,7 @@ async fn run_it() -> Result<(), Box<dyn std::error::Error>> {
     let file = PathBuf::from("crates/pathfinder-common/src/types.rs");
 
     match surgeon.read_source_file(&workspace, &file).await {
-        Ok((_, _, lang, syms)) => {
+        Ok((_, lang, syms)) => {
             println!("Success! Lang: {}", lang);
             println!("Symbols: {}", syms.len());
         }

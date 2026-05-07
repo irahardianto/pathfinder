@@ -55,16 +55,10 @@ impl PathfinderServer {
                     content: scope.content.clone(),
                     start_line: scope.start_line,
                     end_line: scope.end_line,
-                    version_hash: scope.version_hash.short().to_owned(),
                     language: scope.language,
                 };
 
-                let text_with_hash = format!(
-                    "{}\n---\nversion_hash: {}",
-                    scope.content,
-                    scope.version_hash.short()
-                );
-                let mut result = CallToolResult::success(vec![Content::text(text_with_hash)]);
+                let mut result = CallToolResult::success(vec![Content::text(scope.content)]);
                 result.structured_content = serialize_metadata(&metadata);
 
                 Ok(result)
@@ -91,7 +85,7 @@ mod tests {
     use super::*;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
-    use pathfinder_common::types::{VersionHash, WorkspaceRoot};
+    use pathfinder_common::types::WorkspaceRoot;
     use pathfinder_search::MockScout;
     use pathfinder_treesitter::mock::MockSurgeon;
     use std::sync::Arc;
@@ -111,7 +105,6 @@ mod tests {
         let file_path = ws.path().join("test.rs");
         let content = "fn test() {}\n";
         tokio::fs::write(&file_path, content).await.unwrap();
-        let version_hash = VersionHash::compute(content.as_bytes());
 
         let mock_surgeon = MockSurgeon::new();
         let expected_scope = pathfinder_common::types::SymbolScope {
@@ -119,7 +112,6 @@ mod tests {
             start_line: 1,
             end_line: 1,
             name_column: 0,
-            version_hash,
             language: "rust".to_owned(),
         };
         mock_surgeon
@@ -145,21 +137,12 @@ mod tests {
         assert!(result.is_ok(), "read_symbol_scope should succeed");
         let call_result = result.unwrap();
 
-        // Verify the text content ends with the version_hash footer
+        // Verify the text content is the symbol source
         if let Some(content) = call_result.content.first() {
             if let rmcp::model::RawContent::Text(text_content) = &content.raw {
                 assert!(
-                    text_content.text.contains("---\nversion_hash:"),
-                    "text output should contain version_hash footer"
-                );
-                // Verify the hash is 7 characters (short format)
-                let hash_start = text_content.text.find("version_hash: ").unwrap();
-                let hash_part = &text_content.text[hash_start + "version_hash: ".len()..];
-                let hash_value = hash_part.lines().next().unwrap_or("");
-                assert_eq!(
-                    hash_value.len(),
-                    7,
-                    "version_hash should be in short format (7 characters)"
+                    !text_content.text.is_empty(),
+                    "text output should be non-empty"
                 );
             } else {
                 panic!("Expected text content");

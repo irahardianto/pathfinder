@@ -22,7 +22,6 @@ impl PathfinderServer {
             degraded: false,
             degraded_reason: None,
             capabilities: RepoCapabilities {
-                edit: true,
                 search: true,
                 lsp: LspCapabilities {
                     supported: true,
@@ -147,7 +146,6 @@ impl PathfinderServer {
             degraded,
             degraded_reason,
             capabilities: RepoCapabilities {
-                edit: true,
                 search: true,
                 lsp: LspCapabilities {
                     supported: true,

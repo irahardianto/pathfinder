@@ -1,6 +1,6 @@
 //! Pathfinder MCP Server — tool registration and dispatch.
 //!
-//! Implements `rmcp::ServerHandler` with all 18 Pathfinder tools.
+//! Implements `rmcp::ServerHandler` for all Pathfinder discovery & navigation tools.
 //!
 //! # Module Layout
 //! - [`helpers`] — error conversion, stub builder, language detection
@@ -10,7 +10,8 @@
 //!   - [`tools::repo_map`] — `get_repo_map`
 //!   - [`tools::symbols`] — `read_symbol_scope`, `read_with_deep_context`
 //!   - [`tools::navigation`] — `get_definition`, `analyze_impact`
-//!   - [`tools::file_ops`] — `create_file`, `delete_file`, `read_file`, `write_file`
+//!   - [`tools::file_ops`] — `read_file`
+//!   - [`tools::source_file`] — `read_source_file`
 
 /// Duration after which a negative probe cache entry expires.
 /// Allows re-probing an LSP that was still starting when first checked.
@@ -67,12 +68,9 @@ mod tools;
 pub mod types;
 
 use types::{
-    AnalyzeImpactParams, CreateFileParams, CreateFileResponse, DeleteFileParams,
-    DeleteFileResponse, DeleteSymbolParams, EditResponse, GetDefinitionParams,
-    GetDefinitionResponse, GetRepoMapParams, InsertAfterParams, InsertBeforeParams, ReadFileParams,
-    ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams, ReplaceBodyParams,
-    ReplaceFullParams, SearchCodebaseParams, SearchCodebaseResponse, ValidateOnlyParams,
-    WriteFileParams,
+    AnalyzeImpactParams, GetDefinitionParams, GetDefinitionResponse, GetRepoMapParams,
+    ReadFileParams, ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams,
+    SearchCodebaseParams, SearchCodebaseResponse,
 };
 
 use pathfinder_common::config::PathfinderConfig;
@@ -203,13 +201,13 @@ impl PathfinderServer {
     }
 }
 
-// ── Tool Router (defines all 18 tools) ──────────────────────────────
+// ── Tool Router (defines all 9 tools) ──────────────────────────────
 
 #[tool_router]
 impl PathfinderServer {
     #[tool(
         name = "search_codebase",
-        description = "Search the codebase for a text pattern. Returns matching lines with surrounding context. Each match includes an 'enclosing_semantic_path' (the AST symbol containing the match) and 'version_hash' (for immediate editing without a separate read). The version_hash in each match is immediately usable as base_version for edit tools — no additional read required. Use path_glob to narrow the search scope.\n\n**E4 parameters (token efficiency):**\n- `exclude_glob` — Glob pattern for files to exclude before search (e.g. `**/*.test.*`). Applied at the file-walk level so excluded files are never read.\n- `known_files` — List of file paths already in agent context. Matches in these files are returned with minimal metadata only (`file`, `line`, `column`, `enclosing_semantic_path`, `version_hash`) — `content` and context lines are omitted.\n- `group_by_file` — When `true`, results are returned in `file_groups` (one group per file with a single shared `version_hash`). Known-file matches appear in `known_matches`; others in `matches` inside each group."
+        description = "Search for text or regex patterns across source code. Returns matching lines with `enclosing_semantic_path` (the symbol containing the match). Use `filter_mode` to search code_only (default), comments_only, or all. Use `path_glob` to narrow scope and `exclude_glob` to skip files (e.g. tests). Pass `known_files` to suppress content for already-read files and `group_by_file=true` to group matches."
     )]
     async fn search_codebase(
         &self,
@@ -220,7 +218,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_repo_map",
-        description = "Returns the structural skeleton of the project as an indented tree of classes, functions, and type signatures. IMPORTANT: Each symbol has its full semantic path in a trailing comment. You MUST copy-paste these EXACT paths into read/edit tools. Also returns version_hashes per file for immediate editing. The version_hashes are immediately usable as base_version for edit tools — no additional read required. Two budget knobs control coverage: `max_tokens` is the total token budget (default 16000); `max_tokens_per_file` caps detail per file before collapsing to a stub (default 2000). When `coverage_percent` is low, increase `max_tokens`. When files show `[TRUNCATED DUE TO SIZE]`, increase `max_tokens_per_file`. Use `visibility=all` to include private symbols for auditing. Module scopes (e.g., Rust `mod tests`, `mod types`) are only shown when `visibility` is set to `\"all\"`. They are hidden in public-only maps. The `depth` parameter (default 5) controls directory traversal depth; increase it for deeply-nested repos when `coverage_percent` is low.\n\n**Temporal & extension filters (Epic E6):**\n- `changed_since` — Git ref or duration to show only recently-modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`). Useful for reviewing what changed in a PR or recent session. When git is unavailable the parameter is silently ignored and `degraded: true` is set in the response.\n- `include_extensions` — Only include files with these extensions (e.g., `[\"ts\", \"tsx\"]`). Mutually exclusive with `exclude_extensions`.\n- `exclude_extensions` — Exclude files with these extensions (e.g., `[\"md\", \"json\"]`). Mutually exclusive with `include_extensions`."
+        description = "Get the structural skeleton of the project — an indented tree of symbols with their semantic paths. IMPORTANT: Copy-paste the exact semantic paths from the output into other Pathfinder tools. Use `max_tokens` (default 16000) and `max_tokens_per_file` (default 2000) to control coverage. Use `visibility=all` for private symbols. Use `changed_since` (e.g. '3h', 'HEAD~5') to scope to recent changes. Use `include_extensions`/`exclude_extensions` to filter by language."
     )]
     async fn get_repo_map(
         &self,
@@ -231,7 +229,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_symbol_scope",
-        description = "Extract the exact source code of a single symbol (function, class, method) by its semantic path. IMPORTANT: semantic_path must ALWAYS include the file path and '::', e.g., 'src/client/process.rs::send'. Returns the code, line range, and version_hash for OCC. The version_hash is immediately usable as base_version for any edit tool — no additional read required."
+        description = "Extract the exact source code of one symbol (function, class, method) by semantic path. IMPORTANT: semantic_path MUST include file path + '::', e.g. 'src/auth.ts::AuthService.login'. Returns source and line range. Use this for focused reading of a single symbol without context waste."
     )]
     async fn read_symbol_scope(
         &self,
@@ -242,7 +240,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_source_file",
-        description = "**AST-only.** Only call this on source code files (.rs, .ts, .tsx, .go, .py, .vue, .jsx, .js). For configuration or documentation files (YAML, TOML, JSON, Markdown, Dockerfile, .env, XML), use `read_file` instead — calling this tool on those file types returns UNSUPPORTED_LANGUAGE.\n\nRead an entire source file and extract its complete AST symbol hierarchy. Returns the full file context, the language detected, OCC hashes, and a nested tree of symbols with their semantic paths. Use this instead of read_symbol_scope when you need broader context beyond a single symbol. The version_hash is immediately usable as base_version for any edit tool — no additional read required.\n\n**detail_level parameter:** `compact` (default) — full source + flat symbol list; `symbols` — symbol tree only, no source; `full` — full source + complete nested AST (v4 behaviour). Use `start_line`/`end_line` to restrict output to a region of interest."
+        description = "Read an entire source file with its full AST symbol hierarchy. Returns source, language, and a nested symbol tree with semantic paths. **AST-only** — only for source files (.rs, .ts, .tsx, .go, .py, .vue, .jsx, .js); use `read_file` for config/docs files. detail_level: `compact` (default) = source + flat symbols, `symbols` = tree only, `full` = source + nested AST. Use `start_line`/`end_line` to restrict output."
     )]
     async fn read_source_file(
         &self,
@@ -252,19 +250,8 @@ impl PathfinderServer {
     }
 
     #[tool(
-        name = "replace_batch",
-        description = "Apply multiple AST-aware edits sequentially within a single source file using a single atomic write. Accepts a list of edits, applies them from the end of the file backwards to prevent offset shifting, and uses a single OCC base_version guard. Use this for refactors touching multiple non-contiguous symbols in one file. IMPORTANT: For each edit, semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**Two targeting modes per edit (E3.1 — Hybrid Batch):**\n\n**Option A — Semantic targeting (existing):** Set `semantic_path`, `edit_type`, and optionally `new_code`. Use for source-code constructs that have a parseable AST symbol.\n\n**Option B — Text targeting (new):** Set `old_text`, `context_line`, and optionally `replacement_text`. Use for Vue `<template>`/`<style>` zones or any region with no usable semantic path. The search scans ±25 lines around `context_line` (1-indexed) for an exact match of `old_text`. Set `normalize_whitespace: true` to collapse `\\s+` → single space before matching (useful for HTML where indentation may vary; do NOT use for Python or YAML).\n\nBoth targeting modes can appear in the same batch — the batch is fully atomic (all-or-nothing). If any edit fails (e.g., `TEXT_NOT_FOUND`), the entire batch is rolled back.\n\n**Schema quick-reference:**\n  Option A: { \"semantic_path\": \"src/file.rs::MyStruct.my_fn\", \"edit_type\": \"replace_body\", \"new_code\": \"...\" }\n  edit_type values: replace_body | replace_full | insert_before | insert_after | insert_into | delete\n  Option B: { \"old_text\": \"<old html>\", \"context_line\": 42, \"replacement_text\": \"<new html>\" }\n  Both modes may be mixed in one batch. `context_line` is required for text targeting.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn replace_batch(
-        &self,
-        Parameters(params): Parameters<crate::server::types::ReplaceBatchParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.replace_batch_impl(params).await
-    }
-
-    #[tool(
         name = "read_with_deep_context",
-        description = "Extract a symbol's source code PLUS the signatures of all functions it calls. Use this when you need to understand a function's dependencies before editing it. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login').\n\nReturns a hybrid response: raw source code in `content[0].text` for direct reading, and structured metadata in `structured_content` (JSON) containing `version_hash`, `start_line`, `end_line`, `language`, `dependencies` (callee signatures), `degraded`, and `degraded_reason`.\n\n**Latency note:** The first call after an LSP server starts may take longer while the server indexes the workspace (typically 5–30s for most projects; up to 60s for large Rust projects). Pathfinder automatically opens the target file in the LSP before querying and retries once if the LSP returns no result during warmup. Subsequent calls are fast.\n\n**Degraded mode:** When the LSP is unavailable or still warming up, `degraded=true` with a `degraded_reason` explaining why. The response still returns source code and Tree-sitter context, but `dependencies` will be empty or incomplete. Check `degraded` before relying on dependency data.\n- `no_lsp` — No language server available for this language.\n- `lsp_warmup_empty_unverified` — LSP is indexing; empty dependency list is unverified.\n- `lsp_error` — LSP returned an error; dependencies are from Tree-sitter only."
+        description = "Read a symbol's source code PLUS the signatures of all functions it calls — its dependency graph in one call. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). LSP-powered; first call may take 5–30s during LSP warmup. Check `degraded` in response — if true, dependencies may be incomplete. Source code is always returned even when degraded."
     )]
     async fn read_with_deep_context(
         &self,
@@ -275,7 +262,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_definition",
-        description = "Jump to where a symbol is defined. Provide a semantic path to a reference and get back the definition's file, line, and a code preview. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login').\n\n**How it works:** Uses LSP (Language Server Protocol) for precise, cross-file navigation that follows imports, re-exports, and type aliases. When the LSP is still warming up or unavailable, falls back to a multi-strategy ripgrep search (file-scoped → impl-block-scoped → global) and returns `degraded: true` with a `degraded_reason` explaining the fallback.\n\n**Degraded reasons:**\n- `lsp_warmup_grep_fallback` — LSP returned no result (likely still indexing); result is from ripgrep. Verify with `read_source_file`.\n- `grep_fallback_file_scoped` — No LSP; result from file-scoped ripgrep search.\n- `grep_fallback_impl_scoped` — No LSP; result from impl-block ripgrep search.\n- `grep_fallback_global` — No LSP; result from global ripgrep search. Least precise.\n\nWhen `degraded: true`, the result is a best-effort approximation. Always verify with `read_source_file` before relying on it for edits."
+        description = "Jump to where a symbol is defined. Returns the definition's file, line, column, and a code preview. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). LSP-powered — follows imports, re-exports, and type aliases across files. Falls back to ripgrep when LSP is unavailable. Check `degraded` in response."
     )]
     async fn get_definition(
         &self,
@@ -286,7 +273,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "analyze_impact",
-        description = "Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Use this BEFORE refactoring to understand the blast radius of a change. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). Returns version_hashes for all referenced files. The version_hashes are immediately usable as base_version for edit tools — no additional read required.\n\n**How it works:** Uses LSP call hierarchy for precise caller/callee resolution. When the LSP is still warming up, Pathfinder runs a verification probe — if the probe also returns no result, the response is marked `degraded: true` to indicate the empty results may be due to LSP warmup rather than genuinely zero callers.\n\n**Interpreting results:**\n- `degraded: false` — LSP confirmed the results. Empty lists mean genuinely zero callers/callees.\n- `degraded: true` + `degraded_reason: \"lsp_warmup_empty_unverified\"` — LSP may still be indexing. Empty lists are UNVERIFIED — there may be callers/callees the LSP hasn't found yet. Do NOT treat empty as confirmed-zero. Re-run after LSP finishes indexing.\n- `degraded: true` + `degraded_reason: \"no_lsp\"` — No LSP available at all. Results are from grep heuristics only."
+        description = "Map the blast radius of a symbol: all callers (incoming) and all callees (outgoing). Use before any refactor to find who depends on a function. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). LSP-powered with grep fallback. Check `degraded` — when true, empty results may be due to LSP warmup, not genuinely zero callers."
     )]
     async fn analyze_impact(
         &self,
@@ -297,7 +284,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "lsp_health",
-        description = "Check LSP (Language Server Protocol) health status. Use this at session start to determine whether navigation tools (get_definition, analyze_impact, read_with_deep_context) will return real data or degraded results.\\n\\n**Response fields:**\\n- \\`status\\` — overall readiness: \\\"ready\\\", \\\"warming_up\\\", \\\"starting\\\", or \\\"unavailable\\\".\\n- \\`languages\\` — per-language details with \\`language\\`, \\`status\\`, and optional \\`uptime\\`.\\n\\n**Status values:**\\n- \\\"ready\\\" — LSP has finished indexing. Navigation tools should work reliably.\\n- \\\"warming_up\\\" — LSP is running but still indexing the workspace. Navigation tools may return empty or incomplete results.\\n- \\\"starting\\\" — LSP process has started but not yet initialized.\\n- \\\"unavailable\\\" — No LSP available for this language.\\n\\nWhen \\`status\\` is not \\\"ready\\\", agents should:\\n1. Use Tree-sitter-based tools instead (search_codebase, read_symbol_scope, read_source_file)\\\n2. Wait and retry later, or\\\n3. Treat empty navigation results as UNVERIFIED rather than \\\"confirmed zero\\\".\\n\\n**Optional parameter:** \\`language\\` — filter to a specific language (e.g., \\\"rust\\\", \\\"typescript\\\"). If omitted, checks all available languages."
+        description = "Check LSP health per language. Returns overall status (ready / warming_up / starting / unavailable) and per-language details. Use this when navigation tools return degraded results, or at session start to know which languages have full LSP support. Pass `language` to check a specific language, or omit to check all. When status is not 'ready', navigation tools may return incomplete results."
     )]
     async fn lsp_health(
         &self,
@@ -310,132 +297,14 @@ impl PathfinderServer {
     }
 
     #[tool(
-        name = "replace_body",
-        description = "Replace the internal logic of a block-scoped construct (function, method, class body, impl block), keeping the signature intact. Provide ONLY the body content — DO NOT include the outer braces or function signature. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn replace_body(
-        &self,
-        Parameters(params): Parameters<ReplaceBodyParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.replace_body_impl(params).await
-    }
-
-    #[tool(
-        name = "replace_full",
-        description = "Replace an entire declaration including its signature, body, decorators, and doc comments. Provide the COMPLETE replacement — anything you omit (decorators, doc comments) will be removed. DO NOT wrap your code in markdown code blocks. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). To see LSP status before editing, call `get_repo_map` and inspect `capabilities.lsp.per_language`.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn replace_full(
-        &self,
-        Parameters(params): Parameters<ReplaceFullParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.replace_full_impl(params).await
-    }
-
-    #[tool(
-        name = "insert_before",
-        description = "Insert new code BEFORE a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To insert at the TOP of a file (e.g., adding imports), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between your code and the target.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn insert_before(
-        &self,
-        Parameters(params): Parameters<InsertBeforeParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.insert_before_impl(params).await
-    }
-
-    #[tool(
-        name = "insert_after",
-        description = "Insert new code AFTER a target symbol. IMPORTANT: To target a symbol, semantic_path must include the file path and '::' (e.g. 'src/mod.rs::func'). To append to the BOTTOM of a file (e.g., adding new classes), use a bare file path without '::' (e.g. 'src/mod.rs'). Pathfinder automatically adds one blank line between the target and your code.\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn insert_after(
-        &self,
-        Parameters(params): Parameters<InsertAfterParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.insert_after_impl(params).await
-    }
-
-    #[tool(
-        name = "insert_into",
-        description = "Insert new code at the END of a container symbol's body \
-            (Module, Class, Struct, Impl, Interface). This is the correct tool \
-            for adding new functions to a test module, new methods to a struct, \
-            or new items to any scope. IMPORTANT: semantic_path must target a \
-            container symbol (e.g. 'src/lib.rs::tests'), NOT a bare file path. \
-            For inserting before/after a specific sibling symbol, use insert_before \
-            or insert_after instead.\n\nbase_version accepts either the full SHA-256 hash \
-            (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), \
-            matching Git convention."
-    )]
-    async fn insert_into(
-        &self,
-        Parameters(params): Parameters<crate::server::types::InsertIntoParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.insert_into_impl(params).await
-    }
-
-    #[tool(
-        name = "delete_symbol",
-        description = "Delete a symbol and all its associated decorators, attributes, and doc comments. If the target is a class, the ENTIRE class is deleted. If the target is a method, only that method is deleted. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/auth.ts::AuthService.login').\n\n**LSP validation:** Edit responses include a `validation` field. If `validation_skipped` is true, check `validation_skipped_reason` for why. Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn delete_symbol(
-        &self,
-        Parameters(params): Parameters<DeleteSymbolParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.delete_symbol_impl(params).await
-    }
-
-    #[tool(
-        name = "validate_only",
-        description = "Dry-run an edit WITHOUT writing to disk. Use this to pre-check risky changes. Returns the same validation results as a real edit. IMPORTANT: semantic_path must ALWAYS include the file path and '::' (e.g. 'src/mod.rs::func'). new_version_hash will be null because nothing was written. Reuse your original base_version for the real edit.\n\n**LSP validation:** If `validation_skipped` is true, check `validation_skipped_reason` for why (e.g., `no_lsp`, `lsp_crash`). Call `get_repo_map` and inspect `capabilities.lsp.per_language` to see LSP status upfront.\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn validate_only(
-        &self,
-        Parameters(params): Parameters<ValidateOnlyParams>,
-    ) -> Result<Json<EditResponse>, ErrorData> {
-        self.validate_only_impl(params).await
-    }
-
-    #[tool(
-        name = "create_file",
-        description = "Create a new file with initial content. Parent directories are created automatically. Returns a version_hash for subsequent edits."
-    )]
-    async fn create_file(
-        &self,
-        Parameters(params): Parameters<CreateFileParams>,
-    ) -> Result<Json<CreateFileResponse>, ErrorData> {
-        self.create_file_impl(params).await
-    }
-
-    #[tool(
-        name = "delete_file",
-        description = "Delete a file. Requires base_version (OCC) to prevent deleting a file that was modified after you last read it. base_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn delete_file(
-        &self,
-        Parameters(params): Parameters<DeleteFileParams>,
-    ) -> Result<Json<DeleteFileResponse>, ErrorData> {
-        self.delete_file_impl(params).await
-    }
-
-    #[tool(
         name = "read_file",
-        description = "Read raw file content. Use ONLY for configuration files (.env, Dockerfile, YAML, TOML, package.json). For source code, use read_symbol_scope instead. Supports pagination via start_line for large files."
+        description = "Read raw file content with optional pagination (start_line, max_lines). Use for config files (.env, YAML, TOML, Dockerfile, package.json). For source code, prefer read_symbol_scope or read_source_file instead."
     )]
     async fn read_file(
         &self,
         Parameters(params): Parameters<ReadFileParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.read_file_impl(params).await
-    }
-
-    #[tool(
-        name = "write_file",
-        description = "WARNING: This bypasses AST validation and formatting. DO NOT use for source code (TypeScript, Python, Go, Rust). ONLY use for configuration files (.env, .gitignore, Dockerfile, YAML). For source code, use replace_body or replace_full instead. Provide EITHER 'content' for full replacement OR 'replacements' for surgical search-and-replace edits (e.g., {old_text: 'postgres:15', new_text: 'postgres:16'}). Use replacements when changing specific text in large files. Requires base_version (OCC).\n\nbase_version accepts either the full SHA-256 hash (e.g., \"sha256:4ec5a8a...\") or a short 7-character prefix (e.g., \"sha256:4ec5a8a\"), matching Git convention."
-    )]
-    async fn write_file(
-        &self,
-        Parameters(params): Parameters<WriteFileParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.write_file_impl(params).await
     }
 }
 
@@ -455,8 +324,7 @@ impl ServerHandler for PathfinderServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::server::types::Replacement;
-    use pathfinder_common::types::{FilterMode, VersionHash};
+    use pathfinder_common::types::FilterMode;
     use pathfinder_search::{MockScout, SearchMatch, SearchResult};
     use pathfinder_treesitter::mock::MockSurgeon;
     use rmcp::model::ErrorCode;
@@ -594,79 +462,6 @@ mod tests {
             panic!("Expected ACCESS_DENIED error");
         };
         assert_eq!(err.code, ErrorCode(-32001));
-    }
-
-    #[tokio::test]
-    async fn test_create_file_success_and_already_exists() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let mock_scout = MockScout::default();
-        let server = PathfinderServer::with_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(mock_scout),
-            Arc::new(MockSurgeon::new()),
-        );
-
-        let filepath = "src/new_file.ts";
-        let content = "console.log('hello');";
-        let params = CreateFileParams {
-            filepath: filepath.to_owned(),
-            content: content.to_owned(),
-        };
-
-        // 1. First creation should succeed
-        let result = server.create_file(Parameters(params.clone())).await;
-        assert!(result.is_ok(), "Expected success, got {:#?}", result.err());
-        let val = result.expect("create_file should succeed").0;
-        assert!(val.success);
-        assert_eq!(val.validation.status, "passed");
-
-        let expected_hash = VersionHash::compute(content.as_bytes());
-        assert_eq!(val.version_hash, expected_hash.short());
-
-        // Verify file is on disk
-        let absolute_path = ws_dir.path().join(filepath);
-        assert!(absolute_path.exists());
-        let read_content = fs::read_to_string(&absolute_path).expect("read file");
-        assert_eq!(read_content, content);
-
-        // 2. Second creation should fail (FILE_ALREADY_EXISTS)
-        let result2 = server.create_file(Parameters(params)).await;
-        assert!(result2.is_err());
-        if let Err(err) = result2 {
-            let code = err
-                .data
-                .as_ref()
-                .and_then(|d| d.get("error"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            assert_eq!(code, "FILE_ALREADY_EXISTS", "got data: {:?}", err.data);
-        } else {
-            panic!("Expected error mapping to FILE_ALREADY_EXISTS");
-        }
-
-        // 3. Attempt to create file in a denied location
-        let deny_params = CreateFileParams {
-            filepath: ".git/objects/some_file".to_owned(),
-            content: "payload".to_owned(),
-        };
-        let result3 = server.create_file(Parameters(deny_params)).await;
-        assert!(result3.is_err());
-        if let Err(err) = result3 {
-            let code = err
-                .data
-                .as_ref()
-                .and_then(|d| d.get("error"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            assert_eq!(code, "ACCESS_DENIED", "got data: {:?}", err.data);
-        } else {
-            panic!("Expected error mapping to ACCESS_DENIED");
-        }
     }
 
     #[tokio::test]
@@ -947,99 +742,7 @@ mod tests {
         assert!(!result.degraded);
     }
 
-    // ── delete_file tests ────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_delete_file_success_and_occ_failure() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-        );
-
-        // Create a file to delete
-        let filepath = "to_delete.txt";
-        let content = "goodbye";
-        let abs = ws_dir.path().join(filepath);
-        fs::write(&abs, content).expect("write");
-        let hash = VersionHash::compute(content.as_bytes());
-
-        // Happy path
-        let result = server
-            .delete_file(Parameters(DeleteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: hash.as_str().to_owned(),
-            }))
-            .await;
-        assert!(result.is_ok(), "Expected success, got {:?}", result.err());
-        assert!(!abs.exists(), "File should be gone");
-
-        // FILE_NOT_FOUND — file is already deleted, now handled via tfs::read NotFound (no pre-check race)
-        let result2 = server
-            .delete_file(Parameters(DeleteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: hash.as_str().to_owned(),
-            }))
-            .await;
-        assert!(result2.is_err());
-        let Err(err) = result2 else {
-            panic!("expected error")
-        };
-        let code = err
-            .data
-            .as_ref()
-            .and_then(|d| d.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(code, "FILE_NOT_FOUND", "got: {err:?}");
-
-        // VERSION_MISMATCH — recreate file, pass wrong hash
-        fs::write(&abs, content).expect("write");
-        let result3 = server
-            .delete_file(Parameters(DeleteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: "sha256:wrong".to_owned(),
-            }))
-            .await;
-        assert!(result3.is_err());
-        let Err(err) = result3 else {
-            panic!("expected error")
-        };
-        let code = err
-            .data
-            .as_ref()
-            .and_then(|d| d.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(code, "VERSION_MISMATCH", "got: {err:?}");
-
-        // ACCESS_DENIED — sandbox-protected path
-        let result4 = server
-            .delete_file(Parameters(DeleteFileParams {
-                filepath: ".git/objects/x".to_owned(),
-                base_version: "sha256:any".to_owned(),
-            }))
-            .await;
-        assert!(result4.is_err());
-        let Err(err) = result4 else {
-            panic!("expected error")
-        };
-        let code = err
-            .data
-            .as_ref()
-            .and_then(|d| d.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(code, "ACCESS_DENIED", "got: {err:?}");
-    }
-
-    // ── read_file tests ──────────────────────────────────────────────
+    // ── read_file tests ──────────────────────────────────────
 
     #[tokio::test]
     async fn test_read_file_pagination() {
@@ -1136,7 +839,6 @@ mod tests {
             start_line: 5,
             end_line: 7,
             name_column: 0,
-            version_hash: VersionHash::compute(content.as_bytes()),
             language: "go".to_owned(),
         };
         mock_surgeon
@@ -1163,13 +865,7 @@ mod tests {
         let rmcp::model::RawContent::Text(t) = &val.content[0].raw else {
             panic!("Expected text content");
         };
-        // After GAP-004, the text content includes a version_hash footer
-        let expected_text = format!(
-            "{}\n---\nversion_hash: {}",
-            expected_scope.content,
-            expected_scope.version_hash.short()
-        );
-        assert_eq!(t.text, expected_text);
+        assert_eq!(t.text, expected_scope.content);
 
         let metadata: crate::server::types::ReadSymbolScopeMetadata =
             serde_json::from_value(val.structured_content.expect("missing structured_content"))
@@ -1177,7 +873,6 @@ mod tests {
 
         assert_eq!(metadata.start_line, expected_scope.start_line);
         assert_eq!(metadata.end_line, expected_scope.end_line);
-        assert_eq!(metadata.version_hash, expected_scope.version_hash.short());
         assert_eq!(metadata.language, expected_scope.language);
 
         let calls = mock_surgeon.read_symbol_scope_calls.lock().unwrap();
@@ -1229,160 +924,7 @@ mod tests {
         assert_eq!(code, "SYMBOL_NOT_FOUND");
     }
 
-    // ── write_file tests ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_write_file_full_replacement() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-        );
-
-        let filepath = "config.toml";
-        let original = "[server]\nport = 8080";
-        let abs = ws_dir.path().join(filepath);
-        fs::write(&abs, original).expect("write");
-        let hash = VersionHash::compute(original.as_bytes());
-
-        // Happy path — full replacement
-        let replacement = "[server]\nport = 9090";
-        let result = server
-            .write_file(Parameters(WriteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: hash.as_str().to_owned(),
-                content: Some(replacement.to_owned()),
-                replacements: None,
-            }))
-            .await
-            .expect("should succeed");
-        let val: crate::server::types::WriteFileMetadata =
-            serde_json::from_value(result.structured_content.unwrap()).unwrap();
-        assert!(val.success);
-        let on_disk = fs::read_to_string(&abs).expect("read");
-        assert_eq!(on_disk, replacement);
-        let new_hash = VersionHash::compute(replacement.as_bytes());
-        assert_eq!(val.new_version_hash, new_hash.short());
-
-        // VERSION_MISMATCH — use old hash
-        let result2 = server
-            .write_file(Parameters(WriteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: hash.as_str().to_owned(), // stale
-                content: Some("something else".to_owned()),
-                replacements: None,
-            }))
-            .await;
-        assert!(result2.is_err());
-        let Err(err) = result2 else {
-            panic!("expected error")
-        };
-        let code = err
-            .data
-            .as_ref()
-            .and_then(|d| d.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(code, "VERSION_MISMATCH", "got: {err:?}");
-    }
-
-    #[tokio::test]
-    async fn test_write_file_search_and_replace() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-        );
-
-        let filepath = "docker-compose.yml";
-        let original = "image: postgres:15\nports:\n  - 5432:5432";
-        let abs = ws_dir.path().join(filepath);
-        fs::write(&abs, original).expect("write");
-        let hash = VersionHash::compute(original.as_bytes());
-
-        // Happy path — single match
-        let result = server
-            .write_file(Parameters(WriteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: hash.as_str().to_owned(),
-                content: None,
-                replacements: Some(vec![Replacement {
-                    old_text: "postgres:15".to_owned(),
-                    new_text: "postgres:16-alpine".to_owned(),
-                }]),
-            }))
-            .await
-            .expect("should succeed");
-        let val: crate::server::types::WriteFileMetadata =
-            serde_json::from_value(result.structured_content.unwrap()).unwrap();
-        assert!(val.success);
-        let on_disk = fs::read_to_string(&abs).expect("read");
-        assert!(on_disk.contains("postgres:16-alpine"));
-        let new_hash_val = val.new_version_hash;
-
-        // MATCH_NOT_FOUND — old text no longer exists
-        let result2 = server
-            .write_file(Parameters(WriteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: new_hash_val.clone(),
-                content: None,
-                replacements: Some(vec![Replacement {
-                    old_text: "postgres:15".to_owned(), // already replaced
-                    new_text: "postgres:17".to_owned(),
-                }]),
-            }))
-            .await;
-        assert!(result2.is_err());
-        let Err(err) = result2 else {
-            panic!("expected error")
-        };
-        let code = err
-            .data
-            .as_ref()
-            .and_then(|d| d.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(code, "MATCH_NOT_FOUND", "got: {err:?}");
-
-        // AMBIGUOUS_MATCH — inject a file where old_text appears twice
-        let ambiguous = "tag: v1\ntag: v1";
-        fs::write(&abs, ambiguous).expect("write");
-        let ambig_hash = VersionHash::compute(ambiguous.as_bytes());
-        let result3 = server
-            .write_file(Parameters(WriteFileParams {
-                filepath: filepath.to_owned(),
-                base_version: ambig_hash.as_str().to_owned(),
-                content: None,
-                replacements: Some(vec![Replacement {
-                    old_text: "tag: v1".to_owned(),
-                    new_text: "tag: v2".to_owned(),
-                }]),
-            }))
-            .await;
-        assert!(result3.is_err());
-        let Err(err) = result3 else {
-            panic!("expected error")
-        };
-        let code = err
-            .data
-            .as_ref()
-            .and_then(|d| d.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(code, "AMBIGUOUS_MATCH", "got: {err:?}");
-    }
+    // \u2500\u2500 E4 tests \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     // ── E4 tests ─────────────────────────────────────────────────────
 
@@ -1731,7 +1273,6 @@ mod tests {
                 start_line: 0,
                 end_line: 0,
                 name_column: 0,
-                version_hash: VersionHash::compute(b"fn hello() -> i32 { 1 }"),
                 language: "rust".to_owned(),
             }));
 
@@ -1752,111 +1293,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── file_ops edge case tests (WP-6) ──────────────────────────────────
-
-    #[tokio::test]
-    async fn test_create_file_broadcasts_watched_file_event() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-            lawyer.clone(),
-        );
-
-        let params = crate::server::types::CreateFileParams {
-            filepath: "src/new_file.rs".to_owned(),
-            content: "fn new() {}".to_owned(),
-        };
-        let result = server.create_file_impl(params).await;
-        let res = result.expect("should succeed");
-        assert!(res.0.success);
-
-        // Verify the file was created
-        assert!(ws_dir.path().join("src/new_file.rs").exists());
-
-        // Verify watched file event was broadcast
-        assert_eq!(lawyer.watched_file_changes_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_delete_file_broadcasts_watched_file_event() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-
-        // Create a file to delete
-        std::fs::write(ws_dir.path().join("to_delete.txt"), "content").unwrap();
-        let hash = VersionHash::compute(b"content");
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-            lawyer.clone(),
-        );
-
-        let params = crate::server::types::DeleteFileParams {
-            filepath: "to_delete.txt".to_owned(),
-            base_version: hash.as_str().to_owned(),
-        };
-        let result = server.delete_file_impl(params).await;
-        let res = result.expect("should succeed");
-        assert!(res.0.success);
-
-        // Verify the file was deleted
-        assert!(!ws_dir.path().join("to_delete.txt").exists());
-
-        // Verify watched file event was broadcast
-        assert_eq!(lawyer.watched_file_changes_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_delete_file_not_found() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-            Arc::new(pathfinder_lsp::MockLawyer::default()),
-        );
-
-        let params = crate::server::types::DeleteFileParams {
-            filepath: "nonexistent.txt".to_owned(),
-            base_version: "sha256:any".to_owned(),
-        };
-        let result = server.delete_file_impl(params).await;
-        let Err(err) = result else {
-            panic!("expected error");
-        };
-        let code = err
-            .data
-            .as_ref()
-            .and_then(|d| d.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(code, "FILE_NOT_FOUND");
-    }
-
     #[tokio::test]
     async fn test_read_file_not_found() {
         let ws_dir = tempdir().expect("temp dir");
@@ -1870,7 +1306,7 @@ mod tests {
             sandbox,
             Arc::new(MockScout::default()),
             Arc::new(MockSurgeon::new()),
-            Arc::new(pathfinder_lsp::MockLawyer::default()),
+            Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
         let params = crate::server::types::ReadFileParams {
@@ -1889,108 +1325,5 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert_eq!(code, "FILE_NOT_FOUND");
-    }
-
-    #[tokio::test]
-    async fn test_write_file_broadcasts_watched_file_event() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        // Write initial file
-        let initial_content = "initial content";
-        std::fs::write(ws_dir.path().join("config.toml"), initial_content).unwrap();
-        let hash = VersionHash::compute(initial_content.as_bytes());
-
-        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-            lawyer.clone(),
-        );
-
-        let params = crate::server::types::WriteFileParams {
-            filepath: "config.toml".to_owned(),
-            base_version: hash.as_str().to_owned(),
-            content: Some("updated content".to_owned()),
-            replacements: None,
-        };
-        let result = server.write_file_impl(params).await;
-        assert!(result.is_ok(), "write should succeed");
-
-        // Verify content updated
-        let written = std::fs::read_to_string(ws_dir.path().join("config.toml")).unwrap();
-        assert_eq!(written, "updated content");
-
-        // Verify watched file event was broadcast
-        assert_eq!(lawyer.watched_file_changes_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_write_file_invalid_params_both_modes() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        std::fs::write(ws_dir.path().join("test.txt"), "content").unwrap();
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-            Arc::new(pathfinder_lsp::MockLawyer::default()),
-        );
-
-        // Both content and replacements set — invalid
-        let hash = VersionHash::compute(b"content");
-        let params = crate::server::types::WriteFileParams {
-            filepath: "test.txt".to_owned(),
-            base_version: hash.as_str().to_owned(),
-            content: Some("new".to_owned()),
-            replacements: Some(vec![crate::server::types::Replacement {
-                old_text: "a".to_string(),
-                new_text: "b".to_string(),
-            }]),
-        };
-        let result = server.write_file_impl(params).await;
-        assert!(result.is_err(), "should reject both modes");
-    }
-
-    #[tokio::test]
-    async fn test_write_file_invalid_params_neither_mode() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        std::fs::write(ws_dir.path().join("test.txt"), "content").unwrap();
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            Arc::new(MockSurgeon::new()),
-            Arc::new(pathfinder_lsp::MockLawyer::default()),
-        );
-
-        // Neither content nor replacements — invalid
-        let hash = VersionHash::compute(b"content");
-        let params = crate::server::types::WriteFileParams {
-            filepath: "test.txt".to_owned(),
-            base_version: hash.as_str().to_owned(),
-            content: None,
-            replacements: None,
-        };
-        let result = server.write_file_impl(params).await;
-        assert!(result.is_err(), "should reject neither mode");
     }
 }

@@ -155,7 +155,7 @@ impl PathfinderServer {
             .read_source_file(self.workspace_root.path(), file_path)
             .await
         {
-            Ok((mut content, version_hash, language, mut symbols)) => {
+            Ok((mut content, language, mut symbols)) => {
                 let tree_sitter_ms = ts_start.elapsed().as_millis();
 
                 // Line filtering
@@ -206,16 +206,13 @@ impl PathfinderServer {
                 }
 
                 let metadata = ReadSourceFileMetadata {
-                    version_hash: version_hash.short().to_owned(),
                     language,
                     symbols: final_symbols,
                 };
 
                 let mut contents = Vec::new();
                 if let Some(text) = final_content {
-                    let with_hash =
-                        format!("{}\n---\nversion_hash: {}", text, version_hash.short());
-                    contents.push(Content::text(with_hash));
+                    contents.push(Content::text(text));
                 }
 
                 let mut result = CallToolResult::success(contents);
@@ -432,7 +429,7 @@ mod tests {
     async fn test_read_source_file_includes_version_hash_in_text() {
         use pathfinder_common::config::PathfinderConfig;
         use pathfinder_common::sandbox::Sandbox;
-        use pathfinder_common::types::{VersionHash, WorkspaceRoot};
+        use pathfinder_common::types::WorkspaceRoot;
         use pathfinder_search::MockScout;
         use pathfinder_treesitter::mock::MockSurgeon;
 
@@ -448,19 +445,12 @@ mod tests {
         let file_path = ws.path().join("test.rs");
         let content = "fn test() {}\n";
         tokio::fs::write(&file_path, content).await.unwrap();
-        let version_hash = VersionHash::compute(content.as_bytes());
-
         let mock_surgeon = MockSurgeon::new();
         mock_surgeon
             .read_source_file_results
             .lock()
             .unwrap()
-            .push(Ok((
-                content.to_owned(),
-                version_hash,
-                "rust".to_owned(),
-                vec![],
-            )));
+            .push(Ok((content.to_owned(), "rust".to_owned(), vec![])));
 
         let server = crate::server::PathfinderServer::with_all_engines(
             ws,
@@ -482,35 +472,17 @@ mod tests {
         assert!(result.is_ok(), "read_source_file should succeed");
         let call_result = result.unwrap();
 
-        // Verify the text content ends with the version_hash footer
-        if let Some(content) = call_result.content.first() {
-            // Content is Annotated<RawContent>, need to access inner RawContent
-            if let rmcp::model::RawContent::Text(text_content) = &content.raw {
-                assert!(
-                    text_content.text.contains("---\nversion_hash:"),
-                    "text output should contain version_hash footer"
-                );
-                // Verify the hash is 7 characters (short format)
-                let hash_start = text_content.text.find("version_hash: ").unwrap();
-                let hash_part = &text_content.text[hash_start + "version_hash: ".len()..];
-                let hash_value = hash_part.lines().next().unwrap_or("");
-                assert_eq!(
-                    hash_value.len(),
-                    7,
-                    "version_hash should be in short format (7 characters)"
-                );
-            } else {
-                panic!("Expected text content");
-            }
-        } else {
-            panic!("Expected content");
-        }
+        // Verify content is present
+        assert!(
+            !call_result.content.is_empty(),
+            "text output should be non-empty"
+        );
 
-        // Verify structured_content also contains version_hash
+        // Verify structured_content contains language
         if let Some(metadata) = call_result.structured_content {
             assert!(
-                metadata.get("version_hash").is_some(),
-                "structured_content should contain version_hash"
+                metadata.get("language").is_some(),
+                "structured_content should contain language"
             );
         } else {
             panic!("Expected structured_content");
@@ -526,7 +498,7 @@ mod tests {
     async fn test_read_source_file_triggers_lt4_idle_touch() {
         use pathfinder_common::config::PathfinderConfig;
         use pathfinder_common::sandbox::Sandbox;
-        use pathfinder_common::types::{VersionHash, WorkspaceRoot};
+        use pathfinder_common::types::WorkspaceRoot;
         use pathfinder_search::MockScout;
         use pathfinder_treesitter::mock::MockSurgeon;
 
@@ -540,19 +512,12 @@ mod tests {
 
         // Create a Rust file — should trigger touch_language("rust")
         let content = "fn main() {}\n";
-        let version_hash = VersionHash::compute(content.as_bytes());
-
         let mock_surgeon = MockSurgeon::new();
         mock_surgeon
             .read_source_file_results
             .lock()
             .unwrap()
-            .push(Ok((
-                content.to_owned(),
-                version_hash,
-                "rust".to_owned(),
-                vec![],
-            )));
+            .push(Ok((content.to_owned(), "rust".to_owned(), vec![])));
 
         let server = crate::server::PathfinderServer::with_all_engines(
             ws,
