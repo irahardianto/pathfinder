@@ -1474,7 +1474,11 @@ fn parse_definition_response(
         .as_deref()
         .and_then(|p| p.strip_prefix(workspace_root).ok())
         .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|| abs_path.as_deref().map(|p| p.to_string_lossy().into_owned()))
+        .or_else(|| {
+            abs_path
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
         .unwrap_or(uri_str);
 
     // Read the definition line from disk to populate the preview.

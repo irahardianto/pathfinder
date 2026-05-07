@@ -503,21 +503,31 @@ impl PathfinderServer {
             let reason = def.degraded_reason.as_deref().unwrap_or("unknown");
             format!(
                 "DEGRADED ({reason}) — {}:L{} — {}",
-                def.file, def.line,
-                if def.preview.is_empty() { "(no preview)" } else { &def.preview }
+                def.file,
+                def.line,
+                if def.preview.is_empty() {
+                    "(no preview)"
+                } else {
+                    &def.preview
+                }
             )
         } else {
             format!(
                 "{}:L{} col:{} — {}",
-                def.file, def.line, def.column,
-                if def.preview.is_empty() { "(no preview)" } else { &def.preview }
+                def.file,
+                def.line,
+                def.column,
+                if def.preview.is_empty() {
+                    "(no preview)"
+                } else {
+                    &def.preview
+                }
             )
         };
         let mut res = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(def);
         res
     }
-
 
     /// Grep-based fallback for definition resolution when LSP is unavailable or warming up.
     ///
@@ -835,10 +845,7 @@ impl PathfinderServer {
         } else {
             let mut lines = Vec::with_capacity(metadata.dependencies.len());
             for dep in &metadata.dependencies {
-                lines.push(format!(
-                    "  {} ({}:L{})",
-                    dep.signature, dep.file, dep.line
-                ));
+                lines.push(format!("  {} ({}:L{})", dep.signature, dep.file, dep.line));
             }
             format!("\n{}", lines.join("\n"))
         };
@@ -851,7 +858,10 @@ impl PathfinderServer {
                 reason, scope.content
             )
         } else {
-            format!("{dep_count} dependencies loaded{dep_block}\n\n{}", scope.content)
+            format!(
+                "{dep_count} dependencies loaded{dep_block}\n\n{}",
+                scope.content
+            )
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);

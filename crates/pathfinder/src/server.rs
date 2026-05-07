@@ -68,9 +68,9 @@ mod tools;
 pub mod types;
 
 use types::{
-    AnalyzeImpactParams, GetDefinitionParams, GetRepoMapParams,
-    ReadFileParams, ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams,
-    SearchCodebaseParams, SearchCodebaseResponse,
+    AnalyzeImpactParams, GetDefinitionParams, GetRepoMapParams, ReadFileParams,
+    ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams, SearchCodebaseParams,
+    SearchCodebaseResponse,
 };
 
 use pathfinder_common::config::PathfinderConfig;
