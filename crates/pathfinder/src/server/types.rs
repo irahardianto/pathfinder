@@ -340,21 +340,6 @@ pub struct ReadSymbolScopeMetadata {
     pub language: String,
 }
 
-/// The response for `read_symbol_scope`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ReadSymbolScopeResponse {
-    /// The extracted symbol source code.
-    pub content: String,
-    /// Starting line number of the symbol in the source.
-    pub start_line: usize,
-    /// Ending line number of the symbol in the source.
-    pub end_line: usize,
-    /// Version hash of the file containing the symbol.
-    pub version_hash: String,
-    /// Programming language of the source symbol.
-    pub language: String,
-}
-
 /// A symbol output for `read_source_file`.
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SourceSymbol {
@@ -477,8 +462,6 @@ pub struct ImpactReference {
     pub line: usize,
     /// A short code snippet showing the call site or declaration.
     pub snippet: String,
-    /// SHA-256 content fingerprint for this file.
-    pub version_hash: String,
     /// Direction of the reference relative to the target symbol.
     ///
     /// - `"incoming"` — this symbol calls or references the target (a caller).
@@ -512,11 +495,6 @@ pub struct AnalyzeImpactMetadata {
     /// Absent when `degraded` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
-    /// SHA-256 version hashes for all referenced files (including the target file itself),
-    /// keyed by relative file path. Agents can use these as content fingerprints to detect
-    /// file changes without a separate read call.
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty", default)]
-    pub version_hashes: std::collections::HashMap<String, String>,
 }
 
 // ── LSP Health Tool Types ────────────────────────────────────────────
@@ -568,9 +546,6 @@ pub struct LspLanguageHealth {
     /// Whether definition is supported (affects `get_definition`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_definition: Option<bool>,
-    /// Whether formatting is supported.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_formatting: Option<bool>,
     /// Background indexing status: `"complete"`, `"in_progress"`, or None.
     ///
     /// Independent of overall status — an LSP can be "ready" for navigation
@@ -605,11 +580,6 @@ pub struct LspLanguageHealth {
     /// Example: `["analyze_impact", "read_with_deep_context"]` when call hierarchy unsupported.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub degraded_tools: Vec<String>,
-    /// Approximate validation latency in milliseconds for this language.
-    ///
-    /// `None` when unknown or not applicable. Helps agents decide whether to validate.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validation_latency_ms: Option<u64>,
 }
 
 /// Helper to skip serializing false values for `probe_verified`.
