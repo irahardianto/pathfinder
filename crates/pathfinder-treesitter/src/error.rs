@@ -34,12 +34,6 @@ pub enum SurgeonError {
     /// A file-system error occurred when attempting to read source files.
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
-
-    /// The target symbol is incompatible with the requested edit operation.
-    ///
-    /// E.g., calling `replace_body` on a constant or abstract declaration.
-    #[error("invalid target: {reason} (path: {path})")]
-    InvalidTarget { path: String, reason: String },
 }
 
 impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
@@ -54,12 +48,6 @@ impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
             SurgeonError::ParseError { path, reason } => Self::ParseError { path, reason },
             SurgeonError::Io(err) => Self::IoError {
                 message: err.to_string(),
-            },
-            SurgeonError::InvalidTarget { path, reason } => Self::InvalidTarget {
-                semantic_path: path,
-                reason,
-                edit_index: None,
-                valid_edit_types: None,
             },
         }
     }

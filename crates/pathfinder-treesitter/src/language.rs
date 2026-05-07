@@ -243,29 +243,6 @@ pub fn extract_vue_script(source: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Count the number of `ERROR` and `MISSING` nodes in a Tree-sitter parse
-/// of the given source, using the language appropriate for the file path.
-///
-/// Returns `None` if the file type is not supported (non-source files).
-/// Used by `replace_batch` for post-apply structural validation.
-#[must_use]
-pub fn count_parse_errors(source: &[u8], file_path: &std::path::Path) -> Option<usize> {
-    let lang = SupportedLanguage::detect(file_path)?;
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&lang.grammar()).ok()?;
-    let tree = parser.parse(source, None)?;
-    Some(count_error_nodes_recursive(tree.root_node()))
-}
-
-fn count_error_nodes_recursive(node: tree_sitter::Node) -> usize {
-    let mut count = usize::from(node.is_error() || node.is_missing());
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        count += count_error_nodes_recursive(child);
-    }
-    count
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

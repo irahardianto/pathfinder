@@ -1,26 +1,10 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::manual_assert)]
 
 use crate::error::SurgeonError;
-use crate::surgeon::{BodyRange, ExtractedSymbol, FullRange, ResolvedFile, Surgeon, SymbolRange};
-use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
+use crate::surgeon::{ExtractedSymbol, Surgeon};
+use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-
-// ── Dispatch pattern overview ───────────────────────────────────────────────
-//
-// MockSurgeon method bodies fall into two categories, each served by a shared
-// private helper to eliminate boilerplate:
-//
-//   resolve_range_dispatch — for methods keyed by (workspace_root, semantic_path):
-//     read_symbol_scope, resolve_body_range, resolve_body_end_range,
-//     resolve_full_range, resolve_symbol_range.
-//
-//   file_path_dispatch — for methods keyed by (workspace_root, file_path):
-//     read_source_file, extract_symbols.
-//
-// Special-case methods (enclosing_symbol, generate_skeleton, node_type_at_position)
-// retain bespoke implementations due to non-standard argument shapes or
-// default-fallback behaviour.
 
 /// A mock implementation of the [`Surgeon`] trait for unit testing.
 ///
@@ -43,22 +27,13 @@ pub struct MockSurgeon {
     #[allow(clippy::type_complexity)]
     /// Pre-configured return values for reading source files.
     pub read_source_file_results:
-        Mutex<Vec<Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError>>>,
+        Mutex<Vec<Result<(String, String, Vec<ExtractedSymbol>), SurgeonError>>>,
     /// Pre-configured return values for extracting symbols.
     pub extract_symbols_results: Mutex<Vec<Result<Vec<ExtractedSymbol>, SurgeonError>>>,
     /// Pre-configured return values for finding enclosing symbols.
     pub enclosing_symbol_results: Mutex<Vec<Result<Option<String>, SurgeonError>>>,
     /// Pre-configured return values for generating repository skeletons.
     pub generate_skeleton_results: Mutex<Vec<Result<crate::repo_map::RepoMapResult, SurgeonError>>>,
-    /// Pre-configured return values for resolving body ranges.
-    pub resolve_body_range_results: Mutex<Vec<Result<(BodyRange, ResolvedFile), SurgeonError>>>,
-    /// Pre-configured return values for resolving body end ranges.
-    pub resolve_body_end_range_results:
-        Mutex<Vec<Result<(crate::surgeon::BodyEndRange, ResolvedFile), SurgeonError>>>,
-    /// Pre-configured return values for resolving full ranges.
-    pub resolve_full_range_results: Mutex<Vec<Result<(FullRange, ResolvedFile), SurgeonError>>>,
-    /// Pre-configured return values for resolving symbol ranges.
-    pub resolve_symbol_range_results: Mutex<Vec<Result<(SymbolRange, ResolvedFile), SurgeonError>>>,
     /// Pre-configured return values for `node_type_at_position`.
     /// Defaults to returning `"code"` when the queue is empty.
     pub node_type_at_position_results: Mutex<Vec<Result<String, SurgeonError>>>,
@@ -76,14 +51,6 @@ pub struct MockSurgeon {
     #[allow(clippy::type_complexity)]
     pub generate_skeleton_calls:
         Mutex<Vec<(PathBuf, PathBuf, crate::repo_map::SkeletonConfig<'static>)>>,
-    /// Recorded `(workspace_root, semantic_path)` for each `resolve_body_range` call.
-    pub resolve_body_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
-    /// Recorded `(workspace_root, semantic_path)` for each `resolve_body_end_range` call.
-    pub resolve_body_end_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
-    /// Recorded `(workspace_root, semantic_path)` for each `resolve_full_range` call.
-    pub resolve_full_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
-    /// Recorded `(workspace_root, semantic_path)` for each `resolve_symbol_range` call.
-    pub resolve_symbol_range_calls: Mutex<Vec<(PathBuf, SemanticPath)>>,
     /// Recorded `(workspace_root, file_path, line, column)` for each `node_type_at_position` call.
     pub node_type_at_position_calls: Mutex<Vec<(PathBuf, PathBuf, usize, usize)>>,
 }
@@ -98,10 +65,6 @@ impl MockSurgeon {
     // ── Shared dispatch helpers ───────────────────────────────────────────────
 
     /// Pop the next queued result for a method keyed by `(workspace_root, semantic_path)`.
-    ///
-    /// Records the call arguments in `calls_mutex`, then removes and returns the
-    /// first entry from `results_mutex`. Panics with a descriptive message if the
-    /// results queue is empty (i.e. an unexpected call was made).
     fn resolve_range_dispatch<T>(
         calls_mutex: &Mutex<Vec<(PathBuf, SemanticPath)>>,
         results_mutex: &Mutex<Vec<Result<T, SurgeonError>>>,
@@ -123,10 +86,6 @@ impl MockSurgeon {
     }
 
     /// Pop the next queued result for a method keyed by `(workspace_root, file_path)`.
-    ///
-    /// Records the call arguments in `calls_mutex`, then removes and returns the
-    /// first entry from `results_mutex`. Panics with a descriptive message if the
-    /// results queue is empty (i.e. an unexpected call was made).
     fn file_path_dispatch<T>(
         calls_mutex: &Mutex<Vec<(PathBuf, PathBuf)>>,
         results_mutex: &Mutex<Vec<Result<T, SurgeonError>>>,
@@ -166,69 +125,13 @@ impl Surgeon for MockSurgeon {
         )
     }
 
-    async fn resolve_body_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(BodyRange, ResolvedFile), SurgeonError> {
-        Self::resolve_range_dispatch(
-            &self.resolve_body_range_calls,
-            &self.resolve_body_range_results,
-            workspace_root,
-            semantic_path,
-            "resolve_body_range",
-        )
-    }
-
-    async fn resolve_body_end_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(crate::surgeon::BodyEndRange, ResolvedFile), SurgeonError> {
-        Self::resolve_range_dispatch(
-            &self.resolve_body_end_range_calls,
-            &self.resolve_body_end_range_results,
-            workspace_root,
-            semantic_path,
-            "resolve_body_end_range",
-        )
-    }
-
-    async fn resolve_full_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(FullRange, ResolvedFile), SurgeonError> {
-        Self::resolve_range_dispatch(
-            &self.resolve_full_range_calls,
-            &self.resolve_full_range_results,
-            workspace_root,
-            semantic_path,
-            "resolve_full_range",
-        )
-    }
-
-    async fn resolve_symbol_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(SymbolRange, ResolvedFile), SurgeonError> {
-        Self::resolve_range_dispatch(
-            &self.resolve_symbol_range_calls,
-            &self.resolve_symbol_range_results,
-            workspace_root,
-            semantic_path,
-            "resolve_symbol_range",
-        )
-    }
-
     // ── File-path methods (keyed by workspace_root + file_path) ──────────────
 
     async fn read_source_file(
         &self,
         workspace_root: &Path,
         file_path: &Path,
-    ) -> Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError> {
+    ) -> Result<(String, String, Vec<ExtractedSymbol>), SurgeonError> {
         Self::file_path_dispatch(
             &self.read_source_file_calls,
             &self.read_source_file_results,
@@ -260,7 +163,6 @@ impl Surgeon for MockSurgeon {
         file_path: &Path,
         line: usize,
     ) -> Result<Option<String>, SurgeonError> {
-        // Three-argument key; not covered by either generic dispatch helper.
         self.enclosing_symbol_calls
             .lock()
             .expect("mutex poisoned")
@@ -283,8 +185,6 @@ impl Surgeon for MockSurgeon {
         path: &Path,
         config: &crate::repo_map::SkeletonConfig<'_>,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
-        // Bespoke: must convert the borrowed SkeletonConfig lifetime to 'static
-        // before storing in the calls log.
         let static_config = crate::repo_map::SkeletonConfig {
             max_tokens: config.max_tokens,
             depth: config.depth,
@@ -319,8 +219,6 @@ impl Surgeon for MockSurgeon {
         line: usize,
         column: usize,
     ) -> Result<String, SurgeonError> {
-        // Bespoke: returns a default value ("code") when the results queue is empty,
-        // making it transparent for tests that don't care about node classification.
         self.node_type_at_position_calls
             .lock()
             .expect("mutex poisoned")

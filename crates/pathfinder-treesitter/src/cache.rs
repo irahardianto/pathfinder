@@ -63,7 +63,7 @@ pub struct CacheEntry {
 pub struct MultiZoneEntry {
     /// Multi-zone trees (script + template + style).
     pub multi: MultiZoneTree,
-    /// SHA-256 hash of the *original* SFC content (for OCC).
+    /// SHA-256 hash of the *original* SFC content (content fingerprint).
     pub content_hash: VersionHash,
     /// Mtime at parse time (fast-path guard).
     pub mtime: SystemTime,
@@ -180,7 +180,7 @@ impl AstCache {
                 let current_hash = VersionHash::compute(&content);
                 let content_arc: Arc<[u8]> = Arc::from(content);
                 // For Vue SFCs, preprocess extracts the <script> block before parsing.
-                // The original `content` is kept for version hashing and OCC checks —
+                // The original `content` is kept for version hashing and change detection —
                 // only the input to the AST parser uses the processed bytes.
                 let parse_input = lang.preprocess_source(&content_arc);
                 let tree = AstParser::parse_source(path, lang, &parse_input)?;

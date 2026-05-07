@@ -1,12 +1,12 @@
 use crate::cache::AstCache;
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
-use crate::surgeon::{BodyRange, ExtractedSymbol, FullRange, ResolvedFile, Surgeon, SymbolRange};
+use crate::surgeon::{ExtractedSymbol, Surgeon};
 use crate::symbols::{
     did_you_mean, extract_symbols_from_multizone, extract_symbols_from_tree, find_enclosing_symbol,
     resolve_symbol_chain,
 };
-use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
+use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::Path;
 use tracing::instrument;
 
@@ -39,7 +39,6 @@ impl TreeSitterSurgeon {
             SupportedLanguage,
             tree_sitter::Tree,
             std::sync::Arc<[u8]>,
-            pathfinder_common::types::VersionHash,
             Vec<ExtractedSymbol>,
         ),
         SurgeonError,
@@ -51,224 +50,25 @@ impl TreeSitterSurgeon {
 
         // ── Vue SFC: multi-zone parse path ────────────────────────────────────
         if lang == SupportedLanguage::Vue {
-            let (multi, content_hash) = self.cache.get_or_parse_vue(&abs_path).await?;
+            let (multi, _content_hash) = self.cache.get_or_parse_vue(&abs_path).await?;
             let symbols = extract_symbols_from_multizone(&multi);
-            // Return the script tree as the representative tree (used only for
-            // body-range / full-range ops, which are only valid on script symbols).
-            // If no script tree, synthesize a minimal fallback: Vue SFCs without
-            // a <script> block can still be read for template/style symbols.
             let (tree, source) = if let Some(script_tree) = multi.script_tree {
                 (script_tree, multi.source)
             } else {
-                // Template-only SFC: parse the source as TypeScript to get an
-                // empty-but-valid Tree (the caller only reads symbols, not the tree).
                 let (t, s) = self.cache.get_or_parse(&abs_path, lang).await?;
                 (t, s)
             };
-            return Ok((lang, tree, source, content_hash, symbols));
+            return Ok((lang, tree, source, symbols));
         }
 
         // ── All other languages: single-zone path (unchanged) ─────────────────
         let (tree, source) = self.cache.get_or_parse(&abs_path, lang).await?;
         let symbols = extract_symbols_from_tree(&tree, &source, lang);
-        let hash = pathfinder_common::types::VersionHash::compute(&source);
-        Ok((lang, tree, source, hash, symbols))
+        Ok((lang, tree, source, symbols))
     }
 
-    /// Find the body node byte range for a resolved symbol node.
-    ///
-    /// Walks tree-sitter child nodes to find the body/block field. Returns
-    /// `(open_brace_byte, close_brace_byte)` or an error if the target has
-    /// no body.
-    ///
-    /// # Body detection strategy
-    /// 1. **Primary**: `child_by_field_name("body")` — covers most grammars (Go, TS, JS,
-    ///    Python, Rust) where the grammar explicitly labels the body as a `body` field.
-    /// 2. **Fallback**: Walk named children checking `body_kinds` — a language-aware list
-    ///    of valid body node kinds from [`LanguageNodeTypes`]. This defends against grammars
-    ///    that rename the `body` field or use non-standard body node names.
-    fn find_body_bytes(
-        tree: &tree_sitter::Tree,
-        source: &[u8],
-        symbol_byte_range: std::ops::Range<usize>,
-        symbol_path: &str,
-        body_kinds: &[&str],
-    ) -> Result<(usize, usize), SurgeonError> {
-        let root = tree.root_node();
-
-        // Find the tree-sitter node that exactly matches the symbol's byte range
-        let sym_node = root
-            .named_descendant_for_byte_range(symbol_byte_range.start, symbol_byte_range.end)
-            .ok_or_else(|| SurgeonError::ParseError {
-                path: std::path::PathBuf::from(symbol_path),
-                reason: "symbol node not found in AST".to_owned(),
-            })?;
-
-        // Primary path: try the `body` field (covers Go, TypeScript, JavaScript, Python, Rust).
-        let body_node = sym_node
-            .child_by_field_name("body")
-            // Fallback: walk named children looking for a known body node kind.
-            // This is language-aware: body_kinds is sourced from LanguageNodeTypes
-            // rather than a global hardcoded list, so it only matches kinds valid
-            // for the current grammar (e.g. field_declaration_list for Rust structs,
-            // enum_body for TypeScript enums).
-            .or_else(|| {
-                let mut cursor = sym_node.walk();
-                // Materialize so cursor is dropped before or_else returns
-                let found = sym_node
-                    .named_children(&mut cursor)
-                    .find(|c| body_kinds.contains(&c.kind()));
-                found
-            });
-
-        body_node.map_or_else(
-            || {
-                let source_snippet = source
-                    .get(symbol_byte_range)
-                    .and_then(|b| std::str::from_utf8(b).ok())
-                    .unwrap_or("<non-utf8>")
-                    .chars()
-                    .take(80)
-                    .collect::<String>();
-
-                Err(SurgeonError::InvalidTarget {
-                    path: symbol_path.to_owned(),
-                    reason: format!(
-                        "symbol has no block body (snippet: \"{source_snippet}...\"). \
-                         Use replace_full for declarations without a body."
-                    ),
-                })
-            },
-            |body| Ok((body.start_byte(), body.end_byte())),
-        )
-    }
-
-    /// Detect the actual indentation column of a block body.
-    ///
-    /// For brace-delimited blocks (`{ ... }`), scans past the opening brace to find
-    /// the first non-empty line inside the block. For non-brace blocks (e.g., Python),
-    /// uses the line containing the start byte.
-    fn detect_body_indent(
-        source: &[u8],
-        start_byte: usize,
-        end_byte: usize,
-        is_brace_block: bool,
-        fallback_indent: usize,
-    ) -> usize {
-        if !is_brace_block {
-            // Non-brace block: use indentation of the line containing start_byte
-            let line_start = source
-                .get(..start_byte)
-                .unwrap_or(b"")
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map_or(0, |pos| pos + 1);
-
-            if let Some(line_bytes) = source.get(line_start..end_byte) {
-                if let Ok(full_str) = std::str::from_utf8(line_bytes) {
-                    if let Some(line) = full_str.lines().next() {
-                        return line.len() - line.trim_start().len();
-                    }
-                }
-            }
-            return fallback_indent;
-        }
-
-        // Brace-delimited block: find first non-empty line inside the block
-        let block_bytes = source.get((start_byte + 1)..end_byte);
-        let block_str = match block_bytes {
-            Some(bytes) => match std::str::from_utf8(bytes) {
-                Ok(s) => s,
-                Err(_) => return fallback_indent,
-            },
-            None => return fallback_indent,
-        };
-
-        // Find the first line that is purely inside the block and not on the same line as `{`
-        let mut lines = block_str.lines();
-        let _same_line_as_brace = lines.next();
-
-        for line in lines {
-            if !line.trim().is_empty() {
-                return line.len() - line.trim_start().len();
-            }
-        }
-
-        fallback_indent
-    }
-
-    /// Expand a symbol's start byte upward to include preceding doc comments and decorators.
-    ///
-    /// # Algorithm
-    /// Starting from `start_byte`, scans backwards line-by-line. Each preceding line
-    /// is examined after trimming whitespace. If the trimmed line starts with any prefix
-    /// listed in `metadata_prefixes`, the start byte moves to the beginning of that line
-    /// and the scan continues. An empty line or an unmatched line stops the expansion.
-    ///
-    /// # Language-awareness
-    /// `metadata_prefixes` is sourced from [`LanguageNodeTypes::metadata_prefixes`] and
-    /// is specific to the file's detected language:
-    /// - **Rust**: absorbs `//`, `/*`, `*`, `#` (attributes like `#[derive(...)]`)
-    /// - **Go**: absorbs `//`, `/*`, `*` — NOT `#` or `@` (not valid Go syntax)
-    /// - **TypeScript/JS**: absorbs `//`, `/*`, `*`, `@` (decorators like `@Injectable()`)
-    /// - **Python**: absorbs `@` (decorators), `#` (comments)
-    ///
-    /// # Batch Edit Safety
-    /// When used with `replace_full` on adjacent symbols, the expanded range may
-    /// absorb blank lines between symbols. The batch edit pipeline includes overlap
-    /// detection as a safety net (see `check_overlap` in batch.rs).
-    fn expand_to_full_start_byte(
-        source: &[u8],
-        mut start_byte: usize,
-        metadata_prefixes: &[&str],
-    ) -> usize {
-        loop {
-            let line_start = source
-                .get(..start_byte)
-                .unwrap_or(b"")
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map_or(0, |pos| pos + 1);
-
-            let (prev_line_start, prev_line_end) = if line_start == 0 {
-                if start_byte == 0 {
-                    break;
-                }
-                (0, start_byte)
-            } else {
-                let end = line_start - 1; // before \n
-                let start = source
-                    .get(..end)
-                    .unwrap_or(b"")
-                    .iter()
-                    .rposition(|&b| b == b'\n')
-                    .map_or(0, |pos| pos + 1);
-                (start, end)
-            };
-
-            let prev_line = source.get(prev_line_start..prev_line_end).unwrap_or(b"");
-            let trimmed = String::from_utf8_lossy(prev_line);
-            let trimmed_ref = trimmed.trim();
-
-            if trimmed_ref.is_empty() {
-                break;
-            }
-
-            // Check against the language-specific prefix list instead of a global
-            // hardcoded set. This prevents e.g. Go from absorbing `#` lines or
-            // Rust from absorbing `@` lines.
-            let is_metadata = metadata_prefixes
-                .iter()
-                .any(|&prefix| trimmed_ref.starts_with(prefix));
-
-            if is_metadata {
-                start_byte = prev_line_start;
-            } else {
-                break;
-            }
-        }
-        start_byte
-    }
+    // Private helpers removed (edit-only: find_body_bytes, detect_body_indent,
+    // expand_to_full_start_byte) — no longer needed without edit tools.
 }
 
 #[async_trait::async_trait]
@@ -286,7 +86,7 @@ impl Surgeon for TreeSitterSurgeon {
             }
         })?;
 
-        let (lang, _tree, source, version_hash, symbols) = self
+        let (lang, _tree, source, symbols) = self
             .cached_parse(workspace_root, &semantic_path.file_path)
             .await?;
 
@@ -317,7 +117,6 @@ impl Surgeon for TreeSitterSurgeon {
             start_line: symbol.start_line,
             end_line: symbol.end_line,
             name_column: symbol.name_column,
-            version_hash,
             language: language_str.to_string(),
         })
     }
@@ -327,9 +126,8 @@ impl Surgeon for TreeSitterSurgeon {
         &self,
         workspace_root: &Path,
         file_path: &Path,
-    ) -> Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError> {
-        let (lang, _tree, source, version_hash, symbols) =
-            self.cached_parse(workspace_root, file_path).await?;
+    ) -> Result<(String, String, Vec<ExtractedSymbol>), SurgeonError> {
+        let (lang, _tree, source, symbols) = self.cached_parse(workspace_root, file_path).await?;
 
         let content = std::str::from_utf8(&source)
             .map_err(|_| SurgeonError::ParseError {
@@ -338,7 +136,7 @@ impl Surgeon for TreeSitterSurgeon {
             })?
             .to_string();
 
-        Ok((content, version_hash, lang.as_str().to_string(), symbols))
+        Ok((content, lang.as_str().to_string(), symbols))
     }
 
     #[instrument(skip(self, workspace_root))]
@@ -347,7 +145,7 @@ impl Surgeon for TreeSitterSurgeon {
         workspace_root: &Path,
         file_path: &Path,
     ) -> Result<Vec<ExtractedSymbol>, SurgeonError> {
-        let (_, _, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
+        let (_, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
         Ok(symbols)
     }
 
@@ -358,7 +156,7 @@ impl Surgeon for TreeSitterSurgeon {
         file_path: &Path,
         line: usize,
     ) -> Result<Option<String>, SurgeonError> {
-        let (_, _, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
+        let (_, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
         // `find_enclosing_symbol` uses 0-indexed lines; `line` is 1-indexed.
         Ok(find_enclosing_symbol(&symbols, line.saturating_sub(1)))
     }
@@ -410,251 +208,6 @@ impl Surgeon for TreeSitterSurgeon {
         config: &crate::repo_map::SkeletonConfig<'_>,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError> {
         crate::repo_map::generate_skeleton_text(self, workspace_root, path, config).await
-    }
-
-    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
-    async fn resolve_body_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(BodyRange, ResolvedFile), SurgeonError> {
-        let chain =
-            semantic_path
-                .symbol_chain
-                .as_ref()
-                .ok_or_else(|| SurgeonError::SymbolNotFound {
-                    path: semantic_path.to_string(),
-                    did_you_mean: vec![],
-                })?;
-
-        // Use the shared parse/cache/extract pipeline
-        let (lang, tree, source, version_hash, symbols) = self
-            .cached_parse(workspace_root, &semantic_path.file_path)
-            .await?;
-
-        let symbol =
-            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
-                path: semantic_path.to_string(),
-                did_you_mean: did_you_mean(&symbols, chain, 3),
-            })?;
-
-        let last_newline_pos = source
-            .get(..symbol.byte_range.start)
-            .unwrap_or(&[])
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |pos| pos + 1);
-        let indent_column = symbol.byte_range.start.saturating_sub(last_newline_pos);
-
-        let (start_byte, end_byte) = Self::find_body_bytes(
-            &tree,
-            &source,
-            symbol.byte_range.clone(),
-            &semantic_path.to_string(),
-            lang.node_types().body_kinds,
-        )?;
-
-        // Detect actual body indentation
-        let is_brace_block = source.get(start_byte) == Some(&b'{');
-        let fallback_indent = indent_column + 4;
-        let body_indent_column = Self::detect_body_indent(
-            &source,
-            start_byte,
-            end_byte,
-            is_brace_block,
-            fallback_indent,
-        );
-
-        Ok((
-            BodyRange {
-                start_byte,
-                end_byte,
-                indent_column,
-                body_indent_column,
-            },
-            ResolvedFile {
-                source,
-                version_hash,
-            },
-        ))
-    }
-
-    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
-    async fn resolve_body_end_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(crate::surgeon::BodyEndRange, ResolvedFile), SurgeonError> {
-        let chain =
-            semantic_path
-                .symbol_chain
-                .as_ref()
-                .ok_or_else(|| SurgeonError::SymbolNotFound {
-                    path: semantic_path.to_string(),
-                    did_you_mean: vec![],
-                })?;
-
-        // Use the shared parse/cache/extract pipeline
-        let (lang, tree, source, version_hash, symbols) = self
-            .cached_parse(workspace_root, &semantic_path.file_path)
-            .await?;
-
-        let symbol =
-            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
-                path: semantic_path.to_string(),
-                did_you_mean: did_you_mean(&symbols, chain, 3),
-            })?;
-
-        // Only container symbols are valid targets
-        let container_kind = match symbol.kind {
-            crate::surgeon::SymbolKind::Module
-            | crate::surgeon::SymbolKind::Class
-            | crate::surgeon::SymbolKind::Struct
-            | crate::surgeon::SymbolKind::Interface
-            | crate::surgeon::SymbolKind::Impl => symbol.kind,
-            other => {
-                return Err(SurgeonError::InvalidTarget {
-                    path: semantic_path.to_string(),
-                    reason: format!(
-                        "insert_into requires a container symbol (Module, Class, Struct, \
-                    Impl, Interface), but got {other:?}. Use replace_body for functions."
-                    ),
-                })
-            }
-        };
-
-        let (start_byte, end_byte) = Self::find_body_bytes(
-            &tree,
-            &source,
-            symbol.byte_range.clone(),
-            &semantic_path.to_string(),
-            lang.node_types().body_kinds,
-        )?;
-
-        // Determine if this is a brace-delimited block
-        let is_brace_block = source.get(start_byte) == Some(&b'{');
-
-        // For brace-delimited blocks (Rust, Go, TS, etc.): insert before closing `}`
-        // For indentation-based blocks (Python): insert after the last line of the body
-        let insert_byte = if is_brace_block {
-            let raw_end = end_byte.saturating_sub(1);
-            source
-                .get(..raw_end)
-                .unwrap_or(b"")
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map_or(raw_end, |pos| pos + 1)
-        } else {
-            // For indentation-based languages, end_byte is at the end of the last
-            // child statement. Insert right at end_byte to append after the body.
-            end_byte
-        };
-
-        let last_newline_pos = source
-            .get(..symbol.byte_range.start)
-            .unwrap_or(&[])
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |pos| pos + 1);
-        let symbol_indent_column = symbol.byte_range.start.saturating_sub(last_newline_pos);
-
-        let fallback_indent = symbol_indent_column + 4;
-        let body_indent_column = Self::detect_body_indent(
-            &source,
-            start_byte,
-            end_byte,
-            is_brace_block,
-            fallback_indent,
-        );
-
-        Ok((
-            crate::surgeon::BodyEndRange {
-                insert_byte,
-                body_indent_column,
-                container_kind,
-            },
-            ResolvedFile {
-                source,
-                version_hash,
-            },
-        ))
-    }
-
-    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
-    async fn resolve_full_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(FullRange, ResolvedFile), SurgeonError> {
-        let chain =
-            semantic_path
-                .symbol_chain
-                .as_ref()
-                .ok_or_else(|| SurgeonError::SymbolNotFound {
-                    path: semantic_path.to_string(),
-                    did_you_mean: vec![],
-                })?;
-
-        let (lang, _tree, source, version_hash, symbols) = self
-            .cached_parse(workspace_root, &semantic_path.file_path)
-            .await?;
-
-        let symbol =
-            resolve_symbol_chain(&symbols, chain).ok_or_else(|| SurgeonError::SymbolNotFound {
-                path: semantic_path.to_string(),
-                did_you_mean: did_you_mean(&symbols, chain, 3),
-            })?;
-
-        let start_byte = Self::expand_to_full_start_byte(
-            &source,
-            symbol.byte_range.start,
-            lang.node_types().metadata_prefixes,
-        );
-        let end_byte = symbol.byte_range.end;
-
-        let last_newline_pos = source
-            .get(..symbol.byte_range.start)
-            .unwrap_or(b"")
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |pos| pos + 1);
-        let indent_column = symbol.byte_range.start.saturating_sub(last_newline_pos);
-
-        Ok((
-            FullRange {
-                start_byte,
-                end_byte,
-                indent_column,
-            },
-            ResolvedFile {
-                source,
-                version_hash,
-            },
-        ))
-    }
-
-    #[instrument(skip(self, workspace_root), fields(path = %semantic_path))]
-    async fn resolve_symbol_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(SymbolRange, ResolvedFile), SurgeonError> {
-        let (full_range, resolved) = self
-            .resolve_full_range(workspace_root, semantic_path)
-            .await?;
-
-        Ok((
-            SymbolRange {
-                start_byte: full_range.start_byte,
-                end_byte: full_range.end_byte,
-                indent_column: full_range.indent_column,
-            },
-            resolved,
-        ))
-    }
-
-    fn invalidate_cache(&self, path: &std::path::Path) {
-        self.cache.invalidate(path);
     }
 }
 
@@ -849,7 +402,7 @@ function doThing() { count.value++ }
         let workspace_root = PathBuf::from("/");
         let relative = file.path().strip_prefix("/").unwrap();
 
-        let (content, _hash, lang, symbols) = surgeon
+        let (content, lang, symbols) = surgeon
             .read_source_file(&workspace_root, relative)
             .await
             .unwrap();
@@ -1078,56 +631,5 @@ function doThing() { count.value++ }
 
         assert_eq!(scope.language, "rust");
         assert!(scope.content.contains("fn outer"));
-    }
-
-    // ── Edge case: Insert before/after in Go ───────────────────────────────────
-
-    #[tokio::test]
-    async fn test_go_insert_before_respects_indentation() {
-        let surgeon = TreeSitterSurgeon::new(2);
-        let mut file = Builder::new().suffix(".go").tempfile().unwrap();
-        writeln!(file, "package main\n\nfunc foo() {{}}\n\nfunc bar() {{}}\n").unwrap();
-        let path = file.path().to_path_buf();
-        let workspace_root = PathBuf::from("/");
-        let relative = path.strip_prefix("/").unwrap();
-
-        let sp = SemanticPath::parse(&format!("{}::bar", relative.display())).unwrap();
-
-        let (body_range, resolved) = surgeon
-            .resolve_body_range(&workspace_root, &sp)
-            .await
-            .unwrap();
-
-        // Verify we can resolve the range
-        assert!(body_range.start_byte < body_range.end_byte);
-        assert!(!resolved.source.is_empty());
-    }
-
-    // ── Edge case: Insert before/after in TypeScript ───────────────────────────
-
-    #[tokio::test]
-    async fn test_typescript_insert_after_class_method() {
-        let surgeon = TreeSitterSurgeon::new(2);
-        let mut file = Builder::new().suffix(".ts").tempfile().unwrap();
-        writeln!(
-            file,
-            "class Foo {{\n  method1() {{}}\n  method2() {{}}\n}}\n"
-        )
-        .unwrap();
-        let path = file.path().to_path_buf();
-        let workspace_root = PathBuf::from("/");
-        let relative = path.strip_prefix("/").unwrap();
-
-        // TypeScript methods use '.' separator
-        let sp = SemanticPath::parse(&format!("{}::Foo.method1", relative.display())).unwrap();
-
-        let (symbol_range, resolved) = surgeon
-            .resolve_symbol_range(&workspace_root, &sp)
-            .await
-            .unwrap();
-
-        // Verify we can resolve the symbol range
-        assert!(symbol_range.start_byte < symbol_range.end_byte);
-        assert!(!resolved.source.is_empty());
     }
 }

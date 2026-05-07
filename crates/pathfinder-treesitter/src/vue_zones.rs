@@ -62,7 +62,7 @@ pub struct MultiZoneTree {
     pub zones: VueZones,
     /// Original, unmodified SFC source bytes.
     ///
-    /// Kept intact for version hashing, OCC, and symbol source extraction.
+    /// Kept intact for version hashing and change detection.
     pub source: Arc<[u8]>,
     /// `true` when HTML or CSS grammar was unavailable and the respective zone
     /// was skipped. Template / style symbols are absent; script symbols are unaffected.

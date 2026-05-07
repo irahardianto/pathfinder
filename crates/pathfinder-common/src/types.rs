@@ -153,7 +153,7 @@ impl fmt::Display for Symbol {
     }
 }
 
-/// A SHA-256 version hash of file content, used for OCC (Optimistic Concurrency Control).
+/// A SHA-256 version hash of file content, used as a content fingerprint to detect changes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VersionHash(String);
 
@@ -210,7 +210,7 @@ impl VersionHash {
 
     /// Check whether an agent-supplied hash token matches this hash.
     ///
-    /// This is the single authoritative OCC comparison — it replaces all raw
+    /// This is the single authoritative hash comparison — it replaces all raw
     /// `==` / `!=` string comparisons and `check_occ` prefix logic. Accepting
     /// all formats prevents version-mismatch failures when agents supply the
     /// short form produced by [`short`].
@@ -256,8 +256,6 @@ pub struct SymbolScope {
     /// `analyze_impact`, `read_with_deep_context`) to position the cursor on the
     /// symbol name, which is required for rust-analyzer to resolve the symbol.
     pub name_column: usize,
-    /// The version hash of the *entire file* at the time of extraction.
-    pub version_hash: VersionHash,
     /// The language of the file.
     pub language: String,
 }

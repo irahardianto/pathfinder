@@ -1,5 +1,5 @@
 use crate::error::SurgeonError;
-use pathfinder_common::types::{SemanticPath, SymbolScope, VersionHash};
+use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::Path;
 
 /// Information about a symbol successfully extracted from the AST.
@@ -59,7 +59,6 @@ pub enum SymbolKind {
     /// A Vue SFC zone container (`template` or `style`).
     ///
     /// Acts as a parent grouping all child symbols extracted from that zone.
-    /// Read-only — not a target for edit operations.
     Zone,
     /// A capitalised HTML element used as a Vue component (e.g. `<MyButton>`).
     Component,
@@ -69,73 +68,6 @@ pub enum SymbolKind {
     CssSelector,
     /// A CSS at-rule within a `<style>` block (`@media`, `@keyframes`).
     CssAtRule,
-}
-
-/// The byte range and context needed to splice a new body into a symbol.
-///
-/// Used by `replace_body` to locate the content region inside a function's
-/// braces (or equivalent block delimiters in the target language).
-#[derive(Debug, Clone)]
-pub struct BodyRange {
-    /// Byte offset of the start of the body block in the file.
-    pub start_byte: usize,
-    /// Byte offset of the end of the body block in the file (exclusive).
-    pub end_byte: usize,
-    /// Column (0-indexed) of the symbol's starting line, used for re-indentation.
-    pub indent_column: usize,
-    /// Column (0-indexed) of the first non-empty line inside the body.
-    pub body_indent_column: usize,
-}
-
-/// The byte range and context spanning an entire declaration (including decorators, doc comments, etc).
-///
-/// Used by `replace_full` and `delete_symbol` to replace or remove the entire symbol.
-#[derive(Debug, Clone)]
-pub struct FullRange {
-    /// Byte offset of the start of the entire declaration (including preceding doc comments/decorators).
-    pub start_byte: usize,
-    /// Byte offset of the end of the declaration (exclusive).
-    pub end_byte: usize,
-    /// Column (0-indexed) of the symbol's start (excluding comments), used for indentation.
-    pub indent_column: usize,
-}
-
-/// The byte range and context used to position new code around an existing symbol.
-///
-/// Functionally identical to `FullRange` data, but semantically distinct. Used
-/// by `insert_before` and `insert_after`.
-#[derive(Debug, Clone)]
-pub struct SymbolRange {
-    /// Byte offset of the start of the entire declaration.
-    pub start_byte: usize,
-    /// Byte offset of the end of the declaration.
-    pub end_byte: usize,
-    /// Column (0-indexed) of the symbol's start, used as the baseline indentation for inserted code.
-    pub indent_column: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct BodyEndRange {
-    /// Byte offset just before the closing `}` (or `end`, etc.) of the body.
-    pub insert_byte: usize,
-    /// Indentation column for newly inserted content.
-    pub body_indent_column: usize,
-    /// The kind of the container symbol being targeted.
-    /// Used by `insert_into` to emit warnings (e.g., struct vs impl in Rust).
-    pub container_kind: SymbolKind,
-}
-
-/// The raw file content and OCC version hash, shared across all range-resolution methods.
-///
-/// Bundles the two values that are always returned together with a range,
-/// eliminating the boilerplate of a 3-element tuple and providing named fields
-/// for clarity at every call site.
-#[derive(Debug, Clone)]
-pub struct ResolvedFile {
-    /// The raw file content as bytes.
-    pub source: std::sync::Arc<[u8]>,
-    /// The OCC version hash computed from the file content.
-    pub version_hash: VersionHash,
 }
 
 /// The `Surgeon` trait — testability boundary for AST-aware operations.
@@ -200,84 +132,13 @@ pub trait Surgeon: Send + Sync {
         config: &crate::repo_map::SkeletonConfig<'_>,
     ) -> Result<crate::repo_map::RepoMapResult, SurgeonError>;
 
-    /// Resolve the body byte range and indent column for a symbol.
-    ///
-    /// Returns the `BodyRange` (brace positions + indent column) along with
-    /// a [`ResolvedFile`] containing the raw file bytes and current `VersionHash` for OCC.
-    ///
-    /// # Errors
-    /// - `SurgeonError::SymbolNotFound` — semantic path does not resolve
-    /// - `SurgeonError::InvalidTarget` — target symbol has no body (e.g., constant)
-    /// - `SurgeonError::UnsupportedLanguage` — file language not supported
-    /// - `SurgeonError::Io` — file cannot be read
-    async fn resolve_body_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(BodyRange, ResolvedFile), SurgeonError>;
-
-    /// Resolve the body end byte range and indent column for a container symbol.
-    ///
-    /// Used by `insert_into` to append code at the end of a scope without
-    /// needing to know which symbol is last inside it.
-    async fn resolve_body_end_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(BodyEndRange, ResolvedFile), SurgeonError>;
-
     /// Read an entire source file and extract its symbols.
     ///
-    /// Returns the complete file content, its OCC version hash, the detected language,
+    /// Returns the complete file content, the detected language,
     /// and a hierarchical listing of all extracted symbols (functions, classes, etc).
     async fn read_source_file(
         &self,
         workspace_root: &Path,
         file_path: &Path,
-    ) -> Result<(String, VersionHash, String, Vec<ExtractedSymbol>), SurgeonError>;
-
-    /// Resolve the full byte range for a symbol, including decorators and doc comments.
-    ///
-    /// Used by `replace_full` and `delete_symbol`.
-    async fn resolve_full_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(FullRange, ResolvedFile), SurgeonError>;
-
-    /// Resolve the symbol byte range for insertion operations.
-    ///
-    /// Used by `insert_before` and `insert_after`.
-    async fn resolve_symbol_range(
-        &self,
-        workspace_root: &Path,
-        semantic_path: &SemanticPath,
-    ) -> Result<(SymbolRange, ResolvedFile), SurgeonError>;
-
-    /// Evict `path` from the AST cache, forcing a full re-parse on the next read.
-    ///
-    /// **Must be called immediately after every successful file write** (edit, insert,
-    /// create) to prevent mtime-granularity races where a sub-second write+read
-    /// pair returns the stale pre-edit AST, causing `SYMBOL_NOT_FOUND` for newly
-    /// inserted symbols.
-    ///
-    /// The default implementation is a no-op — safe for mock implementations that
-    /// hold no in-process cache. Override in concrete implementations that maintain
-    /// an AST cache (e.g., `TreeSitterSurgeon`).
-    fn invalidate_cache(&self, _path: &Path) {}
-}
-
-/// Extension methods for cache management on [`Surgeon`] implementors.
-///
-/// Provided as a blanket extension to avoid a breaking change to the `Surgeon` trait.
-/// Call `invalidate_cache` after any write to ensure the next `read_symbol_scope`
-/// or `read_source_file` call sees the updated content without a 1-second mtime
-/// granularity race.
-pub trait SurgeonCacheExt {
-    /// Remove a file from the AST cache, forcing a full re-parse on next access.
-    ///
-    /// Must be called immediately after every successful file write (edit, insert,
-    /// create) to prevent stale cached ASTs from causing `SYMBOL_NOT_FOUND` errors
-    /// on newly inserted symbols.
-    fn invalidate_cache(&self, path: &std::path::Path);
+    ) -> Result<(String, String, Vec<ExtractedSymbol>), SurgeonError>;
 }

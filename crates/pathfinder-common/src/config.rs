@@ -29,10 +29,6 @@ pub struct PathfinderConfig {
     #[serde(default)]
     pub repo_map: RepoMapConfig,
 
-    /// Validation scope.
-    #[serde(default)]
-    pub validation: ValidationConfig,
-
     /// Log level.
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -45,7 +41,6 @@ impl Default for PathfinderConfig {
             sandbox: SandboxConfig::default(),
             search: SearchConfig::default(),
             repo_map: RepoMapConfig::default(),
-            validation: ValidationConfig::default(),
             log_level: default_log_level(),
         }
     }
@@ -176,22 +171,6 @@ impl Default for RepoMapConfig {
     }
 }
 
-/// Validation scope configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationConfig {
-    /// Validation scope for edit tools.
-    #[serde(default = "default_validation_scope")]
-    pub scope: String,
-}
-
-impl Default for ValidationConfig {
-    fn default() -> Self {
-        Self {
-            scope: default_validation_scope(),
-        }
-    }
-}
-
 /// Configuration loading errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -238,10 +217,6 @@ fn default_token_method() -> String {
     "char_div_4".to_owned()
 }
 
-fn default_validation_scope() -> String {
-    "workspace_wide".to_owned()
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -254,7 +229,6 @@ mod tests {
         assert_eq!(config.log_level, "info");
         assert_eq!(config.search.max_results, 50);
         assert_eq!(config.repo_map.max_tokens, 16_000);
-        assert_eq!(config.validation.scope, "workspace_wide");
         assert!(config.lsp.is_empty());
     }
 
