@@ -71,7 +71,7 @@ pub struct SearchMatch {
     /// pipelines (e.g. the `search_codebase` handler's Tree-sitter pass)
     /// populate this field before results are returned to the caller.
     pub enclosing_semantic_path: Option<String>,
-    /// SHA-256 hash of the matched file, for OCC chaining.
+    /// SHA-256 content fingerprint of the matched file.
     pub version_hash: String,
     /// `true` when this file was listed in `known_files`.
     ///

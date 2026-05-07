@@ -2,7 +2,7 @@
 //!
 //! `RipgrepScout` drives files through the `grep-searcher` engine, collecting
 //! matches with configurable context lines, then computes a SHA-256 version
-//! hash for each matched file to enable immediate OCC-based editing.
+//! hash for each matched file as a content fingerprint.
 //!
 //! Hashing is performed lazily: a file is only read for hashing when it
 //! contains at least one match, avoiding redundant I/O for non-matching files.
