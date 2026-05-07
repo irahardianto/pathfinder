@@ -9,7 +9,7 @@
 use crate::{
     error::LspError,
     lawyer::Lawyer,
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, FileEvent, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -70,67 +70,6 @@ impl Lawyer for NoOpLawyer {
         Err(LspError::NoLspAvailable)
     }
 
-    async fn did_open(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-        _content: &str,
-    ) -> Result<(), LspError> {
-        Err(LspError::NoLspAvailable)
-    }
-
-    async fn did_change(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-        _content: &str,
-        _version: i32,
-    ) -> Result<(), LspError> {
-        Err(LspError::NoLspAvailable)
-    }
-
-    async fn did_close(&self, _workspace_root: &Path, _file_path: &Path) -> Result<(), LspError> {
-        Err(LspError::NoLspAvailable)
-    }
-
-    async fn pull_diagnostics(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Err(LspError::NoLspAvailable)
-    }
-
-    async fn collect_diagnostics(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-        _content: &str,
-        _version: i32,
-        _timeout_ms: u64,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Err(LspError::NoLspAvailable)
-    }
-
-    async fn pull_workspace_diagnostics(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Err(LspError::NoLspAvailable)
-    }
-
-    async fn range_formatting(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-        _start_line: u32,
-        _end_line: u32,
-        _original_content: &str,
-    ) -> Result<Option<String>, LspError> {
-        Err(LspError::NoLspAvailable)
-    }
-
     async fn capability_status(
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
@@ -143,10 +82,6 @@ impl Lawyer for NoOpLawyer {
 
     async fn force_respawn(&self, _language_id: &str) -> Result<(), LspError> {
         Err(LspError::NoLspAvailable)
-    }
-
-    async fn did_change_watched_files(&self, _changes: Vec<FileEvent>) -> Result<(), LspError> {
-        Ok(())
     }
 }
 
@@ -209,62 +144,5 @@ mod tests {
         };
         let result = lawyer.call_hierarchy_outgoing(&workspace(), &item).await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_no_op_lawyer_did_open_returns_no_lsp() {
-        let lawyer = NoOpLawyer;
-        let result = lawyer.did_open(&workspace(), &file(), "fn main() {}").await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_no_op_lawyer_did_change_returns_no_lsp() {
-        let lawyer = NoOpLawyer;
-        let result = lawyer
-            .did_change(&workspace(), &file(), "fn main() {}", 1)
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_no_op_lawyer_pull_diagnostics_returns_no_lsp() {
-        let lawyer = NoOpLawyer;
-        let result = lawyer.pull_diagnostics(&workspace(), &file()).await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_no_op_lawyer_collect_diagnostics_returns_no_lsp() {
-        let lawyer = NoOpLawyer;
-        let result = lawyer
-            .collect_diagnostics(&workspace(), &file(), "fn main() {}", 1, 1000)
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_no_op_lawyer_pull_workspace_diagnostics_returns_no_lsp() {
-        let lawyer = NoOpLawyer;
-        let result = lawyer
-            .pull_workspace_diagnostics(&workspace(), &file())
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_no_op_lawyer_range_formatting_returns_no_lsp() {
-        let lawyer = NoOpLawyer;
-        let result = lawyer
-            .range_formatting(&workspace(), &file(), 1, 5, "")
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_no_op_lawyer_did_change_watched_files_returns_ok() {
-        let lawyer = NoOpLawyer;
-        let result = lawyer.did_change_watched_files(vec![]).await;
-        assert!(result.is_ok());
     }
 }

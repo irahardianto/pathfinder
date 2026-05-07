@@ -178,84 +178,6 @@ async fn test_lsp_client_capability_status_no_diagnostic_provider() {
 
 // ── Document sync tests ──────────────────────────────────────────────────────
 
-/// Verify that `did_open` + `pull_diagnostics` returns the mock's canned
-/// diagnostic list. This exercises the full document sync + diagnostic pull
-/// pipeline on real OS pipes.
-#[cfg(feature = "integration")]
-#[tokio::test]
-async fn test_lsp_client_pull_diagnostics_returns_mock_items() {
-    let workspace = common::make_rust_workspace();
-    let config = common::mock_lsp_config(common::mock_binary(), &[]);
-    let client = LspClient::new(workspace.path(), Arc::new(config))
-        .await
-        .expect("LspClient::new failed");
-
-    let file_path = workspace.path().join("src/main.rs");
-    let content = "fn main() {}";
-
-    // did_open triggers lazy initialization via ensure_process
-    client
-        .did_open(workspace.path(), &file_path, content)
-        .await
-        .expect("did_open failed");
-
-    // Pull diagnostics — mock returns one synthetic error by default
-    let diagnostics = client
-        .pull_diagnostics(workspace.path(), &file_path)
-        .await
-        .expect("pull_diagnostics failed");
-
-    assert!(
-        !diagnostics.is_empty(),
-        "mock server returns one synthetic error by default"
-    );
-    assert_eq!(
-        diagnostics[0].severity as u8,
-        1, // LspDiagnosticSeverity::Error
-        "mock diagnostic must be severity Error (1)"
-    );
-    assert!(
-        diagnostics[0].message.contains("mock error"),
-        "mock diagnostic message expected, got: {}",
-        diagnostics[0].message
-    );
-
-    client.shutdown();
-}
-
-/// Verify that `pull_diagnostics` returns an empty list when the mock is
-/// configured with `--no-diagnostics`. This exercises the empty-snapshot
-/// path in `build_validation_outcome`.
-#[cfg(feature = "integration")]
-#[tokio::test]
-async fn test_lsp_client_pull_diagnostics_empty_when_configured() {
-    let workspace = common::make_rust_workspace();
-    let config = common::mock_lsp_config(common::mock_binary(), &["--no-diagnostics"]);
-    let client = LspClient::new(workspace.path(), Arc::new(config))
-        .await
-        .expect("LspClient::new failed");
-
-    let file_path = workspace.path().join("src/main.rs");
-    client
-        .did_open(workspace.path(), &file_path, "fn main() {}")
-        .await
-        .expect("did_open failed");
-
-    let diagnostics = client
-        .pull_diagnostics(workspace.path(), &file_path)
-        .await
-        .expect("pull_diagnostics failed");
-
-    assert!(
-        diagnostics.is_empty(),
-        "--no-diagnostics flag must yield empty diagnostic list"
-    );
-
-    client.shutdown();
-}
-
-// ── Error path tests ─────────────────────────────────────────────────────────
-
 /// Verify that `goto_definition` returns `Ok(None)` when the mock is
 /// configured with `--definition-returns-null`.
 #[cfg(feature = "integration")]
@@ -278,37 +200,6 @@ async fn test_lsp_client_goto_definition_returns_none_for_null_response() {
         .expect("goto_definition failed");
 
     assert!(result.is_none(), "null LSP response must map to Ok(None)");
-
-    client.shutdown();
-}
-
-/// Verify that `did_change` and `did_close` notifications complete without
-/// error. These are fire-and-forget notifications (no LSP response expected).
-#[cfg(feature = "integration")]
-#[tokio::test]
-async fn test_lsp_client_document_sync_notifications_succeed() {
-    let workspace = common::make_rust_workspace();
-    let config = common::mock_lsp_config(common::mock_binary(), &[]);
-    let client = LspClient::new(workspace.path(), Arc::new(config))
-        .await
-        .expect("LspClient::new failed");
-
-    let file_path = workspace.path().join("src/main.rs");
-
-    client
-        .did_open(workspace.path(), &file_path, "fn main() {}")
-        .await
-        .expect("did_open failed");
-
-    client
-        .did_change(workspace.path(), &file_path, "fn main() { println!(); }", 1)
-        .await
-        .expect("did_change failed");
-
-    client
-        .did_close(workspace.path(), &file_path)
-        .await
-        .expect("did_close failed");
 
     client.shutdown();
 }
@@ -386,28 +277,7 @@ if __name__ == "__main__":
             return;
         }
 
-        let content = r#"
-def greet(name: str) -> str:
-    return f"Hello, {name}!"
-
-def main() -> None:
-    message = greet("world")
-    print(message)
-
-if __name__ == "__main__":
-    main()
-"#;
-
-        // Trigger LSP initialization by opening the file
-        let did_open_result = client.did_open(dir.path(), &main_py, content).await;
-
-        if let Err(e) = did_open_result {
-            eprintln!("Python did_open failed: {}", e);
-            eprintln!("This likely means pyright could not start as an LSP server. Skipping test.");
-            client.shutdown();
-            return;
-        }
-
+        // Trigger LSP initialization via goto_definition (read-only)
         // Wait for LSP to initialize and index
         tokio::time::sleep(Duration::from_secs(5)).await;
 
@@ -419,7 +289,7 @@ if __name__ == "__main__":
                 py_status.validation, py_status.reason
             );
         } else {
-            eprintln!("Python not in status after did_open");
+            eprintln!("Python not in status");
             client.shutdown();
             return;
         }
@@ -441,8 +311,6 @@ if __name__ == "__main__":
                     "definition should be in main.py, got: {}",
                     def.file
                 );
-                // Line should be near the def greet declaration
-                // Pyright may use different line numbering than expected
                 assert!(
                     def.line >= 1 && def.line <= 6,
                     "definition line should be near def greet, got: {}",
@@ -450,7 +318,6 @@ if __name__ == "__main__":
                 );
             }
             Ok(None) => {
-                // LSP might still be warming up — acceptable in CI
                 eprintln!("Python goto_definition returned None (possibly still warming up)");
             }
             Err(e) => {
@@ -468,7 +335,6 @@ if __name__ == "__main__":
             )
             .await;
 
-        // Should either work or degrade gracefully (pyright may not fully support call hierarchy)
         match hierarchy {
             Ok(items) if !items.is_empty() => {
                 assert_eq!(
@@ -477,7 +343,6 @@ if __name__ == "__main__":
                 );
             }
             Ok(_) => {
-                // Empty result — pyright may not return call hierarchy items for simple cases
                 eprintln!("Python call_hierarchy_prepare returned empty items");
             }
             Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {

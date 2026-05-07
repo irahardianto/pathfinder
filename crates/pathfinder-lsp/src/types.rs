@@ -31,7 +31,7 @@ pub struct LspLanguageStatus {
     /// LSP supports textDocument/prepareCallHierarchy (`analyze_impact`, `read_with_deep_context`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_call_hierarchy: Option<bool>,
-    /// LSP supports textDocument/diagnostic or publishDiagnostics (`validate_only`, edit validation).
+    /// LSP supports textDocument/diagnostic or publishDiagnostics (diagnostic health reporting).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_diagnostics: Option<bool>,
     /// LSP supports textDocument/rangeFormatting (edit formatting).

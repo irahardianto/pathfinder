@@ -6,7 +6,7 @@
 
 use crate::{
     error::LspError,
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, FileEvent, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -20,7 +20,7 @@ use std::path::Path;
 /// preventing memory leaks regardless of early returns or panics in callers.
 ///
 /// Navigation tools should obtain this via [`Lawyer::open_document`] rather
-/// than calling `did_open` + `did_close` manually.
+/// than manually managing document lifecycle.
 pub trait DocumentLease: Send + Sync {}
 
 /// Abstracts Language Server Protocol operations behind a testable interface.
@@ -105,122 +105,6 @@ pub trait Lawyer: Send + Sync {
         content: &str,
     ) -> Result<Box<dyn DocumentLease>, LspError>;
 
-    /// Notify the LSP that a file has been opened with the given content.
-    ///
-    /// This is a notification (fire-and-forget) — the LSP begins tracking the
-    /// document so that subsequent `pull_diagnostics` calls work correctly.
-    ///
-    /// Must be called before the first `did_change` on a file.
-    ///
-    /// # Errors
-    /// - `LspError::NoLspAvailable` — no language server for this file type
-    /// - `LspError::ConnectionLost` — LSP process crashed
-    async fn did_open(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-    ) -> Result<(), LspError>;
-
-    /// Notify the LSP of a full content change to an open document.
-    ///
-    /// Sends `textDocument/didChange` with full-file synchronisation
-    /// (version-based change tracking). This updates the LSP's in-memory
-    /// document state so that `pull_diagnostics` sees the new content.
-    ///
-    /// # Errors
-    /// - `LspError::NoLspAvailable` — no language server for this file type
-    /// - `LspError::ConnectionLost` — LSP process crashed
-    async fn did_change(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-        version: i32,
-    ) -> Result<(), LspError>;
-
-    /// Notify the LSP that a document has been closed.
-    ///
-    /// Sends `textDocument/didClose`. This allows the LSP to clear its internal
-    /// state for the file (preventing memory leaks for short-lived validations).
-    ///
-    /// # Errors
-    /// - `LspError::NoLspAvailable` — no language server for this file type
-    /// - `LspError::ConnectionLost` — LSP process crashed
-    async fn did_close(&self, workspace_root: &Path, file_path: &Path) -> Result<(), LspError>;
-
-    /// Request Pull Diagnostics for a file (LSP 3.17 `textDocument/diagnostic`).
-    ///
-    /// Intended for use in the edit validation pipeline: called before and
-    /// after an in-memory edit to compute the diagnostic diff.
-    ///
-    /// # Errors
-    /// - `LspError::NoLspAvailable` — no language server for this file type
-    /// - `LspError::UnsupportedCapability` — LSP does not support Pull Diagnostics
-    /// - `LspError::Timeout` — LSP did not respond within the timeout
-    /// - `LspError::Protocol` — LSP returned malformed diagnostics
-    async fn pull_diagnostics(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError>;
-
-    /// Collect diagnostics using the push model (`textDocument/publishDiagnostics`).
-    ///
-    /// Sends `didOpen` or `didChange` as indicated by the version, then waits
-    /// for `textDocument/publishDiagnostics` notifications targeting the file.
-    /// Returns all diagnostics received within the timeout window.
-    ///
-    /// Used as a fallback for LSP servers that don't support Pull Diagnostics
-    /// (LSP 3.17), such as gopls and typescript-language-server.
-    ///
-    /// # Errors
-    /// - `LspError::NoLspAvailable` — no language server for this file type
-    /// - `LspError::Timeout` — LSP did not respond within the timeout (rare for push model, returns empty instead)
-    /// - `LspError::Protocol` — LSP returned malformed diagnostics
-    async fn collect_diagnostics(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-        version: i32,
-        timeout_ms: u64,
-    ) -> Result<Vec<LspDiagnostic>, LspError>;
-
-    /// Request Pull Diagnostics for the entire workspace (LSP 3.17 `workspace/diagnostic`).
-    ///
-    /// Intended for use in the edit validation pipeline: called after an in-memory
-    /// edit to catch cross-file breakages.
-    ///
-    /// # Errors
-    /// - `LspError::NoLspAvailable` — no language server for this file type
-    /// - `LspError::UnsupportedCapability` — LSP does not support Workspace Diagnostics
-    /// - `LspError::Timeout` — LSP did not respond within the timeout
-    /// - `LspError::Protocol` — LSP returned malformed diagnostics
-    async fn pull_workspace_diagnostics(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError>;
-
-    /// Request range formatting for a changed region (LSP `textDocument/rangeFormatting`).
-    ///
-    /// Returns `Ok(Some(formatted_text))` when the LSP supports formatting.
-    /// Returns `Ok(None)` when the LSP is available but returns no edits.
-    ///
-    /// # Errors
-    /// - `LspError::NoLspAvailable` — no language server for this file type
-    /// - `LspError::UnsupportedCapability` — LSP does not support formatting
-    /// - `LspError::Timeout` — LSP did not respond within the timeout
-    async fn range_formatting(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        start_line: u32,
-        end_line: u32,
-        original_content: &str,
-    ) -> Result<Option<String>, LspError>;
-
     /// Retrieve the current LSP process status and capabilities per language.
     async fn capability_status(
         &self,
@@ -237,15 +121,6 @@ pub trait Lawyer: Send + Sync {
     /// Returns `Ok(())` on successful start, `Err(LspError::NoLspAvailable)` if
     /// no descriptor is registered for the language.
     async fn force_respawn(&self, language_id: &str) -> Result<(), LspError>;
-
-    /// Notify all running LSP processes of a filesystem change.
-    ///
-    /// Broadcasts `workspace/didChangeWatchedFiles` to every running LSP process.
-    /// This is a notification (fire-and-forget). Broadcasting to all processes is
-    /// intentional: the LSP spec allows servers to ignore events for file patterns
-    /// they don't watch, and routing by extension is unreliable when files are
-    /// being created or deleted.
-    async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError>;
 
     /// LT-4: Pre-warm LSP processes for specific languages.
     ///

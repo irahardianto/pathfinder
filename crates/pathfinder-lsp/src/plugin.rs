@@ -5,7 +5,7 @@
 //! - LSP binary discovery (binary candidates, default args)
 //! - Workspace detection (marker files, search depth)
 //! - Manifest validation rules
-//! - Diagnostic collection configuration (push timeouts from MT-2)
+//! - Install guidance for missing binaries
 //! - LSP initialization options
 //! - Install guidance for missing binaries
 //!
@@ -18,8 +18,6 @@
 //!
 //! The trait is **object-safe** so implementations can be used as
 //! `Box<dyn LanguagePlugin>` or `&dyn LanguagePlugin`.
-
-use crate::client::PushDiagnosticsConfig;
 
 /// Describes a candidate LSP binary with its default arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,12 +60,6 @@ pub trait LanguagePlugin: Send + Sync {
     /// (`pyright-langserver`, `pylsp`, `ruff-lsp`, `jedi-language-server`).
     fn lsp_candidates(&self) -> &[LspCandidate];
 
-    /// Push diagnostics collection config for this language's server.
-    ///
-    /// Encapsulates the MT-2 per-server timing (`ceiling_ms`, `grace_ms`).
-    /// `server_name` is the `serverInfo.name` from the LSP `initialize` response.
-    fn push_diagnostics_config(&self, server_name: Option<&str>) -> PushDiagnosticsConfig;
-
     /// Human-readable install guidance when no LSP binary is found.
     fn install_hint(&self) -> &'static str;
 }
@@ -99,14 +91,6 @@ impl LanguagePlugin for RustPlugin {
             binary: "rust-analyzer",
             default_args: &[],
         }]
-    }
-
-    fn push_diagnostics_config(&self, _server_name: Option<&str>) -> PushDiagnosticsConfig {
-        // rust-analyzer is fast at emitting diagnostics
-        PushDiagnosticsConfig {
-            ceiling_ms: 10_000,
-            grace_ms: 300,
-        }
     }
 
     fn install_hint(&self) -> &'static str {
@@ -141,14 +125,6 @@ impl LanguagePlugin for GoPlugin {
         }]
     }
 
-    fn push_diagnostics_config(&self, _server_name: Option<&str>) -> PushDiagnosticsConfig {
-        // gopls needs more time: analyses entire module graph
-        PushDiagnosticsConfig {
-            ceiling_ms: 20_000,
-            grace_ms: 3_000,
-        }
-    }
-
     fn install_hint(&self) -> &'static str {
         "Install gopls: go install golang.org/x/tools/gopls@latest"
     }
@@ -179,14 +155,6 @@ impl LanguagePlugin for TypeScriptPlugin {
             binary: "typescript-language-server",
             default_args: &["--stdio"],
         }]
-    }
-
-    fn push_diagnostics_config(&self, _server_name: Option<&str>) -> PushDiagnosticsConfig {
-        // tsserver can be slow on large projects
-        PushDiagnosticsConfig {
-            ceiling_ms: 30_000,
-            grace_ms: 3_000,
-        }
     }
 
     fn install_hint(&self) -> &'static str {
@@ -233,16 +201,6 @@ impl LanguagePlugin for PythonPlugin {
                 default_args: &[],
             },
         ]
-    }
-
-    fn push_diagnostics_config(&self, server_name: Option<&str>) -> PushDiagnosticsConfig {
-        // Pyright and pylsp both have moderate timing
-        // Pyright, pylsp, and other Python LSPs all use the same timing.
-        let _ = server_name;
-        PushDiagnosticsConfig {
-            ceiling_ms: 15_000,
-            grace_ms: 1_000,
-        }
     }
 
     fn install_hint(&self) -> &'static str {
@@ -327,13 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rust_plugin_push_diagnostics_config() {
-        let cfg = RustPlugin.push_diagnostics_config(Some("rust-analyzer"));
-        assert_eq!(cfg.ceiling_ms, 10_000);
-        assert_eq!(cfg.grace_ms, 300);
-    }
-
-    #[test]
     fn test_rust_plugin_install_hint() {
         let hint = RustPlugin.install_hint();
         assert!(hint.contains("rust-analyzer"));
@@ -366,13 +317,6 @@ mod tests {
         let candidates = GoPlugin.lsp_candidates();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].binary, "gopls");
-    }
-
-    #[test]
-    fn test_go_plugin_push_diagnostics_config() {
-        let cfg = GoPlugin.push_diagnostics_config(Some("gopls"));
-        assert_eq!(cfg.ceiling_ms, 20_000);
-        assert_eq!(cfg.grace_ms, 3_000);
     }
 
     #[test]
@@ -420,13 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn test_typescript_plugin_push_diagnostics_config() {
-        let cfg = TypeScriptPlugin.push_diagnostics_config(Some("typescript-language-server"));
-        assert_eq!(cfg.ceiling_ms, 30_000);
-        assert_eq!(cfg.grace_ms, 3_000);
-    }
-
-    #[test]
     fn test_typescript_plugin_install_hint() {
         let hint = TypeScriptPlugin.install_hint();
         assert!(hint.contains("typescript-language-server"));
@@ -466,27 +403,6 @@ mod tests {
         assert_eq!(candidates[1].binary, "pylsp");
         assert_eq!(candidates[2].binary, "ruff-lsp");
         assert_eq!(candidates[3].binary, "jedi-language-server");
-    }
-
-    #[test]
-    fn test_python_plugin_push_diagnostics_config_pyright() {
-        let cfg = PythonPlugin.push_diagnostics_config(Some("pyright"));
-        assert_eq!(cfg.ceiling_ms, 15_000);
-        assert_eq!(cfg.grace_ms, 1_000);
-    }
-
-    #[test]
-    fn test_python_plugin_push_diagnostics_config_pylsp() {
-        let cfg = PythonPlugin.push_diagnostics_config(Some("pylsp"));
-        assert_eq!(cfg.ceiling_ms, 15_000);
-        assert_eq!(cfg.grace_ms, 1_000);
-    }
-
-    #[test]
-    fn test_python_plugin_push_diagnostics_config_unknown_server() {
-        let cfg = PythonPlugin.push_diagnostics_config(Some("ruff-lsp"));
-        assert_eq!(cfg.ceiling_ms, 15_000);
-        assert_eq!(cfg.grace_ms, 1_000);
     }
 
     #[test]
@@ -574,38 +490,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn test_plugins_match_push_config_for_known_servers() {
-        // Verify that the plugin's push_diagnostics_config matches
-        // the existing push_collection_config_for for known server names.
-        use crate::client::DetectedCapabilities;
-
-        let cases = [
-            ("rust", Some("rust-analyzer")),
-            ("go", Some("gopls")),
-            ("typescript", Some("typescript-language-server")),
-            ("python", Some("pyright")),
-            ("python", Some("pylsp")),
-        ];
-
-        for (lang, server_name) in cases {
-            let plugin = plugin_for_language(lang).unwrap();
-            let from_plugin = plugin.push_diagnostics_config(server_name);
-            let from_fn = DetectedCapabilities::push_collection_config_for(server_name);
-
-            assert_eq!(
-                from_plugin.ceiling_ms, from_fn.ceiling_ms,
-                "ceiling_ms mismatch for {lang}/{server_name:?}"
-            );
-            assert_eq!(
-                from_plugin.grace_ms, from_fn.grace_ms,
-                "grace_ms mismatch for {lang}/{server_name:?}"
-            );
-        }
-    }
-
-    // ── Unique language IDs ─────────────────────────────────────────────
 
     #[test]
     fn test_all_plugins_have_unique_language_ids() {

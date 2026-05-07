@@ -19,7 +19,7 @@
 use crate::{
     error::LspError,
     lawyer::{DocumentLease, Lawyer},
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, FileEvent, LspDiagnostic},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation},
 };
 use async_trait::async_trait;
 use std::{
@@ -63,12 +63,6 @@ impl Drop for MockDocumentLease {
 /// Configured result for `goto_definition`.
 type GotoDefinitionFixture = Arc<Mutex<Option<Result<Option<DefinitionLocation>, String>>>>;
 
-/// Queue of results for `pull_diagnostics` calls.
-type PullDiagnosticsQueue = Arc<Mutex<Vec<Result<Vec<LspDiagnostic>, String>>>>;
-
-/// Configured result for `range_formatting`.
-type RangeFormattingFixture = Arc<Mutex<Option<Result<Option<String>, String>>>>;
-
 /// Configured error for `did_open`. `None` = return `Ok(())`.
 type DidOpenErrorFixture = Arc<Mutex<Option<LspError>>>;
 
@@ -100,17 +94,9 @@ pub struct MockLawyer {
     /// Configurable error to return from `did_open`. `None` = return `Ok(())`.
     pub did_open_error: DidOpenErrorFixture,
 
-    // ── did_change ────────────────────────────────────────────────────────────
-    /// All `(file_path, content, version)` tuples passed to `did_change`.
-    pub did_change_calls: Arc<Mutex<Vec<(String, String, i32)>>>,
-
     // ── did_close ─────────────────────────────────────────────────────────────
     /// Number of `did_close` notifications received.
     pub did_close_calls: Arc<Mutex<Vec<String>>>,
-
-    // ── did_change_watched_files ──────────────────────────────────────────────
-    /// All file events passed to `did_change_watched_files`.
-    pub watched_file_changes: Arc<Mutex<Vec<FileEvent>>>,
 
     // ── capability_status ─────────────────────────────────────────────────────
     /// Configured result for `capability_status`.
@@ -120,16 +106,6 @@ pub struct MockLawyer {
     /// Configured result for `missing_languages`.
     missing_languages_result: MissingLanguagesFixture,
 
-    // ── pull_diagnostics ──────────────────────────────────────────────────────
-    /// Queue of results for successive `pull_diagnostics` calls.
-    ///
-    /// Each call pops the front. When empty, returns `Ok(vec![])`.
-    pub pull_diagnostics_results: PullDiagnosticsQueue,
-
-    // ── pull_workspace_diagnostics ────────────────────────────────────────────
-    /// Queue of results for successive `pull_workspace_diagnostics` calls.
-    pub pull_workspace_diagnostics_results: PullDiagnosticsQueue,
-
     // ── call_hierarchy ────────────────────────────────────────────────────────
     /// Queue of results for successive `call_hierarchy_prepare` calls.
     pub prepare_call_hierarchy_results: PrepareCallHierarchyQueue,
@@ -137,20 +113,13 @@ pub struct MockLawyer {
     pub incoming_call_results: CallHierarchyQueue,
     /// Queue of results for successive `call_hierarchy_outgoing` calls.
     pub outgoing_call_results: CallHierarchyQueue,
-
-    // ── range_formatting ──────────────────────────────────────────────────────
-    /// Configured result for `range_formatting`.
-    ///
-    /// `None` = return `Ok(None)` (LSP available, no formatting edits).
-    pub range_formatting_result: RangeFormattingFixture,
 }
 
 impl MockLawyer {
     /// Pop the next result from a queued result mutex.
     ///
     /// Shared helper for `call_hierarchy_prepare`, `call_hierarchy_incoming`,
-    /// `call_hierarchy_outgoing`, `pull_diagnostics`, and `pull_workspace_diagnostics`.
-    /// Extracted to eliminate 23-line duplication across these methods.
+    /// `call_hierarchy_outgoing`.
     /// Pop the next queued result, returning `None` when the queue is empty.
     ///
     /// Returns:
@@ -214,29 +183,6 @@ impl MockLawyer {
         *guard = Some(error);
     }
 
-    // ── pull_diagnostics ──────────────────────────────────────────────────────
-
-    /// Push a result onto the `pull_diagnostics` queue.
-    ///
-    /// Calls are served FIFO. When the queue is empty, `Ok(vec![])` is returned.
-    pub fn push_pull_diagnostics_result(&self, result: Result<Vec<LspDiagnostic>, String>) {
-        self.pull_diagnostics_results
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(result);
-    }
-
-    /// Push a result onto the `pull_workspace_diagnostics` queue.
-    pub fn push_pull_workspace_diagnostics_result(
-        &self,
-        result: Result<Vec<LspDiagnostic>, String>,
-    ) {
-        self.pull_workspace_diagnostics_results
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(result);
-    }
-
     // ── call_hierarchy ────────────────────────────────────────────────────────
 
     /// Push a result onto the `call_hierarchy_prepare` queue.
@@ -275,28 +221,10 @@ impl MockLawyer {
             .len()
     }
 
-    /// Returns the number of `did_change` calls recorded.
-    #[must_use]
-    pub fn did_change_call_count(&self) -> usize {
-        self.did_change_calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    }
-
     /// Returns the number of `did_close` calls recorded.
     #[must_use]
     pub fn did_close_call_count(&self) -> usize {
         self.did_close_calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    }
-
-    /// Returns the number of `did_change_watched_files` events recorded.
-    #[must_use]
-    pub fn watched_file_changes_count(&self) -> usize {
-        self.watched_file_changes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
@@ -319,17 +247,6 @@ impl MockLawyer {
             .missing_languages_result
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = missing;
-    }
-
-    /// Set the result for `range_formatting`.
-    ///
-    /// Pass `Ok(Some(text))` for formatted output, `Ok(None)` for no edits, or `Err` for error.
-    pub fn set_range_formatting_result(&self, result: Result<Option<String>, String>) {
-        let mut guard = self
-            .range_formatting_result
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(result);
     }
 }
 
@@ -426,109 +343,6 @@ impl Lawyer for MockLawyer {
         }))
     }
 
-    async fn did_open(
-        &self,
-        _workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-    ) -> Result<(), LspError> {
-        self.did_open_calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((file_path.to_string_lossy().into_owned(), content.to_owned()));
-
-        // If a failure has been configured, consume and return it.
-        let maybe_error = {
-            let mut guard = self
-                .did_open_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.take()
-        };
-        if let Some(e) = maybe_error {
-            return Err(e);
-        }
-        Ok(())
-    }
-
-    async fn did_change(
-        &self,
-        _workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-        version: i32,
-    ) -> Result<(), LspError> {
-        self.did_change_calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((
-                file_path.to_string_lossy().into_owned(),
-                content.to_owned(),
-                version,
-            ));
-        Ok(())
-    }
-
-    async fn did_close(&self, _workspace_root: &Path, file_path: &Path) -> Result<(), LspError> {
-        self.did_close_calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(file_path.to_string_lossy().into_owned());
-        Ok(())
-    }
-
-    async fn pull_diagnostics(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Self::pop_queued_result(&self.pull_diagnostics_results).unwrap_or_else(|| Ok(vec![]))
-    }
-
-    async fn collect_diagnostics(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-        _content: &str,
-        _version: i32,
-        _timeout_ms: u64,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        // Return empty by default — reuse pull_diagnostics_results queue for testing
-        Self::pop_queued_result(&self.pull_diagnostics_results).unwrap_or_else(|| Ok(vec![]))
-    }
-
-    async fn pull_workspace_diagnostics(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        Self::pop_queued_result(&self.pull_workspace_diagnostics_results)
-            .unwrap_or_else(|| Ok(vec![]))
-    }
-
-    async fn range_formatting(
-        &self,
-        _workspace_root: &Path,
-        _file_path: &Path,
-        _start_line: u32,
-        _end_line: u32,
-        _original_content: &str,
-    ) -> Result<Option<String>, LspError> {
-        let next = {
-            let mut guard = self
-                .range_formatting_result
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.take()
-        };
-
-        match next {
-            Some(Ok(result)) => Ok(result),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
-            None => Ok(None),
-        }
-    }
-
     async fn capability_status(
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
@@ -546,15 +360,7 @@ impl Lawyer for MockLawyer {
     }
 
     async fn force_respawn(&self, _language_id: &str) -> Result<(), LspError> {
-        // No-op in mock — test can verify call count via a separate field if needed
-        Ok(())
-    }
-
-    async fn did_change_watched_files(&self, changes: Vec<FileEvent>) -> Result<(), LspError> {
-        self.watched_file_changes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(changes);
+        // No-op in mock
         Ok(())
     }
 }
@@ -616,141 +422,5 @@ mod tests {
         mock.set_goto_definition_result(Err("LSP crashed".into()));
         let result = mock.goto_definition(&workspace(), &file(), 1, 1).await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_mock_did_open_records_calls() {
-        let mock = MockLawyer::default();
-        mock.did_open(&workspace(), &file(), "fn main() {}")
-            .await
-            .expect("should succeed");
-        assert_eq!(mock.did_open_call_count(), 1);
-        let calls = mock.did_open_calls.lock().expect("lock");
-        assert_eq!(calls[0].0, "src/main.rs");
-        assert_eq!(calls[0].1, "fn main() {}");
-    }
-
-    #[tokio::test]
-    async fn test_mock_did_change_records_calls() {
-        let mock = MockLawyer::default();
-        mock.did_change(&workspace(), &file(), "fn main() { let x = 1; }", 2)
-            .await
-            .expect("should succeed");
-        assert_eq!(mock.did_change_call_count(), 1);
-        let calls = mock.did_change_calls.lock().expect("lock");
-        assert_eq!(calls[0].2, 2); // version
-    }
-
-    #[tokio::test]
-    async fn test_mock_did_close_records_calls() {
-        let mock = MockLawyer::default();
-        mock.did_close(&workspace(), &file())
-            .await
-            .expect("should succeed");
-        assert_eq!(mock.did_close_call_count(), 1);
-        let calls = mock.did_close_calls.lock().expect("lock");
-        assert_eq!(calls[0], "src/main.rs");
-    }
-
-    #[tokio::test]
-    async fn test_mock_pull_diagnostics_empty_queue_returns_empty() {
-        let mock = MockLawyer::default();
-        let result = mock
-            .pull_diagnostics(&workspace(), &file())
-            .await
-            .expect("should succeed");
-        assert!(result.is_empty());
-    }
-
-    /// Shared test helper for diagnostics queue operations.
-    ///
-    /// Extracted to eliminate duplication between `test_mock_pull_diagnostics_returns_configured`
-    /// and `test_mock_pull_workspace_diagnostics_returns_configured`.
-    #[tokio::test]
-    async fn test_mock_pull_diagnostics_returns_configured() {
-        use crate::types::LspDiagnosticSeverity;
-        let mock = MockLawyer::default();
-        let diag = LspDiagnostic {
-            severity: LspDiagnosticSeverity::Error,
-            code: Some("E001".into()),
-            message: "type mismatch".into(),
-            file: "src/main.rs".into(),
-            start_line: 5,
-            end_line: 5,
-        };
-        mock.push_pull_diagnostics_result(Ok(vec![diag.clone()]));
-        let result = mock
-            .pull_diagnostics(&workspace(), &file())
-            .await
-            .expect("should succeed");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].message, "type mismatch");
-    }
-
-    #[tokio::test]
-    async fn test_mock_pull_workspace_diagnostics_empty_queue_returns_empty() {
-        let mock = MockLawyer::default();
-        let result = mock
-            .pull_workspace_diagnostics(&workspace(), &file())
-            .await
-            .expect("should succeed");
-        assert!(result.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_mock_pull_workspace_diagnostics_returns_configured() {
-        use crate::types::LspDiagnosticSeverity;
-        let mock = MockLawyer::default();
-        let diag = LspDiagnostic {
-            severity: LspDiagnosticSeverity::Error,
-            code: Some("W002".into()),
-            message: "workspace error".into(),
-            file: "src/other.rs".into(),
-            start_line: 1,
-            end_line: 1,
-        };
-        mock.push_pull_workspace_diagnostics_result(Ok(vec![diag.clone()]));
-        let result = mock
-            .pull_workspace_diagnostics(&workspace(), &file())
-            .await
-            .expect("should succeed");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].message, "workspace error");
-    }
-
-    #[tokio::test]
-    async fn test_mock_range_formatting_defaults_to_none() {
-        let mock = MockLawyer::default();
-        let result = mock
-            .range_formatting(&workspace(), &file(), 1, 10, "")
-            .await
-            .expect("should succeed");
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mock_range_formatting_returns_configured() {
-        let mock = MockLawyer::default();
-        mock.set_range_formatting_result(Ok(Some("formatted_code".into())));
-        let result = mock
-            .range_formatting(&workspace(), &file(), 1, 5, "")
-            .await
-            .expect("should succeed");
-        assert_eq!(result, Some("formatted_code".into()));
-    }
-
-    #[tokio::test]
-    async fn test_mock_did_change_watched_files_records_calls() {
-        use crate::types::FileChangeType;
-        let mock = MockLawyer::default();
-        mock.did_change_watched_files(vec![FileEvent {
-            uri: "file:///test.rs".into(),
-            change_type: FileChangeType::Created,
-        }])
-        .await
-        .expect("should succeed");
-        assert_eq!(mock.watched_file_changes_count(), 1);
-        let calls = mock.watched_file_changes.lock().expect("lock");
-        assert_eq!(calls[0].uri, "file:///test.rs");
     }
 }

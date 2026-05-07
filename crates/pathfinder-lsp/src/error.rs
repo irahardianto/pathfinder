@@ -42,8 +42,8 @@ pub enum LspError {
     /// The LSP server is running but does not advertise the requested capability.
     ///
     /// For example, a server that doesn't implement Pull Diagnostics (LSP 3.17)
-    /// will trigger this error for `pull_diagnostics()` calls. Tool handlers
-    /// should return `validation_skipped: true, reason: "pull_diagnostics_unsupported"`.
+    /// will trigger this error for diagnostic queries. The tool handler should
+    /// degrade gracefully and report the limitation to the caller.
     #[error("LSP does not support capability: {capability}")]
     UnsupportedCapability {
         /// The LSP capability name (e.g., `"diagnosticProvider"`).

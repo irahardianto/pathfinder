@@ -16,13 +16,13 @@ mod process;
 mod protocol;
 mod transport;
 
-pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy, PushDiagnosticsConfig};
+pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy};
 pub use detect::install_hint;
 pub use detect::{
     detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage,
 };
 
-use crate::types::{CallHierarchyCall, CallHierarchyItem, LspDiagnostic, LspDiagnosticSeverity};
+use crate::types::{CallHierarchyCall, CallHierarchyItem};
 use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -77,10 +77,7 @@ struct LanguageState {
     ///
     /// When `true`, LSP diagnostics validation is automatically skipped to avoid
     /// resource contention with the co-existing instance (e.g. VS Code's LSP).
-    /// Navigation (`goto_definition`, `analyze_impact`) still works normally — only
-    /// the expensive `didOpen/didChange/pull_diagnostics` validation cycle is
-    /// bypassed. This prevents the resource-contention rabbit hole where both
-    /// LSP instances fight over inotify watches and module locks.
+    /// Navigation (`goto_definition`, `analyze_impact`) still works normally.
     in_coexistence_mode: bool,
 }
 
@@ -319,10 +316,8 @@ pub struct LspClient {
     shutdown_tx: Arc<broadcast::Sender<()>>,
     /// Per-file document version counter (ST-4).
     ///
-    /// Keyed by the file URI string. `did_open` sets version 1; `did_change`
-    /// atomically increments it. `did_close` removes the entry.
-    /// This avoids hardcoded version numbers (1, 2, 3) that conflict under
-    /// concurrent operations on the same file.
+    /// Keyed by the file URI string. `did_open` sets version 1.
+    /// `did_close` removes the entry.
     doc_versions: Arc<DashMap<String, std::sync::atomic::AtomicI32>>,
 }
 
@@ -521,6 +516,81 @@ impl LspClient {
             workspace_root.to_path_buf(),
             file_path.to_path_buf(),
         ))
+    }
+
+    /// Open an LSP document (textDocument/didOpen notification).
+    ///
+    /// This is an inherent helper called by `open_document` and not exposed as
+    /// an MCP tool. Sends `textDocument/didOpen` and tracks the document version.
+    async fn did_open(
+        &self,
+        workspace_root: &std::path::Path,
+        file_path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), LspError> {
+        tracing::debug!(file = %file_path.display(), "LSP: did_open");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        // Set version to 1 on open
+        self.doc_versions
+            .insert(file_uri.to_string(), std::sync::atomic::AtomicI32::new(1));
+
+        let params = json!({
+            "textDocument": {
+                "uri": file_uri.as_str(),
+                "languageId": language_id,
+                "version": 1,
+                "text": content
+            }
+        });
+
+        if let Err(e) = self
+            .notify(language_id, "textDocument/didOpen", params)
+            .await
+        {
+            tracing::error!(language = language_id, error = %e, "textDocument/didOpen failed");
+            self.doc_versions.remove(&file_uri.to_string());
+            return Err(e);
+        }
+        self.touch(language_id);
+        Ok(())
+    }
+
+    /// Close an LSP document (textDocument/didClose notification).
+    ///
+    /// Called automatically by `DocumentGuard::drop`. Not exposed as an MCP tool.
+    pub(crate) async fn did_close(
+        &self,
+        workspace_root: &std::path::Path,
+        file_path: &std::path::Path,
+    ) -> Result<(), LspError> {
+        tracing::debug!(file = %file_path.display(), "LSP: did_close");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        self.doc_versions.remove(&file_uri.to_string());
+
+        let params = json!({
+            "textDocument": { "uri": file_uri.as_str() }
+        });
+
+        if let Err(e) = self
+            .notify(language_id, "textDocument/didClose", params)
+            .await
+        {
+            tracing::error!(language = language_id, error = %e, "textDocument/didClose failed");
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Force-respawn the LSP process for the given language.
@@ -1142,13 +1212,6 @@ impl Lawyer for LspClient {
         LspClient::touch_language(self, language_id);
     }
 
-    async fn did_change_watched_files(
-        &self,
-        _changes: Vec<crate::types::FileEvent>,
-    ) -> Result<(), LspError> {
-        Ok(())
-    }
-
     /// IW-3 (DS-1 gap fix): RAII document lifecycle for navigation queries.
     ///
     /// Opens the document via `did_open` and returns a `DocumentGuard` boxed as
@@ -1313,368 +1376,6 @@ impl Lawyer for LspClient {
         .await
     }
 
-    async fn did_open(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-    ) -> Result<(), LspError> {
-        tracing::info!(tool = "did_open", file = %file_path.display(), "LSP operation started");
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
-
-        // ST-4: Set version to 1 on open; did_change will atomically increment.
-        self.doc_versions
-            .insert(file_uri.to_string(), std::sync::atomic::AtomicI32::new(1));
-
-        let params = json!({
-            "textDocument": {
-                "uri": file_uri.as_str(),
-                "languageId": language_id,
-                "version": 1,
-                "text": content
-            }
-        });
-
-        if let Err(e) = self
-            .notify(language_id, "textDocument/didOpen", params)
-            .await
-        {
-            tracing::error!(tool = "did_open", language = language_id, error = %e, "textDocument/didOpen failed");
-            // Clean up version entry on failure to avoid stale tracking
-            self.doc_versions.remove(&file_uri.to_string());
-            return Err(e);
-        }
-        self.touch(language_id);
-        Ok(())
-    }
-
-    async fn did_change(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-        _version: i32,
-    ) -> Result<(), LspError> {
-        tracing::info!(tool = "did_change", file = %file_path.display(), "LSP operation started");
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
-
-        // ST-4: Atomically increment the tracked version, ignoring the caller-supplied
-        // `version` argument. This ensures monotonicity even under concurrent edits.
-        let tracked_version = self
-            .doc_versions
-            .entry(file_uri.to_string())
-            .or_insert_with(|| std::sync::atomic::AtomicI32::new(1))
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-
-        // Full content sync (TextDocumentSyncKind.Full = 1)
-        let params = json!({
-            "textDocument": {
-                "uri": file_uri.as_str(),
-                "version": tracked_version
-            },
-            "contentChanges": [{ "text": content }]
-        });
-
-        if let Err(e) = self
-            .notify(language_id, "textDocument/didChange", params)
-            .await
-        {
-            tracing::error!(tool = "did_change", language = language_id, error = %e, "textDocument/didChange failed");
-            return Err(e);
-        }
-        self.touch(language_id);
-        Ok(())
-    }
-
-    async fn did_close(&self, workspace_root: &Path, file_path: &Path) -> Result<(), LspError> {
-        tracing::info!(tool = "did_close", file = %file_path.display(), "LSP operation started");
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
-
-        // ST-4: Remove version tracking entry on close.
-        self.doc_versions.remove(&file_uri.to_string());
-
-        let params = json!({
-            "textDocument": {
-                "uri": file_uri.as_str()
-            }
-        });
-
-        if let Err(e) = self
-            .notify(language_id, "textDocument/didClose", params)
-            .await
-        {
-            tracing::error!(tool = "did_close", language = language_id, error = %e, "textDocument/didClose failed");
-            return Err(e);
-        }
-        // Not touching `last_used` on close since this is a cleanup action.
-        Ok(())
-    }
-
-    async fn pull_diagnostics(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        let start = Instant::now();
-        tracing::info!(tool = "pull_diagnostics", file = %file_path.display(), "LSP operation started");
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        // Check capability before sending the request
-        let caps = self.capabilities_for(language_id)?;
-        if !matches!(caps.diagnostics_strategy, DiagnosticsStrategy::Pull) {
-            return Err(LspError::UnsupportedCapability {
-                capability: "diagnosticProvider (pull model)".to_owned(),
-            });
-        }
-
-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
-
-        let params = json!({
-            "textDocument": { "uri": file_uri.as_str() }
-        });
-
-        let response = match self
-            .request(
-                language_id,
-                "textDocument/diagnostic",
-                params,
-                Duration::from_secs(30),
-            )
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::error!(tool = "pull_diagnostics", language = language_id, error = %e, "textDocument/diagnostic failed");
-                return Err(e);
-            }
-        };
-
-        self.touch(language_id);
-
-        let elapsed = start.elapsed().as_millis();
-        tracing::debug!(
-            language = language_id,
-            elapsed_ms = elapsed,
-            "textDocument/diagnostic complete"
-        );
-
-        parse_diagnostic_response(&response, file_path)
-    }
-
-    async fn collect_diagnostics(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        content: &str,
-        version: i32,
-        timeout_ms: u64,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        let start = Instant::now();
-        tracing::info!(tool = "collect_diagnostics", file = %file_path.display(), "LSP operation started");
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
-        let file_uri_str = file_uri.to_string();
-
-        // MT-2: Resolve per-server push collection config from capabilities.
-        // Falls back to `PushDiagnosticsConfig::default()` when the caps entry
-        // is missing (e.g., during test-mock scenarios or lazy-started processes).
-        let push_cfg = self
-            .capabilities_for(language_id)
-            .map(|caps| caps.push_collection_config())
-            .unwrap_or_default();
-
-        // Use caller-supplied `timeout_ms` as the ceiling (backward-compatible);
-        // use `push_cfg.grace_ms` as the per-server grace window.
-        let ceiling = Duration::from_millis(timeout_ms);
-        let grace = Duration::from_millis(push_cfg.grace_ms);
-
-        // Send didOpen or didChange depending on version
-        if version <= 1 {
-            self.did_open(workspace_root, file_path, content).await?;
-        } else {
-            self.did_change(workspace_root, file_path, content, version)
-                .await?;
-        }
-
-        // Wait for push diagnostics within ceiling, grace per server profile
-        let raw_diags = self
-            .dispatcher
-            .collect_push_diagnostics(&file_uri_str, ceiling, grace)
-            .await;
-
-        // Parse all collected diagnostics
-        let mut all_diags = Vec::new();
-        for notif in raw_diags {
-            if let Some(items) = notif
-                .pointer("/params/diagnostics")
-                .and_then(|v| v.as_array())
-            {
-                all_diags.extend(parse_diagnostic_items(items, file_path));
-            }
-        }
-
-        self.touch(language_id);
-
-        let elapsed = start.elapsed().as_millis();
-        tracing::debug!(
-            language = language_id,
-            ceiling_ms = push_cfg.ceiling_ms,
-            grace_ms = push_cfg.grace_ms,
-            elapsed_ms = elapsed,
-            "textDocument/publishDiagnostics collection complete"
-        );
-
-        Ok(all_diags)
-    }
-
-    async fn pull_workspace_diagnostics(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-    ) -> Result<Vec<LspDiagnostic>, LspError> {
-        let start = Instant::now();
-        tracing::info!(tool = "pull_workspace_diagnostics", file = %file_path.display(), "LSP operation started");
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        let caps = self.capabilities_for(language_id)?;
-        if !caps.workspace_diagnostic_provider {
-            return Err(LspError::UnsupportedCapability {
-                capability: "workspaceDiagnosticProvider".to_owned(),
-            });
-        }
-
-        // The params for workspace diagnostics are typically quite minimal
-        let params = json!({});
-
-        let response = match self
-            .request(
-                language_id,
-                "workspace/diagnostic",
-                params,
-                Duration::from_mins(1), // Workspace diagnostics might take longer
-            )
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::error!(tool = "pull_workspace_diagnostics", language = language_id, error = %e, "workspace/diagnostic failed");
-                return Err(e);
-            }
-        };
-
-        self.touch(language_id);
-
-        let elapsed = start.elapsed().as_millis();
-        tracing::debug!(
-            language = language_id,
-            elapsed_ms = elapsed,
-            "workspace/diagnostic complete"
-        );
-
-        parse_workspace_diagnostic_response(&response, workspace_root)
-    }
-
-    async fn range_formatting(
-        &self,
-        workspace_root: &Path,
-        file_path: &Path,
-        start_line: u32,
-        end_line: u32,
-        _original_content: &str,
-    ) -> Result<Option<String>, LspError> {
-        tracing::info!(tool = "range_formatting", file = %file_path.display(), "LSP operation started");
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
-
-        // Check capability before sending the request
-        let caps = self.capabilities_for(language_id)?;
-        if !caps.formatting_provider {
-            return Err(LspError::UnsupportedCapability {
-                capability: "documentFormattingProvider".to_owned(),
-            });
-        }
-
-        let file_uri = Url::from_file_path(workspace_root.join(file_path))
-            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
-
-        // LSP positions are 0-indexed, our API is 1-indexed
-        let params = json!({
-            "textDocument": { "uri": file_uri.as_str() },
-            "range": {
-                "start": { "line": start_line.saturating_sub(1), "character": 0 },
-                "end":   { "line": end_line.saturating_sub(1),   "character": 0 }
-            },
-            "options": { "tabSize": 4, "insertSpaces": true }
-        });
-
-        let response = match self
-            .request(
-                language_id,
-                "textDocument/rangeFormatting",
-                params,
-                Duration::from_secs(10),
-            )
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::error!(tool = "range_formatting", language = language_id, error = %e, "textDocument/rangeFormatting failed");
-                return Err(e);
-            }
-        };
-
-        self.touch(language_id);
-
-        tracing::info!(
-            tool = "range_formatting",
-            language = language_id,
-            "textDocument/rangeFormatting complete"
-        );
-
-        if response.is_null() {
-            return Ok(None);
-        }
-
-        if let Some(edits) = response.as_array() {
-            tracing::debug!(
-                language = language_id,
-                edit_count = edits.len(),
-                "LSP returned range formatting edits (currently ignored)"
-            );
-        }
-
-        // response is an array of TextEdit objects; we currently don't apply them
-        // (we just signal availability). The Tree-sitter indentation pre-pass
-        // is sufficient. Return None to indicate "no formatted text substitution".
-        Ok(None)
-    }
-
     async fn capability_status(&self) -> HashMap<String, crate::types::LspLanguageStatus> {
         let mut status = HashMap::new();
         for desc in self.descriptors.iter() {
@@ -1709,130 +1410,6 @@ impl Lawyer for LspClient {
         LspClient::force_respawn(self, language_id).await
     }
 }
-
-/// Parse the `textDocument/diagnostic` response into a `Vec<LspDiagnostic>`.
-///
-/// The response shape is: `{ "kind": "full", "items": [Diagnostic, ...] }`
-/// or `{ "kind": "unchanged", "resultId": "..." }` for unchanged results.
-fn parse_diagnostic_response(
-    response: &serde_json::Value,
-    file_path: &Path,
-) -> Result<Vec<LspDiagnostic>, LspError> {
-    // "unchanged" kind means diagnostics have not changed since last pull
-    if response.get("kind").and_then(|k| k.as_str()) == Some("unchanged") {
-        return Ok(vec![]);
-    }
-
-    let items = match response.get("items") {
-        Some(serde_json::Value::Array(arr)) => arr,
-        Some(_) => {
-            return Err(LspError::Protocol(
-                "diagnostics 'items' is not an array".to_owned(),
-            ))
-        }
-        // Some LSPs return flat arrays (not wrapped in {kind, items})
-        None => {
-            if let Some(arr) = response.as_array() {
-                return Ok(parse_diagnostic_items(arr, file_path));
-            }
-            return Ok(vec![]);
-        }
-    };
-
-    Ok(parse_diagnostic_items(items, file_path))
-}
-
-/// Parse the `workspace/diagnostic` response into a flat `Vec<LspDiagnostic>`.
-///
-/// Response shape: `{ "items": [ { "uri": "...", "kind": "full", "items": [Diagnostic, ...] } ] }`
-fn parse_workspace_diagnostic_response(
-    response: &serde_json::Value,
-    workspace_root: &Path,
-) -> Result<Vec<LspDiagnostic>, LspError> {
-    let mut all_diags = Vec::new();
-
-    let items = response
-        .get("items")
-        .and_then(|i| i.as_array())
-        .ok_or_else(|| {
-            LspError::Protocol("workspace.diagnostic 'items' is missing or not an array".to_owned())
-        })?;
-
-    for doc_report in items {
-        if doc_report.get("kind").and_then(|k| k.as_str()) == Some("unchanged") {
-            continue;
-        }
-
-        let Some(uri_str) = doc_report.get("uri").and_then(|u| u.as_str()) else {
-            continue;
-        };
-
-        // Convert URI to relative file path using workspace_root
-        let file_path = match Url::parse(uri_str) {
-            Ok(url) => match url.to_file_path() {
-                Ok(path) => path
-                    .strip_prefix(workspace_root)
-                    .map_or_else(|_| path.clone(), std::path::Path::to_path_buf),
-                Err(()) => continue,
-            },
-            Err(_) => continue,
-        };
-
-        if let Some(doc_items) = doc_report.get("items").and_then(|i| i.as_array()) {
-            all_diags.extend(parse_diagnostic_items(doc_items, &file_path));
-        }
-    }
-
-    Ok(all_diags)
-}
-
-/// Parse an array of LSP `Diagnostic` objects.
-fn parse_diagnostic_items(items: &[serde_json::Value], file_path: &Path) -> Vec<LspDiagnostic> {
-    let mut result = Vec::with_capacity(items.len());
-    let file_str = file_path.to_string_lossy().into_owned();
-
-    for item in items {
-        let severity = match item["severity"].as_u64().unwrap_or(1) {
-            1 => LspDiagnosticSeverity::Error,
-            2 => LspDiagnosticSeverity::Warning,
-            3 => LspDiagnosticSeverity::Information,
-            _ => LspDiagnosticSeverity::Hint,
-        };
-
-        let message = item["message"].as_str().unwrap_or("").to_owned();
-        if message.is_empty() {
-            continue; // Skip diagnostics with no message
-        }
-
-        let code = item.get("code").and_then(|c| match c {
-            serde_json::Value::String(s) => Some(s.clone()),
-            serde_json::Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        });
-
-        let start_line = item["range"]["start"]["line"]
-            .as_u64()
-            .map_or(1, |l| u32::try_from(l + 1).unwrap_or(1));
-        let end_line = item["range"]["end"]["line"]
-            .as_u64()
-            .map_or(start_line, |l| u32::try_from(l + 1).unwrap_or(1));
-
-        result.push(LspDiagnostic {
-            severity,
-            code,
-            message,
-            file: file_str.clone(),
-            start_line,
-            end_line,
-        });
-    }
-
-    result
-}
-
-/// Parse the `textDocument/definition` response into a `DefinitionLocation`.
-///
-/// Returns `Ok(None)` for JSON `null` (no definition found).
 fn parse_definition_response(
     response: serde_json::Value,
 ) -> Result<Option<DefinitionLocation>, LspError> {
@@ -2437,193 +2014,6 @@ mod tests {
         let result = parse_definition_response(response).expect("ok");
         // Empty array → null first element → None
         assert!(result.is_none());
-    }
-
-    // ── parse_diagnostic_response tests ───────────────────────────
-
-    #[test]
-    fn test_parse_diagnostic_response_full() {
-        let response = json!({
-            "kind": "full",
-            "items": [
-                {
-                    "severity": 1,
-                    "message": "type mismatch",
-                    "range": {
-                        "start": { "line": 4, "character": 0 },
-                        "end": { "line": 4, "character": 10 }
-                    },
-                    "code": "E0308"
-                }
-            ]
-        });
-        let result = parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].severity, LspDiagnosticSeverity::Error);
-        assert_eq!(result[0].message, "type mismatch");
-        assert_eq!(result[0].start_line, 5);
-        assert_eq!(result[0].end_line, 5);
-        assert_eq!(result[0].code.as_deref(), Some("E0308"));
-    }
-
-    #[test]
-    fn test_parse_diagnostic_response_unchanged() {
-        let response = json!({"kind": "unchanged", "resultId": "abc"});
-        let result = parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_diagnostic_response_flat_array() {
-        // Some LSPs return flat arrays without wrapping
-        let response = json!([
-            {
-                "severity": 2,
-                "message": "unused variable",
-                "range": {
-                    "start": { "line": 9, "character": 3 },
-                    "end": { "line": 9, "character": 7 }
-                }
-            }
-        ]);
-        let result = parse_diagnostic_response(&response, Path::new("src/lib.rs")).expect("ok");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].severity, LspDiagnosticSeverity::Warning);
-    }
-
-    #[test]
-    fn test_parse_diagnostic_response_empty_object() {
-        let response = json!({});
-        let result = parse_diagnostic_response(&response, Path::new("src/main.rs")).expect("ok");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_diagnostic_response_items_not_array() {
-        let response = json!({"items": "not_an_array"});
-        let result = parse_diagnostic_response(&response, Path::new("src/main.rs"));
-        assert!(result.is_err());
-        match result {
-            Err(LspError::Protocol(msg)) => assert!(msg.contains("not an array")),
-            _ => panic!("expected Protocol error"),
-        }
-    }
-
-    #[test]
-    fn test_parse_definition_response_invalid_uri_fallback() {
-        // Provide an invalid URL. It should fallback to the raw URI string.
-        let response = json!({
-            "uri": "invalid_url_no_scheme",
-            "range": {
-                "start": { "line": 10, "character": 0 },
-                "end":   { "line": 10, "character": 5 }
-            }
-        });
-        let result = parse_definition_response(response).expect("ok");
-        let loc = result.expect("some location");
-        assert_eq!(loc.file, "invalid_url_no_scheme");
-    }
-
-    // ── parse_diagnostic_items tests ──────────────────────────────
-
-    #[test]
-    fn test_parse_diagnostic_items_severity_mapping() {
-        let items = json!([
-            {"severity": 1, "message": "err", "range": {"start": {"line": 0}, "end": {"line": 0}}},
-            {"severity": 2, "message": "warn", "range": {"start": {"line": 1}, "end": {"line": 1}}},
-            {"severity": 3, "message": "info", "range": {"start": {"line": 2}, "end": {"line": 2}}},
-            {"severity": 4, "message": "hint", "range": {"start": {"line": 3}, "end": {"line": 3}}}
-        ]);
-        let result = parse_diagnostic_items(items.as_array().unwrap(), Path::new("test.rs"));
-        assert_eq!(result.len(), 4);
-        assert_eq!(result[0].severity, LspDiagnosticSeverity::Error);
-        assert_eq!(result[1].severity, LspDiagnosticSeverity::Warning);
-        assert_eq!(result[2].severity, LspDiagnosticSeverity::Information);
-        assert_eq!(result[3].severity, LspDiagnosticSeverity::Hint);
-    }
-
-    #[test]
-    fn test_parse_diagnostic_items_skips_empty_message() {
-        let items = json!([
-            {"severity": 1, "message": "", "range": {"start": {"line": 0}, "end": {"line": 0}}},
-            {"severity": 1, "message": "real error", "range": {"start": {"line": 1}, "end": {"line": 1}}}
-        ]);
-        let result = parse_diagnostic_items(items.as_array().unwrap(), Path::new("test.rs"));
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].message, "real error");
-    }
-
-    #[test]
-    fn test_parse_diagnostic_items_numeric_code() {
-        let items = json!([
-            {"severity": 1, "message": "err", "code": 1234, "range": {"start": {"line": 0}, "end": {"line": 0}}}
-        ]);
-        let result = parse_diagnostic_items(items.as_array().unwrap(), Path::new("test.rs"));
-        assert_eq!(result[0].code.as_deref(), Some("1234"));
-    }
-
-    // ── parse_workspace_diagnostic_response tests ─────────────────
-
-    #[test]
-    fn test_parse_workspace_diagnostic_response_success() {
-        let temp = std::env::temp_dir().join("pathfinder_wd_test");
-        let _ = std::fs::create_dir_all(&temp);
-        let file_path = temp.join("src/main.rs");
-        std::fs::create_dir_all(temp.join("src")).ok();
-        std::fs::write(&file_path, "fn main() {}").ok();
-
-        let file_uri = Url::from_file_path(&file_path).unwrap().to_string();
-        let response = json!({
-            "items": [{
-                "uri": file_uri,
-                "kind": "full",
-                "items": [
-                    {
-                        "severity": 1,
-                        "message": "error here",
-                        "range": {"start": {"line": 0}, "end": {"line": 0}}
-                    }
-                ]
-            }]
-        });
-        let result = parse_workspace_diagnostic_response(&response, &temp).expect("ok");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].message, "error here");
-
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn test_parse_workspace_diagnostic_response_missing_items() {
-        let response = json!({});
-        let result = parse_workspace_diagnostic_response(&response, &std::env::temp_dir());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_workspace_diagnostic_response_unchanged_skipped() {
-        let temp = std::env::temp_dir().join("pathfinder_wd_unchanged");
-        let response = json!({
-            "items": [{
-                "kind": "unchanged",
-                "resultId": "abc"
-            }]
-        });
-        let result = parse_workspace_diagnostic_response(&response, &temp).expect("ok");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_workspace_diagnostic_response_no_uri_skipped() {
-        let response = json!({
-            "items": [{
-                "kind": "full",
-                "items": [{"severity": 1, "message": "err", "range": {"start": {"line": 0}, "end": {"line": 0}}}]
-            }]
-        });
-        let result =
-            parse_workspace_diagnostic_response(&response, &std::env::temp_dir()).expect("ok");
-        assert!(result.is_empty(), "entry without URI should be skipped");
     }
 
     // ── parse_call_hierarchy_prepare_response tests ───────────────
@@ -3312,70 +2702,6 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_lawyer_did_change_no_lsp() {
-        let client = client_no_languages();
-        let result = client
-            .did_change(
-                Path::new("/workspace"),
-                Path::new("src/main.rs"),
-                "fn main() { updated }",
-                2,
-            )
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_lawyer_did_close_no_lsp() {
-        let client = client_no_languages();
-        let result = client
-            .did_close(Path::new("/workspace"), Path::new("src/main.rs"))
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_lawyer_pull_diagnostics_no_lsp() {
-        let client = client_no_languages();
-        let result = client
-            .pull_diagnostics(Path::new("/workspace"), Path::new("src/main.rs"))
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_lawyer_pull_workspace_diagnostics_no_lsp() {
-        let client = client_no_languages();
-        let result = client
-            .pull_workspace_diagnostics(Path::new("/workspace"), Path::new("src/main.rs"))
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_lawyer_range_formatting_no_lsp() {
-        let client = client_no_languages();
-        let result = client
-            .range_formatting(
-                Path::new("/workspace"),
-                Path::new("src/main.rs"),
-                1,
-                5,
-                "fn main() {}",
-            )
-            .await;
-        assert!(matches!(result, Err(LspError::NoLspAvailable)));
-    }
-
-    #[tokio::test]
-    async fn test_lawyer_did_change_watched_files_is_noop() {
-        // did_change_watched_files on LspClient is currently a no-op
-        let client = client_no_languages();
-        let result = client.did_change_watched_files(vec![]).await;
-        assert!(result.is_ok());
     }
 
     // ── touch tests ──────────────────────────────────────────────
