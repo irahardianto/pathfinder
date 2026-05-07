@@ -68,7 +68,7 @@ mod tools;
 pub mod types;
 
 use types::{
-    AnalyzeImpactParams, GetDefinitionParams, GetDefinitionResponse, GetRepoMapParams,
+    AnalyzeImpactParams, GetDefinitionParams, GetRepoMapParams,
     ReadFileParams, ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams,
     SearchCodebaseParams, SearchCodebaseResponse,
 };
@@ -271,7 +271,7 @@ impl PathfinderServer {
     async fn get_definition(
         &self,
         Parameters(params): Parameters<GetDefinitionParams>,
-    ) -> Result<Json<GetDefinitionResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.get_definition_impl(params).await
     }
 
@@ -293,10 +293,7 @@ impl PathfinderServer {
     async fn lsp_health(
         &self,
         Parameters(params): Parameters<crate::server::types::LspHealthParams>,
-    ) -> Result<
-        rmcp::handler::server::wrapper::Json<crate::server::types::LspHealthResponse>,
-        ErrorData,
-    > {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.lsp_health_impl(params).await
     }
 

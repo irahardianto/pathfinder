@@ -377,6 +377,8 @@ pub struct ReadFileMetadata {
     pub lines_returned: u32,
     /// Total number of lines in the file.
     pub total_lines: u32,
+    /// Total size of the file in bytes.
+    pub file_size_bytes: u64,
     /// Whether the output was truncated.
     pub truncated: bool,
     /// Detected language of the file.
@@ -426,7 +428,7 @@ pub struct ReadWithDeepContextMetadata {
 }
 
 /// The response for `get_definition`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetDefinitionResponse {
     /// Relative file path of the definition site.
     pub file: String,
@@ -566,19 +568,19 @@ pub struct LspLanguageHealth {
     pub navigation_ready: Option<bool>,
     /// Whether the status was verified by a live probe (rather than just progress notifications).
     /// When true, the agent can trust the status.
-    #[serde(skip_serializing_if = "crate::server::types::is_false")]
+    #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
     pub probe_verified: bool,
     /// Install guidance when LSP is unavailable.
     ///
     /// Provides actionable commands users can run to install their LSP servers.
     /// `None` when LSP is running or language not detected at all.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub install_hint: Option<String>,
     /// Tools that are degraded (using fallback) for this language.
     ///
     /// Empty when LSP is fully operational. Lists which tools lose LSP support.
     /// Example: `["analyze_impact", "read_with_deep_context"]` when call hierarchy unsupported.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub degraded_tools: Vec<String>,
 }
 

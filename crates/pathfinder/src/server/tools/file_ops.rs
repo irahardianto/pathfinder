@@ -69,12 +69,20 @@ impl PathfinderServer {
         // 3. Paginate — start_line is 1-indexed
         let all_lines: Vec<&str> = raw_content.lines().collect();
         let total_lines = u32::try_from(all_lines.len()).unwrap_or(u32::MAX);
+        let file_size_bytes = u64::try_from(raw_content.len()).unwrap_or(u64::MAX);
         let start_idx = params.start_line.saturating_sub(1) as usize;
         let end_idx = (start_idx + params.max_lines as usize).min(all_lines.len());
         let page_lines = &all_lines[start_idx..end_idx];
         let lines_returned = u32::try_from(page_lines.len()).unwrap_or(u32::MAX);
         let truncated = end_idx < all_lines.len();
-        let content = page_lines.join("\n");
+        // Prefix each line with its 1-indexed line number so agents can reference
+        // locations without a follow-up call. Width is padded to align columns.
+        let content: String = page_lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("{:>6} | {}", start_idx + i + 1, line))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         // 4. Detect language from extension
         let language = language_from_path(relative_path);
@@ -96,6 +104,7 @@ impl PathfinderServer {
             start_line: params.start_line,
             lines_returned,
             total_lines,
+            file_size_bytes,
             truncated,
             language,
         };

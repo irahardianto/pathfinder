@@ -21,7 +21,6 @@ use crate::server::types::{
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
 use pathfinder_lsp::LspError;
-use rmcp::handler::server::wrapper::Json;
 use rmcp::model::{CallToolResult, ErrorData};
 
 /// GAP-002: Re-probe interval for "ready" languages to check liveness.
@@ -192,7 +191,7 @@ impl PathfinderServer {
     pub(crate) async fn get_definition_impl(
         &self,
         params: GetDefinitionParams,
-    ) -> Result<Json<GetDefinitionResponse>, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
         tracing::info!(
@@ -275,7 +274,7 @@ impl PathfinderServer {
                     engines_used = ?["tree-sitter", "lsp"],
                     "get_definition: complete"
                 );
-                Ok(Json(GetDefinitionResponse {
+                Ok(Self::get_def_to_call_result(&GetDefinitionResponse {
                     file: def.file,
                     line: def.line,
                     column: def.column,
@@ -314,7 +313,7 @@ impl PathfinderServer {
                         engines_used = ?["tree-sitter", "lsp"],
                         "get_definition: complete (succeeded on retry after warmup wait)"
                     );
-                    return Ok(Json(GetDefinitionResponse {
+                    return Ok(Self::get_def_to_call_result(&GetDefinitionResponse {
                         file: def.file,
                         line: def.line,
                         column: def.column,
@@ -351,7 +350,7 @@ impl PathfinderServer {
                         engines_used = ?["tree-sitter", "lsp", "ripgrep"],
                         "get_definition: degraded complete (grep fallback after LSP None)"
                     );
-                    return Ok(Json(def));
+                    return Ok(Self::get_def_to_call_result(&def));
                 }
 
                 tracing::info!(
@@ -395,7 +394,7 @@ impl PathfinderServer {
                         engines_used = ?["tree-sitter", "ripgrep"],
                         "get_definition: degraded complete (grep fallback)"
                     );
-                    return Ok(Json(def));
+                    return Ok(Self::get_def_to_call_result(&def));
                 }
 
                 // No grep match either — return the original LSP error
@@ -435,7 +434,7 @@ impl PathfinderServer {
                         engines_used = ?["tree-sitter", "lsp", "ripgrep"],
                         "get_definition: degraded complete (grep fallback after timeout)"
                     );
-                    return Ok(Json(def));
+                    return Ok(Self::get_def_to_call_result(&def));
                 }
 
                 tracing::warn!(
@@ -479,7 +478,7 @@ impl PathfinderServer {
                         engines_used = ?["tree-sitter", "lsp", "ripgrep"],
                         "get_definition: degraded complete (grep fallback after LSP error)"
                     );
-                    return Ok(Json(def));
+                    return Ok(Self::get_def_to_call_result(&def));
                 }
 
                 tracing::warn!(
@@ -494,6 +493,31 @@ impl PathfinderServer {
             }
         }
     }
+
+    /// Convert a `GetDefinitionResponse` into a `CallToolResult` with a
+    /// human-readable text summary and the struct in `structured_content`.
+    ///
+    /// Mirrors the pattern used by all other tools in the suite.
+    fn get_def_to_call_result(def: &GetDefinitionResponse) -> rmcp::model::CallToolResult {
+        let text = if def.degraded {
+            let reason = def.degraded_reason.as_deref().unwrap_or("unknown");
+            format!(
+                "DEGRADED ({reason}) — {}:L{} — {}",
+                def.file, def.line,
+                if def.preview.is_empty() { "(no preview)" } else { &def.preview }
+            )
+        } else {
+            format!(
+                "{}:L{} col:{} — {}",
+                def.file, def.line, def.column,
+                if def.preview.is_empty() { "(no preview)" } else { &def.preview }
+            )
+        };
+        let mut res = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
+        res.structured_content = serialize_metadata(def);
+        res
+    }
+
 
     /// Grep-based fallback for definition resolution when LSP is unavailable or warming up.
     ///
@@ -701,6 +725,10 @@ impl PathfinderServer {
     /// Returns the symbol's source code. When LSP is available, appends the
     /// signatures of all called symbols. Degrades gracefully to symbol scope
     /// only when no LSP is configured.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline: parse → sandbox → TS → LSP → dep-block rendering. Linear structure is intentional for readability."
+    )]
     pub(crate) async fn read_with_deep_context_impl(
         &self,
         params: ReadWithDeepContextParams,
@@ -799,15 +827,31 @@ impl PathfinderServer {
             lsp_readiness,
         };
 
+        // Build the dependency block: list each callee signature, file, and line.
+        // This surfaces the same data as structured_content.dependencies in plain text
+        // so agents reading the text channel don't need to parse JSON.
+        let dep_block: String = if metadata.dependencies.is_empty() {
+            String::new()
+        } else {
+            let mut lines = Vec::with_capacity(metadata.dependencies.len());
+            for dep in &metadata.dependencies {
+                lines.push(format!(
+                    "  {} ({}:L{})",
+                    dep.signature, dep.file, dep.line
+                ));
+            }
+            format!("\n{}", lines.join("\n"))
+        };
+
         // Prepend degradation notice when in degraded mode
         let text = if degraded {
             let reason = degraded_reason.as_deref().unwrap_or("unknown");
             format!(
-                "DEGRADED MODE ({}) — {dep_count} dependencies loaded (results may be incomplete)\n\n{}",
+                "DEGRADED MODE ({}) — {dep_count} dependencies loaded (results may be incomplete){dep_block}\n\n{}",
                 reason, scope.content
             )
         } else {
-            format!("{dep_count} dependencies loaded\n\n{}", scope.content)
+            format!("{dep_count} dependencies loaded{dep_block}\n\n{}", scope.content)
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);
@@ -1300,7 +1344,8 @@ impl PathfinderServer {
             degraded_reason,
         };
 
-        // Build honest text output based on actual results
+        // Build honest text output based on actual results, listing every
+        // reference so agents can act without parsing structured_content.
         let mut text_parts = Vec::new();
         if degraded {
             text_parts.push(format!(
@@ -1308,9 +1353,32 @@ impl PathfinderServer {
                 degraded_reason_cloned.as_deref().unwrap_or("unknown")
             ));
         }
-        // Add summary
+        // Incoming
         text_parts.push(format!("Incoming references: {inc_count}"));
+        if let Some(refs) = &metadata.incoming {
+            for r in refs {
+                text_parts.push(format!(
+                    "  [depth={}] {} ({}:L{})",
+                    r.depth, r.semantic_path, r.file, r.line
+                ));
+                if !r.snippet.is_empty() {
+                    text_parts.push(format!("    > {}", r.snippet.trim()));
+                }
+            }
+        }
+        // Outgoing
         text_parts.push(format!("Outgoing references: {out_count}"));
+        if let Some(refs) = &metadata.outgoing {
+            for r in refs {
+                text_parts.push(format!(
+                    "  [depth={}] {} ({}:L{})",
+                    r.depth, r.semantic_path, r.file, r.line
+                ));
+                if !r.snippet.is_empty() {
+                    text_parts.push(format!("    > {}", r.snippet.trim()));
+                }
+            }
+        }
 
         let text = text_parts.join("\n");
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
@@ -1328,10 +1396,7 @@ impl PathfinderServer {
     pub(crate) async fn lsp_health_impl(
         &self,
         params: crate::server::types::LspHealthParams,
-    ) -> Result<
-        rmcp::handler::server::wrapper::Json<crate::server::types::LspHealthResponse>,
-        ErrorData,
-    > {
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         // IW-4: Handle action="restart" before the normal health query flow.
         if params.action.as_deref() == Some("restart") {
             let lang = match &params.language {
@@ -1632,12 +1697,39 @@ impl PathfinderServer {
             overall_status = "unavailable";
         }
 
-        Ok(rmcp::handler::server::wrapper::Json(
-            crate::server::types::LspHealthResponse {
-                status: overall_status.to_owned(),
-                languages,
-            },
-        ))
+        let response = crate::server::types::LspHealthResponse {
+            status: overall_status.to_owned(),
+            languages,
+        };
+
+        // Build a concise human-readable summary for the text channel.
+        // Agents reading plain text get actionable status without parsing JSON.
+        let lang_lines: Vec<String> = response
+            .languages
+            .iter()
+            .map(|l| {
+                let mut parts = vec![format!("{}: {}", l.language, l.status)];
+                if l.probe_verified {
+                    parts.push("(probe_verified)".to_owned());
+                }
+                if let Some(ref idx) = l.indexing_status {
+                    parts.push(format!("indexing: {idx}"));
+                }
+                if !l.degraded_tools.is_empty() {
+                    parts.push(format!("degraded_tools: [{}]", l.degraded_tools.join(", ")));
+                }
+                parts.join(" ")
+            })
+            .collect();
+        let text = if lang_lines.is_empty() {
+            format!("LSP status: {} — no languages detected", response.status)
+        } else {
+            format!("LSP status: {}\n{}", response.status, lang_lines.join("\n"))
+        };
+
+        let mut res = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
+        res.structured_content = serialize_metadata(&response);
+        Ok(res)
     }
 
     /// Probe whether an LSP is actually ready by attempting a lightweight operation.
@@ -1896,6 +1988,17 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    /// Extract `GetDefinitionResponse` from a `CallToolResult.structured_content`.
+    /// Replaces the old `call_res.0` tuple-unwrap from the `Json<T>` era.
+    fn unpack_def(res: rmcp::model::CallToolResult) -> crate::server::types::GetDefinitionResponse {
+        serde_json::from_value(res.structured_content.expect("structured_content")).unwrap()
+    }
+
+    /// Extract `LspHealthResponse` from a `CallToolResult.structured_content`.
+    fn unpack_health(res: rmcp::model::CallToolResult) -> crate::server::types::LspHealthResponse {
+        serde_json::from_value(res.structured_content.expect("structured_content")).unwrap()
+    }
+
     fn make_server_with_lawyer(
         mock_surgeon: Arc<MockSurgeon>,
         mock_lawyer: Arc<MockLawyer>,
@@ -1951,7 +2054,7 @@ mod tests {
 
         let result = server.get_definition_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_def(call_res);
 
         assert_eq!(val.file, "src/auth.rs");
         assert_eq!(val.line, 42);
@@ -2128,7 +2231,10 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(text_content, "1 dependencies loaded\n\nfn login() { }");
+        assert_eq!(
+            text_content,
+            "1 dependencies loaded\n  fn validate_token() -> bool (src/token.rs:L15)\n\nfn login() { }"
+        );
         assert!(!val.degraded);
         assert_eq!(val.degraded_reason, None);
         assert_eq!(val.dependencies.len(), 1);
@@ -2355,16 +2461,16 @@ mod tests {
         let Ok(res) = result else {
             panic!("expected Ok with grep fallback, got Err");
         };
-        assert!(res.0.degraded, "should be degraded");
-        assert_eq!(res.0.file, "src/auth.rs");
+        let val = unpack_def(res);
+        assert!(val.degraded, "should be degraded");
+        assert_eq!(val.file, "src/auth.rs");
         assert!(
-            res.0
-                .degraded_reason
+            val.degraded_reason
                 .as_ref()
                 .unwrap()
                 .contains("lsp_error_grep_fallback"),
             "degraded_reason should mention lsp_error_grep_fallback: {:?}",
-            res.0.degraded_reason
+            val.degraded_reason
         );
     }
 
@@ -2421,15 +2527,15 @@ mod tests {
         let Ok(res) = result else {
             panic!("expected Ok with grep fallback, got Err");
         };
-        assert!(res.0.degraded, "should be degraded");
+        let val = unpack_def(res);
+        assert!(val.degraded, "should be degraded");
         assert!(
-            res.0
-                .degraded_reason
+            val.degraded_reason
                 .as_ref()
                 .unwrap()
                 .contains("lsp_error_grep_fallback"),
             "degraded_reason: {:?}",
-            res.0.degraded_reason
+            val.degraded_reason
         );
     }
 
@@ -2523,10 +2629,10 @@ mod tests {
             panic!("expected Ok with grep fallback, got Err");
         };
         // Should return degraded result from grep
-        assert!(res.0.degraded);
-        assert_eq!(res.0.file, "src/other.rs");
-        assert!(res
-            .0
+        let val = unpack_def(res);
+        assert!(val.degraded);
+        assert_eq!(val.file, "src/other.rs");
+        assert!(val
             .degraded_reason
             .as_ref()
             .unwrap()
@@ -3059,7 +3165,7 @@ mod tests {
         let params = crate::server::types::LspHealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         assert_eq!(val.status, "unavailable");
         assert!(val.languages.is_empty());
@@ -3097,7 +3203,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         assert_eq!(val.languages.len(), 1);
         let go_health = &val.languages[0];
@@ -3140,7 +3246,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         assert_eq!(val.languages.len(), 1);
         let rust_health = &val.languages[0];
@@ -3180,7 +3286,7 @@ mod tests {
         let params = crate::server::types::LspHealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         assert_eq!(val.languages.len(), 1);
         let ts_health = &val.languages[0];
@@ -3238,7 +3344,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         // With two-phase readiness model: navigation_ready = Some(true) means
         // status is immediately "ready" without waiting for indexing.
@@ -3298,7 +3404,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         // GAP-002: With liveness probe, when the LSP was "ready" but becomes
         // non-responsive, the status should be downgraded to "degraded".
@@ -3350,7 +3456,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         // With two-phase readiness: navigation_ready = Some(true) means status
         // is immediately "ready" - uptime doesn't matter when capability is confirmed.
@@ -3402,7 +3508,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         // Status should be "ready" and probe not attempted
         assert_eq!(val.status, "ready");
@@ -3572,7 +3678,7 @@ mod tests {
         let params = crate::server::types::LspHealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         // Should have 3 languages total: 1 detected + 2 missing
         assert_eq!(val.languages.len(), 3);
@@ -3633,7 +3739,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         // Should only return Python, not Rust
         assert_eq!(val.languages.len(), 1);
@@ -3678,7 +3784,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         assert_eq!(val.languages.len(), 1);
         let go_health = &val.languages[0];
@@ -3736,7 +3842,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         assert_eq!(val.languages.len(), 1);
         let rust_health = &val.languages[0];
@@ -3780,7 +3886,7 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val = call_res.0;
+        let val = unpack_health(call_res);
 
         assert_eq!(val.languages.len(), 1);
         let go_health = &val.languages[0];
@@ -3860,7 +3966,7 @@ mod tests {
             language: Some("python".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let val = unpack_health(result.expect("should succeed"));
 
         let py_health = &val.languages[0];
         // Status is "ready" because navigation_ready=true
@@ -3908,7 +4014,7 @@ mod tests {
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let val = unpack_health(result.expect("should succeed"));
 
         let rust_health = &val.languages[0];
         assert_eq!(rust_health.status, "ready");
@@ -3978,7 +4084,7 @@ mod tests {
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let val = unpack_health(result.expect("should succeed"));
 
         let rust_health = &val.languages[0];
         // Status should stay "warming_up" because cached negative result skipped the probe
@@ -4031,7 +4137,7 @@ mod tests {
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let val = unpack_health(result.expect("should succeed"));
 
         let rust_health = &val.languages[0];
         assert_eq!(rust_health.status, "ready");
@@ -4097,7 +4203,7 @@ mod tests {
             language: Some("rust".to_string()),
         };
         let result = server.lsp_health_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let val = unpack_health(result.expect("should succeed"));
 
         // Status should be downgraded to "degraded"
         assert_eq!(val.status, "degraded");
@@ -4151,7 +4257,7 @@ mod tests {
                 language: Some("rust".to_string()),
             })
             .await;
-        let val1 = result1.expect("should succeed").0;
+        let val1 = unpack_health(result1.expect("should succeed"));
         assert!(val1.languages[0].probe_verified);
 
         // Verify cache was populated
@@ -4169,7 +4275,7 @@ mod tests {
                 language: Some("rust".to_string()),
             })
             .await;
-        let val2 = result2.expect("should succeed").0;
+        let val2 = unpack_health(result2.expect("should succeed"));
         assert!(val2.languages[0].probe_verified);
         // Goto definition should not be called again (cache hit)
         assert_eq!(lawyer.goto_definition_call_count(), call_count_before);
@@ -4228,7 +4334,7 @@ mod tests {
 
         let call_count_before = lawyer.goto_definition_call_count();
         let result = server.lsp_health_impl(params).await;
-        let val = result.expect("should succeed").0;
+        let val = unpack_health(result.expect("should succeed"));
 
         // Should use cached result without probing
         assert!(val.languages[0].probe_verified);

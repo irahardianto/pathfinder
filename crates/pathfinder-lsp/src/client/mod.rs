@@ -1282,7 +1282,7 @@ impl Lawyer for LspClient {
             "textDocument/definition complete"
         );
 
-        parse_definition_response(response)
+        parse_definition_response(response, workspace_root)
     }
 
     async fn call_hierarchy_prepare(
@@ -1412,6 +1412,7 @@ impl Lawyer for LspClient {
 }
 fn parse_definition_response(
     response: serde_json::Value,
+    workspace_root: &Path,
 ) -> Result<Option<DefinitionLocation>, LspError> {
     if response.is_null() {
         return Ok(None);
@@ -1462,18 +1463,39 @@ fn parse_definition_response(
         ));
     }
 
-    // Convert URI to a relative file path string
-    let file = Url::parse(&uri_str)
+    // Convert URI to an absolute path, then strip workspace root to get a
+    // relative path — mirroring the convention used by parse_call_hierarchy_prepare_response.
+    // Falls back to the raw URI string if either conversion fails (e.g., external files).
+    let abs_path = Url::parse(&uri_str)
         .ok()
-        .and_then(|u: Url| u.to_file_path().ok())
-        .map(|p: std::path::PathBuf| p.to_string_lossy().into_owned())
+        .and_then(|u: Url| u.to_file_path().ok());
+
+    let file = abs_path
+        .as_deref()
+        .and_then(|p| p.strip_prefix(workspace_root).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| abs_path.as_deref().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or(uri_str);
+
+    // Read the definition line from disk to populate the preview.
+    // `start_line` is 0-indexed (LSP convention); `nth(start_line)` handles this directly.
+    // Falls back to an empty string if the file cannot be read (e.g., external crate).
+    let preview = abs_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|content| {
+            content
+                .lines()
+                .nth(usize::try_from(start_line).unwrap_or(0))
+                .map(|l| l.trim().to_owned())
+        })
+        .unwrap_or_default();
 
     Ok(Some(DefinitionLocation {
         file,
         line: u32::try_from(start_line + 1).unwrap_or(1), // 0-indexed → 1-indexed
         column: u32::try_from(start_char + 1).unwrap_or(1),
-        preview: String::default(), // Preview populated in future milestone
+        preview,
     }))
 }
 
@@ -1954,7 +1976,7 @@ mod tests {
 
     #[test]
     fn test_parse_definition_response_null() {
-        let result = parse_definition_response(json!(null));
+        let result = parse_definition_response(json!(null), Path::new("/"));
         assert!(result.expect("should not err").is_none());
     }
 
@@ -1967,7 +1989,7 @@ mod tests {
                 "end":   { "line": 41, "character": 9 }
             }
         });
-        let result = parse_definition_response(response).expect("ok");
+        let result = parse_definition_response(response, Path::new("/")).expect("ok");
         let loc = result.expect("some location");
         assert_eq!(loc.line, 42); // 0-indexed → 1-indexed
         assert_eq!(loc.column, 5);
@@ -1983,7 +2005,7 @@ mod tests {
                 "end":   { "line": 9, "character": 5 }
             }
         }]);
-        let result = parse_definition_response(response).expect("ok");
+        let result = parse_definition_response(response, Path::new("/")).expect("ok");
         let loc = result.expect("some location");
         assert_eq!(loc.line, 10);
         assert!(loc.file.contains("lib.rs"));
@@ -2002,7 +2024,7 @@ mod tests {
                 "end":   { "line": 19, "character": 9 }
             }
         });
-        let result = parse_definition_response(response).expect("ok");
+        let result = parse_definition_response(response, Path::new("/")).expect("ok");
         let loc = result.expect("some location");
         assert_eq!(loc.line, 20); // 0-indexed → 1-indexed
         assert!(loc.file.contains("types.rs"));
@@ -2011,7 +2033,7 @@ mod tests {
     #[test]
     fn test_parse_definition_empty_array() {
         let response = json!([]);
-        let result = parse_definition_response(response).expect("ok");
+        let result = parse_definition_response(response, Path::new("/")).expect("ok");
         // Empty array → null first element → None
         assert!(result.is_none());
     }
