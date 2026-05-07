@@ -24,7 +24,7 @@ pathfinder-common = { version = "0.4.0", path = "../pathfinder-common", package 
 tree-sitter = "0.24"
 
 # Language grammars (Tier 1)
-tree-sitter-go = "0.23"
+tree-sitter-go = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-javascript = "0.23"
