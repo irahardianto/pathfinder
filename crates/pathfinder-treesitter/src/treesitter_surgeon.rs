@@ -66,9 +66,6 @@ impl TreeSitterSurgeon {
         let symbols = extract_symbols_from_tree(&tree, &source, lang);
         Ok((lang, tree, source, symbols))
     }
-
-    // Private helpers removed (edit-only: find_body_bytes, detect_body_indent,
-    // expand_to_full_start_byte) — no longer needed without edit tools.
 }
 
 #[async_trait::async_trait]

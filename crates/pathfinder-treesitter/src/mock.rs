@@ -65,7 +65,7 @@ impl MockSurgeon {
     // ── Shared dispatch helpers ───────────────────────────────────────────────
 
     /// Pop the next queued result for a method keyed by `(workspace_root, semantic_path)`.
-    fn resolve_range_dispatch<T>(
+    fn semantic_path_dispatch<T>(
         calls_mutex: &Mutex<Vec<(PathBuf, SemanticPath)>>,
         results_mutex: &Mutex<Vec<Result<T, SurgeonError>>>,
         workspace_root: &Path,
@@ -116,7 +116,7 @@ impl Surgeon for MockSurgeon {
         workspace_root: &Path,
         semantic_path: &SemanticPath,
     ) -> Result<SymbolScope, SurgeonError> {
-        Self::resolve_range_dispatch(
+        Self::semantic_path_dispatch(
             &self.read_symbol_scope_calls,
             &self.read_symbol_scope_results,
             workspace_root,

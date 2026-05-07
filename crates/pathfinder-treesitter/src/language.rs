@@ -20,24 +20,6 @@ pub struct LanguageNodeTypes {
     /// Contents are extracted as named children under the module's path segment.
     /// Example: Rust `mod tests { fn foo() {} }` → `tests` (Module) with child `foo`.
     pub module_kinds: &'static [&'static str],
-    /// Node kinds that represent the body block of a declaration.
-    ///
-    /// Used as a language-aware fallback in `find_body_bytes` when
-    /// `child_by_field_name("body")` returns `None`. The primary `body` field
-    /// lookup covers most grammars; this list provides defense-in-depth for
-    /// grammars that rename the field or use an unusual body node kind.
-    ///
-    /// Node kinds are specific to each language's tree-sitter grammar.
-    pub body_kinds: &'static [&'static str],
-    /// Line prefixes that indicate metadata lines (doc comments, decorators,
-    /// attributes) to absorb when expanding a symbol's full range upward.
-    ///
-    /// Used by `expand_to_full_start_byte` to walk backward from a symbol's
-    /// start byte and include preceding comments/decorators in the range.
-    /// Language-specific to avoid incorrectly absorbing unrelated lines:
-    /// e.g., `#` is a Rust attribute but has no meaning in Go, `@` is a
-    /// decorator in TypeScript/Python but not valid in Rust or Go.
-    pub metadata_prefixes: &'static [&'static str],
 }
 
 /// The programming languages natively supported by the Surgeon.
@@ -114,8 +96,6 @@ impl SupportedLanguage {
                 impl_kinds: &[],
                 constant_kinds: &["const_declaration", "var_declaration"],
                 module_kinds: &[],
-                body_kinds: &["block", "field_declaration_list", "method_spec_list"],
-                metadata_prefixes: &["//", "/*", "*"],
             },
             Self::TypeScript | Self::Tsx | Self::JavaScript | Self::Vue => &LanguageNodeTypes {
                 function_kinds: &["function_declaration", "generator_function_declaration"],
@@ -130,8 +110,6 @@ impl SupportedLanguage {
                 impl_kinds: &[],
                 constant_kinds: &["lexical_declaration", "variable_declaration"],
                 module_kinds: &["internal_module"],
-                body_kinds: &["statement_block", "class_body", "enum_body", "object_type"],
-                metadata_prefixes: &["//", "/*", "*", "@"],
             },
             Self::Python => &LanguageNodeTypes {
                 function_kinds: &["function_definition", "decorated_definition"],
@@ -140,8 +118,6 @@ impl SupportedLanguage {
                 impl_kinds: &[],
                 constant_kinds: &[],
                 module_kinds: &[],
-                body_kinds: &["block", "compound_statement"],
-                metadata_prefixes: &["@", "#"],
             },
             Self::Rust => &LanguageNodeTypes {
                 function_kinds: &["function_item"],
@@ -152,13 +128,6 @@ impl SupportedLanguage {
                 impl_kinds: &["impl_item"],
                 constant_kinds: &["const_item", "static_item"],
                 module_kinds: &["mod_item"],
-                body_kinds: &[
-                    "block",
-                    "declaration_list",
-                    "field_declaration_list",
-                    "enum_variant_list",
-                ],
-                metadata_prefixes: &["//", "/*", "*", "#"],
             },
         }
     }
@@ -321,104 +290,5 @@ mod tests {
         let result = extract_vue_script(sfc);
         // No script block -> returns empty (parser creates valid empty AST)
         assert!(result.is_empty() || std::str::from_utf8(&result).unwrap().trim().is_empty());
-    }
-
-    // ── body_kinds field tests ────────────────────────────────────────────────
-
-    #[test]
-    fn test_rust_body_kinds_includes_field_declaration_list() {
-        let types = SupportedLanguage::Rust.node_types();
-        assert!(
-            types.body_kinds.contains(&"field_declaration_list"),
-            "Rust body_kinds must include field_declaration_list for struct bodies"
-        );
-        assert!(
-            types.body_kinds.contains(&"enum_variant_list"),
-            "Rust body_kinds must include enum_variant_list for enum bodies"
-        );
-        assert!(
-            types.body_kinds.contains(&"block"),
-            "Rust body_kinds must include block for function bodies"
-        );
-    }
-
-    #[test]
-    fn test_go_body_kinds_does_not_include_rust_specific_kinds() {
-        let types = SupportedLanguage::Go.node_types();
-        assert!(
-            !types.body_kinds.contains(&"enum_variant_list"),
-            "Go should not list enum_variant_list — Rust-specific kind"
-        );
-        assert!(
-            types.body_kinds.contains(&"block"),
-            "Go body_kinds must include block for function bodies"
-        );
-    }
-
-    #[test]
-    fn test_typescript_body_kinds_includes_enum_body() {
-        let types = SupportedLanguage::TypeScript.node_types();
-        assert!(
-            types.body_kinds.contains(&"enum_body"),
-            "TypeScript body_kinds must include enum_body"
-        );
-        assert!(
-            types.body_kinds.contains(&"statement_block"),
-            "TypeScript body_kinds must include statement_block for function bodies"
-        );
-    }
-
-    // ── metadata_prefixes field tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_metadata_prefixes_rust_has_hash_not_at() {
-        let types = SupportedLanguage::Rust.node_types();
-        assert!(
-            types.metadata_prefixes.contains(&"#"),
-            "Rust must expand '#' prefixes (attribute lines like #[derive(...)])"
-        );
-        assert!(
-            !types.metadata_prefixes.contains(&"@"),
-            "Rust must NOT expand '@' prefixes — not a valid Rust decorator"
-        );
-    }
-
-    #[test]
-    fn test_metadata_prefixes_go_has_no_hash_no_at() {
-        let types = SupportedLanguage::Go.node_types();
-        assert!(
-            !types.metadata_prefixes.contains(&"#"),
-            "Go must NOT expand '#' prefixes — not valid Go syntax"
-        );
-        assert!(
-            !types.metadata_prefixes.contains(&"@"),
-            "Go must NOT expand '@' prefixes — not valid Go syntax"
-        );
-    }
-
-    #[test]
-    fn test_metadata_prefixes_typescript_has_at_not_hash() {
-        let types = SupportedLanguage::TypeScript.node_types();
-        assert!(
-            types.metadata_prefixes.contains(&"@"),
-            "TypeScript must expand '@' prefixes (decorator lines like @Injectable())"
-        );
-        assert!(
-            !types.metadata_prefixes.contains(&"#"),
-            "TypeScript must NOT expand '#' — not a valid TS decorator prefix"
-        );
-    }
-
-    #[test]
-    fn test_metadata_prefixes_python_has_at_and_hash() {
-        let types = SupportedLanguage::Python.node_types();
-        assert!(
-            types.metadata_prefixes.contains(&"@"),
-            "Python must expand '@' prefixes (decorator lines)"
-        );
-        assert!(
-            types.metadata_prefixes.contains(&"#"),
-            "Python must expand '#' prefixes (comment lines above defs)"
-        );
     }
 }
