@@ -10,7 +10,7 @@
 
   <p align="center">
     The Headless IDE — an MCP server that gives AI coding agents<br />
-    AST-aware code intelligence, safe edits, and LSP validation.
+    AST-aware code intelligence, semantic navigation, and LSP-backed discovery.
     <br />
     <br />
     <a href="#getting-started">Getting Started</a>
@@ -28,34 +28,33 @@
 <!-- ABOUT THE PROJECT -->
 ## About Pathfinder
 
-**Pathfinder** is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server written in Rust that gives AI coding agents the same capabilities a human developer gets from an IDE — but without a GUI.
+**Pathfinder** is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server written in Rust that gives AI coding agents the same code intelligence a human developer gets from an IDE — but without a GUI.
 
-Instead of treating source code as flat text, Pathfinder understands your code structurally through **Tree-sitter AST parsing** and semantically through **Language Server Protocol (LSP)** integration. This means AI agents can navigate, search, edit, and validate code at the *symbol* level — functions, classes, methods — rather than fragile line-by-line string matching.
+Instead of treating source code as flat text, Pathfinder understands your code structurally through **Tree-sitter AST parsing** and semantically through **Language Server Protocol (LSP)** integration. This means AI agents can navigate, search, and explore code at the *symbol* level — functions, classes, methods — rather than fragile line-by-line string matching.
 
 ### Why Pathfinder?
 
 Traditional AI coding workflows suffer from:
 
-- **Fragile text edits** — line-based search-and-replace breaks when code shifts.
-- **No compile-time feedback** — agents write code blindly, with no way to know if edits introduce errors until tests run.
-- **Limited code understanding** — flat text search misses semantic structure (e.g., a search hit in a comment vs. actual code).
+- **Blind navigation** — agents read entire files to find one symbol, wasting context.
+- **No semantic understanding** — flat text search returns hits in comments, strings, and dead code equally.
+- **Fragile path construction** — agents guess file structures instead of discovering them.
 
 Pathfinder solves these problems by providing:
 
-- 🌳 **AST-Aware Operations** — navigate and edit at the symbol level using semantic paths (e.g., `src/auth.ts::AuthService.login`).
-- ✅ **LSP Validation** — every edit is validated against a real language server before being written to disk, catching type errors and compilation failures *before* they happen.
-- 🔒 **Optimistic Concurrency Control (OCC)** — SHA-256 version hashes prevent conflicting writes and stale-data overwrites.
+- 🌳 **AST-Aware Navigation** — jump to symbols using semantic paths (e.g., `src/auth.ts::AuthService.login`).
 - 🔍 **Semantic Search** — filter search results by AST context (code-only, comments-only, or all) powered by ripgrep + Tree-sitter.
+- 📡 **LSP-Powered Discovery** — go-to-definition, call hierarchy (incoming/outgoing), and real-time indexing status.
+- 🗺️ **Structural Mapping** — a token-budgeted repository skeleton that surfaces every symbol and its semantic path.
 - 🛡️ **Sandbox Security** — a 3-tier file access model prevents path traversal attacks and unauthorized file access.
 - 📊 **Built-in Observability** — per-engine telemetry (`ripgrep_ms`, `tree_sitter_parse_ms`, `lsp_ms`) and optional `--lsp-trace` for raw JSON-RPC debugging.
 
 ### Key Features
 
-- 🛠️ **18 MCP Tools** — covering code navigation, semantic editing, file operations, search, and impact analysis.
+- 🛠️ **11 MCP Tools** — covering code navigation, semantic discovery, file reading, and impact analysis.
 - 🌐 **7 Languages** — native Tree-sitter support for Go, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
 - ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
-- 🧪 **Shadow Editor** — a validation pipeline that catches introduced errors by diffing LSP diagnostics before and after each edit.
 
 <!-- GETTING STARTED -->
 ## Getting Started
@@ -64,7 +63,7 @@ Pathfinder solves these problems by providing:
 
 - **Rust toolchain** (1.75+ recommended) — [Install via rustup](https://rustup.rs/)
 - **An MCP-compatible AI client** — such as [Antigravity](https://antigravity.dev/), Claude Desktop, Cursor, or any tool supporting MCP stdio transport.
-- **(Optional) Language servers** — for LSP validation support (e.g., `gopls` for Go, `typescript-language-server` for TS/JS, `rust-analyzer` for Rust, `pyright` for Python).
+- **(Optional) Language servers** — for LSP navigation support (e.g., `gopls` for Go, `typescript-language-server` for TS/JS, `rust-analyzer` for Rust, `pyright` for Python).
 
 ### Installation
 
@@ -148,9 +147,9 @@ Pathfinder communicates over **stdio** using the MCP protocol. Logs are emitted 
 <!-- AGENT DIRECTIVES -->
 ## Agent Directives
 
-Pathfinder ships with a set of **agent directives** — pre-written rules and skills that teach your AI agent how to use Pathfinder tools correctly, reliably, and efficiently. Without these, the agent falls back to generic file-editing behaviour and misses most of Pathfinder's value.
+Pathfinder ships with a set of **agent directives** — pre-written rules and skills that teach your AI agent how to use Pathfinder tools correctly, reliably, and efficiently. Without these, the agent falls back to generic file-reading behaviour and misses most of Pathfinder's value.
 
-> **Why this matters:** An AI agent that doesn't know about semantic paths, OCC version hashes, or the difference between `read_source_file` and `read_file` will make avoidable mistakes — calling the wrong tool, constructing malformed paths, or ignoring LSP validation feedback. The directives encode all of this knowledge directly into the agent's system context.
+> **Why this matters:** An AI agent that doesn't know about semantic paths or the difference between `read_source_file` and `read_file` will make avoidable mistakes — calling the wrong tool, constructing malformed paths, or wasting context reading entire files for single symbols. The directives encode all of this knowledge directly into the agent's system context.
 
 ### What's Included
 
@@ -162,23 +161,19 @@ docs/agent_directives/
 │   └── pathfinder-tool-routing.md   # Always-on routing rule: which Pathfinder tool to use for each action
 └── skills/
     └── pathfinder-workflow/
-        └── SKILL.md                 # On-demand skill: concrete workflows, OCC patterns, error recovery
+        └── SKILL.md                 # On-demand skill: concrete navigation workflows and error recovery
 ```
 
 **`rules/pathfinder-tool-routing.md`** — an always-on rule injected into every agent turn. It tells the agent:
 - To prefer Pathfinder's semantic tools over built-in text tools whenever possible
 - How to form correct semantic paths (e.g., `src/auth.ts::AuthService.login`)
-- Which tool to reach for each action (reading, editing, searching, creating)
+- Which tool to reach for each action (reading, searching, navigating)
 - When to fall back gracefully if Pathfinder is unavailable
 
 **`skills/pathfinder-workflow/SKILL.md`** — a detailed on-demand skill the agent activates when it needs deeper guidance. It covers:
-- Step-by-step workflows for exploring, refactoring, implementing, auditing, and debugging
-- OCC (Optimistic Concurrency Control) version hash chaining across sequential edits
-- Multi-file and same-file batch edit patterns
-- Vue SFC text targeting for `<template>`/`<style>` zones
+- Step-by-step workflows for exploring, auditing, and debugging codebases
 - Efficient search with `filter_mode`, `exclude_glob`, `known_files`, `group_by_file`, and `is_regex`
-- `ignore_validation_failures` guidance for flaky or unavailable LSP environments
-- Error recovery patterns for `SYMBOL_NOT_FOUND`, `VERSION_MISMATCH`, `Validation Skipped`, `TEXT_NOT_FOUND`, and LSP validation failures
+- Error recovery patterns for `SYMBOL_NOT_FOUND`, LSP degradation, and timeout scenarios
 
 ### Setup by Client
 
@@ -208,42 +203,26 @@ For any MCP-compatible client, the minimum effective setup is to inject the **to
 <!-- TOOLS -->
 ## Tools
 
-Pathfinder exposes 18 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
+Pathfinder exposes 11 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
 
 ### 🔍 Search & Navigation
 
 | Tool | Description |
 |---|---|
-| `search_codebase` | Search for text patterns with AST-aware filtering. Set `filter_mode` to `code_only` (default), `comments_only`, or `all`. Use `is_regex=true` for multi-pattern searches (e.g., `unwrap\(\)\|expect\(`). Token-efficiency parameters: `known_files` (suppress content for already-read files), `group_by_file`, `exclude_glob`. Returns matching lines with context and `enclosing_semantic_path` + `version_hash` per match. |
-| `get_repo_map` | Generate a structural skeleton of the project — an indented tree of classes, functions, and type signatures with semantic path annotations. Token-budgeted for LLM context windows. Supports `changed_since` (git ref/duration), `include_extensions`, `exclude_extensions`, and `include_imports` (`none`/`third_party`/`all`) for focused exploration. Returns `version_hashes` per file and `capabilities.lsp.per_language` for upfront LSP status. |
+| `search_codebase` | Search for text patterns with AST-aware filtering. Set `filter_mode` to `code_only` (default), `comments_only`, or `all`. Use `is_regex=true` for multi-pattern searches. Token-efficiency parameters: `known_files` (suppress content for already-read files), `group_by_file`, `exclude_glob`. Returns matching lines with context and `enclosing_semantic_path` + `version_hash` per match. |
+| `get_repo_map` | Generate a structural skeleton of the project — an indented tree of classes, functions, and type signatures with semantic path annotations. Token-budgeted for LLM context windows. Supports `changed_since` (git ref/duration), `include_extensions`, `exclude_extensions`, and `include_imports` for focused exploration. Returns `version_hashes` per file and `capabilities.lsp.per_language` for upfront LSP status. |
 | `read_symbol_scope` | Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns code, line range, and version hash. |
 | `read_source_file` | Read an entire source file and extract its complete AST symbol hierarchy. Supports three detail levels: `compact` (default — source + flat symbol list), `symbols` (symbol tree only, no source), `full` (source + complete nested AST). Use `start_line`/`end_line` to restrict output to a region of interest. **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files. |
-| `read_with_deep_context` | Read a symbol's source code **plus** the signatures of all functions it calls. Ideal for understanding dependencies before editing. |
+| `read_with_deep_context` | Read a symbol's source code **plus** the signatures of all functions it calls. Ideal for understanding a function's full dependency graph before refactoring. |
 | `get_definition` | Jump to where a symbol is defined. Provide a semantic path to a reference and get the definition's file, line, and a code preview. |
-| `analyze_impact` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius before refactoring. Returns `version_hashes` for all referenced files — use these directly as `base_version` for edits without a separate read step. |
+| `analyze_impact` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius of a change and tracing call chains. |
+| `lsp_health` | Check per-language LSP readiness — including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use this to diagnose why a navigation tool returned degraded results. |
 
-### ✏️ AST-Aware Editing
-
-All edit tools use the **Shadow Editor** validation pipeline — edits are validated against the LSP before being written to disk. Every edit requires a `base_version` (SHA-256 hash) for optimistic concurrency control.
-
-| Tool | Description |
-|---|---|
-| `replace_body` | Replace the internal logic of a block-scoped construct (function, method, class body), keeping the signature intact. |
-| `replace_full` | Replace an entire declaration including its signature, body, decorators, and doc comments. |
-| `replace_batch` | Apply multiple edits atomically within a single file — back-to-front to avoid offset shifting, single OCC guard. Supports **two targeting modes**: Option A (semantic — `semantic_path` + `edit_type`) for code symbols, and Option B (text — `old_text` + `context_line` + `replacement_text`) for Vue `<template>`/`<style>` zones or any non-symbol region. Both modes can be mixed in one call. |
-| `insert_before` | Insert new code before a target symbol. Use a bare file path (without `::`) to insert at the top of a file. |
-| `insert_after` | Insert new code after a target symbol. Use a bare file path (without `::`) to append to the bottom of a file. |
-| `delete_symbol` | Delete a symbol and all its associated decorators, attributes, and doc comments. |
-| `validate_only` | Dry-run an edit without writing to disk. Pre-check risky changes and get the same validation results as a real edit. |
-
-### 📁 File Operations
+### 📁 File Reading
 
 | Tool | Description |
 |---|---|
 | `read_file` | Read raw file content with pagination (`start_line`, `max_lines`). Best for configuration files (YAML, TOML, Dockerfile). For source code, prefer `read_symbol_scope`. |
-| `write_file` | Write to configuration files. Supports full replacement or surgical search-and-replace via a `replacements` array. **Not for source code** — use the AST-aware edit tools instead. |
-| `create_file` | Create a new file with initial content. Parent directories are created automatically. |
-| `delete_file` | Delete a file. Requires `base_version` (OCC) to prevent deleting a file modified after you last read it. |
 
 <!-- ARCHITECTURE -->
 ## Architecture
@@ -262,13 +241,11 @@ pathfinder/
 │   │           ├── helpers.rs   # Shared utilities
 │   │           └── tools/       # One module per tool category
 │   │               ├── search.rs
-│   │               ├── edit.rs
 │   │               ├── navigation.rs
 │   │               ├── file_ops.rs
 │   │               ├── repo_map.rs
 │   │               ├── source_file.rs
-│   │               ├── symbols.rs
-│   │               └── diagnostics.rs
+│   │               └── symbols.rs
 │   │
 │   ├── pathfinder-common/       # Shared types, errors, config, sandbox
 │   ├── pathfinder-treesitter/   # The Surgeon — AST parsing & symbol extraction
@@ -293,7 +270,7 @@ Pathfinder internally delegates work to three specialized engines, each abstract
 |---|---|---|---|
 | **The Surgeon** | `pathfinder-treesitter` | `Surgeon` | AST parsing, symbol extraction, semantic path resolution, repo map generation |
 | **The Scout** | `pathfinder-search` | `Scout` | Ripgrep-powered full-text search with Tree-sitter enrichment for AST-aware filtering |
-| **The Lawyer** | `pathfinder-lsp` | `Lawyer` | LSP process lifecycle, edit validation (Shadow Editor), go-to-definition |
+| **The Lawyer** | `pathfinder-lsp` | `Lawyer` | LSP process lifecycle, go-to-definition, call hierarchy navigation |
 
 Each engine can be mocked independently for unit testing, and the server gracefully degrades when an engine is unavailable (e.g., falls back to Tree-sitter heuristics when no LSP is running).
 
@@ -311,22 +288,9 @@ lib/models.py::User                     # Class
 
 Format: `<relative_file_path>::<Symbol>[.<Method>]`
 
-#### Optimistic Concurrency Control (OCC)
+#### Version Hashes
 
-Every file read returns a `version_hash` (SHA-256 digest of the file content). Edit and delete operations require this hash as `base_version` — if the file has changed since you last read it, the operation is rejected. This prevents conflicting writes in multi-agent environments.
-
-#### The Shadow Editor
-
-For AST-aware edits, Pathfinder runs a "validation sandwich":
-
-1. `didOpen` — notify LSP of original content
-2. `pull_diagnostics` — capture baseline errors
-3. `didChange` — notify LSP of proposed edit
-4. `pull_diagnostics` — capture post-edit errors
-5. Revert — restore LSP state
-6. **Diff** — compare pre/post errors using a multiset algorithm that's resilient to line shifts
-
-If new errors are **introduced**, the edit fails by default (overridable with `ignore_validation_failures`).
+Every file read returns a `version_hash` (SHA-256 digest of the file content). This is a content fingerprint that agents can use to detect when a file has changed between reads — useful for coordinating multi-step workflows and detecting concurrent modifications.
 
 ### Supported Languages
 
@@ -342,13 +306,13 @@ Tree-sitter grammars are compiled directly into the Pathfinder binary — no ext
 | JavaScript | `.js`, `.jsx` | Functions, classes, and JSX elements in `.jsx` files |
 | Python | `.py` | Function, class, and method extraction |
 | Rust | `.rs` | Functions, structs, enums, traits; `impl` block methods merged under their parent type |
-| Vue SFC | `.vue` | **Multi-zone**: `<script>` parsed as TypeScript (AST-aware), `<template>` and `<style>` accessible via text targeting in `replace_batch` |
+| Vue SFC | `.vue` | **Multi-zone**: `<script>` parsed as TypeScript (AST-aware), `<template>` and `<style>` accessible for text search |
 
 #### LSP Support (Optional, Auto-detected)
 
 Pathfinder automatically detects which language servers are available in your workspace by scanning for marker files (`Cargo.toml`, `go.mod`, `tsconfig.json`, etc.). LSP processes start **lazily** on first use and are shut down after an idle timeout.
 
-To maximise validation coverage, install the language server(s) for your project:
+To maximise navigation coverage, install the language server(s) for your project:
 
 | Language | LSP Server | Install Command | Auto-detect Marker |
 |---|---|---|---|
@@ -359,9 +323,7 @@ To maximise validation coverage, install the language server(s) for your project
 
 > **Vue note:** Pathfinder handles Vue SFC parsing internally with Tree-sitter. The `typescript-language-server` validates the `<script>` block — no separate `volar` or `vue-language-server` installation is required.
 
-> **LSP validation status:** Every edit response includes a `validation` field. If `validation_skipped: true`, inspect `validation_skipped_reason` — possible values are `no_lsp` (no server detected), `lsp_not_on_path` (binary missing), `lsp_start_failed`, `lsp_crash`, `lsp_timeout`, and `pull_diagnostics_unsupported`. Call `get_repo_map` upfront to see which languages have active LSP validation via `capabilities.lsp.per_language`.
-
-> **Concurrent LSP handling:** When Pathfinder detects a concurrent LSP instance (e.g., your IDE is already running `gopls`), it automatically isolates build caches to avoid lock contention. Isolated caches are stored under `.pathfinder/` in your project root, which is automatically added to `.gitignore`. Use the `lsp_health` tool to check per-language readiness, including `navigation_ready` (LSP navigation works), `indexing_status` (background indexing state), and `degraded_tools` (which tools lose LSP support).
+> **Concurrent LSP handling:** When Pathfinder detects a concurrent LSP instance (e.g., your IDE is already running `gopls`), it automatically isolates build caches to avoid lock contention. Isolated caches are stored under `.pathfinder/` in your project root, which is automatically added to `.gitignore`. Use the `lsp_health` tool to check per-language readiness, including `navigation_ready` (LSP navigation works), `indexing_status` (background indexing state), and `degraded_tools` (which tools lose LSP support for a given language).
 
 <!-- OBSERVABILITY -->
 ## Observability
@@ -407,11 +369,8 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] JSX/TSX element extraction as addressable child symbols
 - [x] Ripgrep search with AST-aware filtering (`code_only`, `comments_only`, `all`)
 - [x] Search intelligence: `known_files`, `group_by_file`, `exclude_glob` (E4)
-- [x] Full suite of AST-aware edit tools with OCC
-- [x] Hybrid batch edits — semantic + text targeting in a single atomic call (E3.1)
-- [x] LSP integration with Shadow Editor validation
+- [x] LSP integration for go-to-definition and call hierarchy navigation
 - [x] LSP lifecycle management (auto-start, crash recovery, idle termination)
-- [x] Granular LSP skip reasons for actionable agent recovery (v5.1)
 - [x] Proactive capability reporting via `get_repo_map` (`capabilities.lsp.per_language`)
 - [x] Two-phase LSP readiness model (navigation vs indexing) with `lsp_health` tool
 - [x] Concurrent LSP cache isolation (Go, TypeScript, Python, Rust)
