@@ -97,6 +97,10 @@ pub struct PathfinderServer {
     scout: Arc<dyn Scout>,
     surgeon: Arc<dyn Surgeon>,
     lawyer: Arc<dyn Lawyer>,
+    // Populated by `#[tool_router]` and consumed through the generated
+    // `tool_handler` trait impl. The compiler's dead-code pass cannot follow
+    // the read path across the proc-macro boundary, so we suppress the lint.
+    #[expect(dead_code)]
     tool_router: ToolRouter<Self>,
     /// Cache of probe results per language to avoid redundant LSP calls.
     ///
