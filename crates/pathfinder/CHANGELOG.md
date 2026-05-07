@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/irahardianto/pathfinder/compare/v0.6.2...v0.7.0) - 2026-05-07
+
+### Fixed
+
+- *(clippy)* suppress dead_code lint on tool_router field
+- resolve Dependabot config error and patch CVE-2026-42559 in rmcp
+
+### Other
+
+- *(server)* Remove OCC metadata from tool responses
+- *(lsp)* Drop diagnostics, formatting, and validation types
+- Formalize read-only architectural pivot and update agent directives
+- *(server)* Decommission edit tools and validation pipeline in pathfinder server
+- *(core)* Sunset edit traits and utilities in common and treesitter crates
+- *(lsp)* Remove shadow editor and edit logic from LSP client
+- *(search)* Strip edit-related metadata from search crate
+- *(search)* eliminate redundant Mutex wrappers in RipgrepScout
+- *(treesitter)* Remove edit-centric AST resolution capabilities
+
 ## [0.6.2](https://github.com/irahardianto/pathfinder/compare/v0.6.1...v0.6.2) - 2026-05-04
 
 ### Fixed
