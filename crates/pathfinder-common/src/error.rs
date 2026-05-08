@@ -136,13 +136,16 @@ impl PathfinderError {
                 };
 
                 if did_you_mean.is_empty() {
+                    // No suggestions — the symbol might be in a different file than what the agent guessed.
+                    // Suggest search_codebase to find which file actually defines this symbol.
+                    let symbol_name = semantic_path.split("::").last().unwrap_or(semantic_path);
                     Some(format!(
-                        "Use read_source_file to see available symbols in this file.{}",
+                        "Symbol not found in the specified file. Use search_codebase(query=\"{symbol_name}\") to find which file defines this symbol, then use the correct file path in the semantic path.{}",
                         separator_hint.unwrap_or("")
                     ))
                 } else {
                     Some(format!(
-                        "Did you mean: {}? Use read_source_file to see available symbols.{}",
+                        "Did you mean: {}? Use search_codebase if the symbol is in a different file, or read_source_file to see available symbols in this file.{}",
                         did_you_mean.join(", "),
                         separator_hint.unwrap_or("")
                     ))
@@ -515,9 +518,11 @@ mod tests {
         let hint = err
             .hint()
             .expect("should have hint even without suggestions");
+        // When no suggestions, the symbol is likely in a different file.
+        // Hint should suggest search_codebase to find the correct file.
         assert!(
-            hint.contains("read_source_file"),
-            "hint should point to read_source_file: {hint}"
+            hint.contains("search_codebase"),
+            "hint should suggest search_codebase to find the correct file: {hint}"
         );
     }
 
