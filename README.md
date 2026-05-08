@@ -72,7 +72,8 @@ Choose one of the following methods:
 **Homebrew (macOS & Linux):**
 
 ```sh
-brew install irahardianto/tap/pathfinder-mcp
+brew tap irahardianto/pathfinder-mcp
+brew install pathfinder-mcp
 ```
 
 **cargo install from crates.io:**
