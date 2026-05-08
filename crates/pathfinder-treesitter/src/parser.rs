@@ -93,4 +93,149 @@ mod tests {
         .expect("should still parse");
         assert!(tree.root_node().has_error());
     }
+
+    #[test]
+    fn test_parse_empty_source() {
+        let source = b"";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("empty.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .expect("should parse empty source");
+        let root = tree.root_node();
+        assert_eq!(root.child_count(), 0);
+    }
+
+    #[test]
+    fn test_parse_rust_source() {
+        let source = br#"
+fn main() {
+    println!("Hello, world!");
+}
+
+struct MyStruct {
+    field: i32,
+}
+
+impl MyStruct {
+    fn new() -> Self {
+        Self { field: 0 }
+    }
+}
+"#;
+        let tree = AstParser::parse_source(
+            std::path::Path::new("test.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .expect("should parse Rust");
+        let root = tree.root_node();
+        assert_eq!(root.kind(), "source_file");
+        // Should have at least a few nodes (functions, structs, impls)
+        assert!(root.child_count() >= 2);
+    }
+
+    #[test]
+    fn test_parse_python_source() {
+        let source = b"def hello():\n    print('world')\n\nclass MyClass:\n    pass";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("test.py"),
+            SupportedLanguage::Python,
+            source,
+        )
+        .expect("should parse Python");
+        let root = tree.root_node();
+        assert!(root.child_count() > 0);
+    }
+
+    #[test]
+    fn test_parse_large_source() {
+        // Test with a larger file to ensure it handles reasonable sizes
+        let mut source = Vec::new();
+        for i in 0..1000 {
+            source.extend_from_slice(format!("fn func_{i}() -> i32 {{ {i} }}\n").as_bytes());
+        }
+        let tree = AstParser::parse_source(
+            std::path::Path::new("large.rs"),
+            SupportedLanguage::Rust,
+            &source,
+        )
+        .expect("should parse large source");
+        let root = tree.root_node();
+        assert_eq!(root.kind(), "source_file");
+        // Should have many function items
+        assert!(root.child_count() > 0);
+    }
+
+    #[test]
+    fn test_parse_with_unicode() {
+        let source =
+            "fn main() {\n    let msg = \"Hello, 世界! 🌍\";\n    println!(\"{}\", msg);\n}"
+                .as_bytes();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("unicode.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .expect("should parse unicode");
+        let root = tree.root_node();
+        assert_eq!(root.kind(), "source_file");
+    }
+
+    #[test]
+    fn test_parse_javascript_source() {
+        let source =
+            b"function greet(name) {\n  return `Hello, ${name}!`;\n}\n\nconst arrow = () => 42;";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("test.js"),
+            SupportedLanguage::JavaScript,
+            source,
+        )
+        .expect("should parse JavaScript");
+        let root = tree.root_node();
+        assert!(root.child_count() > 0);
+    }
+
+    #[test]
+    fn test_parse_tsx_source() {
+        let source = br"import React from 'react';
+
+interface Props {
+  title: string;
+}
+
+export const Button: React.FC<Props> = ({ title }) => {
+  return <button>{title}</button>;
+}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Button.tsx"),
+            SupportedLanguage::Tsx,
+            source,
+        )
+        .expect("should parse TSX");
+        let root = tree.root_node();
+        assert!(root.child_count() > 0);
+    }
+
+    #[test]
+    fn test_parse_vue_source() {
+        let source = br#"<script setup lang="ts">
+import { ref } from 'vue';
+
+const count = ref(0);
+</script>
+
+<template>
+  <div>{{ count }}</div>
+</template>"#;
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Component.vue"),
+            SupportedLanguage::Vue,
+            source,
+        )
+        .expect("should parse Vue");
+        let root = tree.root_node();
+        assert!(root.child_count() > 0);
+    }
 }
