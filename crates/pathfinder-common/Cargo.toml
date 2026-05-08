@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder-mcp-common"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 license.workspace = true
 description = "Shared types, errors, and infrastructure for Pathfinder MCP server"

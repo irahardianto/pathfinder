@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1](https://github.com/irahardianto/pathfinder/compare/v0.8.0...v0.8.1) - 2026-05-08
+
+### Added
+
+- *(navigation)* add source file filtering and workspace detection for LSP fallback
+- *(server)* add structured DegradedToolInfo for degraded tool reporting
+
+### Fixed
+
+- *(lint)* resolve clippy warnings in error.rs and helpers.rs
+- *(common)* improve symbol not found hint to suggest search_codebase
+- *(search)* exclude .git/, node_modules/, vendor/ from search results
+
+### Other
+
+- *(helpers)* apply rustfmt formatting to assert_eq! statements
+- *(server)* update tool descriptions with missing guidance
+- *(readme)* fix inaccuracies in tool count, agent directives, and development commands
+- *(server)* add comprehensive helpers module tests achieving 95% coverage
+- *(lsp)* add transport edge case tests improving coverage to 89%
+- *(lsp)* add client module tests for validation status and in-flight guard
+- *(lsp)* add comprehensive error.rs tests achieving 100% coverage
+- *(treesitter)* add parser tests for all supported languages achieving 95% coverage
+
 ## [0.8.0](https://github.com/irahardianto/pathfinder/compare/v0.7.0...v0.8.0) - 2026-05-07
 
 ### Other
