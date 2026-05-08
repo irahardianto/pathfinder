@@ -28,6 +28,64 @@ use rmcp::model::{CallToolResult, ErrorData};
 /// initial readiness (e.g., stuck indexing, memory pressure, internal deadlock).
 const LIVENESS_PROBE_INTERVAL_SECS: u64 = 120;
 
+/// File extensions considered source code for grep fallback filtering.
+///
+/// When the LSP is unavailable and we fall back to text search, we only
+/// want results from actual source files, not documentation (.md), config
+/// (.json, .yaml, .toml), or other non-source files.
+const SOURCE_FILE_EXTENSIONS: &[&str] = &[
+    "rs",  // Rust
+    "go",  // Go
+    "ts",  // TypeScript
+    "tsx", // TypeScript + JSX
+    "js",  // JavaScript
+    "jsx", // JavaScript + JSX
+    "py",  // Python
+    "vue", // Vue Single-File Component
+];
+
+/// Returns `true` if the file path has a source code extension.
+///
+/// Used to filter out non-source files (docs, configs) from grep fallback
+/// search results to reduce false positives.
+fn is_source_file(file: &str) -> bool {
+    let ext = std::path::Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    SOURCE_FILE_EXTENSIONS.contains(&ext)
+}
+
+/// Returns `true` if the file looks like it's from the user's workspace (not external/dependencies).
+///
+/// Filters out:
+/// - Absolute paths (stdlib, SDK files)
+/// - Paths containing `node_modules/` or `vendor/` (dependencies)
+fn is_workspace_file(file: &str) -> bool {
+    // Filter out absolute paths (stdlib, SDK files)
+    // Unix: starts with `/`
+    // Windows: starts with `\` or has `:` at position 1 (e.g., `C:\`)
+    if file.starts_with('/') || file.starts_with('\\') {
+        return false;
+    }
+    // Check for Windows-style absolute paths like `C:\` or `D:/`
+    if file.len() >= 2 {
+        let second_char = file.chars().nth(1);
+        if second_char == Some(':') {
+            return false;
+        }
+    }
+    // Filter out dependency directories
+    if file.contains("node_modules/")
+        || file.contains("node_modules\\")
+        || file.contains("vendor/")
+        || file.contains("vendor\\")
+    {
+        return false;
+    }
+    true
+}
+
 /// Direction for call hierarchy BFS traversal in `analyze_impact`.
 ///
 /// `Incoming` traverses callers (who calls this symbol).
@@ -50,7 +108,12 @@ impl PathfinderServer {
     ///
     /// Extracted from `read_with_deep_context` to reduce nesting depth.
     /// Prepares the call hierarchy, then fetches outgoing calls and
-    /// maps them to `DeepContextDependency` entries.
+    /// maps them to `DeepContextDependency` entries. Includes LSP warmup
+    /// retry logic (3-second wait + re-probe) mirroring `get_definition_impl`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Call-hierarchy resolution with LSP warmup probe + retry. Linear structure for readability."
+    )]
     async fn resolve_lsp_dependencies(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
@@ -107,10 +170,60 @@ impl PathfinderServer {
                     degraded = false;
                     degraded_reason = None;
                 } else {
-                    // LSP returned empty but can't resolve the symbol → warmup or bad position
+                    // LSP returned empty but can't resolve the symbol → likely warming up.
+                    //
+                    // Retry once after a brief wait: if the LSP just finished indexing
+                    // between our call_hierarchy_prepare and the probe, a second attempt
+                    // often succeeds. This mirrors the retry pattern in get_definition_impl.
                     engines.push("lsp");
-                    degraded = true;
-                    degraded_reason = Some("lsp_warmup_empty_unverified".to_owned());
+
+                    tracing::info!(
+                        tool = "read_with_deep_context",
+                        semantic_path = %semantic_path,
+                        "read_with_deep_context: call_hierarchy_prepare returned [] and goto_definition \
+                         probe returned no result — LSP likely warming up, waiting 3s and retrying"
+                    );
+
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                    let retry_result = self
+                        .lawyer
+                        .call_hierarchy_prepare(
+                            self.workspace_root.path(),
+                            &semantic_path.file_path,
+                            u32::try_from(start_line + 1).unwrap_or(1),
+                            u32::try_from(name_column + 1).unwrap_or(1),
+                        )
+                        .await;
+
+                    match retry_result {
+                        Ok(retry_items) if !retry_items.is_empty() => {
+                            // Succeeded on retry — LSP finished indexing
+                            tracing::info!(
+                                tool = "read_with_deep_context",
+                                semantic_path = %semantic_path,
+                                "read_with_deep_context: call_hierarchy_prepare succeeded on retry after warmup wait"
+                            );
+                            self.append_outgoing_deps(
+                                &retry_items[0],
+                                &mut dependencies,
+                                &mut engines,
+                                &mut degraded,
+                                &mut degraded_reason,
+                            )
+                            .await;
+                        }
+                        _ => {
+                            // Retry also returned empty or failed → truly warming up or no deps
+                            tracing::info!(
+                                tool = "read_with_deep_context",
+                                semantic_path = %semantic_path,
+                                "read_with_deep_context: retry also returned empty — LSP still warming up"
+                            );
+                            degraded = true;
+                            degraded_reason = Some("lsp_warmup_empty_unverified".to_owned());
+                        }
+                    }
                 }
             }
             Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {}
@@ -149,6 +262,12 @@ impl PathfinderServer {
                 engines.push("lsp");
                 for call in outgoing {
                     let callee = call.item;
+
+                    // Filter out non-workspace files (stdlib, dependencies)
+                    if !is_source_file(&callee.file) || !is_workspace_file(&callee.file) {
+                        continue;
+                    }
+
                     let signature = callee.detail.clone().unwrap_or_else(|| callee.name.clone());
                     let sp = format!("{}::{}", callee.file, callee.name);
                     dependencies.push(crate::server::types::DeepContextDependency {
@@ -910,6 +1029,17 @@ impl PathfinderServer {
                 Ok(calls) => {
                     for call in calls {
                         let referenced_item = call.item;
+
+                        // Filter out non-workspace files:
+                        // - Must have a source code extension
+                        // - Must be a relative path (not absolute like stdlib/SDK paths)
+                        // - Must not be in node_modules/ or vendor/
+                        if !is_source_file(&referenced_item.file)
+                            || !is_workspace_file(&referenced_item.file)
+                        {
+                            continue;
+                        }
+
                         files_referenced.insert(referenced_item.file.clone());
 
                         let key = (referenced_item.file.clone(), referenced_item.line);
@@ -1156,10 +1286,12 @@ impl PathfinderServer {
                             let refs: Vec<crate::server::types::ImpactReference> = result
                                 .matches
                                 .into_iter()
-                                // Exclude the definition file itself (it's not a caller)
+                                // Exclude the definition file itself AND non-source files (docs, configs).
+                                // is_source_file filters out .md, .txt, .json, .yaml, etc. to reduce false positives.
                                 .filter(|m| {
                                     let m_path = std::path::Path::new(&m.file);
-                                    m_path != std::path::Path::new(&semantic_path.file_path)
+                                    is_source_file(&m.file)
+                                        && m_path != std::path::Path::new(&semantic_path.file_path)
                                 })
                                 .take(10) // Cap at 10 heuristic references to avoid overwhelming output
                                 .map(|m| {
@@ -1222,10 +1354,12 @@ impl PathfinderServer {
                         let refs: Vec<crate::server::types::ImpactReference> = result
                             .matches
                             .into_iter()
-                            // Exclude the definition file itself (it's not a caller)
+                            // Exclude the definition file itself AND non-source files (docs, configs).
+                            // is_source_file filters out .md, .txt, .json, .yaml, etc. to reduce false positives.
                             .filter(|m| {
                                 let m_path = std::path::Path::new(&m.file);
-                                m_path != std::path::Path::new(&semantic_path.file_path)
+                                is_source_file(&m.file)
+                                    && m_path != std::path::Path::new(&semantic_path.file_path)
                             })
                             .take(10) // Cap at 10 heuristic references to avoid overwhelming output
                             .map(|m| {
@@ -1286,10 +1420,12 @@ impl PathfinderServer {
                         let refs: Vec<crate::server::types::ImpactReference> = result
                             .matches
                             .into_iter()
-                            // Exclude the definition file itself (it's not a caller)
+                            // Exclude the definition file itself AND non-source files (docs, configs).
+                            // is_source_file filters out .md, .txt, .json, .yaml, etc. to reduce false positives.
                             .filter(|m| {
                                 let m_path = std::path::Path::new(&m.file);
-                                m_path != std::path::Path::new(&semantic_path.file_path)
+                                is_source_file(&m.file)
+                                    && m_path != std::path::Path::new(&semantic_path.file_path)
                             })
                             .take(10) // Cap at 10 heuristic references to avoid overwhelming output
                             .map(|m| {
@@ -1697,8 +1833,20 @@ impl PathfinderServer {
                 probe_verified: false,
                 install_hint: Some(missing.install_hint.clone()),
                 degraded_tools: vec![
-                    "analyze_impact".to_owned(),
-                    "read_with_deep_context".to_owned(),
+                    crate::server::types::DegradedToolInfo {
+                        tool: "analyze_impact".to_owned(),
+                        severity: "unavailable".to_owned(),
+                        description:
+                            "No LSP available. Use search_codebase for manual reference search."
+                                .to_owned(),
+                    },
+                    crate::server::types::DegradedToolInfo {
+                        tool: "read_with_deep_context".to_owned(),
+                        severity: "unavailable".to_owned(),
+                        description:
+                            "No LSP available. Returns source only, no dependency signatures."
+                                .to_owned(),
+                    },
                 ],
             });
         }
@@ -1726,7 +1874,9 @@ impl PathfinderServer {
                     parts.push(format!("indexing: {idx}"));
                 }
                 if !l.degraded_tools.is_empty() {
-                    parts.push(format!("degraded_tools: [{}]", l.degraded_tools.join(", ")));
+                    let tool_names: Vec<_> =
+                        l.degraded_tools.iter().map(|t| t.tool.as_str()).collect();
+                    parts.push(format!("degraded_tools: [{}]", tool_names.join(", ")));
                 }
                 parts.join(" ")
             })
@@ -1921,17 +2071,39 @@ enum ProbeAction {
     Probe,
 }
 
-/// Returns a list of tool names that lose LSP support for this language.
-fn compute_degraded_tools(status: &pathfinder_lsp::types::LspLanguageStatus) -> Vec<String> {
+/// Returns structured information about tools that lose LSP support for this language.
+///
+/// Each entry includes the tool name, severity level, and description of the fallback behavior.
+fn compute_degraded_tools(
+    status: &pathfinder_lsp::types::LspLanguageStatus,
+) -> Vec<crate::server::types::DegradedToolInfo> {
     let mut degraded = Vec::new();
 
     if status.supports_definition != Some(true) {
-        degraded.push("get_definition".to_owned());
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "get_definition".to_owned(),
+            severity: "grep_fallback".to_owned(),
+            description:
+                "Uses ripgrep heuristic instead of LSP. May find wrong definition or miss re-exports."
+                    .to_owned(),
+        });
     }
 
     if status.supports_call_hierarchy != Some(true) {
-        degraded.push("analyze_impact".to_owned());
-        degraded.push("read_with_deep_context".to_owned());
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "analyze_impact".to_owned(),
+            severity: "grep_fallback".to_owned(),
+            description:
+                "Uses text search instead of call hierarchy. May over/under-count references."
+                    .to_owned(),
+        });
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "read_with_deep_context".to_owned(),
+            severity: "unavailable".to_owned(),
+            description:
+                "Returns source only, no dependency signatures. Use search_codebase as alternative."
+                    .to_owned(),
+        });
     }
 
     degraded
@@ -3161,6 +3333,130 @@ mod tests {
         assert_eq!(incoming[0].direction, "incoming_heuristic");
     }
 
+    // ── PATCH-002: Non-source file filtering in grep fallback ───────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_grep_fallback_filters_non_source_files() {
+        // Issue: grep fallback was returning matches from .md, .json, .txt, etc.
+        // causing false positives. This test verifies that non-source files
+        // are filtered out of the results.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create the definition file
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // Return a mix of source and non-source files that match the symbol name
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![
+                // Legitimate source file caller
+                pathfinder_search::SearchMatch {
+                    file: "src/caller.rs".to_string(),
+                    line: 1,
+                    column: 1,
+                    content: "fn call() { login(); }".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:a".to_string(),
+                    known: Some(false),
+                },
+                // Documentation file - should be filtered OUT
+                pathfinder_search::SearchMatch {
+                    file: "docs/README.md".to_string(),
+                    line: 10,
+                    column: 1,
+                    content: "call login() to authenticate".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:b".to_string(),
+                    known: Some(false),
+                },
+                // Config file - should be filtered OUT
+                pathfinder_search::SearchMatch {
+                    file: "config.json".to_string(),
+                    line: 5,
+                    column: 1,
+                    content: "\"login\": \"/api/auth\"".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:c".to_string(),
+                    known: Some(false),
+                },
+                // TypeScript source - should be KEPT
+                pathfinder_search::SearchMatch {
+                    file: "web/src/auth.ts".to_string(),
+                    line: 20,
+                    column: 1,
+                    content: "import { login } from './api';".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    version_hash: "sha256:d".to_string(),
+                    known: Some(false),
+                },
+            ],
+            total_matches: 4,
+            truncated: false,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp_grep_fallback"));
+        let incoming = val.incoming.as_ref().expect("must be Some from grep");
+
+        // Only the 2 source files should remain (.rs and .ts)
+        // .md and .json should be filtered out
+        assert_eq!(
+            incoming.len(),
+            2,
+            "non-source files should be filtered, got: {:?}",
+            incoming.iter().map(|r| &r.file).collect::<Vec<_>>()
+        );
+
+        // Verify the correct files are kept
+        let files: std::collections::HashSet<_> =
+            incoming.iter().map(|r| r.file.as_str()).collect();
+        assert!(files.contains("src/caller.rs"), "should keep .rs file");
+        assert!(files.contains("web/src/auth.ts"), "should keep .ts file");
+        assert!(!files.contains("docs/README.md"), "should filter .md file");
+        assert!(!files.contains("config.json"), "should filter .json file");
+    }
+
     // ── PATCH-005: Per-Language Capabilities Tests ─────────────────────
 
     #[tokio::test]
@@ -3799,23 +4095,52 @@ mod tests {
         assert_eq!(val.languages.len(), 1);
         let go_health = &val.languages[0];
         assert_eq!(go_health.language, "go");
+
+        // Check that degraded_tools contains analyze_impact with correct severity
+        let analyze_impact = go_health
+            .degraded_tools
+            .iter()
+            .find(|t| t.tool == "analyze_impact");
         assert!(
-            go_health
-                .degraded_tools
-                .contains(&"analyze_impact".to_owned()),
+            analyze_impact.is_some(),
             "degraded_tools should include analyze_impact when call hierarchy unsupported"
         );
+        let ai = analyze_impact.unwrap();
+        assert_eq!(
+            ai.severity, "grep_fallback",
+            "analyze_impact should have severity=grep_fallback"
+        );
         assert!(
-            go_health
-                .degraded_tools
-                .contains(&"read_with_deep_context".to_owned()),
+            ai.description.contains("text search"),
+            "analyze_impact description should mention text search fallback"
+        );
+
+        // Check that degraded_tools contains read_with_deep_context with correct severity
+        let rwdc = go_health
+            .degraded_tools
+            .iter()
+            .find(|t| t.tool == "read_with_deep_context");
+        assert!(
+            rwdc.is_some(),
             "degraded_tools should include read_with_deep_context when call hierarchy unsupported"
         );
-        // validate_only no longer exists — degraded_tools only contains LSP navigation tools
+        let rwdc = rwdc.unwrap();
+        assert_eq!(
+            rwdc.severity, "unavailable",
+            "read_with_deep_context should have severity=unavailable"
+        );
         assert!(
-            !go_health
-                .degraded_tools
-                .contains(&"validate_only".to_owned()),
+            rwdc.description.contains("source only"),
+            "read_with_deep_context description should mention source-only limitation"
+        );
+
+        // validate_only no longer exists — degraded_tools only contains LSP navigation tools
+        let has_validate_only = go_health
+            .degraded_tools
+            .iter()
+            .any(|t| t.tool == "validate_only");
+        assert!(
+            !has_validate_only,
             "degraded_tools must not include the removed validate_only tool"
         );
     }
@@ -3988,9 +4313,11 @@ mod tests {
         // Diagnostics not available
         assert_eq!(py_health.diagnostics_strategy, Some("none".to_string()));
         // validate_only no longer exists — diagnostics absence only affects call hierarchy tools
-        assert!(!py_health
+        let has_validate_only = py_health
             .degraded_tools
-            .contains(&"validate_only".to_string()));
+            .iter()
+            .any(|t| t.tool == "validate_only");
+        assert!(!has_validate_only);
     }
 
     #[tokio::test]
