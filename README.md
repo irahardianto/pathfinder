@@ -51,7 +51,7 @@ Pathfinder solves these problems by providing:
 
 ### Key Features
 
-- 🛠️ **11 MCP Tools** — covering code navigation, semantic discovery, file reading, and impact analysis.
+- 🛠️ **9 MCP Tools** — covering code navigation, semantic discovery, file reading, and impact analysis.
 - 🌐 **7 Languages** — native Tree-sitter support for Go, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
 - ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
@@ -157,20 +157,19 @@ The directives live in [`docs/agent_directives/`](docs/agent_directives/) and mi
 
 ```
 docs/agent_directives/
-├── rules/
-│   └── pathfinder-tool-routing.md   # Always-on routing rule: which Pathfinder tool to use for each action
+├── AGENTS.md                   # Always-on routing rule: which Pathfinder tool to use for each action
 └── skills/
-    └── pathfinder-workflow/
-        └── SKILL.md                 # On-demand skill: concrete navigation workflows and error recovery
+    └── pathfinder/
+        └── SKILL.md            # On-demand skill: concrete navigation workflows and error recovery
 ```
 
-**`rules/pathfinder-tool-routing.md`** — an always-on rule injected into every agent turn. It tells the agent:
+**`AGENTS.md`** — an always-on rule injected into every agent turn. It tells the agent:
 - To prefer Pathfinder's semantic tools over built-in text tools whenever possible
 - How to form correct semantic paths (e.g., `src/auth.ts::AuthService.login`)
 - Which tool to reach for each action (reading, searching, navigating)
 - When to fall back gracefully if Pathfinder is unavailable
 
-**`skills/pathfinder-workflow/SKILL.md`** — a detailed on-demand skill the agent activates when it needs deeper guidance. It covers:
+**`skills/pathfinder/SKILL.md`** — a detailed on-demand skill the agent activates when it needs deeper guidance. It covers:
 - Step-by-step workflows for exploring, auditing, and debugging codebases
 - Efficient search with `filter_mode`, `exclude_glob`, `known_files`, `group_by_file`, and `is_regex`
 - Error recovery patterns for `SYMBOL_NOT_FOUND`, LSP degradation, and timeout scenarios
@@ -183,8 +182,8 @@ Copy the directives into your project's `.agents/` directory. Antigravity auto-d
 
 ```sh
 # From your project root (not the Pathfinder repo)
-mkdir -p .agents/rules .agents/skills
-cp /path/to/pathfinder/docs/agent_directives/rules/*.md .agents/rules/
+mkdir -p .agents/skills
+cp /path/to/pathfinder/docs/agent_directives/AGENTS.md .agents/
 cp -r /path/to/pathfinder/docs/agent_directives/skills/* .agents/skills/
 ```
 
@@ -192,13 +191,13 @@ The routing rule runs on every agent turn automatically (`trigger: always_on`). 
 
 #### Claude Desktop / Cursor / Other MCP Clients
 
-For clients that support system prompt injection or custom instructions, paste the content of `rules/pathfinder-tool-routing.md` into your **system prompt** or **custom instructions** field. Then reference `skills/pathfinder-workflow/SKILL.md` as additional context or attach it as a project document.
+For clients that support system prompt injection or custom instructions, paste the content of `AGENTS.md` into your **system prompt** or **custom instructions** field. Then reference `skills/pathfinder/SKILL.md` as additional context or attach it as a project document.
 
-For clients that support agent rule files (e.g., `.cursorrules`, `.clinerules`), you can drop the routing rule content directly into those files.
+For clients that support agent rule files (e.g., `.cursorrules`, `.clinerules`), you can drop the `AGENTS.md` content directly into those files.
 
 #### General Approach
 
-For any MCP-compatible client, the minimum effective setup is to inject the **tool-routing rule** into the agent's persistent context. This single file prevents the most common mistakes. The workflow skill is optional but significantly improves the quality of complex multi-step tasks.
+For any MCP-compatible client, the minimum effective setup is to inject the **AGENTS.md routing rule** into the agent's persistent context. This single file prevents the most common mistakes. The workflow skill is optional but significantly improves the quality of complex multi-step tasks.
 
 <!-- TOOLS -->
 ## Tools
@@ -404,10 +403,13 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 
 # Format
-cargo fmt --all -- --check
+cargo fmt --all --check
+
+# Dependency audit
+cargo deny check
 ```
 
-> The workspace enforces `clippy::pedantic`, `deny(unwrap_used)`, and `deny(unsafe_code)`.
+> The workspace enforces `clippy::pedantic`, `deny(unwrap_used)`, `warn(expect_used)`, and `deny(unsafe_code)`.
 
 <!-- LICENSE -->
 ## License
