@@ -501,6 +501,26 @@ pub struct AnalyzeImpactMetadata {
 
 // ── LSP Health Tool Types ────────────────────────────────────────────
 
+/// Structured information about a degraded tool.
+///
+/// Provides detailed information about which tools are degraded and what
+/// fallback behavior agents can expect. Replaces the old `Vec<String>`
+/// format with machine-readable severity and human-readable descriptions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DegradedToolInfo {
+    /// Tool name (e.g., `"analyze_impact"`, `"get_definition"`, `"read_with_deep_context"`).
+    pub tool: String,
+    /// Severity of degradation:
+    ///
+    /// - `"unavailable"` — tool will error, use alternatives
+    /// - `"grep_fallback"` — tool returns heuristic results, verify manually
+    /// - `"warmup_pending"` — retry after indexing completes
+    /// - `"partial"` — some features work (e.g., definition works but not call hierarchy)
+    pub severity: String,
+    /// Human-readable description of the fallback behavior and limitations.
+    pub description: String,
+}
+
 /// Parameters for `lsp_health`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct LspHealthParams {
@@ -578,10 +598,10 @@ pub struct LspLanguageHealth {
     pub install_hint: Option<String>,
     /// Tools that are degraded (using fallback) for this language.
     ///
-    /// Empty when LSP is fully operational. Lists which tools lose LSP support.
-    /// Example: `["analyze_impact", "read_with_deep_context"]` when call hierarchy unsupported.
+    /// Empty when LSP is fully operational. Lists which tools lose LSP support
+    /// with detailed severity and description for each.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub degraded_tools: Vec<String>,
+    pub degraded_tools: Vec<DegradedToolInfo>,
 }
 
 /// Helper to skip serializing false values for `probe_verified`.
