@@ -332,6 +332,23 @@ impl RipgrepScout {
                 Err(_) => continue,
             };
 
+            // Always exclude git internals, dependency directories, and IDE configs.
+            // These are never source code and cause false positives in grep fallback.
+            // Use both Unix (/) and Windows (\) path separators for cross-platform support.
+            if relative.starts_with(".git/")
+                || relative.starts_with(".git\\")
+                || relative.starts_with("node_modules/")
+                || relative.starts_with("node_modules\\")
+                || relative.starts_with("vendor/")
+                || relative.starts_with("vendor\\")
+                || relative.starts_with(".idea/")
+                || relative.starts_with(".idea\\")
+                || relative.starts_with(".vscode/")
+                || relative.starts_with(".vscode\\")
+            {
+                continue;
+            }
+
             // Apply path_glob filter if one was specified.
             let matches: bool = glob_matcher.is_match(&relative);
             if !matches && glob != "**/*" {
@@ -699,6 +716,64 @@ mod tests {
                 m.file
             );
         }
+    }
+
+    // ── Red-Green: .git/ directory exclusion ──────────────────────
+
+    #[tokio::test]
+    async fn test_search_excludes_git_directory() {
+        // Issue: .git/index and other .git/ internals should be excluded from search
+        // because they are binary files or git internal data, not source code.
+        let ws = make_workspace(&[
+            (".git/index", "needle_in_git_index\n"),
+            (".git/config", "needle_in_git_config\n"),
+            ("src/main.rs", "legitimate_needle\n"),
+        ]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "needle".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        // Only src/main.rs should match, NOT .git/index or .git/config
+        assert_eq!(
+            result.total_matches,
+            1,
+            ".git/ files should be excluded, but got matches in: {:?}",
+            result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result.matches[0].file, "src/main.rs",
+            "only legitimate source file should match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_excludes_node_modules_and_vendor() {
+        // Dependencies directories should also be excluded by default
+        let ws = make_workspace(&[
+            ("node_modules/react/index.js", "needle_in_dep\n"),
+            ("vendor/golang.org/x/net/http.go", "needle_in_vendor\n"),
+            ("src/main.rs", "legitimate_needle\n"),
+        ]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "needle".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        // Only src/main.rs should match
+        assert_eq!(
+            result.total_matches,
+            1,
+            "node_modules/ and vendor/ should be excluded, but got matches in: {:?}",
+            result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+        );
+        assert_eq!(result.matches[0].file, "src/main.rs");
     }
 
     // ── Red-Green: multiple matches per file ──────────────────────
