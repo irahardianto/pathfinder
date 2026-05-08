@@ -317,11 +317,7 @@ mod tests {
 
         for (filename, expected) in test_cases {
             let path = Path::new(filename);
-            assert_eq!(
-                language_from_path(path),
-                expected,
-                "Failed for {filename}"
-            );
+            assert_eq!(language_from_path(path), expected, "Failed for {filename}");
         }
     }
 
@@ -355,11 +351,7 @@ mod tests {
 
         for (filepath, expected) in test_cases {
             let path = Path::new(filepath);
-            assert_eq!(
-                language_from_path(path),
-                expected,
-                "Failed for {filepath}"
-            );
+            assert_eq!(language_from_path(path), expected, "Failed for {filepath}");
         }
     }
 
