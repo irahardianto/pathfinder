@@ -2831,4 +2831,226 @@ mod tests {
         client.touch_language("rust");
         // No panic, no error.
     }
+
+    // ── Tests for validation_status_from_parts helper ───────────────────────
+
+    #[test]
+    fn test_validation_status_not_running() {
+        let status = validation_status_from_parts(
+            "rust-analyzer",
+            false, // not running
+            DiagnosticsStrategy::Pull,
+            true,
+            true,
+            true,
+            true,
+            100,
+            Some("rust-analyzer"),
+        );
+
+        assert!(!status.validation);
+        assert!(status.reason.contains("failed to start"));
+        assert!(status.navigation_ready.is_none());
+        assert!(status.indexing_complete.is_none());
+        assert!(status.uptime_seconds.is_none());
+        assert!(status.diagnostics_strategy.is_none());
+        assert!(status.supports_definition.is_none());
+        assert!(status.supports_call_hierarchy.is_none());
+        assert!(status.supports_diagnostics.is_none());
+        assert!(status.supports_formatting.is_none());
+        assert!(status.server_name.is_none());
+    }
+
+    #[test]
+    fn test_validation_status_running_with_pull_diagnostics() {
+        let status = validation_status_from_parts(
+            "rust-analyzer",
+            true, // running
+            DiagnosticsStrategy::Pull,
+            true,
+            true,
+            true,
+            true,
+            100,
+            Some("rust-analyzer"),
+        );
+
+        assert!(status.validation);
+        assert!(status.reason.contains("pull diagnostics"));
+        assert_eq!(status.navigation_ready, Some(true));
+        assert_eq!(status.indexing_complete, Some(true));
+        assert_eq!(status.uptime_seconds, Some(100));
+        assert_eq!(status.diagnostics_strategy, Some("pull".to_owned()));
+        assert_eq!(status.supports_definition, Some(true));
+        assert_eq!(status.supports_call_hierarchy, Some(true));
+        assert_eq!(status.supports_diagnostics, Some(true));
+        assert_eq!(status.supports_formatting, Some(true));
+        assert_eq!(status.server_name, Some("rust-analyzer".to_owned()));
+    }
+
+    #[test]
+    fn test_validation_status_running_with_push_diagnostics() {
+        let status = validation_status_from_parts(
+            "gopls",
+            true,
+            DiagnosticsStrategy::Push,
+            true,
+            false,
+            false,
+            false,
+            50,
+            Some("gopls"),
+        );
+
+        assert!(status.validation);
+        assert!(status.reason.contains("push diagnostics"));
+        assert_eq!(status.navigation_ready, Some(true));
+        assert_eq!(status.indexing_complete, Some(false));
+        assert_eq!(status.uptime_seconds, Some(50));
+        assert_eq!(status.diagnostics_strategy, Some("push".to_owned()));
+        assert_eq!(status.supports_definition, Some(true));
+        assert_eq!(status.supports_call_hierarchy, Some(false));
+        assert_eq!(status.supports_diagnostics, Some(true));
+        assert_eq!(status.supports_formatting, Some(false));
+    }
+
+    #[test]
+    fn test_validation_status_running_with_no_diagnostics() {
+        let status = validation_status_from_parts(
+            "some-lsp",
+            true,
+            DiagnosticsStrategy::None,
+            true,
+            false,
+            false,
+            true,
+            200,
+            None,
+        );
+
+        assert!(!status.validation);
+        assert!(status.reason.contains("does not support diagnostics"));
+        assert_eq!(status.navigation_ready, Some(true));
+        assert_eq!(status.indexing_complete, Some(true));
+        assert_eq!(status.uptime_seconds, Some(200));
+        assert_eq!(status.diagnostics_strategy, Some("none".to_owned()));
+        assert_eq!(status.supports_definition, Some(true));
+        assert_eq!(status.supports_call_hierarchy, Some(false));
+        assert_eq!(status.supports_diagnostics, Some(false));
+        assert_eq!(status.supports_formatting, Some(false));
+        assert!(status.server_name.is_none());
+    }
+
+    #[test]
+    fn test_validation_status_navigation_ready_false_when_no_definition() {
+        let status = validation_status_from_parts(
+            "lsp",
+            true,
+            DiagnosticsStrategy::Pull,
+            false, // no definition support
+            true,
+            true,
+            true,
+            10,
+            None,
+        );
+
+        assert!(status.validation);
+        assert_eq!(status.navigation_ready, Some(false));
+        assert_eq!(status.supports_definition, Some(false));
+    }
+
+    #[test]
+    fn test_validation_status_includes_server_name() {
+        let status = validation_status_from_parts(
+            "command",
+            true,
+            DiagnosticsStrategy::Pull,
+            true,
+            true,
+            true,
+            true,
+            0,
+            Some("custom-lsp-server"),
+        );
+
+        assert_eq!(status.server_name, Some("custom-lsp-server".to_owned()));
+    }
+
+    #[test]
+    fn test_validation_status_no_server_name() {
+        let status = validation_status_from_parts(
+            "command",
+            true,
+            DiagnosticsStrategy::Pull,
+            true,
+            true,
+            true,
+            true,
+            0,
+            None, // no server name
+        );
+
+        assert!(status.server_name.is_none());
+    }
+
+    // ── Tests for InFlightGuard ───────────────────────────────────────────────
+
+    #[test]
+    fn test_in_flight_guard_increments_counter() {
+        use std::sync::atomic::AtomicU32;
+        let counter = Arc::new(AtomicU32::new(0));
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        {
+            let _guard = InFlightGuard::new(Arc::clone(&counter));
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+            {
+                let _guard2 = InFlightGuard::new(Arc::clone(&counter));
+                assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+            }
+            // Second guard dropped
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
+        }
+        // First guard dropped
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_in_flight_guard_concurrent() {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::Barrier;
+        use std::thread;
+        let counter = Arc::new(AtomicU32::new(0));
+        let barrier = Arc::new(Barrier::new(11)); // 10 threads + main
+        let mut handles = vec![];
+
+        for _ in 0..10 {
+            let counter_clone = Arc::clone(&counter);
+            let barrier_clone = Arc::clone(&barrier);
+            let handle = thread::spawn(move || {
+                let _guard = InFlightGuard::new(counter_clone);
+                // Wait for all threads to reach this point
+                barrier_clone.wait();
+                // Guard is still alive here
+                thread::sleep(std::time::Duration::from_millis(10));
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to create their guards
+        barrier.wait();
+
+        // All guards should be alive now
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 10);
+
+        // Wait for all threads to complete and drop their guards
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All guards should be dropped
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
 }
