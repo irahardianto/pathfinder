@@ -280,6 +280,7 @@ mod tests {
         #[derive(serde::Serialize)]
         struct Unserializable {
             #[serde(skip)]
+            #[allow(dead_code)] // Field is intentionally unused for this test
             non_serializable: std::rc::Rc<i32>,
         }
         let data = Unserializable {
@@ -319,8 +320,7 @@ mod tests {
             assert_eq!(
                 language_from_path(path),
                 expected,
-                "Failed for {}",
-                filename
+                "Failed for {filename}"
             );
         }
     }
@@ -340,7 +340,7 @@ mod tests {
         let test_cases = vec!["file.xyz", "file.unknown", "file", "file.txt"];
         for filename in test_cases {
             let path = Path::new(filename);
-            assert_eq!(language_from_path(path), "text", "Failed for {}", filename);
+            assert_eq!(language_from_path(path), "text", "Failed for {filename}");
         }
     }
 
@@ -358,8 +358,7 @@ mod tests {
             assert_eq!(
                 language_from_path(path),
                 expected,
-                "Failed for {}",
-                filepath
+                "Failed for {filepath}"
             );
         }
     }
@@ -376,8 +375,7 @@ mod tests {
             let result = parse_semantic_path(path_str);
             assert!(
                 result.is_ok(),
-                "Expected valid semantic path for: {}",
-                path_str
+                "Expected valid semantic path for: {path_str}"
             );
         }
     }

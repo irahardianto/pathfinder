@@ -8,17 +8,19 @@ mod tests {
     use std::io;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_no_lsp_available_recovery_hint() {
         let err = LspError::NoLspAvailable;
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("No LSP available"));
         assert!(hint_str.contains("lsp_health"));
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_timeout_recovery_hint() {
         let err = LspError::Timeout {
             operation: "textDocument/definition".to_string(),
@@ -27,7 +29,7 @@ mod tests {
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("textDocument/definition"));
         assert!(hint_str.contains("10000ms"));
         assert!(hint_str.contains("lsp_health"));
@@ -35,24 +37,26 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_protocol_recovery_hint() {
         let err = LspError::Protocol("malformed JSON-RPC".to_string());
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("malformed JSON-RPC"));
         assert!(hint_str.contains("lsp_health"));
         assert!(hint_str.contains("search_codebase"));
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_connection_lost_recovery_hint() {
         let err = LspError::ConnectionLost;
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("connection lost"));
         assert!(hint_str.contains("lsp_health"));
         assert!(hint_str.contains("restart"));
@@ -60,6 +64,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_unsupported_capability_recovery_hint() {
         let err = LspError::UnsupportedCapability {
             capability: "diagnosticProvider".to_string(),
@@ -67,20 +72,21 @@ mod tests {
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("diagnosticProvider"));
         assert!(hint_str.contains("does not support"));
         assert!(hint_str.contains("search_codebase"));
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_io_not_found_recovery_hint() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "binary not found");
         let err = LspError::Io(io_err);
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("binary not found"));
         assert!(hint_str.contains("installed"));
         assert!(hint_str.contains("PATH"));
@@ -88,26 +94,28 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_io_permission_denied_recovery_hint() {
         let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
         let err = LspError::Io(io_err);
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("I/O error"));
         assert!(hint_str.contains("access denied"));
         assert!(hint_str.contains("lsp_health"));
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_io_broken_pipe_recovery_hint() {
         let io_err = io::Error::new(io::ErrorKind::BrokenPipe, "pipe broken");
         let err = LspError::Io(io_err);
         let hint = err.recovery_hint();
 
         assert!(hint.is_some());
-        let hint_str = hint.expect("recovery hint should be Some");
+        let hint_str = hint.unwrap();
         assert!(hint_str.contains("I/O error"));
         assert!(hint_str.contains("pipe broken"));
         assert!(hint_str.contains("lsp_health"));
