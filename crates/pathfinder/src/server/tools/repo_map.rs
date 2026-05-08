@@ -22,9 +22,8 @@ async fn count_source_files(root: &Path) -> usize {
     let mut dirs_to_visit = vec![root.to_path_buf()];
 
     while let Some(dir_path) = dirs_to_visit.pop() {
-        let read_dir = match tokio::fs::read_dir(&dir_path).await {
-            Ok(entries) => entries,
-            Err(_) => continue,
+        let Ok(read_dir) = tokio::fs::read_dir(&dir_path).await else {
+            continue;
         };
 
         let mut entries_stream = read_dir;
@@ -36,7 +35,7 @@ async fn count_source_files(root: &Path) -> usize {
 
                         if file_type.is_file() {
                             let ext = path.extension().and_then(|e| e.to_str());
-                            if ext.map(|e| extensions.contains(&e)).unwrap_or(false) {
+                            if ext.is_some_and(|e| extensions.contains(&e)) {
                                 count += 1;
                             }
                         } else if file_type.is_dir() {
@@ -62,7 +61,7 @@ async fn count_source_files(root: &Path) -> usize {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => continue,
+                Err(_) => {}
             }
         }
     }
@@ -107,6 +106,10 @@ impl PathfinderServer {
     // Orchestrates git (changed_since filter) and Tree-sitter (skeleton generation),
     // with degraded-mode fallback when git fails, plus LSP capability collection for
     // the response metadata. The linear structure makes the orchestration explicit.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Linear orchestration pipeline: sandbox → git filter → auto-scale → tree-sitter → LSP pre-warm → metadata assembly. Extraction would obscure the sequential flow."
+    )]
     pub(crate) async fn get_repo_map_impl(
         &self,
         params: GetRepoMapParams,
@@ -158,7 +161,8 @@ impl PathfinderServer {
             // Only auto-scale when the user didn't explicitly set a value
             let source_file_count = count_source_files(self.workspace_root.path()).await;
             if source_file_count > 20 {
-                let scaled = (source_file_count as u32 * 800).clamp(16_000, 48_000);
+                let scaled = (u32::try_from(source_file_count).unwrap_or(u32::MAX) * 800)
+                    .clamp(16_000, 48_000);
                 tracing::info!(
                     tool = "get_repo_map",
                     source_file_count,

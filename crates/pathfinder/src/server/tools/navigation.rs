@@ -273,7 +273,11 @@ impl PathfinderServer {
     }
 
     /// Fetch outgoing call-hierarchy items and append them as dependencies.
-    /// Returns `true` if results were truncated due to max_dependencies limit.
+    /// Returns `true` if results were truncated due to `max_dependencies` limit.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "All parameters are logically distinct mutable references required by the BFS caller; grouping into a struct would obscure ownership."
+    )]
     async fn append_outgoing_deps(
         &self,
         item: &pathfinder_lsp::types::CallHierarchyItem,
@@ -301,10 +305,10 @@ impl PathfinderServer {
                     let callee = &call.item;
 
                     // Filter out non-workspace files (stdlib, dependencies) when project_only
-                    if project_only {
-                        if !is_source_file(&callee.file) || !is_workspace_file(&callee.file) {
-                            continue;
-                        }
+                    if project_only
+                        && (!is_source_file(&callee.file) || !is_workspace_file(&callee.file))
+                    {
+                        continue;
                     }
 
                     let signature = callee.detail.clone().unwrap_or_else(|| callee.name.clone());
@@ -645,8 +649,7 @@ impl PathfinderServer {
             let reason = def
                 .degraded_reason
                 .as_ref()
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
+                .map_or_else(|| "unknown".to_owned(), ToString::to_string);
             format!(
                 "DEGRADED ({reason}) — {}:L{} — {}",
                 def.file,
@@ -967,7 +970,7 @@ impl PathfinderServer {
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
-        let degraded_reason_str = degraded_reason.as_ref().map(|r| r.to_string());
+        let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
         tracing::info!(
             tool = "read_with_deep_context",
             semantic_path = %params.semantic_path,
@@ -995,7 +998,7 @@ impl PathfinderServer {
             language: scope.language,
             dependencies,
             degraded,
-            degraded_reason: degraded_reason.clone(),
+            degraded_reason,
             lsp_readiness,
             dependencies_truncated,
         };
@@ -1017,11 +1020,10 @@ impl PathfinderServer {
         let text = if degraded {
             let reason = degraded_reason
                 .as_ref()
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
+                .map_or_else(|| "unknown".to_owned(), ToString::to_string);
             format!(
-                "DEGRADED MODE ({}) — {dep_count} dependencies loaded (results may be incomplete){dep_block}\n\n{}",
-                reason, scope.content
+                "DEGRADED MODE ({reason}) — {dep_count} dependencies loaded (results may be incomplete){dep_block}\n\n{}",
+                scope.content
             )
         } else {
             format!(
@@ -1533,8 +1535,8 @@ impl PathfinderServer {
 
         let inc_count = incoming.as_ref().map_or(0, Vec::len);
         let out_count = outgoing.as_ref().map_or(0, Vec::len);
-        let degraded_reason_cloned = degraded_reason.clone();
-        let degraded_reason_str = degraded_reason.as_ref().map(|r| r.to_string());
+        let degraded_reason_cloned = degraded_reason;
+        let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
 
         tracing::info!(
             tool = "analyze_impact",
@@ -1565,11 +1567,9 @@ impl PathfinderServer {
         if degraded {
             let reason_str = degraded_reason_cloned
                 .as_ref()
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
+                .map_or_else(|| "unknown".to_owned(), ToString::to_string);
             text_parts.push(format!(
-                "Degraded analysis ({}) — LSP unavailable — reference counts are UNRELIABLE. Do NOT trust zero as 'confirmed no callers'. Grep-based heuristic was used if available. Use search_codebase for manual verification.",
-                reason_str
+                "Degraded analysis ({reason_str}) — LSP unavailable — reference counts are UNRELIABLE. Do NOT trust zero as 'confirmed no callers'. Grep-based heuristic was used if available. Use search_codebase for manual verification."
             ));
         }
         // Incoming
