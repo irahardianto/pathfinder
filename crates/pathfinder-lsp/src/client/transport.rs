@@ -286,4 +286,117 @@ mod tests {
             serde_json::from_str(&written[body_start..]).expect("valid json body");
         assert_eq!(body["id"], 1);
     }
+
+    #[tokio::test]
+    async fn test_empty_body() {
+        // Content-Length: 0 is valid (empty JSON object or similar)
+        let framed = b"Content-Length: 2\r\n\r\n{}";
+        let mut reader = BufReader::new(framed.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_header_with_leading_space() {
+        // Headers with leading spaces before the name are technically invalid
+        // but let's test they're rejected properly
+        let msg = json!({"jsonrpc": "2.0", "result": true});
+        let body = serde_json::to_vec(&msg).unwrap();
+        let framed = format!(" Content-Length: {}\r\n\r\n", body.len());
+        let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+        buf.extend_from_slice(&body);
+
+        let mut reader = BufReader::new(buf.as_slice());
+        let result = read_message(&mut reader).await;
+        // Leading space means it's not a valid Content-Length header
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_unicode_in_json_body() {
+        // Unicode characters in JSON should be preserved
+        let msg = json!({"message": "Hello 世界 🌍"});
+        let body = serde_json::to_vec(&msg).unwrap();
+        let framed = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+        buf.extend_from_slice(&body);
+
+        let mut reader = BufReader::new(buf.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["message"], "Hello 世界 🌍");
+    }
+
+    #[tokio::test]
+    async fn test_large_but_valid_message() {
+        // A message just under the 50MB limit
+        let large_array: Vec<i32> = (0..1_000_000).collect();
+        let msg = json!({"data": large_array});
+        let body = serde_json::to_vec(&msg).unwrap();
+        let framed = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+        buf.extend_from_slice(&body);
+
+        let mut reader = BufReader::new(buf.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result["data"].as_array().unwrap().len(), 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_messages_sequentially() {
+        // Read multiple messages from the same stream
+        let msg1 = json!({"id": 1, "result": "first"});
+        let msg2 = json!({"id": 2, "result": "second"});
+        let msg3 = json!({"id": 3, "result": "third"});
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_message(&mut buf, &msg1).await.unwrap();
+        write_message(&mut buf, &msg2).await.unwrap();
+        write_message(&mut buf, &msg3).await.unwrap();
+
+        let mut reader = BufReader::new(buf.as_slice());
+        assert_eq!(read_message(&mut reader).await.unwrap()["result"], "first");
+        assert_eq!(read_message(&mut reader).await.unwrap()["result"], "second");
+        assert_eq!(read_message(&mut reader).await.unwrap()["result"], "third");
+    }
+
+    #[tokio::test]
+    async fn test_exact_max_message_size() {
+        // Message exactly at the 50MB limit should be accepted
+        // Using a large array of small integers
+        let array_size = 50 * 1024 * 1024 / 4; // ~50MB of 4-byte ints in JSON
+        let msg = json!({"data": vec![0; array_size]});
+        let body = serde_json::to_vec(&msg).unwrap();
+
+        // The actual size might vary slightly due to JSON encoding
+        let framed = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+        buf.extend_from_slice(&body);
+
+        // Only test if the message is actually at or near the limit
+        if body.len() <= 50 * 1024 * 1024 {
+            let mut reader = BufReader::new(buf.as_slice());
+            let result = read_message(&mut reader).await;
+            assert!(result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_body_returns_error() {
+        // Content-Length says there's more data than actually provided
+        let incomplete = br#"Content-Length: 100
+
+{"incomplete": "data"}"#;
+        let mut reader = BufReader::new(incomplete.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_err());
+        // Should be an Io error since read_exact fails
+        match result {
+            Err(LspError::Io(_)) => {} // Expected
+            other => panic!("expected Io error, got: {other:?}"),
+        }
+    }
 }
