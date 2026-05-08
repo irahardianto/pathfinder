@@ -222,7 +222,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_repo_map",
-        description = "Get the structural skeleton of the project — an indented tree of symbols with their semantic paths. IMPORTANT: Copy-paste the exact semantic paths from the output into other Pathfinder tools. Use `max_tokens` (default 16000) and `max_tokens_per_file` (default 2000) to control coverage. Use `visibility=all` for private symbols. Use `changed_since` (e.g. '3h', 'HEAD~5') to scope to recent changes. Use `include_extensions`/`exclude_extensions` to filter by language."
+        description = "Get the structural skeleton of the project — an indented tree of symbols with their semantic paths. IMPORTANT: Copy-paste the exact semantic paths from the output into other Pathfinder tools. Use `max_tokens` (default 16000) and `max_tokens_per_file` (default 2000) to control coverage. Use `visibility=\"all\"` for all symbols including private/internal, or `visibility=\"public\"` (default) for exported/public symbols only. Use `changed_since` (e.g. '3h', 'HEAD~5') to scope to recent changes. Use `include_extensions`/`exclude_extensions` to filter by language. Use `include_imports` with values `\"none\"`, `\"third_party\"` (default), or `\"all\"` to control whether imports are included in the skeleton."
     )]
     async fn get_repo_map(
         &self,
@@ -266,7 +266,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_definition",
-        description = "Jump to where a symbol is defined. Returns the definition's file, line, column, and a code preview. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). LSP-powered — follows imports, re-exports, and type aliases across files. Falls back to ripgrep when LSP is unavailable. Check `degraded` in response."
+        description = "Jump to where a symbol is defined. Returns the definition's file, line, column, and a code preview. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). If you don't know which file defines a symbol, use search_codebase first to locate it. LSP-powered — follows imports, re-exports, and type aliases across files. Falls back to ripgrep when LSP is unavailable. Check `degraded` in response."
     )]
     async fn get_definition(
         &self,
