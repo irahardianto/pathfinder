@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.6.1...pathfinder-mcp-lsp-v0.6.2) - 2026-05-08
+
+### Fixed
+
+- *(lint)* resolve clippy warnings in error.rs and helpers.rs
+
+### Other
+
+- *(lsp)* add transport edge case tests improving coverage to 89%
+- *(lsp)* add client module tests for validation status and in-flight guard
+- *(lsp)* add comprehensive error.rs tests achieving 100% coverage
+
 ## [0.6.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.6.0...pathfinder-mcp-lsp-v0.6.1) - 2026-05-07
 
 ### Other
