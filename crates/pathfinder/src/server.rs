@@ -634,8 +634,10 @@ mod tests {
         assert_eq!(result.matches.len(), 2, "code_only should drop comments");
         assert_eq!(result.matches[0].content, "code line");
         assert_eq!(result.matches[1].content, "another code line");
-        // total_matches reflects the ORIGINAL ripgrep count, not filtered count
-        assert_eq!(result.total_matches, 3);
+        // raw_match_count reflects the ORIGINAL ripgrep count (before filtering)
+        assert_eq!(result.raw_match_count, 3);
+        // total_matches reflects the FILTERED count (after filtering)
+        assert_eq!(result.total_matches, 2);
         // No degraded flag — filtering was real
         assert!(!result.degraded);
     }

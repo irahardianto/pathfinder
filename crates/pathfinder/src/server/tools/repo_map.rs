@@ -1,11 +1,74 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
 use crate::server::helpers::{pathfinder_to_error_data, serialize_metadata};
-use crate::server::types::{GetRepoMapParams, LspCapabilities, RepoCapabilities};
+use crate::server::types::{
+    default_max_tokens, GetRepoMapParams, LspCapabilities, RepoCapabilities,
+};
 use crate::server::PathfinderServer;
+use pathfinder_common::types::DegradedReason;
 use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
 use std::sync::Arc;
+
+/// Count source files in the project to determine if auto-scaling is needed.
+async fn count_source_files(root: &Path) -> usize {
+    let mut count = 0;
+    let extensions: [&str; 38] = [
+        "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "kt", "swift", "cpp", "c", "h", "cs",
+        "rb", "php", "scala", "clj", "ex", "exs", "erl", "hs", "ml", "m", "nim", "pl", "pm", "r",
+        "sh", "lua", "dart", "fs", "fsi", "fsx", "zig", "v", "svelte", "vue",
+    ];
+
+    let mut dirs_to_visit = vec![root.to_path_buf()];
+
+    while let Some(dir_path) = dirs_to_visit.pop() {
+        let read_dir = match tokio::fs::read_dir(&dir_path).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        let mut entries_stream = read_dir;
+        loop {
+            match entries_stream.next_entry().await {
+                Ok(Some(entry)) => {
+                    if let Ok(file_type) = entry.file_type().await {
+                        let path = entry.path();
+
+                        if file_type.is_file() {
+                            let ext = path.extension().and_then(|e| e.to_str());
+                            if ext.map(|e| extensions.contains(&e)).unwrap_or(false) {
+                                count += 1;
+                            }
+                        } else if file_type.is_dir() {
+                            // Skip common non-source directories
+                            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if !matches!(
+                                dir_name,
+                                "node_modules"
+                                    | "target"
+                                    | "vendor"
+                                    | ".git"
+                                    | "dist"
+                                    | "build"
+                                    | "out"
+                                    | ".next"
+                                    | ".venv"
+                                    | "venv"
+                                    | "env"
+                            ) {
+                                dirs_to_visit.push(path);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    count
+}
 
 impl PathfinderServer {
     /// Build an empty-changes response when `changed_since` finds no diffs.
@@ -28,6 +91,7 @@ impl PathfinderServer {
                     per_language: capability_status,
                 },
             },
+            max_tokens_used: 0,
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
             "No files changed since the specified ref. No skeleton generated.",
@@ -78,7 +142,7 @@ impl PathfinderServer {
                 Err(e) => {
                     tracing::warn!(error = %e, "get_repo_map: fallback to full map (git failed)");
                     degraded = true;
-                    degraded_reason = Some(format!("Git error: {e}"));
+                    degraded_reason = Some(DegradedReason::GitError);
                 }
             }
         }
@@ -88,8 +152,31 @@ impl PathfinderServer {
             pathfinder_common::types::Visibility::Public => "public",
             pathfinder_common::types::Visibility::All => "all",
         };
+
+        // Auto-scale token budget for large projects
+        let effective_max_tokens = if params.max_tokens == default_max_tokens() {
+            // Only auto-scale when the user didn't explicitly set a value
+            let source_file_count = count_source_files(self.workspace_root.path()).await;
+            if source_file_count > 20 {
+                let scaled = (source_file_count as u32 * 800).clamp(16_000, 48_000);
+                tracing::info!(
+                    tool = "get_repo_map",
+                    source_file_count,
+                    auto_scaled_tokens = scaled,
+                    requested_tokens = params.max_tokens,
+                    "auto-scaling max_tokens for large project"
+                );
+                scaled
+            } else {
+                params.max_tokens
+            }
+        } else {
+            // Respect explicit user setting
+            params.max_tokens
+        };
+
         // Clamp to reasonable bounds: minimum 500 (usable output), max 100k (memory safety)
-        let max_tokens = params.max_tokens.clamp(500, 100_000);
+        let max_tokens = effective_max_tokens.clamp(500, 100_000);
         let config = pathfinder_treesitter::repo_map::SkeletonConfig::new(
             max_tokens,
             params.depth,
@@ -152,6 +239,7 @@ impl PathfinderServer {
                     per_language: capability_status,
                 },
             },
+            max_tokens_used: max_tokens,
         };
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(result.skeleton)]);

@@ -401,6 +401,61 @@ pub enum IncludeImports {
     All,
 }
 
+/// Reason for degraded mode in tool responses.
+///
+/// Standardized enum for all degraded reasons across tools. Provides
+/// machine-parsable values for agents to understand and handle degraded responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradedReason {
+    /// LSP is not available for this language.
+    NoLsp,
+    /// LSP is warming up and returned empty unverified results.
+    LspWarmupEmptyUnverified,
+    /// LSP returned no result (likely warming up); fell back to grep.
+    LspWarmupGrepFallback,
+    /// LSP timed out; fell back to grep.
+    LspTimeoutGrepFallback,
+    /// LSP returned an error; fell back to grep.
+    LspErrorGrepFallback,
+    /// LSP unavailable; fell back to grep.
+    NoLspGrepFallback,
+    /// Grep fallback result from file-scoped search.
+    GrepFallbackFileScoped,
+    /// Grep fallback result from impl-scoped search.
+    GrepFallbackImplScoped,
+    /// Grep fallback result from global search.
+    GrepFallbackGlobal,
+    /// Language unsupported; filter was bypassed to return results.
+    UnsupportedLanguageFilterBypassed,
+    /// Language is not supported.
+    UnsupportedLanguage,
+    /// Git error (e.g., `get_repo_map` `changed_since` filter failed).
+    GitError,
+}
+
+impl fmt::Display for DegradedReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            DegradedReason::NoLsp => "no_lsp",
+            DegradedReason::LspWarmupEmptyUnverified => "lsp_warmup_empty_unverified",
+            DegradedReason::LspWarmupGrepFallback => "lsp_warmup_grep_fallback",
+            DegradedReason::LspTimeoutGrepFallback => "lsp_timeout_grep_fallback",
+            DegradedReason::LspErrorGrepFallback => "lsp_error_grep_fallback",
+            DegradedReason::NoLspGrepFallback => "no_lsp_grep_fallback",
+            DegradedReason::GrepFallbackFileScoped => "grep_fallback_file_scoped",
+            DegradedReason::GrepFallbackImplScoped => "grep_fallback_impl_scoped",
+            DegradedReason::GrepFallbackGlobal => "grep_fallback_global",
+            DegradedReason::UnsupportedLanguageFilterBypassed => {
+                "unsupported_language_filter_bypassed"
+            }
+            DegradedReason::UnsupportedLanguage => "unsupported_language",
+            DegradedReason::GitError => "git_error",
+        };
+        write!(f, "{s}")
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -644,5 +699,43 @@ mod tests {
         assert!(result.is_ok());
         let resolved = result.expect("should be Ok");
         assert!(resolved.to_string_lossy().contains("src/main.rs"));
+    }
+
+    // ── DegradedReason tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_degraded_reason_serde_snake_case() {
+        // Verify serde serialization produces snake_case strings (backward compatible)
+        use super::DegradedReason;
+
+        assert_eq!(
+            serde_json::to_string(&DegradedReason::NoLsp).expect("NoLsp should serialize to JSON"),
+            "\"no_lsp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DegradedReason::LspWarmupGrepFallback)
+                .expect("LspWarmupGrepFallback should serialize to JSON"),
+            "\"lsp_warmup_grep_fallback\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DegradedReason::GitError)
+                .expect("GitError should serialize to JSON"),
+            "\"git_error\""
+        );
+    }
+
+    #[test]
+    fn test_degraded_reason_display() {
+        use super::DegradedReason;
+
+        assert_eq!(DegradedReason::NoLsp.to_string(), "no_lsp");
+        assert_eq!(
+            DegradedReason::LspWarmupEmptyUnverified.to_string(),
+            "lsp_warmup_empty_unverified"
+        );
+        assert_eq!(
+            DegradedReason::GrepFallbackGlobal.to_string(),
+            "grep_fallback_global"
+        );
     }
 }

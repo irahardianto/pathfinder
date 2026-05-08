@@ -7,7 +7,7 @@ use crate::server::types::{
 };
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
-use pathfinder_common::types::FilterMode;
+use pathfinder_common::types::{DegradedReason, FilterMode};
 use pathfinder_search::{SearchMatch, SearchParams};
 use pathfinder_treesitter::language::SupportedLanguage;
 use rmcp::handler::server::wrapper::Json;
@@ -113,9 +113,9 @@ impl PathfinderServer {
                 };
 
                 let degraded_reason = if filter_was_bypassed {
-                    Some("unsupported_language_filter_bypassed".to_owned())
+                    Some(DegradedReason::UnsupportedLanguageFilterBypassed)
                 } else if degraded {
-                    Some("unsupported_language".to_owned())
+                    Some(DegradedReason::UnsupportedLanguage)
                 } else {
                     None
                 };
@@ -168,8 +168,10 @@ impl PathfinderServer {
 
                 Ok(Json(SearchCodebaseResponse {
                     matches: flat_matches,
-                    total_matches: result.total_matches,
+                    raw_match_count: result.total_matches,
+                    total_matches: returned_count,
                     returned_count,
+                    filtered_count: result.total_matches.saturating_sub(returned_count),
                     truncated: result.truncated,
                     file_groups,
                     degraded,
@@ -416,8 +418,12 @@ mod tests {
             "should be degraded for unsupported language"
         );
         assert_eq!(
-            response.0.degraded_reason.as_deref(),
-            Some("unsupported_language"),
+            response
+                .0
+                .degraded_reason
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            Some("unsupported_language".to_string()),
             "with FilterMode::All, filter is not bypassed so reason is unsupported_language"
         );
     }
@@ -709,8 +715,12 @@ mod tests {
         );
         assert!(response.0.degraded, "degraded must be true");
         assert_eq!(
-            response.0.degraded_reason.as_deref(),
-            Some("unsupported_language_filter_bypassed"),
+            response
+                .0
+                .degraded_reason
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            Some("unsupported_language_filter_bypassed".to_string()),
             "degraded_reason must indicate filter was bypassed"
         );
     }

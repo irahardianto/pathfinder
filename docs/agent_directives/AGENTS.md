@@ -1,6 +1,6 @@
 ## Pathfinder Tool Routing
 
-Semantic navigation tools. Workflows and deep details: `.agents/skills/pathfinder/SKILL.md`.
+Semantic navigation tools. Workflows and deep details: `docs/agent_directives/skills/pathfinder/SKILL.md`.
 
 ### Pre-Flight
 
@@ -30,7 +30,18 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 ### Degraded Mode
 
-`get_definition`, `analyze_impact`, `read_with_deep_context` use LSP. When `degraded: true`, results are best-effort — never treat empty as confirmed-zero. See skill doc for details.
+`get_definition`, `analyze_impact`, `read_with_deep_context` use LSP. When `degraded: true`, results are best-effort — never treat empty as confirmed-zero. Check `degraded_reason` (enum: `no_lsp`, `lsp_warmup_grep_fallback`, `lsp_timeout_grep_fallback`, etc.). See skill doc for the full table.
+
+### Budget Controls
+
+| Parameter | Tool | Default | Purpose |
+|---|---|---|---|
+| `project_only` | `analyze_impact`, `read_with_deep_context` | `true` | Filter out stdlib/vendor noise |
+| `max_references` | `analyze_impact` | `50` | Cap total BFS references |
+| `max_dependencies` | `read_with_deep_context` | `50` | Cap outgoing dependency entries |
+| `max_tokens` | `get_repo_map` | auto | Auto-scales for monorepos |
+
+When `references_truncated` or `dependencies_truncated` is true, increase the corresponding limit.
 
 ### Fallback
 

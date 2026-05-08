@@ -20,7 +20,9 @@ use crate::server::types::{
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
+use pathfinder_common::types::DegradedReason;
 use pathfinder_lsp::LspError;
+use pathfinder_treesitter::symbols::did_you_mean;
 use rmcp::model::{CallToolResult, ErrorData};
 
 /// GAP-002: Re-probe interval for "ready" languages to check liveness.
@@ -58,9 +60,12 @@ fn is_source_file(file: &str) -> bool {
 
 /// Returns `true` if the file looks like it's from the user's workspace (not external/dependencies).
 ///
-/// Filters out:
-/// - Absolute paths (stdlib, SDK files)
-/// - Paths containing `node_modules/` or `vendor/` (dependencies)
+/// Uses heuristic string matching — does not perform filesystem I/O — to avoid per-reference
+/// latency overhead in BFS traversal. Filters out:
+/// - Absolute paths (Unix `/`, Windows `\` or `C:\`)
+/// - Paths containing `node_modules/` or `vendor/` (dependency directories)
+/// - Known Rust stdlib root paths (`std/`, `core/`, `alloc/`)
+/// - Non-source-code files (checked via [`is_source_file`])
 fn is_workspace_file(file: &str) -> bool {
     // Filter out absolute paths (stdlib, SDK files)
     // Unix: starts with `/`
@@ -83,7 +88,19 @@ fn is_workspace_file(file: &str) -> bool {
     {
         return false;
     }
-    true
+    // Filter out known Rust stdlib paths
+    if file.starts_with("std/")
+        || file.starts_with("core/")
+        || file.starts_with("alloc/")
+        || file == "std"
+        || file == "core"
+        || file == "alloc"
+    {
+        return false;
+    }
+    // Must be a source code file to be considered a workspace file
+    // This filters out docs, configs, and other non-source files
+    is_source_file(file)
 }
 
 /// Direction for call hierarchy BFS traversal in `analyze_impact`.
@@ -99,8 +116,9 @@ enum CallDirection {
 struct LspResolution {
     dependencies: Vec<crate::server::types::DeepContextDependency>,
     degraded: bool,
-    degraded_reason: Option<String>,
+    degraded_reason: Option<DegradedReason>,
     engines: Vec<&'static str>,
+    dependencies_truncated: bool,
 }
 
 impl PathfinderServer {
@@ -119,11 +137,14 @@ impl PathfinderServer {
         semantic_path: &pathfinder_common::types::SemanticPath,
         start_line: usize,
         name_column: usize,
+        project_only: bool,
+        max_dependencies: u32,
     ) -> LspResolution {
         let mut dependencies = Vec::new();
         let mut degraded = true;
-        let mut degraded_reason = Some("no_lsp".to_owned());
+        let mut degraded_reason = Some(DegradedReason::NoLsp);
         let mut engines = vec!["tree-sitter"];
+        let mut dependencies_truncated = false;
 
         let lsp_result = self
             .lawyer
@@ -139,14 +160,17 @@ impl PathfinderServer {
 
         match lsp_result {
             Ok(items) if !items.is_empty() => {
-                self.append_outgoing_deps(
-                    &items[0],
-                    &mut dependencies,
-                    &mut engines,
-                    &mut degraded,
-                    &mut degraded_reason,
-                )
-                .await;
+                dependencies_truncated = self
+                    .append_outgoing_deps(
+                        &items[0],
+                        &mut dependencies,
+                        &mut engines,
+                        &mut degraded,
+                        &mut degraded_reason,
+                        project_only,
+                        max_dependencies,
+                    )
+                    .await;
             }
             Ok(_) => {
                 // Empty call hierarchy — verify LSP is actually warm.
@@ -204,14 +228,17 @@ impl PathfinderServer {
                                 semantic_path = %semantic_path,
                                 "read_with_deep_context: call_hierarchy_prepare succeeded on retry after warmup wait"
                             );
-                            self.append_outgoing_deps(
-                                &retry_items[0],
-                                &mut dependencies,
-                                &mut engines,
-                                &mut degraded,
-                                &mut degraded_reason,
-                            )
-                            .await;
+                            dependencies_truncated = self
+                                .append_outgoing_deps(
+                                    &retry_items[0],
+                                    &mut dependencies,
+                                    &mut engines,
+                                    &mut degraded,
+                                    &mut degraded_reason,
+                                    project_only,
+                                    max_dependencies,
+                                )
+                                .await;
                         }
                         _ => {
                             // Retry also returned empty or failed → truly warming up or no deps
@@ -221,7 +248,7 @@ impl PathfinderServer {
                                 "read_with_deep_context: retry also returned empty — LSP still warming up"
                             );
                             degraded = true;
-                            degraded_reason = Some("lsp_warmup_empty_unverified".to_owned());
+                            degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
                         }
                     }
                 }
@@ -241,18 +268,23 @@ impl PathfinderServer {
             degraded,
             degraded_reason,
             engines,
+            dependencies_truncated,
         }
     }
 
     /// Fetch outgoing call-hierarchy items and append them as dependencies.
+    /// Returns `true` if results were truncated due to max_dependencies limit.
     async fn append_outgoing_deps(
         &self,
         item: &pathfinder_lsp::types::CallHierarchyItem,
         dependencies: &mut Vec<crate::server::types::DeepContextDependency>,
         engines: &mut Vec<&'static str>,
         degraded: &mut bool,
-        degraded_reason: &mut Option<String>,
-    ) {
+        degraded_reason: &mut Option<DegradedReason>,
+        project_only: bool,
+        max_dependencies: u32,
+    ) -> bool {
+        let mut truncated = false;
         match self
             .lawyer
             .call_hierarchy_outgoing(self.workspace_root.path(), item)
@@ -261,11 +293,18 @@ impl PathfinderServer {
             Ok(outgoing) => {
                 engines.push("lsp");
                 for call in outgoing {
-                    let callee = call.item;
+                    if dependencies.len() >= max_dependencies as usize {
+                        truncated = true;
+                        break;
+                    }
 
-                    // Filter out non-workspace files (stdlib, dependencies)
-                    if !is_source_file(&callee.file) || !is_workspace_file(&callee.file) {
-                        continue;
+                    let callee = &call.item;
+
+                    // Filter out non-workspace files (stdlib, dependencies) when project_only
+                    if project_only {
+                        if !is_source_file(&callee.file) || !is_workspace_file(&callee.file) {
+                            continue;
+                        }
                     }
 
                     let signature = callee.detail.clone().unwrap_or_else(|| callee.name.clone());
@@ -273,7 +312,7 @@ impl PathfinderServer {
                     dependencies.push(crate::server::types::DeepContextDependency {
                         semantic_path: sp,
                         signature,
-                        file: callee.file,
+                        file: callee.file.clone(),
                         line: callee.line as usize,
                     });
                 }
@@ -288,6 +327,7 @@ impl PathfinderServer {
                 );
             }
         }
+        truncated
     }
 
     /// Core logic for the `get_definition` tool.
@@ -453,12 +493,7 @@ impl PathfinderServer {
                 );
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    def.degraded_reason = Some(
-                        "lsp_warmup_grep_fallback: LSP returned no result (likely warming up); \
-                         result from Ripgrep pattern search — may not be the canonical definition. \
-                         Verify with read_source_file."
-                            .to_owned(),
-                    );
+                    def.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -480,9 +515,10 @@ impl PathfinderServer {
                     duration_ms,
                     "get_definition: no definition found (LSP None, grep empty)"
                 );
+                let did_you_mean_suggestions = self.compute_did_you_mean(&semantic_path).await;
                 Err(pathfinder_to_error_data(&PathfinderError::SymbolNotFound {
                     semantic_path: params.semantic_path,
-                    did_you_mean: vec![],
+                    did_you_mean: did_you_mean_suggestions,
                 }))
             }
             Err(LspError::NoLspAvailable) => {
@@ -497,12 +533,7 @@ impl PathfinderServer {
                 );
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    def.degraded_reason = Some(
-                        "no_lsp_grep_fallback: LSP unavailable; result from Ripgrep \
-                         pattern search — may not be the canonical definition. \
-                         Verify with read_source_file."
-                            .to_owned(),
-                    );
+                    def.degraded_reason = Some(DegradedReason::NoLspGrepFallback);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -538,11 +569,7 @@ impl PathfinderServer {
                 );
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    def.degraded_reason = Some(
-                        "lsp_timeout_grep_fallback: LSP timed out; result from Ripgrep pattern search — \
-                         may not be the canonical definition. Verify with read_source_file."
-                            .to_owned(),
-                    );
+                    def.degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -582,11 +609,7 @@ impl PathfinderServer {
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
                     def.degraded = true;
-                    def.degraded_reason = Some(format!(
-                        "lsp_error_grep_fallback: LSP returned error ({e}); result from Ripgrep \
-                         pattern search — may not be the canonical definition. \
-                         Verify with read_source_file."
-                    ));
+                    def.degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -619,7 +642,11 @@ impl PathfinderServer {
     /// Mirrors the pattern used by all other tools in the suite.
     fn get_def_to_call_result(def: &GetDefinitionResponse) -> rmcp::model::CallToolResult {
         let text = if def.degraded {
-            let reason = def.degraded_reason.as_deref().unwrap_or("unknown");
+            let reason = def
+                .degraded_reason
+                .as_ref()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
             format!(
                 "DEGRADED ({reason}) — {}:L{} — {}",
                 def.file,
@@ -646,6 +673,23 @@ impl PathfinderServer {
         let mut res = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(def);
         res
+    }
+
+    async fn compute_did_you_mean(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+    ) -> Vec<String> {
+        let Some(ref symbol_chain) = semantic_path.symbol_chain else {
+            return Vec::new();
+        };
+        let symbols = self
+            .surgeon
+            .extract_symbols(self.workspace_root.path(), &semantic_path.file_path)
+            .await;
+        let Ok(symbols) = symbols else {
+            return Vec::new();
+        };
+        did_you_mean(&symbols, symbol_chain, 3)
     }
 
     /// Grep-based fallback for definition resolution when LSP is unavailable or warming up.
@@ -725,11 +769,7 @@ impl PathfinderServer {
                     column: u32::try_from(m.column).unwrap_or(1),
                     preview: m.content.clone(),
                     degraded: true,
-                    degraded_reason: Some(
-                        "grep_fallback_file_scoped: result from file-scoped Ripgrep search. \
-                         Verify with read_source_file."
-                            .to_owned(),
-                    ),
+                    degraded_reason: Some(DegradedReason::GrepFallbackFileScoped),
                     lsp_readiness: Some("unavailable".to_owned()),
                 });
             }
@@ -788,11 +828,7 @@ impl PathfinderServer {
                             column: u32::try_from(hit.column).unwrap_or(1),
                             preview: hit.content.clone(),
                             degraded: true,
-                            degraded_reason: Some(
-                                "grep_fallback_impl_scoped: result from impl-scoped Ripgrep search. \
-                                 Verify with read_source_file."
-                                    .to_owned(),
-                            ),
+                            degraded_reason: Some(DegradedReason::GrepFallbackImplScoped),
                             lsp_readiness: Some("unavailable".to_owned()),
                         });
                     }
@@ -837,11 +873,7 @@ impl PathfinderServer {
                     column: u32::try_from(m.column).unwrap_or(1),
                     preview: m.content.clone(),
                     degraded: true,
-                    degraded_reason: Some(
-                        "grep_fallback_global: result from global Ripgrep search — \
-                         may not be the canonical definition. Verify with read_source_file."
-                            .to_owned(),
-                    ),
+                    degraded_reason: Some(DegradedReason::GrepFallbackGlobal),
                     lsp_readiness: Some("unavailable".to_owned()),
                 });
             }
@@ -910,6 +942,9 @@ impl PathfinderServer {
             )
             .await;
 
+        let project_only = params.project_only.unwrap_or(true);
+        let max_dependencies = params.max_dependencies;
+
         let lsp_start = std::time::Instant::now();
 
         let LspResolution {
@@ -917,14 +952,22 @@ impl PathfinderServer {
             degraded,
             degraded_reason,
             engines,
+            dependencies_truncated,
         } = self
-            .resolve_lsp_dependencies(&semantic_path, scope.start_line, scope.name_column)
+            .resolve_lsp_dependencies(
+                &semantic_path,
+                scope.start_line,
+                scope.name_column,
+                project_only,
+                max_dependencies,
+            )
             .await;
 
         // Note: `_doc_guard` still alive here; drops at function return.
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
+        let degraded_reason_str = degraded_reason.as_ref().map(|r| r.to_string());
         tracing::info!(
             tool = "read_with_deep_context",
             semantic_path = %params.semantic_path,
@@ -932,15 +975,15 @@ impl PathfinderServer {
             lsp_ms,
             duration_ms,
             degraded,
-            degraded_reason,
+            degraded_reason = ?degraded_reason_str,
             engines_used = ?engines,
             "read_with_deep_context: complete"
         );
 
         let dep_count = dependencies.len();
         let lsp_readiness = if degraded {
-            match degraded_reason.as_deref() {
-                Some("no_lsp") => Some("unavailable".to_owned()),
+            match degraded_reason {
+                Some(DegradedReason::NoLsp) => Some("unavailable".to_owned()),
                 _ => Some("warming_up".to_owned()),
             }
         } else {
@@ -954,6 +997,7 @@ impl PathfinderServer {
             degraded,
             degraded_reason: degraded_reason.clone(),
             lsp_readiness,
+            dependencies_truncated,
         };
 
         // Build the dependency block: list each callee signature, file, and line.
@@ -971,7 +1015,10 @@ impl PathfinderServer {
 
         // Prepend degradation notice when in degraded mode
         let text = if degraded {
-            let reason = degraded_reason.as_deref().unwrap_or("unknown");
+            let reason = degraded_reason
+                .as_ref()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
             format!(
                 "DEGRADED MODE ({}) — {dep_count} dependencies loaded (results may be incomplete){dep_block}\n\n{}",
                 reason, scope.content
@@ -996,6 +1043,8 @@ impl PathfinderServer {
         direction: CallDirection,
         max_depth: u32,
         files_referenced: &mut std::collections::HashSet<String>,
+        project_only: bool,
+        remaining_references: &mut u32,
     ) -> (Vec<crate::server::types::ImpactReference>, u32) {
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((initial_item.clone(), 0));
@@ -1010,6 +1059,9 @@ impl PathfinderServer {
             max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
             if current_depth >= max_depth {
                 continue;
+            }
+            if *remaining_references == 0 {
+                break;
             }
 
             let hierarchy_result = match direction {
@@ -1028,14 +1080,19 @@ impl PathfinderServer {
             match hierarchy_result {
                 Ok(calls) => {
                     for call in calls {
+                        if *remaining_references == 0 {
+                            break;
+                        }
+
                         let referenced_item = call.item;
 
-                        // Filter out non-workspace files:
+                        // Filter out non-workspace files when project_only:
                         // - Must have a source code extension
                         // - Must be a relative path (not absolute like stdlib/SDK paths)
                         // - Must not be in node_modules/ or vendor/
-                        if !is_source_file(&referenced_item.file)
-                            || !is_workspace_file(&referenced_item.file)
+                        if project_only
+                            && (!is_source_file(&referenced_item.file)
+                                || !is_workspace_file(&referenced_item.file))
                         {
                             continue;
                         }
@@ -1062,6 +1119,7 @@ impl PathfinderServer {
                                 },
                                 depth: current_depth as usize,
                             });
+                            *remaining_references -= 1;
                         }
                     }
                 }
@@ -1102,6 +1160,9 @@ impl PathfinderServer {
         // Cap max_depth to prevent unbounded BFS traversal (PRD §5.1 maximum).
         // Also floor at 1 to guarantee at least one level of traversal.
         let max_depth = params.max_depth.clamp(1, 5);
+        let project_only = params.project_only.unwrap_or(true);
+        let max_references = params.max_references;
+        let mut remaining_references = max_references;
 
         tracing::info!(
             tool = "analyze_impact",
@@ -1169,7 +1230,7 @@ impl PathfinderServer {
         let mut incoming: Option<Vec<crate::server::types::ImpactReference>> = None;
         let mut outgoing: Option<Vec<crate::server::types::ImpactReference>> = None;
         let mut degraded = true;
-        let mut degraded_reason = Some("no_lsp".to_owned());
+        let mut degraded_reason = Some(DegradedReason::NoLsp);
         let mut engines = vec!["tree-sitter"];
         let mut files_referenced = std::collections::HashSet::new();
         let mut max_depth_reached = 0;
@@ -1193,6 +1254,7 @@ impl PathfinderServer {
                 degraded_reason = None;
 
                 let initial_item = &items[0];
+                files_referenced.insert(initial_item.file.clone());
 
                 // --- INCOMING BFS ---
                 let (incoming_refs, depth_in) = self
@@ -1201,6 +1263,8 @@ impl PathfinderServer {
                         CallDirection::Incoming,
                         max_depth,
                         &mut files_referenced,
+                        project_only,
+                        &mut remaining_references,
                     )
                     .await;
                 incoming = Some(incoming_refs);
@@ -1213,6 +1277,8 @@ impl PathfinderServer {
                         CallDirection::Outgoing,
                         max_depth,
                         &mut files_referenced,
+                        project_only,
+                        &mut remaining_references,
                     )
                     .await;
                 outgoing = Some(outgoing_refs);
@@ -1255,7 +1321,7 @@ impl PathfinderServer {
                     );
                     engines.push("lsp");
                     degraded = true;
-                    degraded_reason = Some("lsp_warmup_empty_unverified".to_owned());
+                    degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
 
                     // Use grep-based reference search as a heuristic fallback when LSP is warming up.
                     // Results may over-count (string references) or under-count (indirect calls),
@@ -1308,7 +1374,7 @@ impl PathfinderServer {
                                 })
                                 .collect();
                             incoming = Some(refs);
-                            degraded_reason = Some("lsp_warmup_grep_fallback".to_owned());
+                            degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
                             tracing::info!(
                                 tool = "analyze_impact",
                                 references_found = incoming.as_ref().map_or(0, Vec::len),
@@ -1376,7 +1442,7 @@ impl PathfinderServer {
                             })
                             .collect();
                         incoming = Some(refs);
-                        degraded_reason = Some("no_lsp_grep_fallback".to_owned());
+                        degraded_reason = Some(DegradedReason::NoLspGrepFallback);
                         tracing::info!(
                             tool = "analyze_impact",
                             references_found = incoming.as_ref().map_or(0, Vec::len),
@@ -1442,7 +1508,7 @@ impl PathfinderServer {
                             })
                             .collect();
                         incoming = Some(refs);
-                        degraded_reason = Some("lsp_timeout_grep_fallback".to_owned());
+                        degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
                         tracing::info!(
                             tool = "analyze_impact",
                             references_found = incoming.as_ref().map_or(0, Vec::len),
@@ -1465,6 +1531,11 @@ impl PathfinderServer {
         let lsp_ms = lsp_start.elapsed().as_millis();
         let duration_ms = start.elapsed().as_millis();
 
+        let inc_count = incoming.as_ref().map_or(0, Vec::len);
+        let out_count = outgoing.as_ref().map_or(0, Vec::len);
+        let degraded_reason_cloned = degraded_reason.clone();
+        let degraded_reason_str = degraded_reason.as_ref().map(|r| r.to_string());
+
         tracing::info!(
             tool = "analyze_impact",
             semantic_path = %params.semantic_path,
@@ -1472,14 +1543,11 @@ impl PathfinderServer {
             lsp_ms,
             duration_ms,
             degraded,
-            degraded_reason,
+            degraded_reason = ?degraded_reason_str,
             engines_used = ?engines,
             "analyze_impact: complete"
         );
-
-        let inc_count = incoming.as_ref().map_or(0, Vec::len);
-        let out_count = outgoing.as_ref().map_or(0, Vec::len);
-        let degraded_reason_cloned = degraded_reason.clone();
+        let references_truncated = max_references > 0 && remaining_references == 0;
 
         let metadata = crate::server::types::AnalyzeImpactMetadata {
             incoming,
@@ -1488,15 +1556,20 @@ impl PathfinderServer {
             files_referenced: files_referenced.len(),
             degraded,
             degraded_reason,
+            references_truncated,
         };
 
         // Build honest text output based on actual results, listing every
         // reference so agents can act without parsing structured_content.
         let mut text_parts = Vec::new();
         if degraded {
+            let reason_str = degraded_reason_cloned
+                .as_ref()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
             text_parts.push(format!(
                 "Degraded analysis ({}) — LSP unavailable — reference counts are UNRELIABLE. Do NOT trust zero as 'confirmed no callers'. Grep-based heuristic was used if available. Use search_codebase for manual verification.",
-                degraded_reason_cloned.as_deref().unwrap_or("unknown")
+                reason_str
             ));
         }
         // Incoming
@@ -2348,6 +2421,7 @@ mod tests {
 
         let params = ReadWithDeepContextParams {
             semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
         };
         let result = server.read_with_deep_context_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2360,7 +2434,7 @@ mod tests {
 
         assert_eq!(text_content, "DEGRADED MODE (no_lsp) — 0 dependencies loaded (results may be incomplete)\n\nfn login() { }");
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         assert!(val.dependencies.is_empty());
     }
 
@@ -2403,6 +2477,7 @@ mod tests {
 
         let params = ReadWithDeepContextParams {
             semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
         };
         let result = server.read_with_deep_context_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2457,6 +2532,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2472,7 +2548,7 @@ mod tests {
             "outgoing must be null (not empty) when degraded"
         );
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
     }
 
     #[tokio::test]
@@ -2528,6 +2604,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2646,12 +2723,10 @@ mod tests {
         let val = unpack_def(res);
         assert!(val.degraded, "should be degraded");
         assert_eq!(val.file, "src/auth.rs");
-        assert!(
-            val.degraded_reason
-                .as_ref()
-                .unwrap()
-                .contains("lsp_error_grep_fallback"),
-            "degraded_reason should mention lsp_error_grep_fallback: {:?}",
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback),
+            "degraded_reason should be lsp_error_grep_fallback: {:?}",
             val.degraded_reason
         );
     }
@@ -2711,11 +2786,9 @@ mod tests {
         };
         let val = unpack_def(res);
         assert!(val.degraded, "should be degraded");
-        assert!(
-            val.degraded_reason
-                .as_ref()
-                .unwrap()
-                .contains("lsp_error_grep_fallback"),
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback),
             "degraded_reason: {:?}",
             val.degraded_reason
         );
@@ -2729,6 +2802,12 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(make_scope()));
+        // Set up extract_symbols to return empty list for did_you_mean
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .unwrap()
+            .push(Ok(Vec::new()));
 
         // Default MockLawyer returns Ok(None) for goto_definition.
         // MockScout returns empty results → no grep fallback.
@@ -2818,6 +2897,7 @@ mod tests {
             .degraded_reason
             .as_ref()
             .unwrap()
+            .to_string()
             .contains("grep_fallback"));
     }
 
@@ -2850,6 +2930,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2896,6 +2977,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2908,8 +2990,8 @@ mod tests {
             "must be degraded when goto_definition probe also returns None"
         );
         assert_eq!(
-            val.degraded_reason.as_deref(),
-            Some("lsp_warmup_empty_unverified"),
+            val.degraded_reason,
+            Some(DegradedReason::LspWarmupEmptyUnverified),
             "degraded_reason must indicate warmup ambiguity"
         );
         // incoming/outgoing must be None — do NOT mislead agent with Some([])
@@ -2943,6 +3025,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2951,7 +3034,7 @@ mod tests {
 
         // Degraded due to LSP error
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
     }
 
     // ── read_with_deep_context with outgoing call error ───────────────────
@@ -2985,6 +3068,7 @@ mod tests {
 
         let params = ReadWithDeepContextParams {
             semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
         };
         let result = server.read_with_deep_context_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2993,7 +3077,7 @@ mod tests {
 
         // Degraded because outgoing call failed
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp"));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         assert!(val.dependencies.is_empty());
     }
 
@@ -3025,6 +3109,7 @@ mod tests {
 
         let params = ReadWithDeepContextParams {
             semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
         };
         let result = server.read_with_deep_context_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -3061,6 +3146,7 @@ mod tests {
 
         let params = ReadWithDeepContextParams {
             semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
         };
         let result = server.read_with_deep_context_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -3073,8 +3159,8 @@ mod tests {
             "must be degraded when goto_definition probe also returns None"
         );
         assert_eq!(
-            val.degraded_reason.as_deref(),
-            Some("lsp_warmup_empty_unverified"),
+            val.degraded_reason,
+            Some(DegradedReason::LspWarmupEmptyUnverified),
             "degraded_reason must indicate warmup ambiguity"
         );
         assert!(val.dependencies.is_empty());
@@ -3140,6 +3226,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1, // Should stop after first level
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -3165,6 +3252,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: ".git/objects/abc::def".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let Err(err) = result else {
@@ -3198,6 +3286,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         assert!(result.is_err(), "tree-sitter error should propagate");
@@ -3246,6 +3335,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed despite partial failure");
@@ -3319,6 +3409,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -3326,7 +3417,7 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp_grep_fallback"));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
         let incoming = val.incoming.as_ref().expect("must be Some from grep");
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0].file, "src/caller.rs");
@@ -3429,6 +3520,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
+            ..Default::default()
         };
         let result = server.analyze_impact_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -3436,7 +3528,7 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason.as_deref(), Some("no_lsp_grep_fallback"));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
         let incoming = val.incoming.as_ref().expect("must be Some from grep");
 
         // Only the 2 source files should remain (.rs and .ts)
@@ -4772,6 +4864,7 @@ mod tests {
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
+            ..Default::default()
         };
 
         let _ = server.analyze_impact_impl(params).await;
@@ -4809,6 +4902,7 @@ mod tests {
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
         let params = ReadWithDeepContextParams {
             semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
         };
 
         let _ = server.read_with_deep_context_impl(params).await;
@@ -4819,6 +4913,413 @@ mod tests {
             lawyer.did_open_call_count(),
             lawyer.did_close_call_count(),
             "DS-1: did_open and did_close must be symmetric in read_with_deep_context"
+        );
+    }
+
+    // ── TASK-3: did_you_mean suggestions ─────────────────────────────────────
+
+    /// When `get_definition` fails (LSP None, grep empty), and `extract_symbols`
+    /// returns close-but-not-exact symbol names, the error payload should contain
+    /// `did_you_mean` suggestions computed by Levenshtein distance.
+    #[tokio::test]
+    async fn test_get_definition_returns_did_you_mean_suggestions_on_symbol_not_found() {
+        use pathfinder_treesitter::surgeon::{ExtractedSymbol, SymbolKind};
+
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // Provide close symbol names so did_you_mean can produce suggestions.
+        // The caller is looking for "login" — we provide "logIn" and "logon" as candidates.
+        let symbols = vec![
+            ExtractedSymbol {
+                name: "logIn".to_owned(),
+                semantic_path: "logIn".to_owned(),
+                kind: SymbolKind::Function,
+                byte_range: 0..5,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                is_public: true,
+                children: vec![],
+            },
+            ExtractedSymbol {
+                name: "logon".to_owned(),
+                semantic_path: "logon".to_owned(),
+                kind: SymbolKind::Function,
+                byte_range: 10..15,
+                start_line: 1,
+                end_line: 1,
+                name_column: 0,
+                is_public: true,
+                children: vec![],
+            },
+        ];
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .unwrap()
+            .push(Ok(symbols));
+
+        // MockLawyer returns Ok(None) — triggers warmup retry → grep fallback → did_you_mean path.
+        // MockScout returns empty results → grep fallback finds nothing → SymbolNotFound.
+        let lawyer = Arc::new(MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected SYMBOL_NOT_FOUND error, got Ok");
+        };
+
+        // Verify error code
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            code, "SYMBOL_NOT_FOUND",
+            "error code must be SYMBOL_NOT_FOUND"
+        );
+
+        // Verify did_you_mean field is non-empty and contains expected candidates.
+        // The suggestions are nested in data.details.did_you_mean (via `to_details()`).
+        let suggestions = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("details"))
+            .and_then(|d| d.get("did_you_mean"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !suggestions.is_empty(),
+            "did_you_mean must contain suggestions when similar symbols exist"
+        );
+        let has_login_variant = suggestions
+            .iter()
+            .any(|s| s.as_str().is_some_and(|s| s.contains("log")));
+        assert!(
+            has_login_variant,
+            "suggestions should include close matches like 'logIn' or 'logon', got: {suggestions:?}"
+        );
+    }
+
+    // ── TASK-2: project_only filter ───────────────────────────────────────────
+
+    /// With `project_only = false`, stdlib/absolute-path items should pass through
+    /// the BFS filter and appear in the impact graph.
+    #[tokio::test]
+    async fn test_analyze_impact_project_only_false_includes_external_refs() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Incoming: a project file (should be included regardless of project_only)
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+
+        // Outgoing: an absolute stdlib path — should be EXCLUDED with project_only=true
+        // but INCLUDED when project_only=false
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "write_all".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "/home/user/.rustup/toolchains/stable/lib/std/io.rs".into(),
+                line: 100,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![10],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            project_only: Some(false), // key: include external
+            ..Default::default()
+        };
+        let result = server
+            .analyze_impact_impl(params)
+            .await
+            .expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert_eq!(
+            outgoing.len(),
+            1,
+            "project_only=false should include the stdlib absolute path ref"
+        );
+        assert!(
+            outgoing[0].file.starts_with('/'),
+            "outgoing ref should be the absolute stdlib path"
+        );
+    }
+
+    /// With `project_only = true` (the default), absolute stdlib paths should be
+    /// silently dropped from the BFS impact graph.
+    #[tokio::test]
+    async fn test_analyze_impact_project_only_true_filters_stdlib_refs() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // No incoming callers
+        lawyer.push_incoming_call_result(Ok(vec![]));
+
+        // Outgoing: an absolute stdlib path — should be filtered when project_only=true
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "write_all".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "/home/user/.rustup/toolchains/stable/lib/std/io.rs".into(),
+                line: 100,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![10],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            // project_only defaults to true via Default::default()
+            ..Default::default()
+        };
+        let result = server
+            .analyze_impact_impl(params)
+            .await
+            .expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert_eq!(
+            outgoing.len(),
+            0,
+            "project_only=true (default) must filter out stdlib absolute paths"
+        );
+    }
+
+    // ── TASK-6: max_references truncation ─────────────────────────────────────
+
+    /// When the number of BFS-found references exceeds `max_references`, the
+    /// result must be truncated and `references_truncated = true`.
+    #[tokio::test]
+    async fn test_analyze_impact_max_references_truncates_results() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Push 5 incoming callers (each on a unique file to avoid dedup)
+        let incoming_calls: Vec<CallHierarchyCall> = (1..=5)
+            .map(|i| CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: format!("caller_{i}"),
+                    kind: "function".into(),
+                    detail: None,
+                    file: format!("src/caller_{i}.rs"),
+                    line: i * 10,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![i * 10],
+            })
+            .collect();
+        lawyer.push_incoming_call_result(Ok(incoming_calls));
+
+        // No outgoing
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            max_references: 3, // cap below the 5 available
+            ..Default::default()
+        };
+        let result = server
+            .analyze_impact_impl(params)
+            .await
+            .expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        let incoming = val.incoming.as_ref().expect("incoming must be Some");
+        assert_eq!(
+            incoming.len(),
+            3,
+            "incoming refs must be capped at max_references=3"
+        );
+        assert!(
+            val.references_truncated,
+            "references_truncated must be true when budget is exhausted"
+        );
+    }
+
+    /// Verify that the `default_max_references()` constant is 50.
+    ///
+    /// This ensures the plan's specified default wasn't accidentally changed.
+    #[test]
+    fn test_analyze_impact_default_max_references_is_50() {
+        use crate::server::types::default_max_references;
+        assert_eq!(
+            default_max_references(),
+            50,
+            "default_max_references must be 50 per the remediation plan spec"
+        );
+    }
+
+    // ── TASK-7: max_dependencies truncation ───────────────────────────────────
+
+    /// When outgoing dependencies exceed `max_dependencies`, the result must be
+    /// truncated and `dependencies_truncated = true`.
+    #[tokio::test]
+    async fn test_read_with_deep_context_max_dependencies_truncates_results() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Push 5 outgoing callees (each on a distinct file)
+        let outgoing_calls: Vec<CallHierarchyCall> = (1..=5)
+            .map(|i| CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: format!("dep_{i}"),
+                    kind: "function".into(),
+                    detail: Some(format!("fn dep_{i}()")),
+                    file: format!("src/dep_{i}.rs"),
+                    line: i * 5,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![i * 5],
+            })
+            .collect();
+        lawyer.push_outgoing_call_result(Ok(outgoing_calls));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_dependencies: 2, // cap below the 5 available
+            ..Default::default()
+        };
+        let result = server
+            .read_with_deep_context_impl(params)
+            .await
+            .expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        assert_eq!(
+            val.dependencies.len(),
+            2,
+            "dependencies must be capped at max_dependencies=2"
+        );
+        assert!(
+            val.dependencies_truncated,
+            "dependencies_truncated must be true when budget is exhausted"
+        );
+    }
+
+    /// Verify that the `default_max_dependencies()` constant is 50.
+    #[test]
+    fn test_read_with_deep_context_default_max_dependencies_is_50() {
+        use crate::server::types::default_max_dependencies;
+        assert_eq!(
+            default_max_dependencies(),
+            50,
+            "default_max_dependencies must be 50 per the implementation"
         );
     }
 }

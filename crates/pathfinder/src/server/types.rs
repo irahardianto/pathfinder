@@ -7,6 +7,7 @@
 //! can remove its struct's allow without touching unrelated items.
 #![allow(dead_code)] // Fields are read by serde deserialization, not by name
 
+use pathfinder_common::types::DegradedReason;
 use rmcp::schemars;
 use rmcp::serde::{self, Deserialize, Serialize};
 
@@ -114,10 +115,31 @@ pub struct ReadSymbolScopeParams {
 }
 
 /// Parameters for `read_with_deep_context`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadWithDeepContextParams {
     /// Semantic path (e.g., `src/auth.ts::AuthService.login`). MUST include file path and '::'.
     pub semantic_path: String,
+    /// Filter dependencies to workspace/project files only.
+    ///
+    /// When `true` (default), excludes stdlib and external library dependencies
+    /// (e.g., `Vec::push`, `String::clone` from Rust stdlib, or npm packages).
+    /// When `false`, includes all references including stdlib/external.
+    #[serde(default)]
+    pub project_only: Option<bool>,
+    /// Maximum number of dependencies (callee signatures) to return.
+    /// Prevents context overflow on large functions. Default: 50.
+    #[serde(default = "default_max_dependencies")]
+    pub max_dependencies: u32,
+}
+
+impl Default for ReadWithDeepContextParams {
+    fn default() -> Self {
+        Self {
+            semantic_path: String::default(),
+            project_only: Some(true),
+            max_dependencies: default_max_dependencies(),
+        }
+    }
 }
 
 /// Parameters for `get_definition`.
@@ -128,13 +150,35 @@ pub struct GetDefinitionParams {
 }
 
 /// Parameters for `analyze_impact`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactParams {
     /// Semantic path to the target (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
     /// Traversal depth (max: 5).
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
+    /// Filter references to workspace/project files only.
+    ///
+    /// When `true` (default), excludes stdlib and external library references
+    /// (e.g., `Vec::push`, `String::clone` from Rust stdlib, or npm packages).
+    /// When `false`, includes all references including stdlib/external.
+    #[serde(default)]
+    pub project_only: Option<bool>,
+    /// Maximum total references (incoming + outgoing) to return.
+    /// Prevents context overflow on large codebases. Default: 50.
+    #[serde(default = "default_max_references")]
+    pub max_references: u32,
+}
+
+impl Default for AnalyzeImpactParams {
+    fn default() -> Self {
+        Self {
+            semantic_path: String::default(),
+            max_depth: default_max_depth(),
+            project_only: Some(true),
+            max_references: default_max_references(),
+        }
+    }
 }
 
 /// Parameters for `read_file`.
@@ -178,13 +222,25 @@ pub struct SearchCodebaseResponse {
     /// When `truncated = true`, this equals `max_results` and ripgrep stopped searching early.
     /// When `filter_mode` is `"comments_only"` or `"code_only"`, matches that do not
     /// pass the filter are excluded from `matches` but still counted here.
-    /// Compare with `returned_count` to understand how many matches were filtered.
+    /// Compare with `total_matches` to see how many matches were removed by filtering.
+    pub raw_match_count: usize,
+    /// Total matches in this response (after `filter_mode` filtering).
+    ///
+    /// This always equals `matches.len()` and `returned_count`. Provided for consistency
+    /// with agent expectations: "total" means what you actually get, not ripgrep's pre-filter count.
+    /// Use `raw_match_count` to see ripgrep's count before filtering.
+    /// Use `filtered_count` to see how many matches were removed by `filter_mode`.
     pub total_matches: usize,
     /// Number of matches actually returned in this response (after `filter_mode` filtering).
     ///
-    /// `returned_count == matches.len()`. Provided as a convenience field so agents
-    /// do not need to count `matches` themselves.
+    /// `returned_count == total_matches == matches.len()`. Provided as a convenience field
+    /// and for backward compatibility.
     pub returned_count: usize,
+    /// Number of matches removed by `filter_mode` filtering.
+    ///
+    /// `filtered_count = raw_match_count - total_matches`.
+    /// When `filter_mode = "All"`, this is always 0.
+    pub filtered_count: usize,
     /// Indicates if the match list was truncated by `max_results`.
     pub truncated: bool,
     /// Grouped output — populated when `group_by_file: true`.
@@ -198,7 +254,7 @@ pub struct SearchCodebaseResponse {
     pub degraded: bool,
     /// Reason for degradation, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded_reason: Option<String>,
+    pub degraded_reason: Option<DegradedReason>,
     /// When results are truncated, this field provides the `offset` value
     /// to use for the next page of results. Absent when not truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,9 +356,11 @@ pub struct GetRepoMapMetadata {
     pub degraded: bool,
     /// Reason for degradation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded_reason: Option<String>,
+    pub degraded_reason: Option<DegradedReason>,
     /// System capabilities available for this repository.
     pub capabilities: RepoCapabilities,
+    /// Actual `max_tokens` used (may differ from requested due to auto-scaling).
+    pub max_tokens_used: u32,
 }
 
 /// The overall capabilities of the Pathfinder system.
@@ -417,7 +475,7 @@ pub struct ReadWithDeepContextMetadata {
     pub degraded: bool,
     /// Reason for degradation (e.g., `"no_lsp"`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded_reason: Option<String>,
+    pub degraded_reason: Option<DegradedReason>,
     /// IW-2: LSP readiness signal at the time of the call.
     ///
     /// - `"ready"`: LSP is fully operational — results are authoritative.
@@ -425,6 +483,8 @@ pub struct ReadWithDeepContextMetadata {
     /// - `"unavailable"`: No LSP; Tree-sitter fallback used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_readiness: Option<String>,
+    /// `true` when the `max_dependencies` limit was reached and results were truncated.
+    pub dependencies_truncated: bool,
 }
 
 /// The response for `get_definition`.
@@ -443,7 +503,7 @@ pub struct GetDefinitionResponse {
     pub degraded: bool,
     /// Reason for degradation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded_reason: Option<String>,
+    pub degraded_reason: Option<DegradedReason>,
     /// IW-2: LSP readiness at the time of the call.
     ///
     /// - `"ready"`: LSP operational — definition is authoritative.
@@ -496,7 +556,9 @@ pub struct AnalyzeImpactMetadata {
     /// Machine-readable reason for degradation (e.g., `no_lsp`, `lsp_crash`, `lsp_timeout`).
     /// Absent when `degraded` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded_reason: Option<String>,
+    pub degraded_reason: Option<DegradedReason>,
+    /// `true` when the `max_references` limit was reached and results were truncated.
+    pub references_truncated: bool,
 }
 
 // ── LSP Health Tool Types ────────────────────────────────────────────
@@ -643,6 +705,14 @@ pub const fn default_depth() -> u32 {
 #[must_use]
 pub const fn default_max_depth() -> u32 {
     2
+}
+#[must_use]
+pub const fn default_max_references() -> u32 {
+    50
+}
+#[must_use]
+pub const fn default_max_dependencies() -> u32 {
+    50
 }
 #[must_use]
 pub const fn default_start_line() -> u32 {

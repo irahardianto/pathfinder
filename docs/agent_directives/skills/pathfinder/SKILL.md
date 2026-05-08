@@ -38,7 +38,7 @@ Bare file paths (no `::`) are valid only for whole-file operations like `read_so
 ```
 1. get_repo_map(path=".", depth=5, visibility="public")
    → Full project skeleton with semantic paths
-   → Low coverage_percent? Increase max_tokens
+   → Low coverage_percent? Increase max_tokens (auto-scales for large repos)
    → Files show [TRUNCATED]? Increase max_tokens_per_file
    → Use changed_since="3h" to scope to recent changes
    → Use include_extensions=["ts","tsx"] for language focus
@@ -46,13 +46,18 @@ Bare file paths (no `::`) are valid only for whole-file operations like `read_so
 2. search_codebase(query="<entry point>", path_glob="src/**/*")
    → Find main handlers, routes, or CLI commands
    → Copy enclosing_semantic_path for next step
+   → total_matches = post-filter count; raw_match_count = ripgrep pre-filter count
 
 3. read_with_deep_context(semantic_path="<entry point>")
    → Source + signatures of everything it calls
    → First call may take 5-30s during LSP warmup
+   → Large codebases: set max_dependencies=20 to reduce noise
 
 4. analyze_impact(semantic_path="<key function>", max_depth=2)
    → Who calls it (incoming) + what it calls (outgoing)
+   → project_only=true (default): only workspace files, no stdlib noise
+   → project_only=false: include stdlib / vendor references too
+   → references_truncated=true: budget hit, increase max_references
 ```
 
 **Done when:** You can explain the architecture and trace a request through the system.
@@ -137,24 +142,64 @@ search_codebase(query="deprecated_api",
                 group_by_file=true)
 ```
 
+**Understanding search counts:**
+- `total_matches` — post-filter count (equals `matches.len()`). This is the ground truth.
+- `raw_match_count` — ripgrep pre-filter count (before `filter_mode` drops comments/strings).
+- `filtered_count` — `raw_match_count - total_matches` (how many rows were removed by the filter).
+- `truncated` — result set was capped at `max_results`. Increase `max_results` or narrow your query.
+
 ---
+
+## Token Budget Controls
+
+Use these parameters to prevent context-window overflow in large repos:
+
+### `analyze_impact` budget parameters
+| Parameter | Default | Effect |
+|---|---|---|
+| `project_only` | `true` | `true` = only workspace files (no stdlib/vendor); `false` = all references |
+| `max_references` | `50` | Hard cap on total BFS references returned across incoming + outgoing |
+| `max_depth` | `2` | BFS traversal depth (clamped 1–5) |
+
+When `references_truncated: true` in the response, the budget was hit — either increase `max_references` or decrease `max_depth`.
+
+### `read_with_deep_context` budget parameters
+| Parameter | Default | Effect |
+|---|---|---|
+| `project_only` | `true` | `true` = filter stdlib/vendor callees; `false` = include all |
+| `max_dependencies` | `50` | Hard cap on outgoing dependency entries |
+
+When `dependencies_truncated: true` in the response, increase `max_dependencies` to see more.
+
+### `get_repo_map` budget parameters
+| Parameter | Default | Effect |
+|---|---|---|
+| `max_tokens` | auto | Auto-scales for repos > 20 files: `clamp(file_count × 800, 16000, 48000)` |
+| `max_tokens_per_file` | `2000` | Per-file skeleton cap before file is shown as a stub |
+
+Check `max_tokens_used` in the response to see the effective budget applied.
 
 ## LSP Degraded Mode
 
 Three tools use LSP: `get_definition`, `analyze_impact`, `read_with_deep_context`.
 
-Every response includes `degraded` (bool) and `degraded_reason`:
+Every response includes `degraded` (bool) and `degraded_reason` (enum, snake_case):
 
 | `degraded_reason` | Meaning | Action |
 |---|---|---|
 | `null` | LSP confirmed | Trust fully |
-| `no_lsp` | No language server | Accept limited results |
-| `lsp_warmup_empty_unverified` | LSP indexing; empty = unverified | Re-run in 10-30s |
-| `lsp_warmup_grep_fallback` | LSP null; grep result | Verify with read_source_file |
+| `no_lsp` | No language server available | Accept limited results |
+| `lsp_warmup_empty_unverified` | LSP indexing; empty result unverified | Re-run in 10-30s |
+| `lsp_warmup_grep_fallback` | LSP returned null; fell back to grep | Verify with read_source_file |
+| `lsp_timeout_grep_fallback` | LSP timed out; fell back to grep | Re-run or use tree-sitter tools |
+| `lsp_error_grep_fallback` | LSP error; fell back to grep | Check lsp_health |
+| `no_lsp_grep_fallback` | No LSP; fell back to grep | Install language server |
 | `grep_fallback_file_scoped` | File-scoped grep | Good confidence |
 | `grep_fallback_impl_scoped` | Impl-block grep | Good for methods |
 | `grep_fallback_global` | Global grep | Least precise — verify |
-| `lsp_error` | LSP error | Tree-sitter/grep only |
+| `unsupported_language_filter_bypassed` | Language unsupported; filter bypassed | Results may include noise |
+| `unsupported_language` | Language not supported | Use read_file for raw content |
+| `git_error` | Git operation failed | get_repo_map changed_since fell back |
 
 **Critical rule:** When `degraded: true`, **never treat empty results as confirmed-zero.** Re-run after LSP finishes indexing, or check `lsp_health`.
 
@@ -162,11 +207,19 @@ Every response includes `degraded` (bool) and `degraded_reason`:
 
 ## Error Recovery
 
-**SYMBOL_NOT_FOUND:**
+**SYMBOL_NOT_FOUND with `did_you_mean` suggestions:**
 ```
 Error: SYMBOL_NOT_FOUND for "src/auth.ts::AuthServce.login"
-       did_you_mean: ["AuthService.login", "AuthService.logout"]
+       data.details.did_you_mean: ["AuthService.login", "AuthService.logout"]
 → Use the corrected path from did_you_mean
+→ If suggestions list is empty: use search_codebase(query="login") to find the right file
+```
+
+**SYMBOL_NOT_FOUND — no suggestions (wrong file):**
+```
+Error: SYMBOL_NOT_FOUND, did_you_mean: []
+→ The symbol probably lives in a different file
+→ search_codebase(query="<symbol_name>") → find file → retry with correct path
 ```
 
 **LSP Timeout / Degraded Navigation:**
