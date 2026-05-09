@@ -1584,13 +1584,11 @@ impl PathfinderServer {
         } else if inc_count == 0 && out_count == 0 {
             text_parts.push("LSP confirmed: zero callers/callees for this symbol.".to_string());
         } else if inc_count == 0 {
-            text_parts.push(
-                "LSP confirmed: zero incoming callers (callees found below).".to_string(),
-            );
+            text_parts
+                .push("LSP confirmed: zero incoming callers (callees found below).".to_string());
         } else if out_count == 0 {
-            text_parts.push(
-                "LSP confirmed: zero outgoing callees (callers found below).".to_string(),
-            );
+            text_parts
+                .push("LSP confirmed: zero outgoing callees (callers found below).".to_string());
         }
         // Incoming
         text_parts.push(format!("Incoming references: {inc_count}"));
