@@ -343,9 +343,9 @@ mod tests {
     // ── Phase 2 §5: [lsp.java] config section ────────────────────────────────
 
     /// Phase 2 §5: Full jdtls config block deserializes correctly via the
-    /// generic `lsp` HashMap (no Java-specific schema additions needed).
+    /// generic `lsp` `HashMap` (no Java-specific schema additions needed).
     ///
-    /// Verifies: command, args, idle_timeout_minutes, and settings all round-trip
+    /// Verifies: command, args, `idle_timeout_minutes`, and settings all round-trip
     /// through `serde_json`.
     #[test]
     fn test_java_lsp_config_section() {

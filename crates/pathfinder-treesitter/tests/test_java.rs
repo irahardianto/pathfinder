@@ -1,3 +1,11 @@
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::format_push_string,
+    clippy::uninlined_format_args,
+    clippy::single_char_add_str
+)]
+
 //! Integration tests for Phase 1: Tree-sitter Java Support.
 //!
 //! Each test loads a real Java fixture file and asserts on the symbol tree
@@ -127,7 +135,7 @@ fn test_fixture_interface_with_defaults() {
 
 // ─── RecordExample.java ───────────────────────────────────────────────────────
 
-/// AC-1.4: Record (Java 16+) → SymbolKind::Struct.
+/// AC-1.4: Record (Java 16+) → `SymbolKind::Struct`.
 #[test]
 fn test_fixture_record_example() {
     let source = include_bytes!("fixtures/RecordExample.java");
@@ -200,7 +208,7 @@ fn test_fixture_sealed_hierarchy() {
 
 // ─── EnumWithMethods.java ─────────────────────────────────────────────────────
 
-/// AC-1.4: Enum → SymbolKind::Enum; methods extracted as children.
+/// AC-1.4: Enum → `SymbolKind::Enum`; methods extracted as children.
 #[test]
 fn test_fixture_enum_with_methods() {
     let source = include_bytes!("fixtures/EnumWithMethods.java");
@@ -230,7 +238,7 @@ fn test_fixture_enum_with_methods() {
 
 // ─── AnnotationType.java ─────────────────────────────────────────────────────
 
-/// AC-1.4: Annotation type (`@interface`) → SymbolKind::Interface.
+/// AC-1.4: Annotation type (`@interface`) → `SymbolKind::Interface`.
 #[test]
 fn test_fixture_annotation_type() {
     let source = include_bytes!("fixtures/AnnotationType.java");
@@ -361,7 +369,7 @@ fn test_fixture_module_info() {
 /// Edge case: `package-info.java` — contains only package declaration and
 /// package-level annotations. No class declarations should result in no symbols.
 ///
-/// Unlike `module-info.java` which has a `module` declaration (not in class_kinds),
+/// Unlike `module-info.java` which has a `module` declaration (not in `class_kinds`),
 /// `package-info.java` has no type declarations at all. The recursive extractor
 /// should iterate the AST without panicking and return empty symbol list.
 #[test]

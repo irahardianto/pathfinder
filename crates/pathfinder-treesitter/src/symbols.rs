@@ -2622,7 +2622,7 @@ def compute(x: int) -> int:
     // AC-0.9: detect_access_level() — per-language detection rules
     // ---------------------------------------------------------------
 
-    /// AC-0.9 Rust: `pub fn` → AccessLevel::Public
+    /// AC-0.9 Rust: `pub fn` → `AccessLevel::Public`
     #[test]
     fn test_detect_rust_pub_fn() {
         let source = b"pub fn greet() {}";
@@ -2641,7 +2641,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Rust: `pub(crate) mod` → AccessLevel::Package
+    /// AC-0.9 Rust: `pub(crate) mod` → `AccessLevel::Package`
     #[test]
     fn test_detect_rust_pub_crate_mod() {
         let source = b"pub(crate) mod utils {}";
@@ -2660,7 +2660,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Rust: `pub(super) fn` → AccessLevel::Protected
+    /// AC-0.9 Rust: `pub(super) fn` → `AccessLevel::Protected`
     #[test]
     fn test_detect_rust_pub_super_fn() {
         let source = b"pub(super) fn helper() {}";
@@ -2679,7 +2679,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Rust: bare `fn` (no visibility modifier) → AccessLevel::Private
+    /// AC-0.9 Rust: bare `fn` (no visibility modifier) → `AccessLevel::Private`
     #[test]
     fn test_detect_rust_private_fn() {
         let source = b"fn internal() {}";
@@ -2698,7 +2698,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Go: uppercase-initial name → AccessLevel::Public
+    /// AC-0.9 Go: uppercase-initial name → `AccessLevel::Public`
     #[test]
     fn test_detect_go_uppercase_function() {
         let source = b"package main\nfunc Export() {}";
@@ -2717,7 +2717,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Go: lowercase-initial name → AccessLevel::Package
+    /// AC-0.9 Go: lowercase-initial name → `AccessLevel::Package`
     #[test]
     fn test_detect_go_lowercase_function() {
         let source = b"package main\nfunc internal() {}";
@@ -2736,7 +2736,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Go: `_`-prefixed name → AccessLevel::Private
+    /// AC-0.9 Go: `_`-prefixed name → `AccessLevel::Private`
     #[test]
     fn test_detect_go_underscore_function() {
         let source = b"package main\nfunc _hidden() {}";
@@ -2755,7 +2755,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 TypeScript: exported function → AccessLevel::Public
+    /// AC-0.9 TypeScript: exported function → `AccessLevel::Public`
     #[test]
     fn test_detect_ts_exported_function() {
         let source = b"export function greet() {}";
@@ -2774,7 +2774,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 TypeScript: non-exported function → AccessLevel::Package
+    /// AC-0.9 TypeScript: non-exported function → `AccessLevel::Package`
     #[test]
     fn test_detect_ts_non_exported_function() {
         let source = b"function helper() {}";
@@ -2793,7 +2793,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 TypeScript: `_`-prefixed non-exported function → AccessLevel::Private
+    /// AC-0.9 TypeScript: `_`-prefixed non-exported function → `AccessLevel::Private`
     #[test]
     fn test_detect_ts_underscore_function() {
         let source = b"function _internal() {}";
@@ -2812,7 +2812,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Python: bare name → AccessLevel::Public
+    /// AC-0.9 Python: bare name → `AccessLevel::Public`
     #[test]
     fn test_detect_python_public_function() {
         let source = b"def compute(): pass";
@@ -2831,7 +2831,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Python: single-underscore name → AccessLevel::Protected
+    /// AC-0.9 Python: single-underscore name → `AccessLevel::Protected`
     #[test]
     fn test_detect_python_single_underscore() {
         let source = b"def _helper(): pass";
@@ -2850,7 +2850,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Python: double-underscore non-dunder name → AccessLevel::Private
+    /// AC-0.9 Python: double-underscore non-dunder name → `AccessLevel::Private`
     #[test]
     fn test_detect_python_double_underscore() {
         let source = b"def __secret(): pass";
@@ -2869,7 +2869,7 @@ def compute(x: int) -> int:
         );
     }
 
-    /// AC-0.9 Python: dunder method (`__init__`) → AccessLevel::Public (not Private)
+    /// AC-0.9 Python: dunder method (`__init__`) → `AccessLevel::Public` (not Private)
     #[test]
     fn test_detect_python_dunder_method() {
         let source = b"def __init__(self): pass";
@@ -2894,7 +2894,7 @@ def compute(x: int) -> int:
 
     /// AC-1.3 / AC-1.4: Basic Java class — extracts class with correct kind and
     /// extracts constructor + methods as children. Fields must NOT be extracted
-    /// (constant_kinds is empty for Java, see §2.1).
+    /// (`constant_kinds` is empty for Java, see §2.1).
     #[test]
     fn test_java_basic_class_symbols() {
         let source = b"package com.example;\n\
@@ -2962,7 +2962,7 @@ public class BasicClass {\n\
         );
     }
 
-    /// AC-1.4: Java interface → SymbolKind::Interface
+    /// AC-1.4: Java interface → `SymbolKind::Interface`
     #[test]
     fn test_java_interface_kind() {
         let source = b"public interface Sortable {\n\
@@ -2982,7 +2982,7 @@ public class BasicClass {\n\
         assert_eq!(iface.access_level, crate::surgeon::AccessLevel::Public);
     }
 
-    /// AC-1.4: Java enum → SymbolKind::Enum
+    /// AC-1.4: Java enum → `SymbolKind::Enum`
     #[test]
     fn test_java_enum_kind() {
         let source = b"public enum Status {\n\
@@ -3007,7 +3007,7 @@ public class BasicClass {\n\
         assert_eq!(is_active.access_level, crate::surgeon::AccessLevel::Public);
     }
 
-    /// AC-1.4: Java record → SymbolKind::Struct (Java 16+)
+    /// AC-1.4: Java record → `SymbolKind::Struct` (Java 16+)
     #[test]
     fn test_java_record_kind() {
         let source = b"public record Point(int x, int y) {\n\
@@ -3036,7 +3036,7 @@ public class BasicClass {\n\
         assert_eq!(distance.kind, crate::surgeon::SymbolKind::Function);
     }
 
-    /// AC-1.4: Java annotation type → SymbolKind::Interface
+    /// AC-1.4: Java annotation type → `SymbolKind::Interface`
     #[test]
     fn test_java_annotation_type_kind() {
         let source = b"public @interface MyAnnotation {\n\
@@ -3157,6 +3157,17 @@ public class BasicClass {\n\
     /// of the recursive extractor, but no crash or empty-name symbol is produced.
     #[test]
     fn test_java_anonymous_class_skipped() {
+        // Helper functions must come before statements in test functions
+        fn no_empty_names(syms: &[crate::surgeon::ExtractedSymbol]) -> bool {
+            syms.iter()
+                .all(|s| !s.name.is_empty() && no_empty_names(&s.children))
+        }
+        fn no_anon_body(syms: &[crate::surgeon::ExtractedSymbol]) -> bool {
+            syms.iter()
+                .all(|s| s.kind != crate::surgeon::SymbolKind::Class || !s.name.is_empty())
+                && syms.iter().all(|s| no_anon_body(&s.children))
+        }
+
         let source = b"public class Outer {\n\
     public class Inner { void innerMethod() {} }\n\
     public static class StaticNested { void nestedMethod() {} }\n\
@@ -3178,19 +3189,10 @@ public class BasicClass {\n\
         );
 
         // No symbol with empty name should appear anywhere in the tree (AC-1.7: no garbage)
-        fn no_empty_names(syms: &[crate::surgeon::ExtractedSymbol]) -> bool {
-            syms.iter()
-                .all(|s| !s.name.is_empty() && no_empty_names(&s.children))
-        }
         assert!(no_empty_names(&syms), "No empty-name symbols should exist");
 
         // The anonymous class body itself must NOT appear as a named container symbol.
         // (Its methods may leak as a known side effect of recursive extraction — acceptable.)
-        fn no_anon_body(syms: &[crate::surgeon::ExtractedSymbol]) -> bool {
-            syms.iter()
-                .all(|s| s.kind != crate::surgeon::SymbolKind::Class || !s.name.is_empty())
-                && syms.iter().all(|s| no_anon_body(&s.children))
-        }
         assert!(
             no_anon_body(&syms),
             "anonymous_class_body must not appear as an extracted Class symbol"
