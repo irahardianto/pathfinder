@@ -197,6 +197,7 @@ impl Surgeon for MockSurgeon {
             changed_files: config.changed_files.clone(),
             include_extensions: config.include_extensions.clone(),
             exclude_extensions: config.exclude_extensions.clone(),
+            include_tests: config.include_tests,
         };
         self.generate_skeleton_calls.lock().unwrap().push((
             path.to_path_buf(),

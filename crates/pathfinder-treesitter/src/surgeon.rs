@@ -57,6 +57,8 @@ pub struct ExtractedSymbol {
 /// The type of an AST symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
+    /// A test function (e.g., `#[test] fn`, `@Test def`, `test_` prefix).
+    Test,
     /// A standalone function.
     Function,
     /// A method associated with a class or impl block.

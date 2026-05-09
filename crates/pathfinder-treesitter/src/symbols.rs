@@ -85,8 +85,15 @@ impl<'a> SymbolExtractionContext<'a> {
         );
     }
 
-    fn determine_symbol_kind(&self, node: Node, kind: &str) -> Option<SymbolKind> {
+    fn determine_symbol_kind(&self, node: Node<'a>, kind: &str) -> Option<SymbolKind> {
         if self.types.function_kinds.contains(&kind) {
+            let func_name = Self::resolve_name_node(node)
+                .and_then(|n| self.source.get(n.byte_range()))
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(str::trim);
+            if is_test_function(node, self.lang, self.source, func_name) {
+                return Some(SymbolKind::Test);
+            }
             return Some(SymbolKind::Function);
         }
 
@@ -95,6 +102,13 @@ impl<'a> SymbolExtractionContext<'a> {
         }
 
         if self.types.method_kinds.contains(&kind) {
+            let func_name = Self::resolve_name_node(node)
+                .and_then(|n| self.source.get(n.byte_range()))
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(str::trim);
+            if is_test_function(node, self.lang, self.source, func_name) {
+                return Some(SymbolKind::Test);
+            }
             return Some(SymbolKind::Method);
         }
 
@@ -541,6 +555,118 @@ fn detect_java_access_level(node: Node) -> crate::surgeon::AccessLevel {
     }
     // No access modifier → package-private (Java default)
     AccessLevel::Package
+}
+
+/// Detect if a function node is a test function using language-specific rules.
+///
+/// Checks for:
+/// - Rust: `#[test]`, `#[tokio::test]`, etc. in `attribute_item` children
+/// - Python: `@pytest.mark` decorator or function named `test_*`
+/// - Go: function name starting with `Test` in `*_test.go` file
+/// - Java: `@Test` annotation in modifiers
+/// - Plus naming conventions as fallback: `test_` prefix, `_test` suffix
+fn is_test_function(
+    node: Node<'_>,
+    lang: SupportedLanguage,
+    source: &[u8],
+    func_name: Option<&str>,
+) -> bool {
+    match lang {
+        SupportedLanguage::Rust => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                let kind = child.kind();
+                if kind == "attribute_item" || kind == "inner_attribute_item" {
+                    if let Some(attr_text) = source.get(child.byte_range()) {
+                        let attr = String::from_utf8_lossy(attr_text);
+                        if attr.contains("#[test]")
+                            || attr.contains("#[tokio::test")
+                            || attr.contains("#[rstest]")
+                            || attr.contains("#[test_case")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            if let Some(name) = func_name {
+                name.starts_with("test_") || name.ends_with("_test")
+            } else {
+                false
+            }
+        }
+        SupportedLanguage::Python => {
+            let mut check_node = node;
+            loop {
+                if let Some(node_bytes) = source.get(check_node.byte_range()) {
+                    let node_text = String::from_utf8_lossy(node_bytes);
+                    if node_text.contains("@pytest")
+                        || node_text.contains("unittest")
+                        || node_text.contains("@given")
+                    {
+                        return true;
+                    }
+                }
+                if check_node.kind() == "decorated_definition" {
+                    break;
+                }
+                match check_node.parent() {
+                    Some(parent) if parent.kind() == "decorated_definition" => {
+                        check_node = parent;
+                    }
+                    _ => break,
+                }
+            }
+            if let Some(name) = func_name {
+                name.starts_with("test_")
+            } else {
+                false
+            }
+        }
+        SupportedLanguage::TypeScript
+        | SupportedLanguage::Tsx
+        | SupportedLanguage::JavaScript
+        | SupportedLanguage::Vue => {
+            if let Some(name) = func_name {
+                name.starts_with("test_")
+                    || name.starts_with("it_")
+                    || name.ends_with("_test")
+                    || name == "test"
+                    || name == "it"
+                    || name == "describe"
+            } else {
+                false
+            }
+        }
+        SupportedLanguage::Go => {
+            if let Some(name) = func_name {
+                name.starts_with("Test")
+            } else {
+                false
+            }
+        }
+        SupportedLanguage::Java => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "modifiers" {
+                    if let Some(mod_text) = source.get(child.byte_range()) {
+                        let modifiers = String::from_utf8_lossy(mod_text);
+                        if modifiers.contains("@Test")
+                            || modifiers.contains("@org.junit.Test")
+                            || modifiers.contains("@ParameterizedTest")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            if let Some(name) = func_name {
+                name.starts_with("test")
+            } else {
+                false
+            }
+        }
+    }
 }
 
 /// Generate unique name with suffix for duplicate symbols.
@@ -1685,10 +1811,91 @@ mod tests {
             .find(|s| s.name == "tests")
             .expect("tests module not found");
         assert_eq!(module.kind, SymbolKind::Module);
-        // Should contain the two test functions, but NOT the `use` statement
         assert_eq!(module.children.len(), 2);
         assert!(module.children.iter().any(|c| c.name == "test_basic"));
         assert!(module.children.iter().any(|c| c.name == "test_advanced"));
+    }
+
+    /// R4: `#[test]` attribute functions are classified as `SymbolKind::Test`
+    #[test]
+    fn test_rust_test_attribute_is_symbol_kind_test() {
+        let source = r"
+fn regular_function() {}
+
+#[test]
+fn test_with_attribute() { assert!(true); }
+
+#[tokio::test]
+async fn test_tokio_attribute() { assert!(true); }
+
+fn test_naming_convention_only() {}
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+        let regular = symbols
+            .iter()
+            .find(|s| s.name == "regular_function")
+            .unwrap();
+        assert_eq!(
+            regular.kind,
+            SymbolKind::Function,
+            "regular function is Function"
+        );
+
+        let test_attr = symbols
+            .iter()
+            .find(|s| s.name == "test_with_attribute")
+            .unwrap();
+        assert_eq!(test_attr.kind, SymbolKind::Test, "#[test] attribute → Test");
+
+        let tokio_test = symbols
+            .iter()
+            .find(|s| s.name == "test_tokio_attribute")
+            .unwrap();
+        assert_eq!(tokio_test.kind, SymbolKind::Test, "#[tokio::test] → Test");
+
+        let test_name_only = symbols
+            .iter()
+            .find(|s| s.name == "test_naming_convention_only")
+            .unwrap();
+        assert_eq!(
+            test_name_only.kind,
+            SymbolKind::Test,
+            "test_ prefix → Test (consistent with Python/Go naming convention)"
+        );
+    }
+
+    /// R4: Python pytest naming convention and decorators are detected
+    #[test]
+    fn test_pytest_functions_detected() {
+        let source = r"
+def regular_function():
+    pass
+
+def test_something():
+    pass
+
+@pytest.fixture
+def my_fixture():
+    pass
+";
+        let symbols = parse_and_extract(source, SupportedLanguage::Python);
+
+        let regular = symbols
+            .iter()
+            .find(|s| s.name == "regular_function")
+            .unwrap();
+        assert_eq!(regular.kind, SymbolKind::Function);
+
+        let test_by_name = symbols.iter().find(|s| s.name == "test_something").unwrap();
+        assert_eq!(
+            test_by_name.kind,
+            SymbolKind::Test,
+            "Python test_ prefix → Test"
+        );
+
+        let fixture = symbols.iter().find(|s| s.name == "my_fixture").unwrap();
+        assert_eq!(fixture.kind, SymbolKind::Test, "@pytest.fixture → Test");
     }
 
     /// PATCH-002-T3: `resolve_symbol_chain` traverses through module

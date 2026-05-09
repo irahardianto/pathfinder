@@ -24,6 +24,8 @@ pub struct SkeletonConfig<'a> {
     pub include_extensions: Vec<String>,
     /// File extensions to exclude (empty = none).
     pub exclude_extensions: Vec<String>,
+    /// Include test symbols regardless of visibility.
+    pub include_tests: bool,
 }
 
 impl<'a> SkeletonConfig<'a> {
@@ -43,7 +45,15 @@ impl<'a> SkeletonConfig<'a> {
             changed_files: None,
             include_extensions: Vec::new(),
             exclude_extensions: Vec::new(),
+            include_tests: true,
         }
+    }
+
+    /// Builder-style setter for `include_tests`.
+    #[must_use]
+    pub fn with_include_tests(mut self, include_tests: bool) -> Self {
+        self.include_tests = include_tests;
+        self
     }
 
     /// Builder-style setter for changed files filter.
@@ -99,7 +109,7 @@ pub fn estimate_tokens(text: &str) -> u32 {
     (chars as f32 / 4.0).ceil() as u32
 }
 
-use crate::surgeon::{AccessLevel, ExtractedSymbol};
+use crate::surgeon::{AccessLevel, ExtractedSymbol, SymbolKind};
 
 /// Default per-file token cap. Used when no per-call override is supplied.
 /// At ~4 chars/token, 2 000 tokens ≈ 8 KB — covers the vast majority of
@@ -107,26 +117,57 @@ use crate::surgeon::{AccessLevel, ExtractedSymbol};
 #[cfg(test)]
 const MAX_TOKENS_PER_FILE: u32 = 2_000;
 
+/// Returns `true` if the symbol is a test-related symbol.
+///
+/// Test symbols include:
+/// - Modules named "tests" or "test"
+/// - Functions with test-like naming conventions: `test_*`, `it_*`, `*_test`
+fn is_test_symbol(sym: &ExtractedSymbol) -> bool {
+    if sym.kind == SymbolKind::Test {
+        return true;
+    }
+    if sym.kind == SymbolKind::Module && matches!(sym.name.as_str(), "tests" | "test") {
+        return true;
+    }
+    if sym.kind == SymbolKind::Function || sym.kind == SymbolKind::Method {
+        let name = sym.name.as_str();
+        if name.starts_with("test_") || name.starts_with("it_") || name.ends_with("_test") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Recursively filter `symbols` keeping only those visible under `visibility`.
 ///
 /// - `"all"` — no filtering, returns the slice unchanged in a cloned `Vec`.
 /// - `"public"` — keeps symbols with `AccessLevel::Public` or `AccessLevel::Protected`
 ///   and recursively filters children; empty parents are dropped.
+///
+/// When `include_tests = true`, test symbols (modules named "tests"/"test",
+/// functions with `test_` prefix etc.) are always included regardless of visibility.
 #[must_use]
-fn filter_by_visibility(symbols: Vec<ExtractedSymbol>, visibility: &str) -> Vec<ExtractedSymbol> {
+fn filter_by_visibility(
+    symbols: Vec<ExtractedSymbol>,
+    visibility: &str,
+    include_tests: bool,
+) -> Vec<ExtractedSymbol> {
     if visibility != "public" {
         return symbols;
     }
     symbols
         .into_iter()
         .filter(|sym| {
+            if include_tests && is_test_symbol(sym) {
+                return true;
+            }
             matches!(
                 sym.access_level,
                 AccessLevel::Public | AccessLevel::Protected
             )
         })
         .map(|mut sym| {
-            sym.children = filter_by_visibility(sym.children, visibility);
+            sym.children = filter_by_visibility(sym.children, visibility, include_tests);
             sym
         })
         .collect()
@@ -156,6 +197,7 @@ fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut
     for sym in symbols {
         use crate::surgeon::SymbolKind;
         let prefix = match sym.kind {
+            SymbolKind::Test => "test ",
             SymbolKind::Function => "func ",
             SymbolKind::Class => "class ",
             SymbolKind::Struct => "struct ",
@@ -182,34 +224,76 @@ fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut
     }
 }
 
-/// A fallback rendering that only preserves top-level class/struct names and method counts.
+/// A fallback rendering that preserves top-level symbol names of all kinds with child counts.
 fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
+    use crate::surgeon::SymbolKind;
+    use std::fmt::Write as _;
+
     let mut out = String::default();
     for sym in symbols {
-        use crate::surgeon::SymbolKind;
-        if sym.kind == SymbolKind::Class || sym.kind == SymbolKind::Struct {
-            let prefix = if sym.kind == SymbolKind::Class {
-                "class "
-            } else {
-                "struct "
-            };
-            let declaration = format!("{}{}", prefix, sym.name);
-            let _ = writeln!(out, "{} // {}", declaration, sym.semantic_path);
+        let prefix = match sym.kind {
+            SymbolKind::Test => "test ",
+            SymbolKind::Function => "func ",
+            SymbolKind::Class => "class ",
+            SymbolKind::Struct => "struct ",
+            SymbolKind::Method => "method ",
+            SymbolKind::Impl => "impl ",
+            SymbolKind::Constant => "const ",
+            SymbolKind::Interface => "interface ",
+            SymbolKind::Enum => "enum ",
+            SymbolKind::Module => "mod ",
+            SymbolKind::Zone => "zone ",
+            SymbolKind::Component => "component ",
+            SymbolKind::HtmlElement => "element ",
+            SymbolKind::CssSelector => "selector ",
+            SymbolKind::CssAtRule => "at-rule ",
+        };
 
+        let _ = writeln!(out, "{}{} // {}", prefix, sym.name, sym.semantic_path);
+
+        if matches!(
+            sym.kind,
+            SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Enum
+                | SymbolKind::Interface
+                | SymbolKind::Impl
+                | SymbolKind::Module
+        ) {
             let method_count = sym
                 .children
                 .iter()
                 .filter(|c| c.kind == SymbolKind::Method)
                 .count();
+            let func_count = sym
+                .children
+                .iter()
+                .filter(|c| c.kind == SymbolKind::Function)
+                .count();
+            let const_count = sym
+                .children
+                .iter()
+                .filter(|c| c.kind == SymbolKind::Constant)
+                .count();
+
+            let mut omitted = Vec::new();
             if method_count > 0 {
-                let _ = writeln!(out, "  // ... {method_count} methods omitted");
+                omitted.push(format!("{method_count} methods"));
+            }
+            if func_count > 0 {
+                omitted.push(format!("{func_count} functions"));
+            }
+            if const_count > 0 {
+                omitted.push(format!("{const_count} constants"));
+            }
+            if !omitted.is_empty() {
+                let _ = writeln!(out, "  // ... {} omitted", omitted.join(", "));
             }
         }
     }
 
-    // Add a warning comment at the top if we had to collapse
     if out.is_empty() {
-        "// [TRUNCATED - NO CLASSES EXTRACTED]".to_string()
+        "// [TRUNCATED - NO SYMBOLS EXTRACTED]".to_string()
     } else {
         format!("// [TRUNCATED DUE TO SIZE]\n{out}")
     }
@@ -327,7 +411,7 @@ pub async fn generate_skeleton_text(
         };
 
         // Apply visibility filtering
-        let symbols = filter_by_visibility(raw_symbols, config.visibility);
+        let symbols = filter_by_visibility(raw_symbols, config.visibility, config.include_tests);
 
         if symbols.is_empty() {
             continue;
@@ -413,7 +497,7 @@ mod tests {
             make_sym("_private", SymbolKind::Function),
             make_sym("Public", SymbolKind::Function),
         ];
-        let filtered = filter_by_visibility(syms, "all");
+        let filtered = filter_by_visibility(syms, "all", false);
         assert_eq!(filtered.len(), 2);
     }
 
@@ -426,7 +510,7 @@ mod tests {
             make_sym("compute", SymbolKind::Function),
         ];
         syms[0].access_level = crate::surgeon::AccessLevel::Private;
-        let filtered = filter_by_visibility(syms, "public");
+        let filtered = filter_by_visibility(syms, "public", false);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "compute");
     }
@@ -444,7 +528,7 @@ mod tests {
         // Simulate what extract_access_level would produce for Go:
         syms[0].access_level = crate::surgeon::AccessLevel::Package; // lowercase → Package
         syms[2].access_level = crate::surgeon::AccessLevel::Private; // _hidden → Private
-        let filtered = filter_by_visibility(syms, "public");
+        let filtered = filter_by_visibility(syms, "public", false);
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].name, "Export");
         assert_eq!(filtered[1].name, "PublicStruct");
@@ -459,10 +543,64 @@ mod tests {
         ];
         // Simulate what detect_access_level would produce:
         parent.children[0].access_level = crate::surgeon::AccessLevel::Private;
-        let filtered = filter_by_visibility(vec![parent], "public");
+        let filtered = filter_by_visibility(vec![parent], "public", false);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].children.len(), 1);
         assert_eq!(filtered[0].children[0].name, "public_method");
+    }
+
+    #[test]
+    fn test_include_tests_preserves_test_module() {
+        // Private "tests" module should be visible when include_tests=true
+        let mut tests_mod = make_sym("tests", SymbolKind::Module);
+        tests_mod.access_level = crate::surgeon::AccessLevel::Private;
+        tests_mod.children = vec![make_sym("test_something", SymbolKind::Function)];
+        tests_mod.children[0].access_level = crate::surgeon::AccessLevel::Private;
+
+        let syms = vec![tests_mod];
+
+        // With include_tests=true: test module should be kept
+        let filtered_with = filter_by_visibility(syms.clone(), "public", true);
+        assert_eq!(filtered_with.len(), 1);
+        assert_eq!(filtered_with[0].name, "tests");
+
+        // With include_tests=false: private module should be filtered
+        let filtered_without = filter_by_visibility(syms, "public", false);
+        assert_eq!(filtered_without.len(), 0);
+    }
+
+    #[test]
+    fn test_include_tests_preserves_test_prefixed_functions() {
+        // Private function with test_ prefix should be visible when include_tests=true
+        let mut test_fn = make_sym("test_something", SymbolKind::Function);
+        test_fn.access_level = crate::surgeon::AccessLevel::Private;
+
+        let mut normal_fn = make_sym("helper", SymbolKind::Function);
+        normal_fn.access_level = crate::surgeon::AccessLevel::Private;
+
+        let syms = vec![test_fn, normal_fn];
+
+        // With include_tests=true: test_ function should be kept
+        let filtered_with = filter_by_visibility(syms.clone(), "public", true);
+        assert_eq!(filtered_with.len(), 1);
+        assert_eq!(filtered_with[0].name, "test_something");
+
+        // With include_tests=false: both private functions should be filtered
+        let filtered_without = filter_by_visibility(syms, "public", false);
+        assert_eq!(filtered_without.len(), 0);
+    }
+
+    #[test]
+    fn test_include_tests_preserves_suffix_test_functions() {
+        // Private function with _test suffix should be visible when include_tests=true
+        let mut test_fn = make_sym("something_test", SymbolKind::Function);
+        test_fn.access_level = crate::surgeon::AccessLevel::Private;
+
+        let syms = vec![test_fn];
+
+        let filtered = filter_by_visibility(syms, "public", true);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "something_test");
     }
 
     #[test]
@@ -775,7 +913,7 @@ mod tests {
                 children: vec![],
             }],
         };
-        let filtered = filter_by_visibility(vec![module], "public");
+        let filtered = filter_by_visibility(vec![module], "public", false);
         assert_eq!(filtered.len(), 1, "pub mod should be visible in public map");
         assert_eq!(filtered[0].name, "types");
         assert_eq!(
@@ -809,7 +947,7 @@ mod tests {
                 children: vec![],
             }],
         };
-        let filtered = filter_by_visibility(vec![module], "public");
+        let filtered = filter_by_visibility(vec![module], "public", false);
         assert!(
             filtered.is_empty(),
             "bare mod should be hidden in public map"
@@ -830,7 +968,54 @@ mod tests {
             access_level: crate::surgeon::AccessLevel::Private,
             children: vec![],
         };
-        let filtered = filter_by_visibility(vec![module], "all");
+        let filtered = filter_by_visibility(vec![module], "all", false);
         assert_eq!(filtered.len(), 1, "mod should be visible in visibility=all");
+    }
+
+    /// With `include_tests=true`, private `mod tests` should appear in visibility="public"
+    #[test]
+    fn test_include_tests_true_makes_test_mod_visible_in_public_visibility() {
+        // This is the NEW behavior: with include_tests=true (default), "tests" module is visible
+        let module = ExtractedSymbol {
+            name: "tests".to_string(),
+            semantic_path: "tests".to_string(),
+            kind: SymbolKind::Module,
+            byte_range: 0..30,
+            start_line: 0,
+            end_line: 5,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Private,
+            children: vec![ExtractedSymbol {
+                name: "test_foo".to_string(),
+                semantic_path: "tests.test_foo".to_string(),
+                kind: SymbolKind::Function,
+                byte_range: 5..25,
+                start_line: 1,
+                end_line: 3,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Private,
+                children: vec![],
+            }],
+        };
+        // With include_tests=true (DEFAULT): private "tests" module should be visible
+        let filtered = filter_by_visibility(vec![module.clone()], "public", true);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "mod tests should be visible in public map when include_tests=true"
+        );
+        assert_eq!(filtered[0].name, "tests");
+        assert_eq!(
+            filtered[0].children.len(),
+            1,
+            "test_foo should also be visible"
+        );
+
+        // With include_tests=false: private module should be hidden
+        let filtered_off = filter_by_visibility(vec![module], "public", false);
+        assert!(
+            filtered_off.is_empty(),
+            "mod tests should be hidden in public map when include_tests=false"
+        );
     }
 }
