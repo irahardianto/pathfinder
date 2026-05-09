@@ -90,4 +90,10 @@ pub struct SearchResult {
     pub total_matches: usize,
     /// `true` if results were capped at `max_results`.
     pub truncated: bool,
+    /// Number of files that were actually searched.
+    pub files_searched: usize,
+    /// Number of files that matched the `path_glob` and were in scope.
+    /// When `files_searched < files_in_scope`, some files were skipped
+    /// (binary, .gitignored, or permission issues).
+    pub files_in_scope: usize,
 }

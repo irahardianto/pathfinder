@@ -77,6 +77,8 @@ impl Scout for MockScout {
                 matches: vec![],
                 total_matches: 0,
                 truncated: false,
+                files_searched: 0,
+                files_in_scope: 0,
             }),
         }
     }
@@ -111,6 +113,8 @@ mod tests {
             matches: vec![],
             total_matches: 42,
             truncated: true,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
         let result = mock.search(&params()).await.expect("should succeed");
         assert_eq!(result.total_matches, 42);

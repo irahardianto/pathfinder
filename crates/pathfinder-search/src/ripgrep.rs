@@ -387,11 +387,13 @@ impl Scout for RipgrepScout {
 
             let matcher = Self::build_matcher(params)?;
             let files = Self::walk_files(params)?;
+            let files_in_scope = files.len();
 
             let mut match_buf: Vec<SearchMatch> = Vec::new();
             let mut total_count: usize = 0;
             let mut skipped_count: usize = 0;
             let mut truncated = false;
+            let mut files_searched: usize = 0;
 
             let mut searcher = SearcherBuilder::new()
                 .line_number(true)
@@ -400,6 +402,7 @@ impl Scout for RipgrepScout {
                 .build();
 
             for (abs_path, relative) in &files {
+                files_searched += 1;
                 let matches_before = match_buf.len();
 
                 let mut sink = MatchCollector::new(
@@ -441,6 +444,8 @@ impl Scout for RipgrepScout {
                 total_matches = total_count,
                 returned = match_buf.len(),
                 truncated,
+                files_searched,
+                files_in_scope,
                 "Scout: search complete"
             );
 
@@ -448,6 +453,8 @@ impl Scout for RipgrepScout {
                 matches: match_buf,
                 total_matches: total_count,
                 truncated,
+                files_searched,
+                files_in_scope,
             })
         })
         .await
