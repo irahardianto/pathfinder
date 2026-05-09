@@ -651,7 +651,7 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "unknown".to_owned(), ToString::to_string);
             format!(
-                "DEGRADED ({reason}) — {}:L{} — {}",
+                "⚠️ DEGRADED ({reason}) — Result is from grep heuristic, not LSP. May not be the authoritative definition.\n{}:L{} — {}",
                 def.file,
                 def.line,
                 if def.preview.is_empty() {
@@ -1022,7 +1022,7 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "unknown".to_owned(), ToString::to_string);
             format!(
-                "DEGRADED MODE ({reason}) — {dep_count} dependencies loaded (results may be incomplete){dep_block}\n\n{}",
+                "⚠️ DEGRADED ({reason}) — Dependencies may be incomplete. LSP was unavailable or still warming.\n\n{dep_count} dependencies loaded{dep_block}\n\n{}",
                 scope.content
             )
         } else {
@@ -1538,6 +1538,15 @@ impl PathfinderServer {
         let degraded_reason_cloned = degraded_reason;
         let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
 
+        let lsp_readiness = if degraded {
+            match degraded_reason_cloned {
+                Some(DegradedReason::NoLsp) => Some("unavailable".to_owned()),
+                _ => Some("warming_up".to_owned()),
+            }
+        } else {
+            Some("ready".to_owned())
+        };
+
         tracing::info!(
             tool = "analyze_impact",
             semantic_path = %params.semantic_path,
@@ -1558,6 +1567,7 @@ impl PathfinderServer {
             files_referenced: files_referenced.len(),
             degraded,
             degraded_reason,
+            lsp_readiness,
             references_truncated,
         };
 
@@ -1569,8 +1579,18 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "unknown".to_owned(), ToString::to_string);
             text_parts.push(format!(
-                "Degraded analysis ({reason_str}) — LSP unavailable — reference counts are UNRELIABLE. Do NOT trust zero as 'confirmed no callers'. Grep-based heuristic was used if available. Use search_codebase for manual verification."
+                "⚠️ DEGRADED ({reason_str}) — Reference counts are UNRELIABLE. Zero does NOT mean confirmed no callers. Use search_codebase for manual verification."
             ));
+        } else if inc_count == 0 && out_count == 0 {
+            text_parts.push("LSP confirmed: zero callers/callees for this symbol.".to_string());
+        } else if inc_count == 0 {
+            text_parts.push(
+                "LSP confirmed: zero incoming callers (callees found below).".to_string(),
+            );
+        } else if out_count == 0 {
+            text_parts.push(
+                "LSP confirmed: zero outgoing callees (callers found below).".to_string(),
+            );
         }
         // Incoming
         text_parts.push(format!("Incoming references: {inc_count}"));
@@ -1603,6 +1623,209 @@ impl PathfinderServer {
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);
         Ok(res)
+    }
+
+    /// Find all references to a symbol across the entire codebase.
+    ///
+    /// Uses the LSP `textDocument/references` capability to find all usages of
+    /// a given symbol. Unlike `analyze_impact`, this returns all references
+    /// including those not in the call hierarchy (e.g., field accesses, imports).
+    #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(skip(self, params))]
+    pub(crate) async fn find_all_references_impl(
+        &self,
+        params: crate::server::types::FindAllReferencesParams,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+
+        tracing::info!(
+            tool = "find_all_references",
+            semantic_path = %params.semantic_path,
+            "find_all_references: start"
+        );
+
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
+
+        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            let duration_ms = start.elapsed().as_millis();
+            tracing::warn!(
+                tool = "find_all_references",
+                error_code = e.error_code(),
+                duration_ms,
+                "sandbox check failed"
+            );
+            return Err(pathfinder_to_error_data(&e));
+        }
+
+        let ts_start = std::time::Instant::now();
+        let symbol_scope = self
+            .surgeon
+            .read_symbol_scope(self.workspace_root.path(), &semantic_path)
+            .await
+            .map_err(treesitter_error_to_error_data)?;
+        let tree_sitter_ms = ts_start.elapsed().as_millis();
+
+        let file_content =
+            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
+                .await
+                .unwrap_or_default();
+        let _doc_guard = self
+            .lawyer
+            .open_document(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                &file_content,
+            )
+            .await;
+
+        let lsp_start = std::time::Instant::now();
+        let lsp_result = self
+            .lawyer
+            .references(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
+                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
+            )
+            .await;
+        let lsp_ms = lsp_start.elapsed().as_millis();
+
+        let duration_ms = start.elapsed().as_millis();
+
+        match lsp_result {
+            Ok(locations) => {
+                let files_referenced = locations
+                    .iter()
+                    .map(|l| l.file.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                let references: Vec<crate::server::types::ReferenceLocation> = locations
+                    .into_iter()
+                    .map(|l| crate::server::types::ReferenceLocation {
+                        file: l.file,
+                        line: l.line,
+                        column: l.column,
+                        snippet: l.snippet,
+                    })
+                    .collect();
+
+                tracing::info!(
+                    tool = "find_all_references",
+                    references_count = references.len(),
+                    files_referenced,
+                    tree_sitter_ms,
+                    lsp_ms,
+                    duration_ms,
+                    engines_used = ?["tree-sitter", "lsp"],
+                    "find_all_references: complete"
+                );
+
+                let ref_count = references.len();
+                let confirmed_zero_msg = if ref_count == 0 {
+                    "LSP confirmed: zero references for this symbol.\n".to_string()
+                } else {
+                    String::new()
+                };
+
+                let metadata = crate::server::types::FindAllReferencesMetadata {
+                    references: Some(references.clone()),
+                    files_referenced,
+                    degraded: false,
+                    degraded_reason: None,
+                    lsp_readiness: Some("ready".to_owned()),
+                };
+
+                let references_text = if ref_count == 0 {
+                    String::new()
+                } else {
+                    references
+                        .iter()
+                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+
+                let mut result =
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                        "{confirmed_zero_msg}Found {ref_count} references across {files_referenced} files.\n\n{references_text}"
+                    ))]);
+                result.structured_content = crate::server::helpers::serialize_metadata(&metadata);
+                Ok(result)
+            }
+            Err(LspError::NoLspAvailable) => {
+                tracing::info!(
+                    tool = "find_all_references",
+                    semantic_path = %params.semantic_path,
+                    tree_sitter_ms,
+                    lsp_ms,
+                    duration_ms,
+                    "find_all_references: no LSP — degraded"
+                );
+
+                let metadata = crate::server::types::FindAllReferencesMetadata {
+                    references: None,
+                    files_referenced: 0,
+                    degraded: true,
+                    degraded_reason: Some(DegradedReason::NoLsp),
+                    lsp_readiness: Some("unavailable".to_owned()),
+                };
+
+                let mut result =
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+                        format!(
+                            "⚠️ DEGRADED (no_lsp) — References unknown. Use search_codebase to manually find usages of `{}`",
+                            params.semantic_path
+                        ),
+                    )]);
+                result.structured_content = crate::server::helpers::serialize_metadata(&metadata);
+                Ok(result)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tool = "find_all_references",
+                    error = %e,
+                    tree_sitter_ms,
+                    lsp_ms,
+                    duration_ms,
+                    "find_all_references: LSP error"
+                );
+
+                let degraded_reason = match &e {
+                    LspError::Timeout { .. } => DegradedReason::LspTimeoutGrepFallback,
+                    LspError::Protocol(_) | LspError::ConnectionLost => {
+                        DegradedReason::LspErrorGrepFallback
+                    }
+                    _ => DegradedReason::LspErrorGrepFallback,
+                };
+
+                let is_timeout = matches!(&e, LspError::Timeout { .. });
+                let lsp_readiness = if is_timeout {
+                    "warming_up"
+                } else {
+                    "unavailable"
+                };
+
+                let metadata = crate::server::types::FindAllReferencesMetadata {
+                    references: None,
+                    files_referenced: 0,
+                    degraded: true,
+                    degraded_reason: Some(degraded_reason),
+                    lsp_readiness: Some(lsp_readiness.to_owned()),
+                };
+
+                let reason_str = degraded_reason.to_string();
+                let mut result =
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+                        format!(
+                            "⚠️ DEGRADED ({}) — References unknown. Use search_codebase to manually find usages of `{}`",
+                            reason_str, params.semantic_path
+                        ),
+                    )]);
+                result.structured_content = crate::server::helpers::serialize_metadata(&metadata);
+                Ok(result)
+            }
+        }
     }
 
     /// Check LSP health status.
@@ -2432,7 +2655,7 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(text_content, "DEGRADED MODE (no_lsp) — 0 dependencies loaded (results may be incomplete)\n\nfn login() { }");
+        assert_eq!(text_content, "⚠️ DEGRADED (no_lsp) — Dependencies may be incomplete. LSP was unavailable or still warming.\n\n0 dependencies loaded\n\nfn login() { }");
         assert!(val.degraded);
         assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         assert!(val.dependencies.is_empty());
@@ -2704,6 +2927,8 @@ mod tests {
             }],
             total_matches: 1,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         // Lawyer returns a generic LSP error (not NoLspAvailable)
@@ -2769,6 +2994,8 @@ mod tests {
             }],
             total_matches: 1,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let lawyer = Arc::new(MockLawyer::default());
@@ -2871,6 +3098,8 @@ mod tests {
             }],
             total_matches: 1,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(
@@ -3395,6 +3624,8 @@ mod tests {
             }],
             total_matches: 1,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(
@@ -3427,6 +3658,7 @@ mod tests {
     // ── PATCH-002: Non-source file filtering in grep fallback ───────────
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn test_analyze_impact_grep_fallback_filters_non_source_files() {
         // Issue: grep fallback was returning matches from .md, .json, .txt, etc.
         // causing false positives. This test verifies that non-source files
@@ -3506,6 +3738,8 @@ mod tests {
             ],
             total_matches: 4,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(
