@@ -105,6 +105,13 @@ pub struct GetRepoMapParams {
     /// Exclude files with these extensions. Mutually exclusive with `include_extensions`.
     #[serde(default)]
     pub exclude_extensions: Vec<String>,
+    /// Include test functions and test modules regardless of visibility filter.
+    ///
+    /// When `true` (default), symbols inside `mod tests {}` blocks and functions with
+    /// test attributes are always included, even with `visibility="public"`.
+    /// When `false`, visibility rules are strictly applied.
+    #[serde(default = "default_true")]
+    pub include_tests: bool,
 }
 
 /// Parameters for `read_symbol_scope`.
@@ -199,7 +206,11 @@ pub struct ReadFileParams {
 pub struct ReadSourceFileParams {
     /// Relative file path.
     pub filepath: String,
-    /// Detail level: "compact", "symbols", "full".
+    /// Detail level: `"source_only"`, `"compact"`, `"symbols"`, or `"full"`.
+    /// - `"source_only"` — source code only, no symbol metadata (lowest token cost)
+    /// - `"compact"` (default) — source + flat symbol list
+    /// - `"symbols"` — symbol tree only, no source
+    /// - `"full"` — source + nested symbol tree
     #[serde(default = "default_detail_level")]
     pub detail_level: String,
     /// First line to return (1-indexed).
@@ -241,6 +252,15 @@ pub struct SearchCodebaseResponse {
     /// `filtered_count = raw_match_count - total_matches`.
     /// When `filter_mode = "All"`, this is always 0.
     pub filtered_count: usize,
+    /// Number of files that were actually searched.
+    pub files_searched: usize,
+    /// Number of files matching the `path_glob` that were in scope for search.
+    /// When `files_searched < files_in_scope`, some files were skipped
+    /// (binary, .gitignored, or permission-denied).
+    pub files_in_scope: usize,
+    /// Percentage of in-scope files that were actually searched.
+    /// 100% means exhaustive search; lower values indicate skipped files.
+    pub coverage_percent: u8,
     /// Indicates if the match list was truncated by `max_results`.
     pub truncated: bool,
     /// Grouped output — populated when `group_by_file: true`.
@@ -535,7 +555,7 @@ pub struct ImpactReference {
     pub depth: usize,
 }
 
-/// The metadata embedded in `structured_content` for `analyze_impact`.
+/// The metadata embedded in `structured_content` for `analyze_impact` / `find_callers_callees`.
 #[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactMetadata {
     /// Symbols that call the target (caller graph).
@@ -557,8 +577,60 @@ pub struct AnalyzeImpactMetadata {
     /// Absent when `degraded` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<DegradedReason>,
+    /// LSP readiness at the time of the call.
+    ///
+    /// - `"ready"`: LSP is fully operational — results are authoritative.
+    /// - `"warming_up"`: LSP is still indexing — results may be partial.
+    /// - `"unavailable"`: No LSP; results degraded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_readiness: Option<String>,
     /// `true` when the `max_references` limit was reached and results were truncated.
     pub references_truncated: bool,
+}
+
+// ── Find All References Tool Types ─────────────────────────────────────
+
+/// Parameters for `find_all_references`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindAllReferencesParams {
+    /// Semantic path to the target symbol (e.g., `src/mod.rs::func`).
+    pub semantic_path: String,
+}
+
+/// The metadata embedded in `structured_content` for `find_all_references`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindAllReferencesMetadata {
+    /// All reference locations for the target symbol.
+    /// Empty array `[]` means LSP confirmed zero references.
+    /// `null` when `degraded` is `true` — LSP was unavailable.
+    pub references: Option<Vec<ReferenceLocation>>,
+    /// Total number of files containing references.
+    pub files_referenced: usize,
+    /// Whether the reference lookup was degraded (LSP unavailable or crashed).
+    pub degraded: bool,
+    /// Machine-readable reason for degradation (e.g., `no_lsp`, `lsp_crash`, `lsp_timeout`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<DegradedReason>,
+    /// LSP readiness at the time of the call.
+    ///
+    /// - `"ready"`: LSP is fully operational — results are authoritative.
+    /// - `"warming_up"`: LSP is still indexing — results may be partial.
+    /// - `"unavailable"`: No LSP; results degraded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_readiness: Option<String>,
+}
+
+/// A single reference location for `find_all_references`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReferenceLocation {
+    /// File path relative to workspace root.
+    pub file: String,
+    /// 1-indexed line number where the reference occurs.
+    pub line: u32,
+    /// 1-indexed column number where the reference occurs.
+    pub column: u32,
+    /// A short code snippet showing the reference (e.g., function call or variable access).
+    pub snippet: String,
 }
 
 // ── LSP Health Tool Types ────────────────────────────────────────────
@@ -704,7 +776,7 @@ pub const fn default_depth() -> u32 {
 }
 #[must_use]
 pub const fn default_max_depth() -> u32 {
-    2
+    3
 }
 #[must_use]
 pub const fn default_max_references() -> u32 {
@@ -725,4 +797,8 @@ pub const fn default_max_lines() -> u32 {
 #[must_use]
 pub fn default_detail_level() -> String {
     "compact".to_string()
+}
+#[must_use]
+pub const fn default_true() -> bool {
+    true
 }
