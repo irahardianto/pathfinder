@@ -244,7 +244,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_source_file",
-        description = "Read an entire source file with its full AST symbol hierarchy. Returns source, language, and a nested symbol tree with semantic paths. **AST-only** — only for source files (.rs, .ts, .tsx, .go, .py, .vue, .jsx, .js); use `read_file` for config/docs files. detail_level: `compact` (default) = source + flat symbols, `symbols` = tree only, `full` = source + nested AST. Use `start_line`/`end_line` to restrict output."
+        description = "Read an entire source file with its full AST symbol hierarchy. Returns source, language, and a nested symbol tree with semantic paths. **AST-only** — only for source files (.rs, .ts, .tsx, .go, .py, .vue, .jsx, .js); use `read_file` for config/docs files. detail_level: `source_only` = source code only (lowest token cost), `compact` (default) = source + flat symbols, `symbols` = tree only, `full` = source + nested AST. Use `start_line`/`end_line` to restrict output."
     )]
     async fn read_source_file(
         &self,
@@ -276,14 +276,25 @@ impl PathfinderServer {
     }
 
     #[tool(
-        name = "analyze_impact",
-        description = "Map the blast radius of a symbol: all callers (incoming) and all callees (outgoing). Use before any refactor to find who depends on a function. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). LSP-powered with grep fallback. Check `degraded` — when true, empty results may be due to LSP warmup, not genuinely zero callers."
+        name = "find_callers_callees",
+        description = "Find all callers (incoming) and callees (outgoing) of a symbol — who calls this function and what does it call? Use max_depth=3 (default) for standard refactoring, max_depth=4-5 for large-scale API changes. LSP-powered with grep fallback. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). When `degraded=true` is true, `incoming`/`outgoing` are `null` (not `[]`) — do NOT treat empty as \"confirmed no callers\". When not degraded: empty arrays `[]` = LSP confirmed: truly zero callers/callees."
     )]
-    async fn analyze_impact(
+    async fn find_callers_callees(
         &self,
         Parameters(params): Parameters<AnalyzeImpactParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.analyze_impact_impl(params).await
+    }
+
+    #[tool(
+        name = "find_all_references",
+        description = "Find all references to a symbol across the entire codebase. Uses LSP textDocument/references to find all usages (function calls, field accesses, imports, etc.). Unlike find_callers_callees (call hierarchy only), this returns every reference including type annotations, imports, and field access. IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/mod.rs::func'). LSP-powered. When degraded, use search_codebase as fallback."
+    )]
+    async fn find_all_references(
+        &self,
+        Parameters(params): Parameters<crate::server::types::FindAllReferencesParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.find_all_references_impl(params).await
     }
 
     #[tool(
@@ -372,6 +383,7 @@ mod tests {
             include_extensions: vec![],
             exclude_extensions: vec![],
             include_imports: pathfinder_common::types::IncludeImports::None,
+            include_tests: true,
         };
 
         let result = server.get_repo_map(Parameters(params)).await;
@@ -486,6 +498,8 @@ mod tests {
             }],
             total_matches: 1,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -594,6 +608,8 @@ mod tests {
             ],
             total_matches: 3,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -657,6 +673,8 @@ mod tests {
             ],
             total_matches: 3,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -712,6 +730,8 @@ mod tests {
             ],
             total_matches: 3,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::default());
@@ -967,6 +987,8 @@ mod tests {
             ],
             total_matches: 2,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -1055,6 +1077,8 @@ mod tests {
             }],
             total_matches: 1,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -1138,6 +1162,8 @@ mod tests {
             ],
             total_matches: 3,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -1203,6 +1229,8 @@ mod tests {
             matches: vec![],
             total_matches: 0,
             truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
         }));
 
         let server = PathfinderServer::with_engines(
