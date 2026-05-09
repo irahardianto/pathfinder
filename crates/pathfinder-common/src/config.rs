@@ -369,12 +369,22 @@ mod tests {
         }"#;
 
         let config: PathfinderConfig = serde_json::from_str(json).expect("should deserialize");
-        assert!(config.lsp.contains_key("java"), "[lsp.java] key must be present");
+        assert!(
+            config.lsp.contains_key("java"),
+            "[lsp.java] key must be present"
+        );
 
         let java_config = &config.lsp["java"];
         assert_eq!(java_config.command, "jdtls", "command must be jdtls");
-        assert_eq!(java_config.args, vec!["--jvm-arg=-Xmx2G"], "args must round-trip");
-        assert_eq!(java_config.idle_timeout_minutes, 20, "idle timeout must be 20");
+        assert_eq!(
+            java_config.args,
+            vec!["--jvm-arg=-Xmx2G"],
+            "args must round-trip"
+        );
+        assert_eq!(
+            java_config.idle_timeout_minutes, 20,
+            "idle timeout must be 20"
+        );
 
         // settings blob preserved
         let settings = &java_config.settings;
@@ -405,9 +415,13 @@ mod tests {
         assert_eq!(
             java_config.idle_timeout_minutes,
             default_idle_timeout(),
-            "idle_timeout_minutes must default to {}", default_idle_timeout()
+            "idle_timeout_minutes must default to {}",
+            default_idle_timeout()
         );
-        assert!(java_config.settings.is_null(), "settings should default to null");
+        assert!(
+            java_config.settings.is_null(),
+            "settings should default to null"
+        );
         assert!(
             java_config.root_override.is_none(),
             "root_override should default to None"
@@ -436,12 +450,19 @@ mod tests {
         }"#;
 
         let config: PathfinderConfig = serde_json::from_str(json).expect("should deserialize");
-        assert_eq!(config.lsp.len(), 2, "both java and typescript must be present");
+        assert_eq!(
+            config.lsp.len(),
+            2,
+            "both java and typescript must be present"
+        );
 
         assert_eq!(config.lsp["java"].command, "jdtls");
         assert_eq!(config.lsp["java"].idle_timeout_minutes, 30);
 
-        assert_eq!(config.lsp["typescript"].command, "typescript-language-server");
+        assert_eq!(
+            config.lsp["typescript"].command,
+            "typescript-language-server"
+        );
         assert_eq!(config.lsp["typescript"].args, vec!["--stdio"]);
     }
 }
