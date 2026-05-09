@@ -19,7 +19,7 @@
 use crate::{
     error::LspError,
     lawyer::{DocumentLease, Lawyer},
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, ReferenceLocation},
 };
 use async_trait::async_trait;
 use std::{
@@ -72,6 +72,9 @@ type PrepareCallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyItem>, St
 /// Queue of results for `call_hierarchy_incoming` and `call_hierarchy_outgoing`.
 type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, String>>>>;
 
+/// Configured result for `references`.
+type ReferencesFixture = Arc<Mutex<Option<Result<Vec<ReferenceLocation>, String>>>>;
+
 /// Configured result for `capability_status`.
 type CapabilityStatusFixture =
     Arc<Mutex<std::collections::HashMap<String, crate::types::LspLanguageStatus>>>;
@@ -113,6 +116,12 @@ pub struct MockLawyer {
     pub incoming_call_results: CallHierarchyQueue,
     /// Queue of results for successive `call_hierarchy_outgoing` calls.
     pub outgoing_call_results: CallHierarchyQueue,
+
+    // ── references ─────────────────────────────────────────────────────────────
+    /// Configured result for `references`.
+    pub references_result: ReferencesFixture,
+    /// All calls made to `references` in order.
+    pub references_calls: Arc<Mutex<Vec<(String, u32, u32)>>>,
 }
 
 impl MockLawyer {
@@ -212,6 +221,35 @@ impl MockLawyer {
             .push(result);
     }
 
+    // ── references ─────────────────────────────────────────────────────────────
+
+    /// Set the result to return from the next `references()` call.
+    pub fn set_references_result(&self, result: Result<Vec<ReferenceLocation>, String>) {
+        let mut guard = self
+            .references_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(result);
+    }
+
+    /// Returns how many times `references()` was called.
+    #[must_use]
+    pub fn references_call_count(&self) -> usize {
+        self.references_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Returns a snapshot of all `(file, line, column)` passed to `references()`.
+    #[must_use]
+    pub fn references_calls(&self) -> Vec<(String, u32, u32)> {
+        self.references_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Returns the number of `did_open` calls recorded.
     #[must_use]
     pub fn did_open_call_count(&self) -> usize {
@@ -306,6 +344,36 @@ impl Lawyer for MockLawyer {
         _item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
         Self::pop_queued_result(&self.outgoing_call_results).unwrap_or_else(|| Ok(vec![]))
+    }
+
+    async fn references(
+        &self,
+        _workspace_root: &Path,
+        file_path: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<ReferenceLocation>, LspError> {
+        {
+            let mut guard = self
+                .references_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.push((file_path.to_string_lossy().into_owned(), line, column));
+        }
+
+        let next = {
+            let mut guard = self
+                .references_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+
+        match next {
+            Some(Ok(result)) => Ok(result),
+            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            None => Ok(vec![]),
+        }
     }
 
     /// IW-3 (DS-1 gap fix): RAII document lifecycle.

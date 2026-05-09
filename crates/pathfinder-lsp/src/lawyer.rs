@@ -6,7 +6,7 @@
 
 use crate::{
     error::LspError,
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, ReferenceLocation},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -77,6 +77,29 @@ pub trait Lawyer: Send + Sync {
         workspace_root: &Path,
         item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError>;
+
+    /// Find all references to the symbol at the given position.
+    ///
+    /// Returns all locations where the symbol is referenced (used, called, or accessed).
+    /// Uses LSP `textDocument/references` request.
+    ///
+    /// `line` and `column` are both 1-indexed.
+    ///
+    /// Returns `Ok(Vec)` containing all reference locations.
+    /// Returns `Err(LspError::NoLspAvailable)` when no LSP is configured.
+    ///
+    /// # Errors
+    /// - `LspError::NoLspAvailable` — no language server for this file type
+    /// - `LspError::Timeout` — LSP did not respond within timeout
+    /// - `LspError::Protocol` — LSP returned an error response
+    /// - `LspError::ConnectionLost` — LSP process crashed
+    async fn references(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<ReferenceLocation>, LspError>;
 
     /// Open a document and return a RAII guard that auto-closes it on drop.
     ///

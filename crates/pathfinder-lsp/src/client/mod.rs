@@ -22,7 +22,7 @@ pub use detect::{
     detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage,
 };
 
-use crate::types::{CallHierarchyCall, CallHierarchyItem};
+use crate::types::{CallHierarchyCall, CallHierarchyItem, ReferenceLocation};
 use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -1376,6 +1376,62 @@ impl Lawyer for LspClient {
         .await
     }
 
+    async fn references(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<ReferenceLocation>, LspError> {
+        let start = Instant::now();
+        tracing::info!(tool = "references", file = %file_path.display(), "LSP operation started");
+
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        let params = json!({
+            "textDocument": { "uri": file_uri.as_str() },
+            "position": {
+                "line": line.saturating_sub(1),       // Convert 1-indexed → 0-indexed
+                "character": column.saturating_sub(1)
+            },
+            "context": { "includeDeclaration": true }  // Include the definition itself in results
+        });
+
+        let response = match self
+            .request(
+                language_id,
+                "textDocument/references",
+                params,
+                Duration::from_secs(30),
+            )
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "references", language = language_id, error = %e, "textDocument/references failed");
+                return Err(e);
+            }
+        };
+
+        self.touch(language_id);
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::info!(
+            tool = "references",
+            language = language_id,
+            elapsed_ms = elapsed,
+            "textDocument/references complete"
+        );
+
+        parse_references_response(&response, workspace_root)
+    }
+
     async fn capability_status(&self) -> HashMap<String, crate::types::LspLanguageStatus> {
         let mut status = HashMap::new();
         for desc in self.descriptors.iter() {
@@ -1614,6 +1670,77 @@ fn parse_call_hierarchy_calls_response(
         }
 
         result.push(CallHierarchyCall { item, call_sites });
+    }
+
+    Ok(result)
+}
+
+fn parse_references_response(
+    response: &serde_json::Value,
+    workspace_root: &Path,
+) -> Result<Vec<ReferenceLocation>, LspError> {
+    if response.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let references = response
+        .as_array()
+        .ok_or_else(|| LspError::Protocol("expected array".to_owned()))?;
+
+    let mut result = Vec::with_capacity(references.len());
+    for ref_item in references {
+        // Each reference is a Location object: { uri, range: { start, end } }
+        let Some(uri_str) = ref_item.get("uri").and_then(|u| u.as_str()) else {
+            continue;
+        };
+
+        // Convert URI to relative path
+        let uri =
+            Url::parse(uri_str).map_err(|e| LspError::Protocol(format!("invalid URI: {e}")))?;
+        let file_path = uri
+            .to_file_path()
+            .map_err(|()| LspError::Protocol("URI is not a file path".to_owned()))?;
+        let relative_path = match file_path.strip_prefix(workspace_root) {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => file_path,
+        };
+
+        let range = ref_item
+            .get("range")
+            .ok_or_else(|| LspError::Protocol("missing range".to_owned()))?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let line = range
+            .get("start")
+            .and_then(|s| s.get("line"))
+            .and_then(serde_json::Value::as_u64)
+            .map_or(1, |l| (l as u32) + 1);
+
+        #[allow(clippy::cast_possible_truncation)]
+        let column = range
+            .get("start")
+            .and_then(|s| s.get("character"))
+            .and_then(serde_json::Value::as_u64)
+            .map_or(1, |c| (c as u32) + 1);
+
+        // Try to read the file for snippet
+        let snippet = match std::fs::read_to_string(workspace_root.join(&relative_path)) {
+            Ok(content) => {
+                let snippet_line = content
+                    .lines()
+                    .nth((line as usize).saturating_sub(1))
+                    .unwrap_or("");
+                snippet_line.trim().to_owned()
+            }
+            Err(_) => String::new(),
+        };
+
+        result.push(ReferenceLocation {
+            file: relative_path.to_string_lossy().into_owned(),
+            line,
+            column,
+            snippet,
+        });
     }
 
     Ok(result)

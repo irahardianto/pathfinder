@@ -9,7 +9,7 @@
 use crate::{
     error::LspError,
     lawyer::Lawyer,
-    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation},
+    types::{CallHierarchyCall, CallHierarchyItem, DefinitionLocation, ReferenceLocation},
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -57,6 +57,16 @@ impl Lawyer for NoOpLawyer {
         _workspace_root: &Path,
         _item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
+    async fn references(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _line: u32,
+        _column: u32,
+    ) -> Result<Vec<ReferenceLocation>, LspError> {
         Err(LspError::NoLspAvailable)
     }
 

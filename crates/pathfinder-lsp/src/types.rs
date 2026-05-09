@@ -89,6 +89,21 @@ pub struct CallHierarchyCall {
     pub call_sites: Vec<u32>, // 1-indexed lines where calls occur
 }
 
+/// A location where a symbol is referenced (used, called, or accessed).
+///
+/// Returned by `textDocument/references` LSP request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceLocation {
+    /// Relative file path within the workspace root.
+    pub file: String,
+    /// 1-indexed line number where the reference occurs.
+    pub line: u32,
+    /// 1-indexed column number where the reference occurs.
+    pub column: u32,
+    /// A short code snippet showing the reference (e.g., function call or variable access).
+    pub snippet: String,
+}
+
 /// A single file system change event for `workspace/didChangeWatchedFiles`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEvent {
