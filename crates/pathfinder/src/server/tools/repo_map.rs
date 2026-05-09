@@ -189,7 +189,8 @@ impl PathfinderServer {
         )
         .with_changed_files(changed_files)
         .with_include_extensions(params.include_extensions)
-        .with_exclude_extensions(params.exclude_extensions);
+        .with_exclude_extensions(params.exclude_extensions)
+        .with_include_tests(params.include_tests);
 
         let result = match self
             .surgeon
@@ -278,6 +279,7 @@ mod tests {
             include_extensions: vec![],
             exclude_extensions: vec![],
             include_imports: pathfinder_common::types::IncludeImports::ThirdParty,
+            include_tests: true,
         }
     }
 

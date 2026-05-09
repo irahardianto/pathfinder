@@ -152,11 +152,22 @@ impl PathfinderServer {
 
                 let returned_count = flat_matches.len();
                 let duration_ms = start.elapsed().as_millis();
+                let files_searched = result.files_searched;
+                let files_in_scope = result.files_in_scope;
+                let coverage_percent: u8 = files_searched
+                    .saturating_mul(100)
+                    .checked_div(files_in_scope)
+                    .and_then(|v| v.try_into().ok())
+                    .unwrap_or(100);
+
                 tracing::info!(
                     tool = "search_codebase",
                     total_matches = result.total_matches,
                     returned = returned_count,
                     truncated = result.truncated,
+                    files_searched,
+                    files_in_scope,
+                    coverage_percent,
                     filter_mode = ?params.filter_mode,
                     filter_bypassed = filter_was_bypassed,
                     ripgrep_ms,
@@ -172,6 +183,9 @@ impl PathfinderServer {
                     total_matches: returned_count,
                     returned_count,
                     filtered_count: result.total_matches.saturating_sub(returned_count),
+                    files_searched,
+                    files_in_scope,
+                    coverage_percent,
                     truncated: result.truncated,
                     file_groups,
                     degraded,

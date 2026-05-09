@@ -171,6 +171,7 @@ impl PathfinderServer {
 
                 // Detail level
                 let (final_content, final_symbols) = match params.detail_level.as_str() {
+                    "source_only" => (Some(content), vec![]),
                     "symbols" => {
                         let syms = map_symbols(symbols);
                         let tree_text = render_symbol_tree(&syms, &params.filepath);
