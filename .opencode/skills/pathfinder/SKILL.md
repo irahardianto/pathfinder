@@ -137,12 +137,6 @@ Bare file paths (no `::`) are valid only for whole-file operations like `read_so
 - `files_in_scope` — files matching path_glob
 - `coverage_percent` — % of in-scope files searched. <100% means some files skipped.
 
-**Search counts:**
-- `total_matches` — post-filter count (equals `matches.len()`). This is the ground truth.
-- `raw_match_count` — ripgrep pre-filter count (before `filter_mode` drops comments/strings).
-- `filtered_count` — `raw_match_count - total_matches` (how many rows were removed by the filter).
-- `truncated` — result set was capped at `max_results`. Increase `max_results` or narrow your query.
-
 **Token-saving pattern:**
 ```
 search_codebase(query="deprecated_api",
@@ -209,7 +203,6 @@ Every response includes `degraded` (bool), `degraded_reason`, and `lsp_readiness
 | `grep_fallback_global` | Global grep | Least precise — verify |
 | `unsupported_language_filter_bypassed` | Language unsupported; filter bypassed | Results may include noise |
 | `unsupported_language` | Language not supported | Use read_file for raw content |
-| `git_error` | Git operation failed | get_repo_map changed_since fell back |
 
 **LSP Readiness values:**
 - `"ready"` — LSP is fully operational

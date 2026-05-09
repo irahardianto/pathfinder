@@ -15,12 +15,13 @@ Check once per session.
 | Task | Tool | Notes |
 |---|---|---|
 | Project skeleton | `get_repo_map` | Returns semantic paths — copy-paste into other tools |
-| Search code | `search_codebase` | AST-filtered, returns `enclosing_semantic_path` |
+| Search code | `search_codebase` | AST-filtered, returns `enclosing_semantic_path`. Check `coverage_percent`. |
 | Read one symbol | `read_symbol_scope` | Exact function/class extraction |
-| Read full file + AST | `read_source_file` | Source files only; use `read_file` for config |
+| Read full file + AST | `read_source_file` | Source files only; use `read_file` for config. `detail_level="source_only"` for minimal tokens. |
 | Symbol + dependencies | `read_with_deep_context` | LSP-powered callee signatures |
 | Jump to definition | `get_definition` | LSP with ripgrep fallback |
-| Blast radius | `analyze_impact` | Callers + callees via LSP call hierarchy |
+| Find callers and callees | `find_callers_callees` | Callers + callees via LSP call hierarchy. Default max_depth=3. |
+| Find all references | `find_all_references` | All usages including non-call references (field access, imports, type annotations) |
 | LSP status | `lsp_health` | Check when navigation returns `degraded: true` |
 | Read config file | `read_file` | For YAML, TOML, JSON, .env, Dockerfile |
 
@@ -30,14 +31,18 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 ### Degraded Mode
 
-`get_definition`, `analyze_impact`, `read_with_deep_context` use LSP. When `degraded: true`, results are best-effort — never treat empty as confirmed-zero. Check `degraded_reason` (enum: `no_lsp`, `lsp_warmup_grep_fallback`, `lsp_timeout_grep_fallback`, etc.). See skill doc for the full table.
+`get_definition`, `find_callers_callees`, `read_with_deep_context`, `find_all_references` use LSP. When `degraded: true`:
+- Text output starts with: `⚠️ DEGRADED ({reason}) — {tool-specific guidance}`
+- Results are best-effort — never treat empty as confirmed-zero
+- Check `degraded_reason` and `lsp_readiness`
 
 ### Budget Controls
 
 | Parameter | Tool | Default | Purpose |
 |---|---|---|---|
-| `project_only` | `analyze_impact`, `read_with_deep_context` | `true` | Filter out stdlib/vendor noise |
-| `max_references` | `analyze_impact` | `50` | Cap total BFS references |
+| `project_only` | `find_callers_callees`, `read_with_deep_context` | `true` | Filter out stdlib/vendor noise |
+| `max_references` | `find_callers_callees` | `50` | Cap total BFS references |
+| `max_depth` | `find_callers_callees` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. |
 | `max_dependencies` | `read_with_deep_context` | `50` | Cap outgoing dependency entries |
 | `max_tokens` | `get_repo_map` | auto | Auto-scales for monorepos |
 
