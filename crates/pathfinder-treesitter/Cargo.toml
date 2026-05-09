@@ -33,7 +33,7 @@ tree-sitter-java = "0.23"
 
 # Language grammars (Tier 2 — Vue SFC multi-zone, E1a)
 tree-sitter-html = "0.23"
-tree-sitter-css  = "0.23"
+tree-sitter-css  = "0.25"
 
 # Utilities
 thiserror = "2"
