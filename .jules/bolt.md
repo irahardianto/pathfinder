@@ -1,0 +1,4 @@
+
+## 2024-05-18 - Eliminating Unnecessary String Allocations in Search Iterations
+**Learning:** In hot search loops (like scanning files in RipgrepScout), iterating over owned strings using `&files` and calling `.clone()` inside the loop for object instantiation (e.g., `MatchCollector::new`) causes N unnecessary allocations, where N is the number of files in scope. Additionally, inside `SinkContext` implementations, unconditionally cloning strings for Context Buffers when context is sometimes not needed is wasteful.
+**Action:** When a loop is the last consumer of a vector, consume it (`for (abs_path, relative) in files`) to move the owned string directly. Conditionally clone strings in context handlers (e.g., check `context_lines > 0`) to avoid allocations when context buffers are not actively used.

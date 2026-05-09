@@ -183,11 +183,18 @@ impl Sink for MatchCollector<'_> {
             }
         }
 
+        // PERF: Only clone `content` if we actually need it for the context buffer.
+        let content_for_buf = if self.context_lines > 0 {
+            Some(content.clone())
+        } else {
+            None
+        };
+
         let search_match = SearchMatch {
             file: self.relative_path.clone(),
             line,
             column,
-            content: content.clone(),
+            content,
             context_before: std::mem::take(&mut self.context_before_buf).into(),
             context_after: Vec::new(), // filled later by `context()`
             enclosing_semantic_path: None,
@@ -196,8 +203,8 @@ impl Sink for MatchCollector<'_> {
         };
 
         // This matching line itself acts as "before context" for a subsequent adjacent overlap match
-        if self.context_lines > 0 {
-            self.context_before_buf.push_back(content);
+        if let Some(c) = content_for_buf {
+            self.context_before_buf.push_back(c);
         }
 
         self.matches.push(search_match);
@@ -222,14 +229,21 @@ impl Sink for MatchCollector<'_> {
             .to_owned();
         let line = truncate_line(&line, 1000);
 
+        let is_after = *ctx.kind() == SinkContextKind::After && self.pending_after_context > 0;
+
+        // PERF: Only clone `line` if it needs to be pushed to both before and after context buffers.
         if self.context_lines > 0 {
             if self.context_before_buf.len() >= self.context_lines {
                 self.context_before_buf.pop_front();
             }
-            self.context_before_buf.push_back(line.clone());
-        }
-
-        if *ctx.kind() == SinkContextKind::After && self.pending_after_context > 0 {
+            if is_after {
+                self.context_before_buf.push_back(line.clone());
+                self.after_context_buf.push(line);
+                self.pending_after_context -= 1;
+            } else {
+                self.context_before_buf.push_back(line);
+            }
+        } else if is_after {
             self.after_context_buf.push(line);
             self.pending_after_context -= 1;
         }
@@ -401,12 +415,13 @@ impl Scout for RipgrepScout {
                 .after_context(params.context_lines)
                 .build();
 
-            for (abs_path, relative) in &files {
+            for (abs_path, relative) in files {
                 files_searched += 1;
                 let matches_before = match_buf.len();
 
+                // PERF: Consume `relative` to avoid allocating a new String for every file in the workspace
                 let mut sink = MatchCollector::new(
-                    relative.clone(),
+                    relative,
                     &mut match_buf,
                     &mut total_count,
                     params.max_results,
@@ -416,8 +431,8 @@ impl Scout for RipgrepScout {
                     &matcher,
                 );
 
-                if let Err(e) = searcher.search_path(&matcher, abs_path, &mut sink) {
-                    tracing::warn!(file = %relative, error = %e, "Scout: failed to search file; skipping");
+                if let Err(e) = searcher.search_path(&matcher, &abs_path, &mut sink) {
+                    tracing::warn!(file = %sink.relative_path, error = %e, "Scout: failed to search file; skipping");
                     continue;
                 }
 
@@ -425,8 +440,8 @@ impl Scout for RipgrepScout {
                 // This avoids reading every file into memory just to compute a hash.
                 let matches_after = sink.current_match_count();
                 if matches_after > matches_before {
-                    let Ok(bytes) = std::fs::read(abs_path) else {
-                        tracing::warn!(file = %relative, "Scout: failed to read file for hashing; skipping hash");
+                    let Ok(bytes) = std::fs::read(&abs_path) else {
+                        tracing::warn!(file = %sink.relative_path, "Scout: failed to read file for hashing; skipping hash");
                         continue;
                     };
                     let hash = VersionHash::compute(&bytes).short().to_owned();
