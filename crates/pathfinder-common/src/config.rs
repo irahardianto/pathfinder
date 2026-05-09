@@ -339,4 +339,109 @@ mod tests {
         assert_eq!(ts_config.typescript_plugins[0], "@vue/typescript-plugin");
         assert_eq!(ts_config.typescript_plugins[1], "@angular/language-service");
     }
+
+    // ── Phase 2 §5: [lsp.java] config section ────────────────────────────────
+
+    /// Phase 2 §5: Full jdtls config block deserializes correctly via the
+    /// generic `lsp` HashMap (no Java-specific schema additions needed).
+    ///
+    /// Verifies: command, args, idle_timeout_minutes, and settings all round-trip
+    /// through `serde_json`.
+    #[test]
+    fn test_java_lsp_config_section() {
+        let json = r#"{
+            "lsp": {
+                "java": {
+                    "command": "jdtls",
+                    "args": ["--jvm-arg=-Xmx2G"],
+                    "idle_timeout_minutes": 20,
+                    "settings": {
+                        "java": {
+                            "format": { "enabled": true },
+                            "import": {
+                                "gradle": { "enabled": true },
+                                "maven": { "enabled": true }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let config: PathfinderConfig = serde_json::from_str(json).expect("should deserialize");
+        assert!(config.lsp.contains_key("java"), "[lsp.java] key must be present");
+
+        let java_config = &config.lsp["java"];
+        assert_eq!(java_config.command, "jdtls", "command must be jdtls");
+        assert_eq!(java_config.args, vec!["--jvm-arg=-Xmx2G"], "args must round-trip");
+        assert_eq!(java_config.idle_timeout_minutes, 20, "idle timeout must be 20");
+
+        // settings blob preserved
+        let settings = &java_config.settings;
+        assert!(!settings.is_null(), "settings must not be null");
+        assert!(
+            settings.get("java").is_some(),
+            "settings.java key must be present"
+        );
+    }
+
+    /// Phase 2 §5: Minimal jdtls config (command only) uses defaults for
+    /// all optional fields.
+    #[test]
+    fn test_java_lsp_config_minimal() {
+        let json = r#"{
+            "lsp": {
+                "java": {
+                    "command": "jdtls"
+                }
+            }
+        }"#;
+
+        let config: PathfinderConfig = serde_json::from_str(json).expect("should deserialize");
+        let java_config = &config.lsp["java"];
+
+        assert_eq!(java_config.command, "jdtls");
+        assert!(java_config.args.is_empty(), "args should default to empty");
+        assert_eq!(
+            java_config.idle_timeout_minutes,
+            default_idle_timeout(),
+            "idle_timeout_minutes must default to {}", default_idle_timeout()
+        );
+        assert!(java_config.settings.is_null(), "settings should default to null");
+        assert!(
+            java_config.root_override.is_none(),
+            "root_override should default to None"
+        );
+        assert!(
+            java_config.typescript_plugins.is_empty(),
+            "typescript_plugins should default to empty"
+        );
+    }
+
+    /// Phase 2 §5: Java and TypeScript LSP configs can coexist in the same
+    /// config file without interference.
+    #[test]
+    fn test_java_and_typescript_lsp_configs_coexist() {
+        let json = r#"{
+            "lsp": {
+                "java": {
+                    "command": "jdtls",
+                    "idle_timeout_minutes": 30
+                },
+                "typescript": {
+                    "command": "typescript-language-server",
+                    "args": ["--stdio"]
+                }
+            }
+        }"#;
+
+        let config: PathfinderConfig = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(config.lsp.len(), 2, "both java and typescript must be present");
+
+        assert_eq!(config.lsp["java"].command, "jdtls");
+        assert_eq!(config.lsp["java"].idle_timeout_minutes, 30);
+
+        assert_eq!(config.lsp["typescript"].command, "typescript-language-server");
+        assert_eq!(config.lsp["typescript"].args, vec!["--stdio"]);
+    }
 }

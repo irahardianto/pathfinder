@@ -129,6 +129,7 @@ impl<'a> SymbolExtractionContext<'a> {
         // (e.g., for anonymous constructs or grammars without a "name" field).
         let name_column = Self::resolve_name_node(child).map_or(0, |n| n.start_position().column);
 
+        let access_level = detect_access_level(child, self.lang, self.source);
         let mut symbol = ExtractedSymbol {
             name: unique_name,
             semantic_path: path.clone(),
@@ -137,13 +138,13 @@ impl<'a> SymbolExtractionContext<'a> {
             start_line: child.start_position().row,
             end_line: child.end_position().row,
             name_column,
-            is_public: true,
+            access_level,
             children: Vec::new(),
         };
 
         if matches!(
             sk,
-            SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface
+            SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Enum
         ) {
             self.extract_nested_symbols(child, &path, &mut symbol.children);
         }
@@ -202,11 +203,9 @@ impl<'a> SymbolExtractionContext<'a> {
             );
         }
 
-        // Determine visibility: `pub mod` → public, `mod` → private.
-        // `visibility_modifier` is a named child (not a field) of `mod_item` in the
-        // Rust tree-sitter grammar. Its presence indicates `pub` (or `pub(crate)`, etc).
+        // Determine visibility via detect_access_level (Rust: pub/pub(crate)/pub(super)/bare).
         let name_column = name_node.start_position().column;
-        let is_public = has_visibility_modifier(child);
+        let access_level = detect_access_level(child, self.lang, self.source);
         self.out.push(ExtractedSymbol {
             name: unique_name,
             semantic_path: module_path,
@@ -215,7 +214,7 @@ impl<'a> SymbolExtractionContext<'a> {
             start_line: child.start_position().row,
             end_line: child.end_position().row,
             name_column,
-            is_public,
+            access_level,
             children,
         });
     }
@@ -279,15 +278,19 @@ fn extract_symbols_recursive(
 /// - Go `type_spec`: checks `type` field for `interface_type`/`struct_type`.
 /// - TS `enum_declaration` → `SymbolKind::Enum`.
 /// - TS `type_alias_declaration` → `SymbolKind::Class` (type alias).
+/// - Java `interface_declaration` / `annotation_type_declaration` → `SymbolKind::Interface`.
+/// - Java `record_declaration` → `SymbolKind::Struct`.
 /// - All others → `SymbolKind::Class`.
 fn refine_class_kind(node: Node) -> SymbolKind {
     match node.kind() {
-        // TypeScript `enum_declaration` / Rust `enum_item`
+        // TypeScript `enum_declaration` / Rust `enum_item` / Java `enum_declaration`
         "enum_declaration" | "enum_item" => SymbolKind::Enum,
-        // Rust struct_item → Struct (not Class)
-        "struct_item" => SymbolKind::Struct,
-        // Rust trait_item → Interface
-        "trait_item" => SymbolKind::Interface,
+        // Rust struct_item / Java record_declaration → Struct
+        "struct_item" | "record_declaration" => SymbolKind::Struct,
+        // Rust trait_item / Java interface_declaration / Java @interface → Interface
+        "trait_item" | "interface_declaration" | "annotation_type_declaration" => {
+            SymbolKind::Interface
+        }
         _ => {
             // Go type_spec: refine based on the `type` field
             node.child_by_field_name("type")
@@ -339,33 +342,205 @@ fn find_variable_declarator_name(node: Node) -> Option<Node> {
     None
 }
 
-/// Check if a tree-sitter node has a `visibility_modifier` named child.
+/// Detect the access level of a tree-sitter node based on language-specific rules.
 ///
-/// In the Rust grammar, `pub`, `pub(crate)`, `pub(super)`, etc. produce a
-/// `visibility_modifier` child on items like `mod_item`, `fn_item`, etc.
-/// This child is a named child (not a named field), so we must iterate.
-fn has_visibility_modifier(node: Node) -> bool {
+/// This replaces the former `has_visibility_modifier()` bool-returning function with a
+/// 4-level enum that supports Java's visibility model without breaking other languages.
+fn detect_access_level(
+    node: Node,
+    lang: SupportedLanguage,
+    source: &[u8],
+) -> crate::surgeon::AccessLevel {
+    match lang {
+        SupportedLanguage::Rust => detect_rust_access_level(node),
+        SupportedLanguage::Go => detect_go_access_level(node, source),
+        SupportedLanguage::TypeScript
+        | SupportedLanguage::Tsx
+        | SupportedLanguage::JavaScript
+        | SupportedLanguage::Vue => detect_ts_access_level(node, source),
+        SupportedLanguage::Python => detect_python_access_level(node, source),
+        SupportedLanguage::Java => detect_java_access_level(node),
+    }
+}
+
+/// Rust visibility rules based on `visibility_modifier` AST child.
+///
+/// | AST text         | AccessLevel |
+/// |-----------------|-------------|
+/// | `pub(crate)`    | Package     |
+/// | `pub(super)`    | Protected   |
+/// | any other `pub` | Public      |
+/// | (no modifier)   | Private     |
+fn detect_rust_access_level(node: Node) -> crate::surgeon::AccessLevel {
+    use crate::surgeon::AccessLevel;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "visibility_modifier" {
-            return true;
+            // The visibility_modifier node's text determines fine-grained level.
+            // We check the direct text children for `(crate)` or `(super)` tokens.
+            let mut inner = child.walk();
+            let mut has_paren_content = false;
+            let mut is_crate = false;
+            let mut is_super = false;
+            for tok in child.named_children(&mut inner) {
+                has_paren_content = true;
+                if tok.kind() == "crate" {
+                    is_crate = true;
+                } else if tok.kind() == "super" {
+                    is_super = true;
+                }
+            }
+            if has_paren_content && is_crate {
+                return AccessLevel::Package;
+            }
+            if has_paren_content && is_super {
+                return AccessLevel::Protected;
+            }
+            return AccessLevel::Public;
         }
     }
+    AccessLevel::Private
+}
 
-    // For TypeScript/JS, exported items are wrapped in an `export_statement`
+/// Go visibility rules based on name convention.
+///
+/// | Name pattern         | AccessLevel |
+/// |---------------------|-------------|
+/// | Starts with `_`     | Private     |
+/// | Starts with uppercase | Public    |
+/// | Starts with lowercase | Package   |
+fn detect_go_access_level(node: Node, source: &[u8]) -> crate::surgeon::AccessLevel {
+    use crate::surgeon::AccessLevel;
+    // Extract the name from `name` field or `identifier` field
+    let name_node = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("identifier"));
+
+    if let Some(nn) = name_node {
+        if let Some(bytes) = source.get(nn.byte_range()) {
+            if let Ok(name) = std::str::from_utf8(bytes) {
+                let name = name.trim();
+                if name.starts_with('_') {
+                    return AccessLevel::Private;
+                }
+                if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                    return AccessLevel::Public;
+                }
+                return AccessLevel::Package;
+            }
+        }
+    }
+    // Fallback: treat as package-level if we can't determine the name
+    AccessLevel::Package
+}
+
+/// TypeScript/JavaScript/Vue visibility rules.
+///
+/// Preserves the existing parent-walk logic from `has_visibility_modifier`.
+/// Also applies `_`-prefix check for private-by-convention symbols.
+///
+/// | Condition                                           | AccessLevel |
+/// |----------------------------------------------------|-------------|
+/// | Ancestor `export_statement` (before program/block) | Public      |
+/// | Name starts with `_`                               | Private     |
+/// | No export ancestor                                 | Package     |
+fn detect_ts_access_level(node: Node, source: &[u8]) -> crate::surgeon::AccessLevel {
+    use crate::surgeon::AccessLevel;
+    // Walk up the parent chain looking for export_statement
     let mut current = node.parent();
     while let Some(p) = current {
         if p.kind() == "export_statement" {
-            return true;
+            return AccessLevel::Public;
         }
-        // If we hit a block or program, stop climbing
         if p.kind() == "program" || p.kind() == "statement_block" {
             break;
         }
         current = p.parent();
     }
 
-    false
+    // Check name for `_` prefix convention
+    let name_node = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("identifier"));
+
+    if let Some(nn) = name_node {
+        if let Some(bytes) = source.get(nn.byte_range()) {
+            if let Ok(name) = std::str::from_utf8(bytes) {
+                if name.trim().starts_with('_') {
+                    return AccessLevel::Private;
+                }
+            }
+        }
+    }
+
+    AccessLevel::Package
+}
+
+/// Python visibility rules based on name-prefix convention.
+///
+/// | Name pattern                      | AccessLevel |
+/// |----------------------------------|-------------|
+/// | Starts with `__`, ends with `__` | Public (dunder/magic method) |
+/// | Starts with `__` (non-dunder)    | Private     |
+/// | Starts with `_`                  | Protected   |
+/// | No prefix                        | Public      |
+fn detect_python_access_level(node: Node, source: &[u8]) -> crate::surgeon::AccessLevel {
+    use crate::surgeon::AccessLevel;
+    let name_node = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("identifier"));
+
+    if let Some(nn) = name_node {
+        if let Some(bytes) = source.get(nn.byte_range()) {
+            if let Ok(name) = std::str::from_utf8(bytes) {
+                let name = name.trim();
+                if name.starts_with("__") {
+                    // Dunder methods (e.g. __init__, __str__) are public magic methods
+                    if name.ends_with("__") {
+                        return AccessLevel::Public;
+                    }
+                    return AccessLevel::Private;
+                }
+                if name.starts_with('_') {
+                    return AccessLevel::Protected;
+                }
+            }
+        }
+    }
+    AccessLevel::Public
+}
+
+/// Java visibility rules based on `modifiers` AST child containing explicit keywords.
+///
+/// | Modifier keyword  | `AccessLevel` |
+/// |------------------|---------------|
+/// | `public`         | Public        |
+/// | `protected`      | Protected     |
+/// | `private`        | Private       |
+/// | (no modifier)    | Package       | — Java package-private (default)
+///
+/// Java modifiers are a child node named `modifiers`. The individual keywords
+/// (`public`, `protected`, `private`) are **unnamed** nodes inside `modifiers`
+/// (i.e. `is_named() == false`), so we must use `children()` not `named_children()`.
+fn detect_java_access_level(node: Node) -> crate::surgeon::AccessLevel {
+    use crate::surgeon::AccessLevel;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "modifiers" {
+            let mut mod_cursor = child.walk();
+            // NOTE: modifier keywords are UNNAMED nodes — use children(), not named_children()
+            for modifier in child.children(&mut mod_cursor) {
+                match modifier.kind() {
+                    "public" => return AccessLevel::Public,
+                    "protected" => return AccessLevel::Protected,
+                    "private" => return AccessLevel::Private,
+                    _ => {}
+                }
+            }
+        }
+    }
+    // No access modifier → package-private (Java default)
+    AccessLevel::Package
 }
 
 /// Generate unique name with suffix for duplicate symbols.
@@ -450,7 +625,7 @@ fn extract_impl_block(
                 start_line: item.start_position().row,
                 end_line: item.end_position().row,
                 name_column: method_name_column,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: Vec::new(),
             });
         }
@@ -466,7 +641,7 @@ fn extract_impl_block(
             start_line: node.start_position().row,
             end_line: node.end_position().row,
             name_column: impl_name_column,
-            is_public: false,
+            access_level: crate::surgeon::AccessLevel::Private,
             children: methods,
         });
     }
@@ -602,7 +777,7 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 start_line: 0,
                 end_line: 0,
                 name_column: 0,
-                is_public: false,
+                access_level: crate::surgeon::AccessLevel::Private,
                 children: methods,
             });
         }
@@ -730,7 +905,7 @@ fn push_zone_symbol(
         start_line,
         end_line,
         name_column: 0,
-        is_public: true,
+        access_level: crate::surgeon::AccessLevel::Public,
         children,
     });
 }
@@ -849,7 +1024,7 @@ fn walk_html_elements_flat(
                 start_line: child.start_position().row,
                 end_line: child.end_position().row,
                 name_column: child.start_position().column,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: Vec::new(), // Always flat
             });
 
@@ -1060,7 +1235,7 @@ fn emit_jsx_symbol(
             start_line: node.start_position().row,
             end_line: node.end_position().row,
             name_column: node.start_position().column,
-            is_public: true,
+            access_level: crate::surgeon::AccessLevel::Public,
             children: Vec::new(), // JSX children are flat, not nested
         });
     }
@@ -1167,7 +1342,7 @@ fn walk_css_rules(
                     start_line: child.start_position().row,
                     end_line: child.end_position().row,
                     name_column: child.start_position().column,
-                    is_public: true,
+                    access_level: crate::surgeon::AccessLevel::Public,
                     children: Vec::new(),
                 });
             }
@@ -1268,7 +1443,7 @@ fn extract_css_rule_set(
                 start_line: node.start_position().row,
                 end_line: node.end_position().row,
                 name_column: selector.start_position().column,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: Vec::new(),
             });
         }
@@ -1943,7 +2118,7 @@ mod helpers {
             start_line: 0,
             end_line: 1,
             name_column: 0,
-            is_public: true,
+            access_level: crate::surgeon::AccessLevel::Public,
             children: vec![
                 ExtractedSymbol {
                     name: "login".to_string(),
@@ -1953,7 +2128,7 @@ mod helpers {
                     start_line: 0,
                     end_line: 0,
                     name_column: 0,
-                    is_public: true,
+                    access_level: crate::surgeon::AccessLevel::Public,
                     children: vec![],
                 },
                 ExtractedSymbol {
@@ -1964,7 +2139,7 @@ mod helpers {
                     start_line: 1,
                     end_line: 1,
                     name_column: 0,
-                    is_public: true,
+                    access_level: crate::surgeon::AccessLevel::Public,
                     children: vec![],
                 },
             ],
@@ -2245,7 +2420,11 @@ pub mod types {
             .find(|s| s.name == "types")
             .expect("types module not found");
         assert_eq!(module.kind, SymbolKind::Module);
-        assert!(module.is_public, "pub mod should have is_public = true");
+        assert_eq!(
+            module.access_level,
+            crate::surgeon::AccessLevel::Public,
+            "pub mod should have access_level = Public"
+        );
     }
 
     /// PATCH-005-C2: Bare `mod` is private (`is_public` = false)
@@ -2262,7 +2441,11 @@ mod internal {
             .find(|s| s.name == "internal")
             .expect("internal module not found");
         assert_eq!(module.kind, SymbolKind::Module);
-        assert!(!module.is_public, "bare mod should have is_public = false");
+        assert_eq!(
+            module.access_level,
+            crate::surgeon::AccessLevel::Private,
+            "bare mod should have access_level = Private"
+        );
     }
 
     /// PATCH-005-C2: `pub(crate) mod` is detected as public
@@ -2279,9 +2462,10 @@ pub(crate) mod types {
             .find(|s| s.name == "types")
             .expect("types module not found");
         assert_eq!(module.kind, SymbolKind::Module);
-        assert!(
-            module.is_public,
-            "pub(crate) mod should have is_public = true"
+        assert_eq!(
+            module.access_level,
+            crate::surgeon::AccessLevel::Package,
+            "pub(crate) mod should have access_level = Package"
         );
     }
 
@@ -2362,7 +2546,10 @@ pub(crate) mod types {
         assert_eq!(ns.name, "Auth");
         assert_eq!(ns.kind, SymbolKind::Module);
         assert_eq!(ns.children.len(), 1);
-        assert!(ns.is_public);
+        assert!(matches!(
+            ns.access_level,
+            crate::surgeon::AccessLevel::Public
+        ));
 
         let login = &ns.children[0];
         assert_eq!(login.name, "login");
@@ -2379,7 +2566,10 @@ pub(crate) mod types {
         assert_eq!(ns.name, "Auth");
         assert_eq!(ns.kind, SymbolKind::Module);
         assert_eq!(ns.children.len(), 1);
-        assert!(ns.is_public);
+        assert!(matches!(
+            ns.access_level,
+            crate::surgeon::AccessLevel::Public
+        ));
     }
 
     /// PATCH-005-C4: TSX enum is also extracted (verify cross-extension support)
@@ -2426,5 +2616,659 @@ def compute(x: int) -> int:
             syms[0].name_column, 4,
             "name_column should point to 'c' in 'compute' (column 4), not 'd' in 'def' (column 0)"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // AC-0.9: detect_access_level() — per-language detection rules
+    // ---------------------------------------------------------------
+
+    /// AC-0.9 Rust: `pub fn` → AccessLevel::Public
+    #[test]
+    fn test_detect_rust_pub_fn() {
+        let source = b"pub fn greet() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("lib.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(
+            syms[0].access_level,
+            crate::surgeon::AccessLevel::Public,
+            "pub fn should be Public"
+        );
+    }
+
+    /// AC-0.9 Rust: `pub(crate) mod` → AccessLevel::Package
+    #[test]
+    fn test_detect_rust_pub_crate_mod() {
+        let source = b"pub(crate) mod utils {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("lib.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(
+            syms[0].access_level,
+            crate::surgeon::AccessLevel::Package,
+            "pub(crate) mod should be Package"
+        );
+    }
+
+    /// AC-0.9 Rust: `pub(super) fn` → AccessLevel::Protected
+    #[test]
+    fn test_detect_rust_pub_super_fn() {
+        let source = b"pub(super) fn helper() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("lib.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(
+            syms[0].access_level,
+            crate::surgeon::AccessLevel::Protected,
+            "pub(super) fn should be Protected"
+        );
+    }
+
+    /// AC-0.9 Rust: bare `fn` (no visibility modifier) → AccessLevel::Private
+    #[test]
+    fn test_detect_rust_private_fn() {
+        let source = b"fn internal() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("lib.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(
+            syms[0].access_level,
+            crate::surgeon::AccessLevel::Private,
+            "bare fn should be Private"
+        );
+    }
+
+    /// AC-0.9 Go: uppercase-initial name → AccessLevel::Public
+    #[test]
+    fn test_detect_go_uppercase_function() {
+        let source = b"package main\nfunc Export() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("main.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+        let sym = syms.iter().find(|s| s.name == "Export").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Public,
+            "Go uppercase fn should be Public"
+        );
+    }
+
+    /// AC-0.9 Go: lowercase-initial name → AccessLevel::Package
+    #[test]
+    fn test_detect_go_lowercase_function() {
+        let source = b"package main\nfunc internal() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("main.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+        let sym = syms.iter().find(|s| s.name == "internal").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Package,
+            "Go lowercase fn should be Package"
+        );
+    }
+
+    /// AC-0.9 Go: `_`-prefixed name → AccessLevel::Private
+    #[test]
+    fn test_detect_go_underscore_function() {
+        let source = b"package main\nfunc _hidden() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("main.go"),
+            SupportedLanguage::Go,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+        let sym = syms.iter().find(|s| s.name == "_hidden").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Private,
+            "Go _-prefix fn should be Private"
+        );
+    }
+
+    /// AC-0.9 TypeScript: exported function → AccessLevel::Public
+    #[test]
+    fn test_detect_ts_exported_function() {
+        let source = b"export function greet() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("lib.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        let sym = syms.iter().find(|s| s.name == "greet").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Public,
+            "exported TS function should be Public"
+        );
+    }
+
+    /// AC-0.9 TypeScript: non-exported function → AccessLevel::Package
+    #[test]
+    fn test_detect_ts_non_exported_function() {
+        let source = b"function helper() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("lib.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        let sym = syms.iter().find(|s| s.name == "helper").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Package,
+            "non-exported TS function should be Package"
+        );
+    }
+
+    /// AC-0.9 TypeScript: `_`-prefixed non-exported function → AccessLevel::Private
+    #[test]
+    fn test_detect_ts_underscore_function() {
+        let source = b"function _internal() {}";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("lib.ts"),
+            SupportedLanguage::TypeScript,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::TypeScript);
+        let sym = syms.iter().find(|s| s.name == "_internal").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Private,
+            "TS _-prefix function should be Private"
+        );
+    }
+
+    /// AC-0.9 Python: bare name → AccessLevel::Public
+    #[test]
+    fn test_detect_python_public_function() {
+        let source = b"def compute(): pass";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("mod.py"),
+            SupportedLanguage::Python,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Python);
+        let sym = syms.iter().find(|s| s.name == "compute").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Public,
+            "Python bare fn should be Public"
+        );
+    }
+
+    /// AC-0.9 Python: single-underscore name → AccessLevel::Protected
+    #[test]
+    fn test_detect_python_single_underscore() {
+        let source = b"def _helper(): pass";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("mod.py"),
+            SupportedLanguage::Python,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Python);
+        let sym = syms.iter().find(|s| s.name == "_helper").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Protected,
+            "Python single-underscore fn should be Protected"
+        );
+    }
+
+    /// AC-0.9 Python: double-underscore non-dunder name → AccessLevel::Private
+    #[test]
+    fn test_detect_python_double_underscore() {
+        let source = b"def __secret(): pass";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("mod.py"),
+            SupportedLanguage::Python,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Python);
+        let sym = syms.iter().find(|s| s.name == "__secret").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Private,
+            "Python __ non-dunder fn should be Private"
+        );
+    }
+
+    /// AC-0.9 Python: dunder method (`__init__`) → AccessLevel::Public (not Private)
+    #[test]
+    fn test_detect_python_dunder_method() {
+        let source = b"def __init__(self): pass";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("mod.py"),
+            SupportedLanguage::Python,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Python);
+        let sym = syms.iter().find(|s| s.name == "__init__").unwrap();
+        assert_eq!(
+            sym.access_level,
+            crate::surgeon::AccessLevel::Public,
+            "__init__ dunder should be Public, not Private"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Phase 1 Java Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// AC-1.3 / AC-1.4: Basic Java class — extracts class with correct kind and
+    /// extracts constructor + methods as children. Fields must NOT be extracted
+    /// (constant_kinds is empty for Java, see §2.1).
+    #[test]
+    fn test_java_basic_class_symbols() {
+        let source = b"package com.example;\n\
+public class BasicClass {\n\
+    private String name;\n\
+    protected int count;\n\
+\n\
+    public BasicClass(String name) {\n\
+        this.name = name;\n\
+    }\n\
+\n\
+    public String getName() { return name; }\n\
+    private void helper() {}\n\
+    void packageMethod() {}\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("BasicClass.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        // Top-level class
+        let class = syms.iter().find(|s| s.name == "BasicClass").unwrap();
+        assert_eq!(class.kind, crate::surgeon::SymbolKind::Class);
+        assert_eq!(class.access_level, crate::surgeon::AccessLevel::Public);
+
+        // Constructor is a child (AC-1.3)
+        let ctor = class
+            .children
+            .iter()
+            .find(|s| s.name == "BasicClass")
+            .unwrap();
+        assert_eq!(ctor.kind, crate::surgeon::SymbolKind::Function);
+        assert_eq!(ctor.access_level, crate::surgeon::AccessLevel::Public);
+
+        // Public method (AC-1.3)
+        let get_name = class.children.iter().find(|s| s.name == "getName").unwrap();
+        assert_eq!(get_name.kind, crate::surgeon::SymbolKind::Function);
+        assert_eq!(get_name.access_level, crate::surgeon::AccessLevel::Public);
+
+        // Private method (AC-1.5)
+        let helper = class.children.iter().find(|s| s.name == "helper").unwrap();
+        assert_eq!(helper.access_level, crate::surgeon::AccessLevel::Private);
+
+        // Package-private method (AC-1.5)
+        let pkg_method = class
+            .children
+            .iter()
+            .find(|s| s.name == "packageMethod")
+            .unwrap();
+        assert_eq!(
+            pkg_method.access_level,
+            crate::surgeon::AccessLevel::Package
+        );
+
+        // Fields must NOT be extracted (constant_kinds empty, see §2.1)
+        assert!(
+            class
+                .children
+                .iter()
+                .all(|s| s.name != "name" && s.name != "count"),
+            "Java fields should not be extracted as symbols"
+        );
+    }
+
+    /// AC-1.4: Java interface → SymbolKind::Interface
+    #[test]
+    fn test_java_interface_kind() {
+        let source = b"public interface Sortable {\n\
+    void sort();\n\
+    default void printSorted() { sort(); }\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Sortable.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let iface = syms.iter().find(|s| s.name == "Sortable").unwrap();
+        assert_eq!(iface.kind, crate::surgeon::SymbolKind::Interface);
+        assert_eq!(iface.access_level, crate::surgeon::AccessLevel::Public);
+    }
+
+    /// AC-1.4: Java enum → SymbolKind::Enum
+    #[test]
+    fn test_java_enum_kind() {
+        let source = b"public enum Status {\n\
+    ACTIVE, INACTIVE;\n\
+    public boolean isActive() { return this == ACTIVE; }\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Status.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let e = syms.iter().find(|s| s.name == "Status").unwrap();
+        assert_eq!(e.kind, crate::surgeon::SymbolKind::Enum);
+        assert_eq!(e.access_level, crate::surgeon::AccessLevel::Public);
+
+        // Enum method is extracted as a child
+        let is_active = e.children.iter().find(|s| s.name == "isActive").unwrap();
+        assert_eq!(is_active.kind, crate::surgeon::SymbolKind::Function);
+        assert_eq!(is_active.access_level, crate::surgeon::AccessLevel::Public);
+    }
+
+    /// AC-1.4: Java record → SymbolKind::Struct (Java 16+)
+    #[test]
+    fn test_java_record_kind() {
+        let source = b"public record Point(int x, int y) {\n\
+    public double distance() {\n\
+        return Math.sqrt(x * x + y * y);\n\
+    }\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Point.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let record = syms.iter().find(|s| s.name == "Point").unwrap();
+        assert_eq!(record.kind, crate::surgeon::SymbolKind::Struct);
+        assert_eq!(record.access_level, crate::surgeon::AccessLevel::Public);
+
+        // Record method is extracted as a child
+        let distance = record
+            .children
+            .iter()
+            .find(|s| s.name == "distance")
+            .unwrap();
+        assert_eq!(distance.kind, crate::surgeon::SymbolKind::Function);
+    }
+
+    /// AC-1.4: Java annotation type → SymbolKind::Interface
+    #[test]
+    fn test_java_annotation_type_kind() {
+        let source = b"public @interface MyAnnotation {\n\
+    String value();\n\
+    int priority() default 0;\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("MyAnnotation.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let annotation = syms.iter().find(|s| s.name == "MyAnnotation").unwrap();
+        assert_eq!(annotation.kind, crate::surgeon::SymbolKind::Interface);
+        assert_eq!(annotation.access_level, crate::surgeon::AccessLevel::Public);
+    }
+
+    /// AC-1.5: All four Java access levels
+    #[test]
+    fn test_java_access_levels_all_four() {
+        let source = b"class Visibility {\n\
+    public void pub_method() {}\n\
+    protected void prot_method() {}\n\
+    private void priv_method() {}\n\
+    void pkg_method() {}\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Visibility.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let cls = syms.iter().find(|s| s.name == "Visibility").unwrap();
+
+        let pub_m = cls
+            .children
+            .iter()
+            .find(|s| s.name == "pub_method")
+            .unwrap();
+        assert_eq!(pub_m.access_level, crate::surgeon::AccessLevel::Public);
+
+        let prot_m = cls
+            .children
+            .iter()
+            .find(|s| s.name == "prot_method")
+            .unwrap();
+        assert_eq!(prot_m.access_level, crate::surgeon::AccessLevel::Protected);
+
+        let priv_m = cls
+            .children
+            .iter()
+            .find(|s| s.name == "priv_method")
+            .unwrap();
+        assert_eq!(priv_m.access_level, crate::surgeon::AccessLevel::Private);
+
+        let pkg_m = cls
+            .children
+            .iter()
+            .find(|s| s.name == "pkg_method")
+            .unwrap();
+        assert_eq!(pkg_m.access_level, crate::surgeon::AccessLevel::Package);
+    }
+
+    /// AC-1.6: Nested/inner classes produce hierarchical symbol trees
+    #[test]
+    fn test_java_inner_classes_hierarchical() {
+        let source = b"public class Outer {\n\
+    public class Inner { void innerMethod() {} }\n\
+    public static class StaticNested { void nestedMethod() {} }\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Outer.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let outer = syms.iter().find(|s| s.name == "Outer").unwrap();
+        assert_eq!(outer.kind, crate::surgeon::SymbolKind::Class);
+
+        // Inner class is a child of Outer
+        let inner = outer.children.iter().find(|s| s.name == "Inner").unwrap();
+        assert_eq!(inner.kind, crate::surgeon::SymbolKind::Class);
+        assert_eq!(inner.access_level, crate::surgeon::AccessLevel::Public);
+
+        // Inner class method is a child of Inner
+        let inner_method = inner
+            .children
+            .iter()
+            .find(|s| s.name == "innerMethod")
+            .unwrap();
+        assert_eq!(inner_method.kind, crate::surgeon::SymbolKind::Function);
+
+        // Static nested class is also a child of Outer
+        let nested = outer
+            .children
+            .iter()
+            .find(|s| s.name == "StaticNested")
+            .unwrap();
+        assert_eq!(nested.kind, crate::surgeon::SymbolKind::Class);
+        let nested_method = nested
+            .children
+            .iter()
+            .find(|s| s.name == "nestedMethod")
+            .unwrap();
+        assert_eq!(nested_method.kind, crate::surgeon::SymbolKind::Function);
+    }
+
+    /// AC-1.7: Anonymous classes are silently skipped (no panic, no garbage symbols).
+    ///
+    /// The anonymous class itself is not extracted as a named symbol (no `anonymous_class_body`
+    /// symbol appears). Methods inside the anonymous class may bubble up as a known side effect
+    /// of the recursive extractor, but no crash or empty-name symbol is produced.
+    #[test]
+    fn test_java_anonymous_class_skipped() {
+        let source = b"public class Outer {\n\
+    public class Inner { void innerMethod() {} }\n\
+    public static class StaticNested { void nestedMethod() {} }\n\
+    Runnable r = new Runnable() { public void run() {} };\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("InnerClasses.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        // Must not panic
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        // The Outer class should be present
+        assert!(
+            syms.iter().any(|s| s.name == "Outer"),
+            "Outer class must be extracted"
+        );
+
+        // No symbol with empty name should appear anywhere in the tree (AC-1.7: no garbage)
+        fn no_empty_names(syms: &[crate::surgeon::ExtractedSymbol]) -> bool {
+            syms.iter()
+                .all(|s| !s.name.is_empty() && no_empty_names(&s.children))
+        }
+        assert!(no_empty_names(&syms), "No empty-name symbols should exist");
+
+        // The anonymous class body itself must NOT appear as a named container symbol.
+        // (Its methods may leak as a known side effect of recursive extraction — acceptable.)
+        fn no_anon_body(syms: &[crate::surgeon::ExtractedSymbol]) -> bool {
+            syms.iter()
+                .all(|s| s.kind != crate::surgeon::SymbolKind::Class || !s.name.is_empty())
+                && syms.iter().all(|s| no_anon_body(&s.children))
+        }
+        assert!(
+            no_anon_body(&syms),
+            "anonymous_class_body must not appear as an extracted Class symbol"
+        );
+    }
+
+    /// AC-1.3: Generic class extracts correctly (generics don't break name resolution)
+    #[test]
+    fn test_java_generic_class() {
+        let source = b"public class Container<T extends Comparable<T>> {\n\
+    private T value;\n\
+    public <R> R transform(java.util.function.Function<T, R> fn) {\n\
+        return fn.apply(value);\n\
+    }\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Container.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let cls = syms.iter().find(|s| s.name == "Container").unwrap();
+        assert_eq!(cls.kind, crate::surgeon::SymbolKind::Class);
+
+        let transform = cls.children.iter().find(|s| s.name == "transform").unwrap();
+        assert_eq!(transform.kind, crate::surgeon::SymbolKind::Function);
+    }
+
+    /// AC-1.3: module-info.java edge case — no symbols extracted, no panic
+    #[test]
+    fn test_java_module_info_no_symbols() {
+        let source = b"module com.example.app {\n\
+    requires java.base;\n\
+    exports com.example.api;\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("module-info.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        // Must not panic
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+        // module declarations are not mapped in module_kinds for Java
+        assert!(
+            syms.is_empty(),
+            "module-info.java should produce zero symbols, got: {syms:?}"
+        );
+    }
+
+    /// AC-1.3: Sealed class (Java 17+) extracts correctly
+    #[test]
+    fn test_java_sealed_class() {
+        let source = b"public sealed class Shape permits Circle, Rectangle {\n\
+    public record Circle(double radius) implements Shape {}\n\
+    public record Rectangle(double w, double h) implements Shape {}\n\
+}\n";
+        let tree = AstParser::parse_source(
+            std::path::Path::new("Shape.java"),
+            SupportedLanguage::Java,
+            source,
+        )
+        .unwrap();
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+        let shape = syms.iter().find(|s| s.name == "Shape").unwrap();
+        assert_eq!(shape.kind, crate::surgeon::SymbolKind::Class);
+
+        // Inner records are Struct kind
+        let circle = shape.children.iter().find(|s| s.name == "Circle").unwrap();
+        assert_eq!(circle.kind, crate::surgeon::SymbolKind::Struct);
+        let rect = shape
+            .children
+            .iter()
+            .find(|s| s.name == "Rectangle")
+            .unwrap();
+        assert_eq!(rect.kind, crate::surgeon::SymbolKind::Struct);
     }
 }

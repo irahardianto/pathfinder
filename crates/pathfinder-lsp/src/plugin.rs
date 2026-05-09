@@ -165,6 +165,13 @@ impl LanguagePlugin for TypeScriptPlugin {
 /// Python language plugin — `pyright-langserver` / `pylsp` / `ruff-lsp` / `jedi-language-server`.
 pub struct PythonPlugin;
 
+/// Java language plugin — jdtls (Eclipse JDT Language Server).
+///
+/// Requires JDK 21+ to run jdtls. Supports Java 8–25 project analysis.
+/// Marker files searched up to depth 2 to support monorepo layouts
+/// (e.g. `services/backend/pom.xml`).
+pub struct JavaPlugin;
+
 impl LanguagePlugin for PythonPlugin {
     fn language_id(&self) -> &'static str {
         "python"
@@ -208,6 +215,42 @@ impl LanguagePlugin for PythonPlugin {
     }
 }
 
+impl LanguagePlugin for JavaPlugin {
+    fn language_id(&self) -> &'static str {
+        "java"
+    }
+
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["java"]
+    }
+
+    fn marker_files(&self) -> &'static [&'static str] {
+        &[
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ]
+    }
+
+    fn marker_search_depth(&self) -> u32 {
+        2 // Monorepo support
+    }
+
+    fn lsp_candidates(&self) -> &[LspCandidate] {
+        &[LspCandidate {
+            binary: "jdtls",
+            default_args: &[],
+        }]
+    }
+
+    fn install_hint(&self) -> &'static str {
+        "Install jdtls: https://github.com/eclipse-jdtls/eclipse.jdt.ls#installation\n\
+         Requires JDK 21+ to run. Use sdkman: sdk install java 21-tem && sdk install jdtls"
+    }
+}
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 /// All built-in language plugins.
@@ -217,7 +260,13 @@ impl LanguagePlugin for PythonPlugin {
 /// `language_id_for_extension` to look up language IDs from file extensions.
 #[must_use]
 pub fn all_plugins() -> &'static [&'static dyn LanguagePlugin] {
-    &[&RustPlugin, &GoPlugin, &TypeScriptPlugin, &PythonPlugin]
+    &[
+        &RustPlugin,
+        &GoPlugin,
+        &TypeScriptPlugin,
+        &PythonPlugin,
+        &JavaPlugin,
+    ]
 }
 
 /// Look up a plugin by its language ID.
@@ -415,14 +464,15 @@ mod tests {
     // ── Registry ────────────────────────────────────────────────────────
 
     #[test]
-    fn test_all_plugins_contains_all_four_languages() {
+    fn test_all_plugins_contains_all_five_languages() {
         let plugins = all_plugins();
-        assert_eq!(plugins.len(), 4);
+        assert_eq!(plugins.len(), 5);
         let ids: Vec<&str> = plugins.iter().map(|p| p.language_id()).collect();
         assert!(ids.contains(&"rust"));
         assert!(ids.contains(&"go"));
         assert!(ids.contains(&"typescript"));
         assert!(ids.contains(&"python"));
+        assert!(ids.contains(&"java"));
     }
 
     #[test]
@@ -432,8 +482,14 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_for_language_found_java() {
+        let plugin = plugin_for_language("java").unwrap();
+        assert_eq!(plugin.language_id(), "java");
+    }
+
+    #[test]
     fn test_plugin_for_language_not_found() {
-        assert!(plugin_for_language("java").is_none());
+        assert!(plugin_for_language("kotlin").is_none());
     }
 
     #[test]
@@ -467,8 +523,14 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_for_extension_java() {
+        let plugin = plugin_for_extension("java").unwrap();
+        assert_eq!(plugin.language_id(), "java");
+    }
+
+    #[test]
     fn test_plugin_for_extension_unknown() {
-        assert!(plugin_for_extension("java").is_none());
+        assert!(plugin_for_extension("kt").is_none());
     }
 
     // ── Cross-validation with existing code ─────────────────────────────
@@ -480,7 +542,7 @@ mod tests {
         use crate::client::language_id_for_extension;
 
         for ext in &[
-            "rs", "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "py", "pyi",
+            "rs", "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "py", "pyi", "java",
         ] {
             let from_fn = language_id_for_extension(ext);
             let from_plugin = plugin_for_extension(ext).map(LanguagePlugin::language_id);
@@ -518,5 +580,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── JavaPlugin ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_java_plugin_language_id() {
+        assert_eq!(JavaPlugin.language_id(), "java");
+    }
+
+    #[test]
+    fn test_java_plugin_file_extensions() {
+        let exts = JavaPlugin.file_extensions();
+        assert_eq!(exts, &["java"]);
+    }
+
+    #[test]
+    fn test_java_plugin_marker_files() {
+        let markers = JavaPlugin.marker_files();
+        assert!(markers.contains(&"pom.xml"));
+        assert!(markers.contains(&"build.gradle"));
+        assert!(markers.contains(&"build.gradle.kts"));
+        assert!(markers.contains(&"settings.gradle"));
+        assert!(markers.contains(&"settings.gradle.kts"));
+    }
+
+    #[test]
+    fn test_java_plugin_marker_search_depth() {
+        assert_eq!(JavaPlugin.marker_search_depth(), 2);
+    }
+
+    #[test]
+    fn test_java_plugin_lsp_candidates() {
+        let candidates = JavaPlugin.lsp_candidates();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].binary, "jdtls");
+        assert!(candidates[0].default_args.is_empty());
+    }
+
+    #[test]
+    fn test_java_plugin_install_hint() {
+        let hint = JavaPlugin.install_hint();
+        assert!(hint.contains("jdtls"));
+        assert!(hint.contains("JDK 21"));
     }
 }

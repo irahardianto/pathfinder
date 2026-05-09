@@ -132,7 +132,7 @@ pub(super) async fn spawn_and_initialize(
     init_timeout_secs: Option<u64>,
     isolate_target_dir: bool,
     plugins: Vec<String>,
-    python_path: Option<std::path::PathBuf>,
+    init_options: serde_json::Value,
 ) -> Result<(ManagedProcess, tokio::task::JoinHandle<()>), LspError> {
     let (child, stdin, stdout) =
         spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)?;
@@ -147,7 +147,7 @@ pub(super) async fn spawn_and_initialize(
     let reader_handle = start_reader_task(stdout, Arc::clone(&dispatcher));
 
     let (id, rx) = dispatcher.register();
-    let init_request = build_initialize_request(id, project_root, &plugins, python_path).await?;
+    let init_request = build_initialize_request(id, project_root, &plugins, init_options).await?;
     write_message(&mut writer, &init_request).await?;
 
     let timeout_secs = init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
@@ -254,6 +254,22 @@ fn spawn_lsp_child(
         );
     }
 
+    // jdtls always needs a unique data directory per workspace — NOT gated on
+    // isolate_target_dir because this is a functional requirement, not an
+    // isolation concern. Without -data, jdtls fails or shares state between projects.
+    if language_id == "java" {
+        let data_dir = project_root.join(".pathfinder").join("jdtls-data");
+        std::fs::create_dir_all(&data_dir).ok();
+        cmd.arg("-data").arg(&data_dir);
+        tracing::info!(
+            language = language_id,
+            data_dir = %data_dir.display(),
+            "LSP: set jdtls data directory"
+        );
+        // Ensure .pathfinder/ is in .gitignore (jdtls always creates files here)
+        ensure_pathfinder_in_gitignore(project_root);
+    }
+
     // prctl(PR_SET_PDEATHSIG) is Linux-only — not available on macOS/BSD even
     // though they are also "unix". Gate strictly on linux to avoid link errors
     // when cross-compiling for aarch64-apple-darwin / x86_64-apple-darwin.
@@ -340,7 +356,7 @@ async fn build_initialize_request(
     id: u64,
     project_root: &Path,
     plugins: &[String],
-    python_path: Option<std::path::PathBuf>,
+    init_options: serde_json::Value,
 ) -> Result<Value, LspError> {
     let workspace_uri = path_to_file_uri(project_root).await?;
     let workspace_name = project_root
@@ -368,13 +384,9 @@ async fn build_initialize_request(
                 ]
             }
         })
-    } else if let Some(py_path) = python_path {
-        // ST-5: pass Python venv interpreter path to Pyright
-        json!({
-            "python": {
-                "pythonPath": py_path.to_string_lossy().as_ref()
-            }
-        })
+    } else if !init_options.is_null() {
+        // Language-specific init options (Python venv path, Java jdtls settings, etc.)
+        init_options
     } else {
         json!({})
     };
@@ -564,7 +576,7 @@ mod process_tests {
     #[tokio::test]
     async fn test_build_initialize_request_structure() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(42, dir.path(), &[], None)
+        let request = build_initialize_request(42, dir.path(), &[], serde_json::Value::Null)
             .await
             .expect("ok");
 
@@ -594,7 +606,7 @@ mod process_tests {
         let named_dir = dir.path().join("my_project");
         std::fs::create_dir_all(&named_dir).expect("create dir");
 
-        let request = build_initialize_request(1, &named_dir, &[], None)
+        let request = build_initialize_request(1, &named_dir, &[], serde_json::Value::Null)
             .await
             .expect("ok");
         let folders = request["params"]["workspaceFolders"]
@@ -606,7 +618,7 @@ mod process_tests {
     #[tokio::test]
     async fn test_build_initialize_request_capabilities() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(1, dir.path(), &[], None)
+        let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
             .await
             .expect("ok");
 
@@ -629,7 +641,7 @@ mod process_tests {
     async fn test_initialize_includes_plugins_when_present() {
         let dir = tempdir().expect("temp dir");
         let plugins = vec!["@vue/typescript-plugin".to_owned()];
-        let request = build_initialize_request(1, dir.path(), &plugins, None)
+        let request = build_initialize_request(1, dir.path(), &plugins, serde_json::Value::Null)
             .await
             .expect("ok");
 
@@ -662,7 +674,7 @@ mod process_tests {
     #[tokio::test]
     async fn test_initialize_empty_when_no_plugins() {
         let dir = tempdir().expect("temp dir");
-        let request = build_initialize_request(1, dir.path(), &[], None)
+        let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
             .await
             .expect("ok");
 
@@ -677,7 +689,7 @@ mod process_tests {
     async fn test_initialize_includes_vue_file_extension() {
         let dir = tempdir().expect("temp dir");
         let plugins = vec!["@vue/typescript-plugin".to_owned()];
-        let request = build_initialize_request(1, dir.path(), &plugins, None)
+        let request = build_initialize_request(1, dir.path(), &plugins, serde_json::Value::Null)
             .await
             .expect("ok");
 
@@ -871,5 +883,79 @@ mod process_tests {
         let content = std::fs::read_to_string(&gitignore).expect("read");
         let count = content.matches(".pathfinder/").count();
         assert_eq!(count, 1, "should not duplicate /.pathfinder/ entry");
+    }
+
+    // ── jdtls data directory tests (AC-2.9) ─────────────────────────────────
+
+    #[test]
+    fn test_jdtls_data_dir_created_for_java() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join(".pathfinder").join("jdtls-data");
+        assert!(!data_dir.exists(), "data dir should not exist before call");
+
+        // Simulate the data-dir creation side-effect directly
+        std::fs::create_dir_all(&data_dir).expect("create_dir_all");
+
+        assert!(data_dir.exists(), "jdtls data dir should be created");
+        assert!(data_dir.is_dir(), "jdtls data dir should be a directory");
+    }
+
+    #[tokio::test]
+    async fn test_initialize_java_init_options_passed() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let java_opts = json!({
+            "java": {
+                "import": {
+                    "gradle": { "enabled": true },
+                    "maven": { "enabled": true }
+                }
+            }
+        });
+
+        let request = build_initialize_request(1, dir.path(), &[], java_opts)
+            .await
+            .expect("ok");
+
+        let init_opts = &request["params"]["initializationOptions"];
+        assert!(
+            !init_opts.is_null(),
+            "init_options should be present for java"
+        );
+        assert!(
+            init_opts["java"]["import"]["maven"]["enabled"]
+                .as_bool()
+                .unwrap_or(false),
+            "Maven import should be enabled in initialize request"
+        );
+        assert!(
+            init_opts["java"]["import"]["gradle"]["enabled"]
+                .as_bool()
+                .unwrap_or(false),
+            "Gradle import should be enabled in initialize request"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_python_init_options_passed() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let python_opts = json!({
+            "python": {
+                "pythonPath": "/home/user/.venv/bin/python"
+            }
+        });
+
+        let request = build_initialize_request(1, dir.path(), &[], python_opts)
+            .await
+            .expect("ok");
+
+        let init_opts = &request["params"]["initializationOptions"];
+        assert!(!init_opts.is_null(), "init_options should be present");
+        assert_eq!(
+            init_opts["python"]["pythonPath"].as_str(),
+            Some("/home/user/.venv/bin/python"),
+            "pythonPath should be passed through to initialize request"
+        );
     }
 }

@@ -2,6 +2,24 @@ use crate::error::SurgeonError;
 use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::Path;
 
+/// The access level of an AST symbol, as determined by language-specific rules.
+///
+/// > **Note**: Do not confuse with `pathfinder_common::types::Visibility` which is
+/// > a repo-map *filter* parameter (`Public | All`). This enum describes the
+/// > per-symbol access level extracted from the AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccessLevel {
+    /// Visible to all consumers (Rust `pub`, Java `public`, Go uppercase, TS `export`).
+    #[default]
+    Public,
+    /// Visible to subclasses/submodules (Java `protected`, Rust `pub(super)`, Python `_prefix`).
+    Protected,
+    /// Visible within the same package/crate/module (Java default, Go lowercase, Rust `pub(crate)`).
+    Package,
+    /// Visible only within the declaring scope (Java `private`, Rust no modifier, Python `__prefix`).
+    Private,
+}
+
 /// Information about a symbol successfully extracted from the AST.
 #[derive(Debug, Clone)]
 pub struct ExtractedSymbol {
@@ -25,12 +43,13 @@ pub struct ExtractedSymbol {
     ///
     /// Falls back to 0 when the name node cannot be resolved (e.g., anonymous symbols).
     pub name_column: usize,
-    /// Whether this symbol is publicly visible.
+    /// The access level of this symbol as determined by language-specific AST rules.
     ///
-    /// - For Rust modules: `true` when declared `pub mod`, `false` for bare `mod`.
-    /// - For all other symbols: defaults to `true` (visibility determined by
-    ///   name-convention heuristics in `repo_map::is_symbol_public`).
-    pub is_public: bool,
+    /// - Rust: `pub` → `Public`, `pub(crate)` → `Package`, `pub(super)` → `Protected`, bare → `Private`.
+    /// - Go: uppercase name → `Public`, `_`-prefix → `Private`, lowercase → `Package`.
+    /// - TypeScript/JS: `export` ancestor → `Public`, `_`-prefix → `Private`, otherwise → `Package`.
+    /// - Python: `__`-prefix (non-dunder) → `Private`, `_`-prefix → `Protected`, bare → `Public`.
+    pub access_level: AccessLevel,
     /// Nested child symbols (e.g., methods within a class).
     pub children: Vec<Self>,
 }

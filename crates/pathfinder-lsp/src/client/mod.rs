@@ -785,7 +785,7 @@ impl LspClient {
         let isolate_target_dir = in_coexistence_mode;
 
         let plugins = descriptor.auto_plugins.clone();
-        let python_path = descriptor.python_path.clone();
+        let init_options = descriptor.init_options.clone();
         let spawn_result = spawn_and_initialize(
             &descriptor.command,
             &descriptor.args,
@@ -795,7 +795,7 @@ impl LspClient {
             descriptor.init_timeout_secs,
             isolate_target_dir,
             plugins,
-            python_path,
+            init_options,
         )
         .await;
 
@@ -2463,7 +2463,7 @@ mod tests {
                 root: std::env::temp_dir(),
                 init_timeout_secs: None,
                 auto_plugins: vec![],
-                python_path: None,
+                init_options: serde_json::Value::Null,
             })
             .collect();
 

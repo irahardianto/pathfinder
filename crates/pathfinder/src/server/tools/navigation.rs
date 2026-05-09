@@ -4943,7 +4943,7 @@ mod tests {
                 start_line: 0,
                 end_line: 0,
                 name_column: 0,
-                is_public: true,
+                access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
                 children: vec![],
             },
             ExtractedSymbol {
@@ -4954,7 +4954,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 name_column: 0,
-                is_public: true,
+                access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
                 children: vec![],
             },
         ];

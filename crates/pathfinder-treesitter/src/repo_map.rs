@@ -99,7 +99,7 @@ pub fn estimate_tokens(text: &str) -> u32 {
     (chars as f32 / 4.0).ceil() as u32
 }
 
-use crate::surgeon::{ExtractedSymbol, SymbolKind};
+use crate::surgeon::{AccessLevel, ExtractedSymbol};
 
 /// Default per-file token cap. Used when no per-call override is supplied.
 /// At ~4 chars/token, 2 000 tokens ≈ 8 KB — covers the vast majority of
@@ -107,70 +107,26 @@ use crate::surgeon::{ExtractedSymbol, SymbolKind};
 #[cfg(test)]
 const MAX_TOKENS_PER_FILE: u32 = 2_000;
 
-/// Determine whether a symbol should be included when `visibility = "public"`.
-///
-/// Uses **name-convention heuristics** because the extracted AST symbols do not
-/// carry visibility metadata (the Tree-sitter `.scm` queries extract names only):
-///
-/// | Convention          | Considered private                                    |
-/// |---------------------|-------------------------------------------------------|
-/// | `_`-prefixed name   | Python private, JS/TS private-by-convention, Rust     |
-/// | Lowercase first char| Go package-private (exported identifiers are `Upper`) |
-///
-/// Methods (children of a class/impl) always mirror their parent's visibility —
-/// a private class is fully excluded; a public class keeps all its methods so
-/// agents see the full public API surface.
-///
-/// TypeScript/JavaScript and Rust `pub`-ness is not analysed at the AST level;
-/// only the `_` prefix strips symbols in those languages.
-#[must_use]
-fn is_symbol_public(sym: &ExtractedSymbol, lang_is_go: bool) -> bool {
-    let name = sym.name.as_str();
-    // _-prefixed names are private across all supported languages
-    if name.starts_with('_') {
-        return false;
-    }
-    // Go: package-level functions/structs/constants are public iff first char is uppercase
-    if lang_is_go
-        && matches!(
-            sym.kind,
-            SymbolKind::Function
-                | SymbolKind::Struct
-                | SymbolKind::Interface
-                | SymbolKind::Constant
-                | SymbolKind::Enum
-        )
-    {
-        return name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-    }
-
-    // Module blocks: use AST-detected visibility (`pub mod` vs `mod`)
-    if sym.kind == SymbolKind::Module {
-        return sym.is_public;
-    }
-
-    true
-}
-
 /// Recursively filter `symbols` keeping only those visible under `visibility`.
 ///
 /// - `"all"` — no filtering, returns the slice unchanged in a cloned `Vec`.
-/// - `"public"` — drops private symbols (see [`is_symbol_public`]) and recursively
-///   filters children; if a class/impl becomes empty after filtering it is also dropped.
+/// - `"public"` — keeps symbols with `AccessLevel::Public` or `AccessLevel::Protected`
+///   and recursively filters children; empty parents are dropped.
 #[must_use]
-fn filter_by_visibility(
-    symbols: Vec<ExtractedSymbol>,
-    visibility: &str,
-    lang_is_go: bool,
-) -> Vec<ExtractedSymbol> {
+fn filter_by_visibility(symbols: Vec<ExtractedSymbol>, visibility: &str) -> Vec<ExtractedSymbol> {
     if visibility != "public" {
         return symbols;
     }
     symbols
         .into_iter()
-        .filter(|sym| is_symbol_public(sym, lang_is_go))
+        .filter(|sym| {
+            matches!(
+                sym.access_level,
+                AccessLevel::Public | AccessLevel::Protected
+            )
+        })
         .map(|mut sym| {
-            sym.children = filter_by_visibility(sym.children, visibility, lang_is_go);
+            sym.children = filter_by_visibility(sym.children, visibility);
             sym
         })
         .collect()
@@ -370,9 +326,8 @@ pub async fn generate_skeleton_text(
             }
         };
 
-        // Apply visibility filtering heuristic
-        let lang_is_go = matches!(lang, crate::language::SupportedLanguage::Go);
-        let symbols = filter_by_visibility(raw_symbols, config.visibility, lang_is_go);
+        // Apply visibility filtering
+        let symbols = filter_by_visibility(raw_symbols, config.visibility);
 
         if symbols.is_empty() {
             continue;
@@ -447,7 +402,7 @@ mod tests {
             start_line: 0,
             end_line: 1,
             name_column: 0,
-            is_public: true,
+            access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         }
     }
@@ -458,30 +413,38 @@ mod tests {
             make_sym("_private", SymbolKind::Function),
             make_sym("Public", SymbolKind::Function),
         ];
-        let filtered = filter_by_visibility(syms, "all", false);
+        let filtered = filter_by_visibility(syms, "all");
         assert_eq!(filtered.len(), 2);
     }
 
     #[test]
     fn test_filter_public_removes_underscore_prefix() {
-        let syms = vec![
+        // Simulate what detect_access_level would set during extraction:
+        // _helper → Private, compute → Public
+        let mut syms = vec![
             make_sym("_helper", SymbolKind::Function),
             make_sym("compute", SymbolKind::Function),
         ];
-        let filtered = filter_by_visibility(syms, "public", false);
+        syms[0].access_level = crate::surgeon::AccessLevel::Private;
+        let filtered = filter_by_visibility(syms, "public");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "compute");
     }
 
     #[test]
     fn test_filter_public_go_removes_lowercase_top_level_functions() {
-        let syms = vec![
+        // With access_level-based filtering, Go public/private is determined at extraction time.
+        // make_sym() creates symbols with AccessLevel::Public; we manually adjust for private.
+        let mut syms = vec![
             make_sym("internal", SymbolKind::Function),
             make_sym("Export", SymbolKind::Function),
             make_sym("_hidden", SymbolKind::Struct),
             make_sym("PublicStruct", SymbolKind::Struct),
         ];
-        let filtered = filter_by_visibility(syms, "public", true /* lang_is_go */);
+        // Simulate what extract_access_level would produce for Go:
+        syms[0].access_level = crate::surgeon::AccessLevel::Package; // lowercase → Package
+        syms[2].access_level = crate::surgeon::AccessLevel::Private; // _hidden → Private
+        let filtered = filter_by_visibility(syms, "public");
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].name, "Export");
         assert_eq!(filtered[1].name, "PublicStruct");
@@ -494,7 +457,9 @@ mod tests {
             make_sym("_private_method", SymbolKind::Method),
             make_sym("public_method", SymbolKind::Method),
         ];
-        let filtered = filter_by_visibility(vec![parent], "public", false);
+        // Simulate what detect_access_level would produce:
+        parent.children[0].access_level = crate::surgeon::AccessLevel::Private;
+        let filtered = filter_by_visibility(vec![parent], "public");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].children.len(), 1);
         assert_eq!(filtered[0].children[0].name, "public_method");
@@ -517,7 +482,7 @@ mod tests {
             start_line: 0,
             end_line: 10,
             name_column: 0,
-            is_public: true,
+            access_level: crate::surgeon::AccessLevel::Public,
             children: vec![ExtractedSymbol {
                 name: "my_method".to_string(),
                 semantic_path: "MyClass.my_method".to_string(),
@@ -526,7 +491,7 @@ mod tests {
                 start_line: 5,
                 end_line: 8,
                 name_column: 0,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: vec![],
             }],
         }];
@@ -551,7 +516,7 @@ mod tests {
                 start_line: 0,
                 end_line: 0,
                 name_column: 0,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: vec![],
             });
         }
@@ -565,7 +530,7 @@ mod tests {
             start_line: 0,
             end_line: 0,
             name_column: 0,
-            is_public: true,
+            access_level: crate::surgeon::AccessLevel::Public,
             children: methods,
         }];
 
@@ -588,7 +553,7 @@ mod tests {
             start_line: 0,
             end_line: 0,
             name_column: 0,
-            is_public: true,
+            access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         }];
         let mut out = String::default();
@@ -638,7 +603,7 @@ mod tests {
                 start_line: 0,
                 end_line: 0,
                 name_column: 0,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: vec![],
             }]));
 
@@ -797,7 +762,7 @@ mod tests {
             start_line: 0,
             end_line: 5,
             name_column: 0,
-            is_public: true,
+            access_level: crate::surgeon::AccessLevel::Public,
             children: vec![ExtractedSymbol {
                 name: "foo".to_string(),
                 semantic_path: "types.foo".to_string(),
@@ -806,11 +771,11 @@ mod tests {
                 start_line: 1,
                 end_line: 3,
                 name_column: 0,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: vec![],
             }],
         };
-        let filtered = filter_by_visibility(vec![module], "public", false);
+        let filtered = filter_by_visibility(vec![module], "public");
         assert_eq!(filtered.len(), 1, "pub mod should be visible in public map");
         assert_eq!(filtered[0].name, "types");
         assert_eq!(
@@ -831,7 +796,7 @@ mod tests {
             start_line: 0,
             end_line: 5,
             name_column: 0,
-            is_public: false,
+            access_level: crate::surgeon::AccessLevel::Private,
             children: vec![ExtractedSymbol {
                 name: "helper".to_string(),
                 semantic_path: "internal.helper".to_string(),
@@ -840,11 +805,11 @@ mod tests {
                 start_line: 1,
                 end_line: 3,
                 name_column: 0,
-                is_public: true,
+                access_level: crate::surgeon::AccessLevel::Public,
                 children: vec![],
             }],
         };
-        let filtered = filter_by_visibility(vec![module], "public", false);
+        let filtered = filter_by_visibility(vec![module], "public");
         assert!(
             filtered.is_empty(),
             "bare mod should be hidden in public map"
@@ -862,10 +827,10 @@ mod tests {
             start_line: 0,
             end_line: 5,
             name_column: 0,
-            is_public: false,
+            access_level: crate::surgeon::AccessLevel::Private,
             children: vec![],
         };
-        let filtered = filter_by_visibility(vec![module], "all", false);
+        let filtered = filter_by_visibility(vec![module], "all");
         assert_eq!(filtered.len(), 1, "mod should be visible in visibility=all");
     }
 }

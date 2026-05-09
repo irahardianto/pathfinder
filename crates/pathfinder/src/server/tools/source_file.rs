@@ -198,6 +198,7 @@ impl PathfinderServer {
                         "go" => Some("go"),
                         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Some("typescript"),
                         "py" | "pyi" => Some("python"),
+                        "java" => Some("java"),
                         _ => None,
                     };
                     if let Some(lang) = lang_id {
@@ -257,7 +258,7 @@ mod tests {
             start_line,
             end_line,
             name_column: 0,
-            is_public: true,
+            access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
             children,
         }
     }

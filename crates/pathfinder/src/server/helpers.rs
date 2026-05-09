@@ -80,6 +80,7 @@ pub(crate) fn language_from_path(path: &Path) -> String {
         Some("rs") => "rust",
         Some("go") => "go",
         Some("py") => "python",
+        Some("java") => "java",
         Some("json") => "json",
         Some("yaml" | "yml") => "yaml",
         Some("toml") => "toml",
@@ -305,6 +306,7 @@ mod tests {
             ("file.rs", "rust"),
             ("file.go", "go"),
             ("file.py", "python"),
+            ("file.java", "java"),
             ("file.json", "json"),
             ("file.yaml", "yaml"),
             ("file.yml", "yaml"),
@@ -319,6 +321,16 @@ mod tests {
             let path = Path::new(filename);
             assert_eq!(language_from_path(path), expected, "Failed for {filename}");
         }
+    }
+
+    /// AC-1.9: Java extension returns "java"
+    #[test]
+    fn test_language_from_path_java() {
+        assert_eq!(language_from_path(Path::new("Main.java")), "java");
+        assert_eq!(
+            language_from_path(Path::new("src/com/example/UserService.java")),
+            "java"
+        );
     }
 
     #[test]

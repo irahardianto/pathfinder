@@ -39,6 +39,8 @@ pub enum SupportedLanguage {
     Rust,
     /// Vue Single-File Component (Phase 1: <script> block parsed as TypeScript).
     Vue,
+    /// The Java programming language.
+    Java,
 }
 
 impl SupportedLanguage {
@@ -54,6 +56,7 @@ impl SupportedLanguage {
             "py" => Some(Self::Python),
             "rs" => Some(Self::Rust),
             "vue" => Some(Self::Vue),
+            "java" => Some(Self::Java),
             _ => None,
         }
     }
@@ -69,6 +72,7 @@ impl SupportedLanguage {
             Self::JavaScript => "javascript",
             Self::Python => "python",
             Self::Rust => "rust",
+            Self::Java => "java",
         }
     }
 
@@ -82,6 +86,7 @@ impl SupportedLanguage {
             Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Self::Java => tree_sitter_java::LANGUAGE.into(),
         }
     }
 
@@ -128,6 +133,27 @@ impl SupportedLanguage {
                 impl_kinds: &["impl_item"],
                 constant_kinds: &["const_item", "static_item"],
                 module_kinds: &["mod_item"],
+            },
+            Self::Java => &LanguageNodeTypes {
+                // Instance methods, static methods, and constructors
+                function_kinds: &["method_declaration", "constructor_declaration"],
+                class_kinds: &[
+                    "class_declaration",
+                    "interface_declaration",
+                    "enum_declaration",
+                    "annotation_type_declaration",
+                    "record_declaration",
+                ],
+                // Java methods are functions inside classes (like Python) — no separate method_kinds
+                method_kinds: &[],
+                // Java has no impl blocks
+                impl_kinds: &[],
+                // Excluded: `field_declaration` covers ALL fields (private, protected, public),
+                // which is too noisy. Only actual constants would qualify but filtering
+                // `static final` requires value inspection beyond node kind.
+                constant_kinds: &[],
+                // Java packages are directory-based, not AST nodes
+                module_kinds: &[],
             },
         }
     }
@@ -252,6 +278,16 @@ mod tests {
         assert_eq!(SupportedLanguage::detect(Path::new("text.txt")), None);
         assert_eq!(SupportedLanguage::detect(Path::new("Makefile")), None);
         assert_eq!(SupportedLanguage::detect(Path::new(".gitignore")), None);
+
+        // AC-1.1 / AC-1.2: Java detection
+        assert_eq!(
+            SupportedLanguage::detect(Path::new("Main.java")),
+            Some(SupportedLanguage::Java)
+        );
+        assert_eq!(
+            SupportedLanguage::detect(Path::new("src/com/example/Service.java")),
+            Some(SupportedLanguage::Java)
+        );
     }
 
     #[test]
@@ -261,6 +297,40 @@ mod tests {
         let _ts = SupportedLanguage::TypeScript.grammar();
         let _py = SupportedLanguage::Python.grammar();
         let _vue = SupportedLanguage::Vue.grammar();
+    }
+
+    /// AC-1.1: Java grammar loads without panic.
+    #[test]
+    fn test_grammar_java_loads_successfully() {
+        let _java = SupportedLanguage::Java.grammar();
+    }
+
+    /// AC-1.1: Java `as_str` returns "java".
+    #[test]
+    fn test_java_as_str() {
+        assert_eq!(SupportedLanguage::Java.as_str(), "java");
+    }
+
+    /// AC-1.1: Java `node_types` returns correct function and class kinds.
+    #[test]
+    fn test_java_node_types() {
+        let nt = SupportedLanguage::Java.node_types();
+        assert!(nt.function_kinds.contains(&"method_declaration"));
+        assert!(nt.function_kinds.contains(&"constructor_declaration"));
+        assert!(nt.class_kinds.contains(&"class_declaration"));
+        assert!(nt.class_kinds.contains(&"interface_declaration"));
+        assert!(nt.class_kinds.contains(&"enum_declaration"));
+        assert!(nt.class_kinds.contains(&"record_declaration"));
+        assert!(nt.class_kinds.contains(&"annotation_type_declaration"));
+        assert!(
+            nt.constant_kinds.is_empty(),
+            "Java constant_kinds must be empty (see §2.1)"
+        );
+        assert!(nt.impl_kinds.is_empty(), "Java impl_kinds must be empty");
+        assert!(
+            nt.module_kinds.is_empty(),
+            "Java module_kinds must be empty"
+        );
     }
 
     #[test]

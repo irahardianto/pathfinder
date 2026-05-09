@@ -246,7 +246,8 @@ fn is_string_node(kind: &str) -> bool {
         | "jsx_text"                  // JSX inline text
         | "string_content"            // Python multi-line strings
         | "concatenated_string"       // Python implicit string concat
-        | "char_literal" // C/C++/Java
+        | "char_literal"              // C/C++/Java
+        | "text_block" // Java 15+ multi-line text blocks
     )
 }
 
@@ -628,5 +629,33 @@ function doThing() { count.value++ }
 
         assert_eq!(scope.language, "rust");
         assert!(scope.content.contains("fn outer"));
+    }
+
+    // ── AC-1.8: Java text_block classified as string ─────────────────────────
+
+    #[tokio::test]
+    async fn test_node_type_at_position_java_text_block() {
+        let surgeon = TreeSitterSurgeon::new(2);
+        let mut file = Builder::new().suffix(".java").tempfile().unwrap();
+        // Java 15+ text block — column 16 on line 2 is inside the text block
+        writeln!(
+            file,
+            "class Foo {{\n    String s = \"\"\"\n        hello\n        \"\"\";\n}}\n"
+        )
+        .unwrap();
+        let path = file.path().to_path_buf();
+        let workspace_root = std::path::PathBuf::from("/");
+        let relative = path.strip_prefix("/").unwrap();
+
+        // Line 2 column 16 is inside the `"""` text block opening
+        let node_type = surgeon
+            .node_type_at_position(&workspace_root, relative, 2, 16)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            node_type, "string",
+            "Java text block should be classified as string, got: {node_type}"
+        );
     }
 }

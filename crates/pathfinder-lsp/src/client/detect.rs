@@ -69,6 +69,10 @@ pub fn install_hint(language_id: &str) -> String {
             "Install pyright: npm install -g pyright\nOr install pylsp: pip install python-lsp-server"
                 .to_string()
         }
+        "java" => {
+            "Install jdtls: https://github.com/eclipse-jdtls/eclipse.jdt.ls\nRequires JDK 21+"
+                .to_string()
+        }
         _ => format!("Install a language server for {language_id}"),
     }
 }
@@ -96,12 +100,13 @@ pub struct LanguageLsp {
     /// Auto-detected TypeScript plugins to load during initialization.
     /// Populated by detect.rs when scanning the workspace for Vue, Svelte, etc.
     pub auto_plugins: Vec<String>,
-    /// ST-5: Python interpreter path detected from the workspace virtual environment.
+    /// Language-specific initialization options passed to LSP `initialize` request.
     ///
-    /// Passed to Pyright via `initializationOptions.python.pythonPath` during
-    /// `initialize` so it inspects the venv's site-packages rather than the
-    /// system interpreter.  `None` for all non-Python languages.
-    pub python_path: Option<std::path::PathBuf>,
+    /// Built by per-language detection functions:
+    /// - Python: `{"python": {"pythonPath": "..."}}` (from venv detection)
+    /// - Java: `{"java": {"import": {"gradle": ..., "maven": ...}}}` (jdtls settings)
+    /// - All others: `serde_json::Value::Null`
+    pub init_options: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +124,7 @@ pub struct LanguageLsp {
 /// - **Go**: go.mod must start with the `module` keyword
 /// - **TypeScript**: tsconfig.json must be parseable JSON
 /// - **Python**: pyproject.toml (if present) must be parseable TOML
+/// - **Java**: pom.xml must contain `<project`; build.gradle[.kts] must be non-empty
 pub(crate) fn validate_marker_file(
     marker_path: &std::path::Path,
     language_id: &str,
@@ -164,7 +170,22 @@ pub(crate) fn validate_marker_file(
             Ok(_) => Ok(()),
             Err(e) => Err(format!("pyproject.toml is not valid TOML: {e}")),
         },
-        // package.json, setup.py, requirements.txt — too loose/executable to validate structurally
+        ("java", "pom.xml") => {
+            if contents.contains("<project") {
+                Ok(())
+            } else {
+                Err("pom.xml does not contain <project element".to_owned())
+            }
+        }
+        ("java", "build.gradle" | "build.gradle.kts") => {
+            // Gradle files are Groovy/Kotlin scripts — minimal structural validation
+            if contents.is_empty() {
+                Err("build.gradle is empty".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+        // package.json, setup.py, requirements.txt, settings.gradle[.kts] — too loose to validate
         _ => Ok(()),
     }
 }
@@ -223,6 +244,51 @@ pub(crate) fn detect_venv(workspace_root: &std::path::Path) -> Option<std::path:
     }
 
     None
+}
+
+/// Build Python LSP initialization options from the detected venv.
+///
+/// Returns a JSON value suitable for `initializationOptions.python.pythonPath`
+/// (Pyright format) when a venv is found, or `Null` otherwise.
+#[must_use]
+pub(crate) fn detect_python_init_options(workspace_root: &std::path::Path) -> serde_json::Value {
+    use serde_json::json;
+    detect_venv(workspace_root).map_or(serde_json::Value::Null, |py_path| {
+        json!({
+            "python": {
+                "pythonPath": py_path.to_string_lossy().as_ref()
+            }
+        })
+    })
+}
+
+/// Build jdtls initialization options.
+///
+/// Enables Maven and Gradle import and, when `JAVA_HOME` is set, pins the
+/// JDK home so jdtls uses the correct JDK across different shell environments.
+#[must_use]
+fn detect_java_init_options(workspace_root: &std::path::Path) -> serde_json::Value {
+    use serde_json::json;
+    // workspace_root is read for potential future per-project config but is
+    // currently unused; the underscore prefix suppresses the lint.
+    let _ = workspace_root;
+
+    let java_home = std::env::var("JAVA_HOME").ok();
+
+    let mut settings = json!({
+        "java": {
+            "import": {
+                "gradle": { "enabled": true },
+                "maven": { "enabled": true }
+            }
+        }
+    });
+
+    if let Some(home) = java_home {
+        settings["java"]["jdt"] = json!({ "ls": { "java": { "home": home } } });
+    }
+
+    settings
 }
 
 /// Resolve a bare binary name to its absolute path using `which`.
@@ -410,12 +476,12 @@ async fn detect_typescript_plugins(
 
 /// Detect available language servers for the given workspace root and configuration.
 #[allow(clippy::missing_errors_doc)]
-// The function is structured as one block per language (Rust, Go, TS, Python).
-// Each block is short but the four-language repetition pushes the total just
+// The function is structured as one block per language (Rust, Go, TS, Python, Java).
+// Each block is short but the five-language repetition pushes the total just
 // over the 100-line clippy default. Suppressing to keep the pattern intact.
 #[expect(
     clippy::too_many_lines,
-    reason = "Four-language repetition block; each block is short but cumulative length exceeds threshold. Pattern is clean per-language — extraction would add indirection without clarity."
+    reason = "Five-language repetition block; each block is short but cumulative length exceeds threshold. Pattern is clean per-language — extraction would add indirection without clarity."
 )]
 pub async fn detect_languages(
     workspace_root: &Path,
@@ -486,7 +552,7 @@ pub async fn detect_languages(
                     root,
                     init_timeout_secs: None,
                     auto_plugins: vec![],
-                    python_path: None,
+                    init_options: serde_json::Value::Null,
                 });
             }
         } else if !has_override {
@@ -527,7 +593,7 @@ pub async fn detect_languages(
                     root,
                     init_timeout_secs: None,
                     auto_plugins: vec![],
-                    python_path: None,
+                    init_options: serde_json::Value::Null,
                 });
             }
         } else if !has_override {
@@ -576,7 +642,7 @@ pub async fn detect_languages(
                         root,
                         init_timeout_secs: None,
                         auto_plugins,
-                        python_path: None,
+                        init_options: serde_json::Value::Null,
                     });
                 }
             } else {
@@ -588,7 +654,7 @@ pub async fn detect_languages(
                     root,
                     init_timeout_secs: None,
                     auto_plugins,
-                    python_path: None,
+                    init_options: serde_json::Value::Null,
                 });
             }
         } else if !has_override {
@@ -671,10 +737,10 @@ pub async fn detect_languages(
 
             if manifest_ok {
                 // ST-5: detect Python venv for Pyright's initializationOptions
-                let python_path = detect_venv(workspace_root);
-                if python_path.is_some() {
+                let init_options = detect_python_init_options(workspace_root);
+                if !init_options.is_null() {
                     tracing::info!(
-                        path = ?python_path,
+                        options = ?init_options,
                         "ST-5: Python venv detected — will pass pythonPath to LSP"
                     );
                 }
@@ -685,7 +751,7 @@ pub async fn detect_languages(
                     root,
                     init_timeout_secs: None,
                     auto_plugins: vec![],
-                    python_path,
+                    init_options,
                 });
             }
         } else if !has_override {
@@ -700,6 +766,74 @@ pub async fn detect_languages(
                     .map(|(name, _)| name.to_string())
                     .collect(),
                 install_hint: install_hint("python"),
+            });
+        }
+    }
+
+    // Java — pom.xml, build.gradle, build.gradle.kts (depth 2 for monorepos)
+    //
+    // CAVEAT: settings.gradle / settings.gradle.kts can match non-Java Gradle projects
+    // (Android-only, Kotlin-only). This is an acceptable false positive — jdtls will
+    // simply find no Java sources and idle. A future refinement can check for .java
+    // files in src/ if this becomes a problem.
+    let (java_root, java_marker) = if get_override!("java").is_some() {
+        (get_override!("java"), None)
+    } else if let Some(r) = find_marker(workspace_root, "pom.xml", 2).await {
+        (Some(r), Some("pom.xml"))
+    } else if let Some(r) = find_marker(workspace_root, "build.gradle", 2).await {
+        (Some(r), Some("build.gradle"))
+    } else if let Some(r) = find_marker(workspace_root, "build.gradle.kts", 2).await {
+        (Some(r), Some("build.gradle.kts"))
+    } else {
+        (
+            find_marker(workspace_root, "settings.gradle", 2).await,
+            Some("settings.gradle"),
+        )
+    };
+    if let Some(root) = java_root {
+        let has_override = get_command_override!("java").is_some();
+        let cmd = get_command_override!("java").or_else(|| resolve_command("jdtls", "java"));
+        if let Some(command) = cmd {
+            // ST-2: validate marker before spawning
+            if let Some(marker) = java_marker {
+                let marker_path = root.join(marker);
+                if let Err(reason) = validate_marker_file(&marker_path, "java") {
+                    tracing::warn!(language = "java", %reason, "ST-2: invalid manifest");
+                    missing.push(MissingLanguage {
+                        language_id: "java".to_owned(),
+                        marker_file: marker.to_string(),
+                        tried_binaries: vec!["jdtls".to_string()],
+                        install_hint: format!("Fix {marker}: {reason}"),
+                    });
+                } else {
+                    detected.push(LanguageLsp {
+                        language_id: "java".to_owned(),
+                        command,
+                        args: get_args!("java", vec![]),
+                        root,
+                        init_timeout_secs: Some(180), // jdtls is slow to start on large projects
+                        auto_plugins: vec![],
+                        init_options: detect_java_init_options(workspace_root),
+                    });
+                }
+            } else {
+                // config root_override — no marker to validate
+                detected.push(LanguageLsp {
+                    language_id: "java".to_owned(),
+                    command,
+                    args: get_args!("java", vec![]),
+                    root,
+                    init_timeout_secs: Some(180),
+                    auto_plugins: vec![],
+                    init_options: detect_java_init_options(workspace_root),
+                });
+            }
+        } else if !has_override {
+            missing.push(MissingLanguage {
+                language_id: "java".to_owned(),
+                marker_file: java_marker.unwrap_or("pom.xml or build.gradle").to_string(),
+                tried_binaries: vec!["jdtls".to_string()],
+                install_hint: install_hint("java"),
             });
         }
     }
@@ -719,6 +853,7 @@ pub fn language_id_for_extension(ext: &str) -> Option<&'static str> {
         // Both TypeScript and JavaScript are served by typescript-language-server
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Some("typescript"),
         "py" | "pyi" => Some("python"),
+        "java" => Some("java"),
         _ => None,
     }
 }
@@ -1595,5 +1730,208 @@ mod tests {
             );
         })
         .await;
+    }
+
+    // ── Java detection tests (AC-2.3 – AC-2.5, AC-2.10) ─────────────────────
+
+    #[tokio::test]
+    async fn test_detects_java_via_pom_xml() {
+        test_with_fake_python_binaries(&["jdtls"], || async {
+            let dir = tempdir().expect("temp dir");
+            std::fs::write(
+                dir.path().join("pom.xml"),
+                "<project><modelVersion>4.0.0</modelVersion></project>",
+            )
+            .expect("write pom.xml");
+
+            let config = pathfinder_common::config::PathfinderConfig::default();
+            let result = detect_languages(dir.path(), &config).await.expect("detect");
+
+            let java = result.detected.iter().find(|l| l.language_id == "java");
+            assert!(java.is_some(), "Java should be detected via pom.xml");
+            let java = java.expect("checked above");
+            assert_eq!(
+                java.init_timeout_secs,
+                Some(180),
+                "Java timeout must be 180s"
+            );
+            assert!(
+                !java.init_options.is_null(),
+                "Java init_options should not be null"
+            );
+            assert!(
+                java.init_options["java"]["import"]["maven"]["enabled"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "Maven import should be enabled"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_detects_java_via_build_gradle() {
+        test_with_fake_python_binaries(&["jdtls"], || async {
+            let dir = tempdir().expect("temp dir");
+            std::fs::write(dir.path().join("build.gradle"), "plugins { id 'java' }\n")
+                .expect("write build.gradle");
+
+            let config = pathfinder_common::config::PathfinderConfig::default();
+            let result = detect_languages(dir.path(), &config).await.expect("detect");
+
+            let java = result.detected.iter().find(|l| l.language_id == "java");
+            assert!(java.is_some(), "Java should be detected via build.gradle");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_detects_java_via_build_gradle_kts() {
+        test_with_fake_python_binaries(&["jdtls"], || async {
+            let dir = tempdir().expect("temp dir");
+            std::fs::write(dir.path().join("build.gradle.kts"), "plugins { java }\n")
+                .expect("write build.gradle.kts");
+
+            let config = pathfinder_common::config::PathfinderConfig::default();
+            let result = detect_languages(dir.path(), &config).await.expect("detect");
+
+            let java = result.detected.iter().find(|l| l.language_id == "java");
+            assert!(
+                java.is_some(),
+                "Java should be detected via build.gradle.kts"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_java_not_detected_without_binary() {
+        test_with_fake_python_binaries(&[], || async {
+            let dir = tempdir().expect("temp dir");
+            std::fs::write(
+                dir.path().join("pom.xml"),
+                "<project><modelVersion>4.0.0</modelVersion></project>",
+            )
+            .expect("write pom.xml");
+
+            let config = pathfinder_common::config::PathfinderConfig::default();
+            let result = detect_languages(dir.path(), &config).await.expect("detect");
+
+            assert!(
+                result.detected.iter().all(|l| l.language_id != "java"),
+                "Java should not be in detected without jdtls binary"
+            );
+            let missing = result.missing.iter().find(|m| m.language_id == "java");
+            assert!(
+                missing.is_some(),
+                "Java should be in missing when jdtls not found"
+            );
+            assert!(
+                missing
+                    .expect("checked above")
+                    .tried_binaries
+                    .contains(&"jdtls".to_string()),
+                "jdtls should be listed in tried_binaries"
+            );
+        })
+        .await;
+    }
+
+    // ── validate_marker_file Java tests ─────────────────────────────────────
+
+    #[test]
+    fn test_validate_marker_file_valid_pom_xml() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("pom.xml");
+        std::fs::write(
+            &path,
+            "<project><modelVersion>4.0.0</modelVersion></project>",
+        )
+        .expect("write");
+        assert!(validate_marker_file(&path, "java").is_ok());
+    }
+
+    #[test]
+    fn test_validate_marker_file_invalid_pom_xml() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("pom.xml");
+        std::fs::write(&path, "<dependency>foo</dependency>").expect("write");
+        let result = validate_marker_file(&path, "java");
+        assert!(result.is_err(), "pom.xml without <project should fail");
+        assert!(
+            result.expect_err("expected Err").contains("<project"),
+            "error should mention <project element"
+        );
+    }
+
+    #[test]
+    fn test_validate_marker_file_empty_build_gradle() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("build.gradle");
+        std::fs::write(&path, "").expect("write");
+        let result = validate_marker_file(&path, "java");
+        assert!(result.is_err(), "empty build.gradle should fail");
+        assert!(
+            result.expect_err("expected Err").contains("empty"),
+            "error should mention empty"
+        );
+    }
+
+    // ── language_id_for_extension Java ──────────────────────────────────────
+
+    #[test]
+    fn test_language_id_for_extension_java() {
+        assert_eq!(language_id_for_extension("java"), Some("java"));
+    }
+
+    // ── Python init_options migration tests ─────────────────────────────────
+
+    #[test]
+    fn test_detect_python_init_options_no_venv() {
+        let dir = tempdir().expect("temp dir");
+        let opts = detect_python_init_options(dir.path());
+        assert!(opts.is_null(), "should be Null when no venv");
+    }
+
+    #[test]
+    fn test_detect_python_init_options_with_venv() {
+        let dir = tempdir().expect("temp dir");
+        let venv_python = dir.path().join(".venv").join("bin").join("python");
+        std::fs::create_dir_all(venv_python.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&venv_python, "#!/bin/sh\nexec python3 \"$@\"").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&venv_python, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let opts = detect_python_init_options(dir.path());
+        assert!(!opts.is_null(), "should not be Null when venv found");
+        assert!(
+            opts["python"]["pythonPath"].as_str().is_some(),
+            "pythonPath should be a string"
+        );
+    }
+
+    // ── detect_java_init_options structure tests ─────────────────────────────
+
+    #[test]
+    fn test_detect_java_init_options_structure() {
+        let dir = tempdir().expect("temp dir");
+        let opts = detect_java_init_options(dir.path());
+        assert!(!opts.is_null(), "java init_options should not be null");
+        assert!(
+            opts["java"]["import"]["gradle"]["enabled"]
+                .as_bool()
+                .unwrap_or(false),
+            "Gradle import should be enabled"
+        );
+        assert!(
+            opts["java"]["import"]["maven"]["enabled"]
+                .as_bool()
+                .unwrap_or(false),
+            "Maven import should be enabled"
+        );
     }
 }
