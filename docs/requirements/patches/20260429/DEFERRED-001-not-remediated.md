@@ -238,22 +238,22 @@ These overlaps are intentional. Merging them would require complex parameter swi
 ### D-16: New Tool Feature Requests (F5.4a–F5.4e)
 
 **Category:** Feature requests  
-**Findings:** `rename_symbol`, `find_all_references`, `move_symbol`, `format_file`, `list_languages` tools do not exist.  
-**Decision:** DEFERRED — greenfield features, not bugs. Tracked in dedicated spec.
+**Findings:** `rename_symbol`, ~~`find_all_references`~~, `move_symbol`, `format_file`, `list_languages` tools do not exist.  
+**Decision:** PARTIALLY IMPLEMENTED — F5.4b shipped in v0.9.0. Remaining tools still deferred.
 
 **Specification:** See [`docs/requirements/FEATURE-001-new-tools-epic.md`](../../FEATURE-001-new-tools-epic.md)
 
 **Summary of each request:**
 
-| Finding | Tool | LSP Method Needed | Complexity |
-|---------|------|-------------------|------------|
-| F5.4a | `rename_symbol` | `textDocument/rename` (not yet in `Lawyer` trait) | Medium-High |
-| F5.4b | `find_all_references` | `textDocument/references` (not yet in `Lawyer` trait) | Medium |
-| F5.4c | `move_symbol` | Requires F5.4b + language-specific import rewriting | High |
-| F5.4d | `format_file` | Reuses existing `range_formatting` — no new LSP method | Low |
-| F5.4e | `list_languages` | Aggregates `SupportedLanguage` + `Lawyer::capability_status` | Low |
+| Finding | Tool | LSP Method Needed | Complexity | Status |
+|---------|------|-------------------|------------|--------|
+| F5.4a | `rename_symbol` | `textDocument/rename` (not yet in `Lawyer` trait) | Medium-High | Deferred |
+| F5.4b | `find_all_references` | `textDocument/references` (`Lawyer::references`) | Medium | ✅ **IMPLEMENTED** (v0.9.0) |
+| F5.4c | `move_symbol` | Requires F5.4b + language-specific import rewriting | High | Deferred |
+| F5.4d | `format_file` | Reuses existing `range_formatting` — no new LSP method | Low | Deferred |
+| F5.4e | `list_languages` | Aggregates `SupportedLanguage` + `Lawyer::capability_status` | Low | Deferred |
 
-**Implementation priority (from FEATURE-001):** F5.4e → F5.4d → F5.4b → F5.4a → F5.4c
+**Implementation priority (remaining):** F5.4e → F5.4d → F5.4a → F5.4c
 
 **Reconsider when:** A dedicated "New Tools" sprint is scheduled. Do not implement these incrementally as patches — they require coordinated design review.
 

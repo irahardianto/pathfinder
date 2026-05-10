@@ -51,8 +51,8 @@ Pathfinder solves these problems by providing:
 
 ### Key Features
 
-- 🛠️ **9 MCP Tools** — covering code navigation, semantic discovery, file reading, and impact analysis.
-- 🌐 **7 Languages** — native Tree-sitter support for Go, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
+- 🛠️ **10 MCP Tools** — covering code navigation, semantic discovery, file reading, and impact analysis.
+- 🌐 **8 Languages** — native Tree-sitter support for Go, Java, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
 - ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
 
@@ -203,7 +203,7 @@ For any MCP-compatible client, the minimum effective setup is to inject the **AG
 <!-- TOOLS -->
 ## Tools
 
-Pathfinder exposes 11 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
+Pathfinder exposes 10 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
 
 ### 🔍 Search & Navigation
 
@@ -212,10 +212,11 @@ Pathfinder exposes 11 tools organized into three categories. Every tool operates
 | `search_codebase` | Search for text patterns with AST-aware filtering. Set `filter_mode` to `code_only` (default), `comments_only`, or `all`. Use `is_regex=true` for multi-pattern searches. Token-efficiency parameters: `known_files` (suppress content for already-read files), `group_by_file`, `exclude_glob`. Returns matching lines with context and `enclosing_semantic_path` + `version_hash` per match. |
 | `get_repo_map` | Generate a structural skeleton of the project — an indented tree of classes, functions, and type signatures with semantic path annotations. Token-budgeted for LLM context windows. Supports `changed_since` (git ref/duration), `include_extensions`, `exclude_extensions`, and `include_imports` for focused exploration. Returns `version_hashes` per file and `capabilities.lsp.per_language` for upfront LSP status. |
 | `read_symbol_scope` | Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns code, line range, and version hash. |
-| `read_source_file` | Read an entire source file and extract its complete AST symbol hierarchy. Supports three detail levels: `compact` (default — source + flat symbol list), `symbols` (symbol tree only, no source), `full` (source + complete nested AST). Use `start_line`/`end_line` to restrict output to a region of interest. **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`); use `read_file` for config/docs files. |
+| `read_source_file` | Read an entire source file and extract its complete AST symbol hierarchy. Supports four detail levels: `source_only` (source code only, lowest token cost), `compact` (default — source + flat symbol list), `symbols` (symbol tree only, no source), `full` (source + complete nested AST). Use `start_line`/`end_line` to restrict output to a region of interest. **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`, `.java`); use `read_file` for config/docs files. |
 | `read_with_deep_context` | Read a symbol's source code **plus** the signatures of all functions it calls. Ideal for understanding a function's full dependency graph before refactoring. |
 | `get_definition` | Jump to where a symbol is defined. Provide a semantic path to a reference and get the definition's file, line, and a code preview. |
-| `analyze_impact` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius of a change and tracing call chains. |
+| `find_callers_callees` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius of a change and tracing call chains. |
+| `find_all_references` | Find all references to a symbol across the entire codebase — every usage including function calls, field accesses, imports, and type annotations. LSP-powered with grep fallback. |
 | `lsp_health` | Check per-language LSP readiness — including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use this to diagnose why a navigation tool returned degraded results. |
 
 ### 📁 File Reading
@@ -270,7 +271,7 @@ Pathfinder internally delegates work to three specialized engines, each abstract
 |---|---|---|---|
 | **The Surgeon** | `pathfinder-treesitter` | `Surgeon` | AST parsing, symbol extraction, semantic path resolution, repo map generation |
 | **The Scout** | `pathfinder-search` | `Scout` | Ripgrep-powered full-text search with Tree-sitter enrichment for AST-aware filtering |
-| **The Lawyer** | `pathfinder-lsp` | `Lawyer` | LSP process lifecycle, go-to-definition, call hierarchy navigation |
+| **The Lawyer** | `pathfinder-lsp` | `Lawyer` | LSP process lifecycle, go-to-definition, call hierarchy, references, and go-to-implementation navigation |
 
 Each engine can be mocked independently for unit testing, and the server gracefully degrades when an engine is unavailable (e.g., falls back to Tree-sitter heuristics when no LSP is running).
 
@@ -301,6 +302,7 @@ Tree-sitter grammars are compiled directly into the Pathfinder binary — no ext
 | Language | Extension(s) | Notes |
 |---|---|---|
 | Go | `.go` | Function, interface, struct, and type alias extraction |
+| Java | `.java` | Class, interface, enum, record, and method extraction with inner class hierarchy |
 | TypeScript | `.ts` | Class, function, arrow function, interface, and type extraction |
 | TSX | `.tsx` | All TypeScript symbols **plus** JSX element extraction as child symbols |
 | JavaScript | `.js`, `.jsx` | Functions, classes, and JSX elements in `.jsx` files |
@@ -320,6 +322,7 @@ To maximise navigation coverage, install the language server(s) for your project
 | **Go** | `gopls` | `go install golang.org/x/tools/gopls@latest` | `go.mod` (scans up to depth 2) |
 | **TypeScript / JavaScript / JSX / TSX / Vue** | `typescript-language-server` | `npm install -g typescript-language-server typescript` | `tsconfig.json` or `package.json` (depth 2) |
 | **Python** | `pyright` | `npm install -g pyright` | `pyproject.toml`, `setup.py`, or `requirements.txt` (depth 2) |
+| **Java** | `jdtls` | [Eclipse JDT Language Server](https://github.com/eclipse-jdtls/eclipse.jdt.ls) | `pom.xml` or `build.gradle` (depth 2) |
 
 > **Vue note:** Pathfinder handles Vue SFC parsing internally with Tree-sitter. The `typescript-language-server` validates the `<script>` block — no separate `volar` or `vue-language-server` installation is required.
 
@@ -378,9 +381,12 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] 3-tier sandbox security model
 - [x] Per-engine observability and telemetry
 - [x] `get_repo_map` temporal filtering (`changed_since`) and extension filters (E6)
-- [x] `read_source_file` with compact/symbols/full detail modes and line range filtering (E2)
+- [x] `read_source_file` with source_only/compact/symbols/full detail modes and line range filtering (E2)
 - [x] Pre-built binaries via Homebrew tap and cargo install
-- [ ] Additional language support (Java, C/C++, C#, etc.)
+- [x] Java language support (Tree-sitter + jdtls LSP integration)
+- [x] `find_all_references` tool (LSP `textDocument/references`)
+- [x] `find_callers_callees` tool (renamed from `analyze_impact` for clarity)
+- [ ] Additional language support (C/C++, C#, Kotlin, etc.)
 - [ ] Custom LSP server command overrides via configuration file
 
 <!-- CONTRIBUTING -->

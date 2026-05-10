@@ -18,7 +18,7 @@ plugin system, detection pipeline, and how to extend the system for new language
 ## Agnostic Channel Design
 
 Pathfinder uses a language-agnostic LSP integration layer. All tool handlers
-(`get_definition`, `analyze_impact`, `validate_only`, etc.) interact with LSP
+(`get_definition`, `find_callers_callees`, `find_all_references`, etc.) interact with LSP
 servers through a single trait boundary.
 
 ### Lawyer Trait
@@ -27,6 +27,8 @@ The `Lawyer` trait (`crates/pathfinder-lsp/src/lawyer.rs`) defines the integrati
 boundary between Pathfinder's tool handlers and the LSP layer:
 
 - `goto_definition` — find where a symbol is defined
+- `goto_implementation` — find implementations of a trait/interface
+- `references` — find all references to a symbol (LSP `textDocument/references`)
 - `call_hierarchy_prepare/incoming/outgoing` — build dependency graphs
 - `did_open/did_change/did_close` — document synchronization
 - `pull_diagnostics/pull_workspace_diagnostics` — diagnostic retrieval
@@ -63,6 +65,7 @@ File paths are mapped to language IDs via file extensions:
 .go -> "go"
 .ts/.tsx/.js/.jsx/.vue -> "typescript"
 .py -> "python"
+.java -> "java"
 ```
 
 See `language_id_for_extension()` in `detect.rs`.
@@ -167,6 +170,7 @@ Languages are detected by scanning for marker files in the workspace:
 | Go | `go.mod` |
 | TypeScript | `tsconfig.json`, `package.json` |
 | Python | `pyproject.toml`, `requirements.txt`, `setup.py`, `setup.cfg` |
+| Java | `pom.xml`, `build.gradle` |
 
 Marker files are searched up to depth 2 (workspace root + one level of subdirectories).
 
@@ -218,7 +222,7 @@ navigation capability from indexing completion.
 
 **Per-language information:**
 - Status: `ready`, `warming_up`, `starting`, `unavailable`
-- `navigation_ready`: Whether navigation tools (`get_definition`, `analyze_impact`)
+- `navigation_ready`: Whether navigation tools (`get_definition`, `find_callers_callees`)
   are functional. `true` once the LSP `initialize` handshake completes with
   `definitionProvider: true`. Independent of indexing status.
 - `indexing_status`: `"complete"`, `"in_progress"`, or absent. Background
@@ -320,8 +324,8 @@ These properties hold for ALL languages. Violating them reintroduces bugs
 that took weeks to diagnose.
 
 1. **Single Lawyer trait, single LspClient**. All languages share the same
-code path through `goto_definition`, `analyze_impact`, `read_with_deep_context`,
-and `validate_only`. There is no per-language branching in tool handlers.
+code path through `goto_definition`, `find_callers_callees`, `read_with_deep_context`,
+and `find_all_references`. There is no per-language branching in tool handlers.
 
 2. **Column indexing is 0-based, UTF-16 offset**. LSP uses 0-based columns.
 Tree-sitter uses 0-based columns. The `name_column` field in `SymbolInfo` must
