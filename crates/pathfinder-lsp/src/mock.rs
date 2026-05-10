@@ -75,6 +75,9 @@ type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, String>>>
 /// Configured result for `references`.
 type ReferencesFixture = Arc<Mutex<Option<Result<Vec<ReferenceLocation>, String>>>>;
 
+/// Configured result for `goto_implementation`.
+type GotoImplementationFixture = Arc<Mutex<Option<Result<Vec<DefinitionLocation>, String>>>>;
+
 /// Configured result for `capability_status`.
 type CapabilityStatusFixture =
     Arc<Mutex<std::collections::HashMap<String, crate::types::LspLanguageStatus>>>;
@@ -122,6 +125,12 @@ pub struct MockLawyer {
     pub references_result: ReferencesFixture,
     /// All calls made to `references` in order.
     pub references_calls: Arc<Mutex<Vec<(String, u32, u32)>>>,
+
+    // ── goto_implementation ─────────────────────────────────────────────────────
+    /// Configured result for `goto_implementation`.
+    pub goto_implementation_result: GotoImplementationFixture,
+    /// All calls made to `goto_implementation` in order.
+    pub goto_implementation_calls: Arc<Mutex<Vec<(String, u32, u32)>>>,
 }
 
 impl MockLawyer {
@@ -250,6 +259,35 @@ impl MockLawyer {
             .clone()
     }
 
+    // ── goto_implementation ──────────────────────────────────────────────────────
+
+    /// Set the result to return from the next `goto_implementation()` call.
+    pub fn set_goto_implementation_result(&self, result: Result<Vec<DefinitionLocation>, String>) {
+        let mut guard = self
+            .goto_implementation_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(result);
+    }
+
+    /// Returns how many times `goto_implementation()` was called.
+    #[must_use]
+    pub fn goto_implementation_call_count(&self) -> usize {
+        self.goto_implementation_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Returns a snapshot of all `(file, line, column)` passed to `goto_implementation()`.
+    #[must_use]
+    pub fn goto_implementation_calls(&self) -> Vec<(String, u32, u32)> {
+        self.goto_implementation_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Returns the number of `did_open` calls recorded.
     #[must_use]
     pub fn did_open_call_count(&self) -> usize {
@@ -364,6 +402,36 @@ impl Lawyer for MockLawyer {
         let next = {
             let mut guard = self
                 .references_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+
+        match next {
+            Some(Ok(result)) => Ok(result),
+            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            None => Ok(vec![]),
+        }
+    }
+
+    async fn goto_implementation(
+        &self,
+        _workspace_root: &Path,
+        file_path: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<DefinitionLocation>, LspError> {
+        {
+            let mut guard = self
+                .goto_implementation_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.push((file_path.to_string_lossy().into_owned(), line, column));
+        }
+
+        let next = {
+            let mut guard = self
+                .goto_implementation_result
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.take()

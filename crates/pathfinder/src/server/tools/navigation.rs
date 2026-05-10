@@ -1578,9 +1578,36 @@ impl PathfinderServer {
             let reason_str = degraded_reason_cloned
                 .as_ref()
                 .map_or_else(|| "unknown".to_owned(), ToString::to_string);
+
+            let symbol_name = semantic_path
+                .symbol_chain
+                .as_ref()
+                .and_then(|c| c.segments.last())
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+
             text_parts.push(format!(
-                "⚠️ DEGRADED ({reason_str}) — Reference counts are UNRELIABLE. Zero does NOT mean confirmed no callers. Use search_codebase for manual verification."
+                "⚠️ DEGRADED ({reason_str}) — LSP call hierarchy unavailable for this symbol."
             ));
+            text_parts.push(String::new());
+            text_parts.push("   Common causes:".to_owned());
+            text_parts.push("   - Interface types without concrete implementations in source (JPA repositories)".to_owned());
+            text_parts.push(
+                "   - Annotation-driven dependency injection (Spring proxies at runtime)"
+                    .to_owned(),
+            );
+            text_parts.push("   - LSP still warming up (wait 30s, try again)".to_owned());
+            text_parts.push(String::new());
+            if symbol_name.is_empty() {
+                text_parts
+                    .push("   Workaround: Use search_codebase to find usages manually.".to_owned());
+            } else {
+                text_parts.push(format!(
+                    "   Workaround: Use search_codebase(query=\"{symbol_name}\") to find usages manually."
+                ));
+            }
+            text_parts.push("   Reference counts below are heuristic only:".to_owned());
+            text_parts.push(String::new());
         } else if inc_count == 0 && out_count == 0 {
             text_parts.push("LSP confirmed: zero callers/callees for this symbol.".to_string());
         } else if inc_count == 0 {
@@ -1687,17 +1714,43 @@ impl PathfinderServer {
                 u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
             )
             .await;
+
+        let implementations_result = self
+            .lawyer
+            .goto_implementation(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
+                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
+            )
+            .await;
         let lsp_ms = lsp_start.elapsed().as_millis();
 
         let duration_ms = start.elapsed().as_millis();
 
         match lsp_result {
             Ok(locations) => {
-                let files_referenced = locations
+                let implementations: Vec<crate::server::types::ReferenceLocation> =
+                    match implementations_result {
+                        Ok(impls) => impls
+                            .into_iter()
+                            .map(|def| crate::server::types::ReferenceLocation {
+                                file: def.file,
+                                line: def.line,
+                                column: def.column,
+                                snippet: def.preview,
+                            })
+                            .collect(),
+                        Err(_) => vec![],
+                    };
+
+                let all_files = locations
                     .iter()
                     .map(|l| l.file.as_str())
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
+                    .chain(implementations.iter().map(|i| i.file.as_str()))
+                    .collect::<std::collections::HashSet<_>>();
+                let files_referenced = all_files.len();
+
                 let references: Vec<crate::server::types::ReferenceLocation> = locations
                     .into_iter()
                     .map(|l| crate::server::types::ReferenceLocation {
@@ -1708,9 +1761,13 @@ impl PathfinderServer {
                     })
                     .collect();
 
+                let mut all_references = references.clone();
+                all_references.extend(implementations.clone());
+
                 tracing::info!(
                     tool = "find_all_references",
                     references_count = references.len(),
+                    implementations_count = implementations.len(),
                     files_referenced,
                     tree_sitter_ms,
                     lsp_ms,
@@ -1720,34 +1777,60 @@ impl PathfinderServer {
                 );
 
                 let ref_count = references.len();
-                let confirmed_zero_msg = if ref_count == 0 {
-                    "LSP confirmed: zero references for this symbol.\n".to_string()
-                } else {
+                let impl_count = implementations.len();
+
+                let implementations_text = if impl_count == 0 {
                     String::new()
+                } else {
+                    let header =
+                        format!("Implementations (extends/implements): {impl_count} found\n");
+                    let items: Vec<_> = implementations
+                        .iter()
+                        .map(|imp| {
+                            format!("{}:{}:{}: {}", imp.file, imp.line, imp.column, imp.snippet)
+                        })
+                        .collect();
+                    format!("{}{}\n", header, items.join("\n"))
+                };
+
+                let references_text = if ref_count == 0 {
+                    String::new()
+                } else {
+                    let header = format!("References: {ref_count} found\n");
+                    let items: Vec<_> = references
+                        .iter()
+                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
+                        .collect();
+                    format!("{}{}", header, items.join("\n"))
+                };
+
+                let summary = if impl_count > 0 && ref_count > 0 {
+                    format!(
+                        "Found {ref_count} references + {impl_count} implementations across {files_referenced} files.\n\n"
+                    )
+                } else if impl_count > 0 {
+                    format!(
+                        "Found {impl_count} implementations across {files_referenced} files.\n\n"
+                    )
+                } else if ref_count > 0 {
+                    format!("Found {ref_count} references across {files_referenced} files.\n\n")
+                } else {
+                    "LSP confirmed: zero references or implementations for this symbol.\n"
+                        .to_string()
                 };
 
                 let metadata = crate::server::types::FindAllReferencesMetadata {
-                    references: Some(references.clone()),
+                    references: Some(all_references),
                     files_referenced,
                     degraded: false,
                     degraded_reason: None,
                     lsp_readiness: Some("ready".to_owned()),
                 };
 
-                let references_text = if ref_count == 0 {
-                    String::new()
-                } else {
-                    references
-                        .iter()
-                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-
                 let mut result =
-                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                        "{confirmed_zero_msg}Found {ref_count} references across {files_referenced} files.\n\n{references_text}"
-                    ))]);
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+                        format!("{summary}{implementations_text}{references_text}"),
+                    )]);
                 result.structured_content = crate::server::helpers::serialize_metadata(&metadata);
                 Ok(result)
             }
@@ -2156,25 +2239,48 @@ impl PathfinderServer {
 
         // Build a concise human-readable summary for the text channel.
         // Agents reading plain text get actionable status without parsing JSON.
-        let lang_lines: Vec<String> = response
-            .languages
-            .iter()
-            .map(|l| {
-                let mut parts = vec![format!("{}: {}", l.language, l.status)];
-                if l.probe_verified {
-                    parts.push("(probe_verified)".to_owned());
+        let mut lang_lines = Vec::new();
+        for l in &response.languages {
+            let mut header_parts = vec![format!("{}: {}", l.language, l.status)];
+            if l.probe_verified {
+                header_parts.push("(probe_verified)".to_owned());
+            }
+            if let Some(ref idx) = l.indexing_status {
+                header_parts.push(format!("indexing: {idx}"));
+            }
+            lang_lines.push(header_parts.join(" "));
+
+            if !l.degraded_tools.is_empty() {
+                let tools_with_severity: Vec<_> = l
+                    .degraded_tools
+                    .iter()
+                    .map(|t| format!("{} ({})", t.tool, t.severity))
+                    .collect();
+
+                lang_lines.push(format!(
+                    "  ⚠️ degraded_tools: {}",
+                    tools_with_severity.join(", ")
+                ));
+
+                let mut reasons = Vec::new();
+                if l.supports_definition != Some(true) {
+                    reasons.push("supports_definition = false");
                 }
-                if let Some(ref idx) = l.indexing_status {
-                    parts.push(format!("indexing: {idx}"));
+                if l.supports_call_hierarchy != Some(true) {
+                    reasons.push("supports_call_hierarchy = false");
                 }
-                if !l.degraded_tools.is_empty() {
-                    let tool_names: Vec<_> =
-                        l.degraded_tools.iter().map(|t| t.tool.as_str()).collect();
-                    parts.push(format!("degraded_tools: [{}]", tool_names.join(", ")));
+                if l.supports_diagnostics != Some(true) {
+                    reasons.push("supports_diagnostics = false");
                 }
-                parts.join(" ")
-            })
-            .collect();
+                if !reasons.is_empty() {
+                    lang_lines.push(format!(
+                        "  → Reason: {}. Use search_codebase as fallback.",
+                        reasons.join(", ")
+                    ));
+                }
+            }
+        }
+
         let text = if lang_lines.is_empty() {
             format!("LSP status: {} — no languages detected", response.status)
         } else {

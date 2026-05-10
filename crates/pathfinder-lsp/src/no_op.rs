@@ -70,6 +70,16 @@ impl Lawyer for NoOpLawyer {
         Err(LspError::NoLspAvailable)
     }
 
+    async fn goto_implementation(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _line: u32,
+        _column: u32,
+    ) -> Result<Vec<DefinitionLocation>, LspError> {
+        Err(LspError::NoLspAvailable)
+    }
+
     /// IW-3 (DS-1): No LSP available — callers should skip LSP queries and degrade.
     async fn open_document(
         &self,

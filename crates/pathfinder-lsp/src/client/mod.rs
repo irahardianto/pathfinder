@@ -1432,6 +1432,61 @@ impl Lawyer for LspClient {
         parse_references_response(&response, workspace_root)
     }
 
+    async fn goto_implementation(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<DefinitionLocation>, LspError> {
+        let start = Instant::now();
+        tracing::info!(tool = "goto_implementation", file = %file_path.display(), "LSP operation started");
+
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
+
+        self.ensure_process(language_id).await?;
+
+        let file_uri = Url::from_file_path(workspace_root.join(file_path))
+            .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        let params = json!({
+            "textDocument": { "uri": file_uri.as_str() },
+            "position": {
+                "line": line.saturating_sub(1),
+                "character": column.saturating_sub(1)
+            }
+        });
+
+        let response = match self
+            .request(
+                language_id,
+                "textDocument/implementation",
+                params,
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(tool = "goto_implementation", language = language_id, error = %e, "textDocument/implementation failed");
+                return Err(e);
+            }
+        };
+
+        self.touch(language_id);
+
+        let elapsed = start.elapsed().as_millis();
+        tracing::info!(
+            tool = "goto_implementation",
+            language = language_id,
+            elapsed_ms = elapsed,
+            "textDocument/implementation complete"
+        );
+
+        Ok(parse_definition_response_multi(&response, workspace_root))
+    }
+
     async fn capability_status(&self) -> HashMap<String, crate::types::LspLanguageStatus> {
         let mut status = HashMap::new();
         for desc in self.descriptors.iter() {
@@ -1557,6 +1612,95 @@ fn parse_definition_response(
         column: u32::try_from(start_char + 1).unwrap_or(1),
         preview,
     }))
+}
+
+fn parse_single_definition_location(
+    location: &serde_json::Value,
+    workspace_root: &Path,
+) -> Option<DefinitionLocation> {
+    if location.is_null() {
+        return None;
+    }
+
+    let (uri_str, start_line, start_char) = if location.get("targetUri").is_some() {
+        (
+            location["targetUri"].as_str().unwrap_or("").to_owned(),
+            location["targetSelectionRange"]["start"]["line"]
+                .as_u64()
+                .unwrap_or(0),
+            location["targetSelectionRange"]["start"]["character"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+    } else {
+        (
+            location["uri"].as_str().unwrap_or("").to_owned(),
+            location["range"]["start"]["line"].as_u64().unwrap_or(0),
+            location["range"]["start"]["character"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+    };
+
+    if uri_str.is_empty() {
+        return None;
+    }
+
+    let abs_path = Url::parse(&uri_str)
+        .ok()
+        .and_then(|u: Url| u.to_file_path().ok());
+
+    let file = abs_path
+        .as_deref()
+        .and_then(|p| p.strip_prefix(workspace_root).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| {
+            abs_path
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .unwrap_or(uri_str);
+
+    let preview = abs_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|content| {
+            content
+                .lines()
+                .nth(usize::try_from(start_line).unwrap_or(0))
+                .map(|l| l.trim().to_owned())
+        })
+        .unwrap_or_default();
+
+    Some(DefinitionLocation {
+        file,
+        line: u32::try_from(start_line + 1).unwrap_or(1),
+        column: u32::try_from(start_char + 1).unwrap_or(1),
+        preview,
+    })
+}
+
+fn parse_definition_response_multi(
+    response: &serde_json::Value,
+    workspace_root: &Path,
+) -> Vec<DefinitionLocation> {
+    if response.is_null() {
+        return Vec::new();
+    }
+
+    if let Some(items) = response.as_array() {
+        let mut result = Vec::with_capacity(items.len());
+        for item in items {
+            if let Some(loc) = parse_single_definition_location(item, workspace_root) {
+                result.push(loc);
+            }
+        }
+        result
+    } else {
+        parse_single_definition_location(response, workspace_root)
+            .map(|loc| vec![loc])
+            .unwrap_or_default()
+    }
 }
 
 /// Parse the `textDocument/prepareCallHierarchy` response into a `Vec<CallHierarchyItem>`.

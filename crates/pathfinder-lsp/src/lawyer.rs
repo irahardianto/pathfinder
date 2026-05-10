@@ -78,6 +78,36 @@ pub trait Lawyer: Send + Sync {
         item: &CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyCall>, LspError>;
 
+    /// Find all implementations of the symbol at the given position.
+    ///
+    /// For Java: finds classes that `extend` or `implement` this class/interface.
+    /// For Rust: finds types that implement a trait.
+    /// For TypeScript: finds classes that `extend` or `implement`.
+    ///
+    /// Uses LSP `textDocument/implementation` request.
+    ///
+    /// `line` and `column` are both 1-indexed.
+    ///
+    /// Returns `Ok(Vec)` containing all implementation locations.
+    /// Returns `Err(LspError::NoLspAvailable)` when no LSP is configured.
+    ///
+    /// Default implementation returns `Ok(vec![])` for backwards compatibility.
+    ///
+    /// # Errors
+    /// - `LspError::NoLspAvailable` — no language server for this file type
+    /// - `LspError::Timeout` — LSP did not respond within timeout
+    /// - `LspError::Protocol` — LSP returned an error response
+    /// - `LspError::ConnectionLost` — LSP process crashed
+    async fn goto_implementation(
+        &self,
+        _workspace_root: &Path,
+        _file_path: &Path,
+        _line: u32,
+        _column: u32,
+    ) -> Result<Vec<DefinitionLocation>, LspError> {
+        Ok(vec![])
+    }
+
     /// Find all references to the symbol at the given position.
     ///
     /// Returns all locations where the symbol is referenced (used, called, or accessed).
