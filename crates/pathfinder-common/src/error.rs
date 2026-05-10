@@ -395,6 +395,55 @@ mod tests {
         );
     }
 
+    // Covers: missing separator hint in SymbolNotFound
+    #[test]
+    fn test_hint_symbol_not_found_missing_separator() {
+        // Arrange
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs.MyStruct".to_owned(),
+            did_you_mean: vec![],
+        };
+
+        // Act
+        let hint = err.hint().expect("should have a hint");
+
+        // Assert
+        assert!(hint.contains("require '::'"));
+        assert!(hint.contains("use '.'"));
+    }
+
+    // Covers: multiple separators hint in SymbolNotFound
+    #[test]
+    fn test_hint_symbol_not_found_multiple_separators() {
+        // Arrange
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs::Outer::Inner".to_owned(),
+            did_you_mean: vec![],
+        };
+
+        // Act
+        let hint = err.hint().expect("should have a hint");
+
+        // Assert
+        assert!(hint.contains("only one '::' is allowed"));
+        assert!(hint.contains("use '.'"));
+    }
+
+    // Covers: fallback None for hint
+    #[test]
+    fn test_hint_no_hint_for_other_errors() {
+        // Arrange
+        let err = PathfinderError::IoError {
+            message: "disk full".to_owned(),
+        };
+
+        // Act
+        let hint = err.hint();
+
+        // Assert
+        assert!(hint.is_none());
+    }
+
     #[test]
     fn test_details_serialization_extra() {
         let err = PathfinderError::AmbiguousSymbol {
