@@ -24,4 +24,6 @@ lcov.info
 .agents/
 .claude/
 .pi/
+.opencode/
 opencode.jsonc
+opencode.json
