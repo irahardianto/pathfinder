@@ -685,6 +685,14 @@ fn make_unique_name(
     (name, suffix)
 }
 
+/// Strip angle-bracket generics and lifetimes from a type name.
+fn strip_generics(type_name: &str) -> &str {
+    match type_name.find('<') {
+        Some(idx) => type_name[..idx].trim_end(),
+        None => type_name.trim(),
+    }
+}
+
 /// Extract methods from a Rust `impl_item` node.
 ///
 /// Reads the implementing type from the `type` field, then iterates the `body`
@@ -709,7 +717,7 @@ fn extract_impl_block(
     let Ok(type_name) = std::str::from_utf8(type_name_bytes) else {
         return;
     };
-    let type_name = type_name.trim().to_string();
+    let type_name = strip_generics(type_name).to_string();
 
     let (unique_name, suffix) = make_unique_name(name_counts, type_name);
     let impl_path = if parent_path.is_empty() {
@@ -3479,5 +3487,134 @@ public class BasicClass {\n\
             .find(|s| s.name == "Rectangle")
             .unwrap();
         assert_eq!(rect.kind, crate::surgeon::SymbolKind::Struct);
+    }
+
+    /// BUG-REGRESSION: Impl blocks with lifetimes/generics must merge correctly.
+    #[test]
+    fn test_impl_block_with_lifetime_generics_merges_correctly() {
+        let source = b"struct Context<'a> { data: &'a str }\n\
+impl<'a> Context<'a> {\n\
+    fn new(data: &'a str) -> Self { Context { data } }\n\
+    fn get_data(&self) -> &str { self.data }\n\
+}\n";
+
+        let tree = AstParser::parse_source(
+            std::path::Path::new("test.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        let struct_sym = syms
+            .iter()
+            .find(|s| s.name == "Context")
+            .expect("struct Context should exist with clean name (no '<'a>')");
+        assert_eq!(struct_sym.kind, SymbolKind::Struct);
+
+        let has_new = struct_sym.children.iter().any(|s| s.name == "new");
+        let has_get_data = struct_sym.children.iter().any(|s| s.name == "get_data");
+        assert!(has_new, "method 'new' should be merged under Context");
+        assert!(
+            has_get_data,
+            "method 'get_data' should be merged under Context"
+        );
+
+        let new_method = struct_sym
+            .children
+            .iter()
+            .find(|s| s.name == "new")
+            .unwrap();
+        assert_eq!(
+            new_method.semantic_path, "Context.new",
+            "semantic path should be 'Context.new', NOT 'Context<'a>.new'"
+        );
+
+        let chain = SymbolChain::parse("Context.new").unwrap();
+        let resolved = resolve_symbol_chain(&syms, &chain);
+        assert!(
+            resolved.is_some(),
+            "resolve_symbol_chain should find Context.new"
+        );
+
+        let no_lifetime_struct = syms.iter().find(|s| s.name.contains('<'));
+        assert!(
+            no_lifetime_struct.is_none(),
+            "No symbol should have '<' or '>' in its name. Found: {:?}",
+            no_lifetime_struct.map(|s| &s.name)
+        );
+    }
+
+    #[test]
+    fn test_impl_block_with_multiple_generics() {
+        let source = b"struct Pair<K, V> { key: K, value: V }\n\
+impl<K, V> Pair<K, V> {\n\
+    fn key(&self) -> &K { &self.key }\n\
+}\n\
+impl Pair<i32, String> {\n\
+    fn format(&self) -> String { format!(\"{}: {}\", self.key, self.value) }\n\
+}\n";
+
+        let tree = AstParser::parse_source(
+            std::path::Path::new("test.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        let struct_sym = syms
+            .iter()
+            .find(|s| s.name == "Pair")
+            .expect("struct Pair should exist");
+
+        let method_names: Vec<_> = struct_sym
+            .children
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            method_names.contains(&"key"),
+            "key() from generic impl should be merged"
+        );
+        assert!(
+            method_names.contains(&"format"),
+            "format() from concrete impl should be merged"
+        );
+    }
+
+    #[test]
+    fn test_impl_block_with_path_qualified_type() {
+        let source = b"struct Wrapper<T>(T);\n\
+impl<T> std::fmt::Display for Wrapper<T>\n\
+where\n\
+    T: std::fmt::Display,\n\
+{\n\
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n\
+        write!(f, \"Wrapper({})\", self.0)\n\
+    }\n\
+}\n";
+
+        let tree = AstParser::parse_source(
+            std::path::Path::new("test.rs"),
+            SupportedLanguage::Rust,
+            source,
+        )
+        .unwrap();
+
+        let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
+
+        let wrapper = syms
+            .iter()
+            .find(|s| s.name == "Wrapper")
+            .expect("struct Wrapper should exist");
+        assert_eq!(wrapper.kind, SymbolKind::Struct);
+
+        let no_bad_names = syms
+            .iter()
+            .all(|s| !s.name.contains('<') && !s.name.contains('>'));
+        assert!(no_bad_names, "No symbol should have '<' or '>' in name");
     }
 }
