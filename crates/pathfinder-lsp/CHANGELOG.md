@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.6.2...pathfinder-mcp-lsp-v0.7.0) - 2026-05-10
+
+### Added
+
+- *(lsp)* add textDocument/references support to Lawyer trait (R5)
+- *(java)* add complete Java support with Tree-sitter and jdtls LSP integration
+
 ## [0.6.2](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.6.1...pathfinder-mcp-lsp-v0.6.2) - 2026-05-08
 
 ### Fixed

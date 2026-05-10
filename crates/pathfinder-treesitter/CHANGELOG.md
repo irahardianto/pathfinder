@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.6.1...pathfinder-mcp-treesitter-v0.7.0) - 2026-05-10
+
+### Added
+
+- *(treesitter)* add comprehensive test function detection + preserve all symbols in truncated skeleton
+- *(java)* add complete Java support with Tree-sitter and jdtls LSP integration
+
+### Fixed
+
+- resolve clippy doc_markdown warnings and test lints
+
+### Other
+
+- format code with rustfmt
+
 ## [0.6.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.6.0...pathfinder-mcp-treesitter-v0.6.1) - 2026-05-08
 
 ### Other

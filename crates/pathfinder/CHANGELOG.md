@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/irahardianto/pathfinder/compare/v0.8.1...v0.9.0) - 2026-05-10
+
+### Added
+
+- *(server)* rename analyze_impact to find_callers_callees, register find_all_references, update descriptions
+- *(nav)* standardize degraded format, confirmed-zero messages, lsp_readiness
+- *(mcp-tools)* add source_only detail_level, search coverage %, thread include_tests
+- *(mcp-types)* add include_tests, search coverage, lsp_readiness, find_all_references types; max_depth 2→3
+- *(java)* add complete Java support with Tree-sitter and jdtls LSP integration
+- *(lsp)* add textDocument/references support to Lawyer trait (R5)
+- *(search)* add files_searched/files_in_scope/coverage_percent to SearchResult (R8)
+- *(treesitter)* add comprehensive test function detection + preserve all symbols in truncated skeleton
+
+### Fixed
+
+- resolve clippy doc_markdown warnings and test lints
+
+### Other
+
+- apply cargo fmt + add .opencode to gitignore
+- resolve 19 clippy lint violations in mcp tools
+- *(core)* finalize read-only semantic navigation architecture and tool ergonomics
+- Update README.md
+- format code with rustfmt
+
 ## [0.8.1](https://github.com/irahardianto/pathfinder/compare/v0.8.0...v0.8.1) - 2026-05-08
 
 ### Added
