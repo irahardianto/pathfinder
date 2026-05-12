@@ -675,9 +675,16 @@ fn make_unique_name(
     name_counts: &mut std::collections::HashMap<String, usize>,
     name: String,
 ) -> (String, String) {
-    let count = name_counts.entry(name.clone()).or_insert(0);
-    *count += 1;
-    let suffix = if *count > 1 {
+    // PERF: Avoid unconditional String allocation on cache hit by checking get_mut first
+    // instead of name_counts.entry(name.clone()).or_insert(0)
+    let count = if let Some(c) = name_counts.get_mut(&name) {
+        *c += 1;
+        *c
+    } else {
+        name_counts.insert(name.clone(), 1);
+        1
+    };
+    let suffix = if count > 1 {
         format!("#{count}")
     } else {
         String::default()
@@ -850,7 +857,13 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
         // 1. Remove all Impl blocks and extract their children
         syms.retain_mut(|s| {
             if s.kind == SymbolKind::Impl {
-                let entry = extracted_methods.entry(s.name.clone()).or_default();
+                // PERF: Avoid unconditional String allocation on cache hit
+                if !extracted_methods.contains_key(&s.name) {
+                    extracted_methods.insert(s.name.clone(), Vec::new());
+                }
+                let Some(entry) = extracted_methods.get_mut(&s.name) else {
+                    return false; // Should never happen
+                };
                 for mut method in std::mem::take(&mut s.children) {
                     // Update method's semantic path to be under the struct instead of the Impl
                     // Impl blocks have `#` suffix, we want it under the Struct which doesn't
@@ -871,10 +884,16 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 }
 
                 let clean_name = s.name.split('#').next().unwrap_or(&s.name);
-                let count = impl_counts.entry(clean_name.to_string()).or_insert(0);
-                *count += 1;
+                // PERF: Avoid unconditional String allocation on cache hit
+                let count = if let Some(c) = impl_counts.get_mut(clean_name) {
+                    *c += 1;
+                    *c
+                } else {
+                    impl_counts.insert(clean_name.to_string(), 1);
+                    1
+                };
 
-                let suffix = if *count > 1 {
+                let suffix = if count > 1 {
                     format!("#{count}")
                 } else {
                     String::default()
@@ -1133,9 +1152,14 @@ fn walk_html_elements_flat(
                 crate::surgeon::SymbolKind::HtmlElement
             };
 
-            let count = tag_counts.entry(name.clone()).or_insert(0);
-            *count += 1;
-            let nth = *count;
+            // PERF: Avoid unconditional String allocation on cache hit
+            let nth = if let Some(c) = tag_counts.get_mut(name) {
+                *c += 1;
+                *c
+            } else {
+                tag_counts.insert(name.clone(), 1);
+                1
+            };
             let sym_name = if nth == 1 {
                 name.clone()
             } else {
@@ -1350,9 +1374,14 @@ fn emit_jsx_symbol(
             SymbolKind::HtmlElement
         };
 
-        let count = tag_counts.entry(name.clone()).or_insert(0);
-        *count += 1;
-        let nth = *count;
+        // PERF: Avoid unconditional String allocation on cache hit
+        let nth = if let Some(c) = tag_counts.get_mut(name) {
+            *c += 1;
+            *c
+        } else {
+            tag_counts.insert(name.clone(), 1);
+            1
+        };
         let sym_name = if nth == 1 {
             name.clone()
         } else {
@@ -1459,9 +1488,14 @@ fn walk_css_rules(
             // @media, @keyframes, @supports …
             "media_statement" | "keyframes_statement" | "at_rule" => {
                 let at_name = extract_at_rule_name(child, source);
-                let count = at_counts.entry(at_name.clone()).or_insert(0);
-                *count += 1;
-                let nth = *count;
+                // PERF: Avoid unconditional String allocation on cache hit
+                let nth = if let Some(c) = at_counts.get_mut(&at_name) {
+                    *c += 1;
+                    *c
+                } else {
+                    at_counts.insert(at_name.clone(), 1);
+                    1
+                };
                 let sym_name = if nth == 1 {
                     format!("@{at_name}")
                 } else {
