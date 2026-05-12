@@ -189,3 +189,22 @@ async fn test_system_git_diff_fails_outside_repo() {
         "diff_name_only must fail outside a git repository"
     );
 }
+
+/// Verify that `diff_name_only` rejects targets starting with `-` to prevent
+/// argument injection vulnerabilities.
+#[tokio::test]
+async fn test_system_git_rejects_argument_injection() {
+    let repo = git_repo_with_initial_commit();
+    let root = repo.path();
+
+    let git = SystemGit;
+    let result = git.diff_name_only(root, "--output=/tmp/pwn.txt").await;
+
+    assert!(
+        result.is_err(),
+        "diff_name_only must fail when target starts with '-' to prevent argument injection"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(err.to_string(), "target revision cannot start with '-'");
+}
