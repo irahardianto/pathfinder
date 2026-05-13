@@ -167,11 +167,12 @@ impl AstCache {
                     reason: "In-flight lock poisoned".into(),
                 })?;
             // PERF: Avoid unconditional path allocation on cache hit.
-            if let Some(cell) = in_flight.get_mut(path) {
+            if let Some(cell) = in_flight.get(path) {
                 cell.clone()
             } else {
-                in_flight.insert(path.to_path_buf(), Arc::new(OnceCell::new()));
-                if let Some(c) = in_flight.get_mut(path) { c.clone() } else { unreachable!() }
+                let cell = Arc::new(OnceCell::new());
+                in_flight.insert(path.to_path_buf(), cell.clone());
+                cell
             }
         };
 
@@ -294,11 +295,12 @@ impl AstCache {
                         reason: "Vue in-flight lock poisoned".into(),
                     })?;
             // PERF: Avoid unconditional path allocation on cache hit.
-            if let Some(cell) = vue_in_flight.get_mut(path) {
+            if let Some(cell) = vue_in_flight.get(path) {
                 cell.clone()
             } else {
-                vue_in_flight.insert(path.to_path_buf(), Arc::new(OnceCell::new()));
-                if let Some(c) = vue_in_flight.get_mut(path) { c.clone() } else { unreachable!() }
+                let cell = Arc::new(OnceCell::new());
+                vue_in_flight.insert(path.to_path_buf(), cell.clone());
+                cell
             }
         };
 

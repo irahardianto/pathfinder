@@ -678,11 +678,12 @@ impl LspClient {
         let init_lock = {
             let mut locks = self.init_locks.lock().await;
             // PERF: Avoid unconditional string allocation on cache hit.
-            if let Some(lock) = locks.get_mut(language_id) {
+            if let Some(lock) = locks.get(language_id) {
                 lock.clone()
             } else {
-                locks.insert(language_id.to_owned(), Arc::new(tokio::sync::Mutex::new(())));
-                if let Some(c) = locks.get_mut(language_id) { c.clone() } else { unreachable!() }
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(language_id.to_owned(), lock.clone());
+                lock
             }
         };
         let _guard = init_lock.lock().await;
