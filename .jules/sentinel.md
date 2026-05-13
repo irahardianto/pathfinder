@@ -1,0 +1,4 @@
+## 2026-05-13 - Command Injection Risk in git target
+**Vulnerability:** Command injection vulnerability due to unvalidated `target` parameter passed to `std::process::Command::new("git")` in `get_changed_files_since` in `crates/pathfinder-common/src/git.rs`. If the target starts with a hyphen (e.g. `--output`), git might interpret it as an option rather than a revision, which could lead to unauthorized actions.
+**Learning:** `git diff` cannot safely use `--` to separate arguments from revisions because some revisions could be mistaken for options. Unvalidated arguments to command runners, even simple tools like git, can result in argument injection if they start with a `-`.
+**Prevention:** Always validate untrusted input provided to `std::process::Command` when `--` cannot be used to separate options. If the input is expected to be a positional argument (like a target branch or commit), reject it if it starts with a `-`.
