@@ -189,3 +189,25 @@ async fn test_system_git_diff_fails_outside_repo() {
         "diff_name_only must fail outside a git repository"
     );
 }
+
+/// Verify that `diff_name_only` rejects target arguments that start with a hyphen
+/// to prevent argument injection vulnerabilities.
+#[tokio::test]
+async fn test_system_git_diff_rejects_target_starting_with_dash() {
+    let repo = git_repo_with_initial_commit();
+    let root = repo.path();
+
+    let git = SystemGit;
+    let result = git.diff_name_only(root, "--output=/tmp/pwned").await;
+
+    assert!(
+        result.is_err(),
+        "diff_name_only must fail when target starts with '-'"
+    );
+    let err = result.expect_err("expected error");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::InvalidInput,
+        "error kind should be InvalidInput"
+    );
+}

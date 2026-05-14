@@ -30,6 +30,13 @@ impl GitRunner for SystemGit {
         workspace_root: &Path,
         target: &str,
     ) -> Result<Vec<u8>, std::io::Error> {
+        if target.starts_with('-') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "target cannot start with '-' to prevent argument injection",
+            ));
+        }
+
         let output = tokio::process::Command::new("git")
             .current_dir(workspace_root)
             .args(["diff", "--name-only", target])
