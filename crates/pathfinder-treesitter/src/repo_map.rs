@@ -699,6 +699,86 @@ mod tests {
         assert_eq!(out, "func Foo // Foo\n");
     }
 
+    #[test]
+    fn test_render_vue_symbols() {
+        // Covers: Vue zone and sub-element symbols are correctly formatted
+        // in repo map outputs.
+        let symbols = vec![
+            ExtractedSymbol {
+                name: "script".to_string(),
+                semantic_path: "script".to_string(),
+                kind: SymbolKind::Zone,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            },
+            ExtractedSymbol {
+                name: "MyComponent".to_string(),
+                semantic_path: "template.MyComponent".to_string(),
+                kind: SymbolKind::Component,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            },
+            ExtractedSymbol {
+                name: "div".to_string(),
+                semantic_path: "template.div".to_string(),
+                kind: SymbolKind::HtmlElement,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            },
+            ExtractedSymbol {
+                name: ".my-class".to_string(),
+                semantic_path: "style..my-class".to_string(),
+                kind: SymbolKind::CssSelector,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            },
+            ExtractedSymbol {
+                name: "@media".to_string(),
+                semantic_path: "style.@media".to_string(),
+                kind: SymbolKind::CssAtRule,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            },
+        ];
+
+        // 1. Test normal recursive rendering
+        let mut out = String::default();
+        render_symbols_recursive(&symbols, 0, &mut out);
+        assert!(out.contains("zone script // script"));
+        assert!(out.contains("component MyComponent // template.MyComponent"));
+        assert!(out.contains("element div // template.div"));
+        assert!(out.contains("selector .my-class // style..my-class"));
+        assert!(out.contains("at-rule @media // style.@media"));
+
+        // 2. Test truncated rendering
+        let truncated_out = render_truncated_file_skeleton(&symbols);
+        assert!(truncated_out.contains("zone script // script"));
+        assert!(truncated_out.contains("component MyComponent // template.MyComponent"));
+        assert!(truncated_out.contains("element div // template.div"));
+        assert!(truncated_out.contains("selector .my-class // style..my-class"));
+        assert!(truncated_out.contains("at-rule @media // style.@media"));
+    }
+
     /// Regression test: default depth of 3 was too shallow for Rust workspace layouts.
     ///
     /// The standard layout `crates/X/src/file.rs` places files at depth 4 from the repo
