@@ -1,0 +1,4 @@
+## 2024-05-18 - Argument Injection in Git Subprocess
+**Vulnerability:** Found an argument injection vulnerability in `SystemGit::diff_name_only` where untrusted input for `target` could be interpreted as an option (e.g., `--ext-diff`) by the `git diff` command since `--` cannot safely separate options from ref names in git diff (git diff treats anything before `--` as refs, so if target starts with `-`, it might be parsed as an option).
+**Learning:** `Command::new("git").args(["diff", "--name-only", target])` allows `target` to be parsed as a git option if it starts with `-`. Even though `--` was not present initially, git diff's specific parsing rules make it vulnerable.
+**Prevention:** Always validate untrusted inputs appended as positional arguments to command line calls to ensure they do not start with `-` unless it is expected and safe.

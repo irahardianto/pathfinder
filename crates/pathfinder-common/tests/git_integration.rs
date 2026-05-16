@@ -174,6 +174,25 @@ async fn test_system_git_diff_detects_deleted_files() {
     );
 }
 
+/// Verify that `diff_name_only` rejects targets starting with a hyphen to
+/// prevent argument injection vulnerabilities.
+#[tokio::test]
+async fn test_system_git_diff_rejects_argument_injection() {
+    let repo = git_repo_with_initial_commit();
+    let git = SystemGit;
+
+    let result = git
+        .diff_name_only(repo.path(), "--ext-diff=echo pwned")
+        .await;
+
+    assert!(
+        result.is_err(),
+        "diff_name_only must reject targets starting with '-'"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 /// Verify that `diff_name_only` returns an error when the directory is not
 /// a git repository. This exercises the git subprocess error path.
 #[tokio::test]
