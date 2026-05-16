@@ -309,7 +309,7 @@ pub struct LspClient {
     /// Running processes keyed by language id.
     processes: Arc<DashMap<String, ProcessEntry>>,
     /// Locks for concurrent initialization to prevent duplicate spawns.
-    init_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Shared JSON-RPC request/response dispatcher.
     dispatcher: Arc<RequestDispatcher>,
     /// Broadcast channel for shutdown signals.
@@ -351,7 +351,7 @@ impl LspClient {
             descriptors: Arc::new(detection_result.detected),
             missing_languages: Arc::new(detection_result.missing),
             processes: Arc::new(DashMap::new()),
-            init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            init_locks: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::clone(&shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),
@@ -675,13 +675,11 @@ impl LspClient {
         }
 
         // Acquire the init lock for this language to prevent duplicate spawn races
-        let init_lock = {
-            let mut locks = self.init_locks.lock().await;
-            locks
-                .entry(language_id.to_owned())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
+        let init_lock = self
+            .init_locks
+            .entry(language_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
         let _guard = init_lock.lock().await;
 
         // Double-check after acquiring lock
@@ -2712,7 +2710,7 @@ mod tests {
             descriptors: Arc::new(Vec::new()),
             missing_languages: Arc::new(Vec::new()),
             processes: Arc::new(DashMap::new()),
-            init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            init_locks: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),
@@ -2748,7 +2746,7 @@ mod tests {
             descriptors: Arc::new(descriptors),
             missing_languages: Arc::new(Vec::new()),
             processes: Arc::new(processes_dashmap),
-            init_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            init_locks: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),

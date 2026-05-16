@@ -1,0 +1,7 @@
+## 2024-05-30 - Replace `HashMap::entry(key.clone()).or_insert(...)` with `entry(key).or_insert(...)` when we own the key
+
+**Learning:** The codebase has multiple occurrences of `HashMap::entry(key.clone()).or_insert(...)` in loops and frequent paths (especially in `crates/pathfinder-treesitter/src/symbols.rs` and `crates/pathfinder-lsp/src/client/mod.rs`). Calling `.clone()` on the key inside the `entry` call causes an unconditional allocation on every invocation, even for cache hits (which are the majority case for duplicate tracking, like `tag_counts`). `Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>` can also be optimized to `Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>` to avoid locking the entire map during LSP initialization.
+
+**Action:**
+1. Review `crates/pathfinder-treesitter/src/symbols.rs` and update occurrences of `entry(name.clone())` or `entry(at_name.clone())` to avoid the allocation. Since NLL borrow checker sometimes complains about `.get_mut` followed by `.insert`, we will use `if let Some(v) = map.get_mut(key) { ... } else { map.insert(key.clone(), 1); }` or `if !map.contains_key(key) { map.insert(key.clone(), 0); } map.get_mut(key).unwrap() += 1;`
+2. Change `init_locks` in `crates/pathfinder-lsp/src/client/mod.rs` from `Arc<tokio::sync::Mutex<HashMap<...>>>` to `Arc<DashMap<...>>` to improve concurrency during initialization without needing a full-map `tokio::sync::Mutex`.
