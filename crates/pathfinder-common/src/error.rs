@@ -526,6 +526,34 @@ mod tests {
         );
     }
 
+    // Covers: Hint generation for missing path separator
+    #[test]
+    fn test_symbol_not_found_hint_missing_colon_separator() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs.MyStruct.method".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("semantic paths require '::' between the file and symbol"),
+            "hint should complain about missing '::' separator: {hint}"
+        );
+    }
+
+    // Covers: Hint generation for multiple path separators
+    #[test]
+    fn test_symbol_not_found_hint_multiple_colon_separators() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs::Outer::Inner.method".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("only one '::' is allowed"),
+            "hint should complain about multiple '::' separators: {hint}"
+        );
+    }
+
     #[test]
     fn test_access_denied_hint_mentions_sandbox() {
         let err = PathfinderError::AccessDenied {
