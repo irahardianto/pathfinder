@@ -681,7 +681,9 @@ fn make_unique_name(
     } else {
         name_counts.insert(name.clone(), 0);
         #[allow(clippy::expect_used)]
-        name_counts.get_mut(name.as_str()).expect("inserted just above")
+        name_counts
+            .get_mut(name.as_str())
+            .expect("inserted just above")
     };
     *count += 1;
     let suffix = if *count > 1 {
@@ -863,7 +865,9 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 } else {
                     extracted_methods.insert(s.name.clone(), Vec::new());
                     #[allow(clippy::expect_used)]
-                    extracted_methods.get_mut(s.name.as_str()).expect("inserted just above")
+                    extracted_methods
+                        .get_mut(s.name.as_str())
+                        .expect("inserted just above")
                 };
                 for mut method in std::mem::take(&mut s.children) {
                     // Update method's semantic path to be under the struct instead of the Impl
@@ -891,7 +895,9 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 } else {
                     impl_counts.insert(clean_name.to_string(), 0);
                     #[allow(clippy::expect_used)]
-                    impl_counts.get_mut(clean_name).expect("inserted just above")
+                    impl_counts
+                        .get_mut(clean_name)
+                        .expect("inserted just above")
                 };
                 *count += 1;
 
@@ -1160,7 +1166,9 @@ fn walk_html_elements_flat(
             } else {
                 tag_counts.insert(name.clone(), 0);
                 #[allow(clippy::expect_used)]
-                tag_counts.get_mut(name.as_str()).expect("inserted just above")
+                tag_counts
+                    .get_mut(name.as_str())
+                    .expect("inserted just above")
             };
             *count += 1;
             let nth = *count;
@@ -1384,7 +1392,9 @@ fn emit_jsx_symbol(
         } else {
             tag_counts.insert(name.clone(), 0);
             #[allow(clippy::expect_used)]
-            tag_counts.get_mut(name.as_str()).expect("inserted just above")
+            tag_counts
+                .get_mut(name.as_str())
+                .expect("inserted just above")
         };
         *count += 1;
         let nth = *count;
@@ -1500,7 +1510,9 @@ fn walk_css_rules(
                 } else {
                     at_counts.insert(at_name.clone(), 0);
                     #[allow(clippy::expect_used)]
-                    at_counts.get_mut(at_name.as_str()).expect("inserted just above")
+                    at_counts
+                        .get_mut(at_name.as_str())
+                        .expect("inserted just above")
                 };
                 *count += 1;
                 let nth = *count;
