@@ -527,6 +527,32 @@ mod tests {
     }
 
     #[test]
+    fn test_symbol_not_found_hint_with_separator_confusion_dot() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs.MyStruct.method".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("semantic paths require '::' between the file and symbol"),
+            "hint should detect missing '::' and suggest it: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_symbol_not_found_hint_with_separator_confusion_multiple_colon() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs::Outer::Inner".into(),
+            did_you_mean: vec!["Inner".into()],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("only one '::' is allowed"),
+            "hint should detect multiple '::' and suggest using '.': {hint}"
+        );
+    }
+
+    #[test]
     fn test_access_denied_hint_mentions_sandbox() {
         let err = PathfinderError::AccessDenied {
             path: ".env".into(),
