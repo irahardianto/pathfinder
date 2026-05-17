@@ -1,0 +1,4 @@
+## 2025-02-24 - Git Diff Command Injection Risk
+**Vulnerability:** The `get_changed_files_since` function passed user-controlled `target` strings to `tokio::process::Command::new("git").args(["diff", "--name-only", target])` without validation.
+**Learning:** `git diff` accepts options alongside positional arguments without needing them to be placed before the arguments. So a `target` starting with `-` (like `--ext-cmd=echo vulnerable` or `--output=...`) will be executed as an option by git, leading to argument/command injection. Furthermore, the standard mitigation of using `--` to separate options from paths does not work smoothly here because `git diff` treats arguments after `--` as pathspecs rather than tree-ish objects/commits, changing its behavior.
+**Prevention:** Always validate that untrusted input intended as a positional argument does not start with `-` (or `--`), especially when `--` termination cannot be safely used.

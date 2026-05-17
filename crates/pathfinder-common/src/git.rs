@@ -66,6 +66,13 @@ pub async fn get_changed_files_since<R: GitRunner>(
     workspace_root: &Path,
     target: &str,
 ) -> Result<HashSet<PathBuf>, std::io::Error> {
+    if target.starts_with('-') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "git target cannot start with a hyphen (prevents argument injection)",
+        ));
+    }
+
     tracing::debug!(
         operation = "get_changed_files_since",
         target = target,
@@ -181,6 +188,16 @@ mod tests {
             .expect("should succeed");
 
         assert_eq!(result.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_changed_files_since_rejects_options() {
+        let runner = FakeGitRunner::ok("");
+        let err = get_changed_files_since(&runner, Path::new("/repo"), "--output=/tmp/pwned")
+            .await
+            .expect_err("should reject targets starting with a hyphen");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[tokio::test]
