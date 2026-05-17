@@ -675,7 +675,14 @@ fn make_unique_name(
     name_counts: &mut std::collections::HashMap<String, usize>,
     name: String,
 ) -> (String, String) {
-    let count = name_counts.entry(name.clone()).or_insert(0);
+    // PERF: Avoid unconditional allocation of name on cache hit.
+    let count = if let Some(v) = name_counts.get_mut(name.as_str()) {
+        v
+    } else {
+        name_counts.insert(name.clone(), 0);
+        #[allow(clippy::expect_used)]
+        name_counts.get_mut(name.as_str()).expect("inserted just above")
+    };
     *count += 1;
     let suffix = if *count > 1 {
         format!("#{count}")
@@ -850,7 +857,14 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
         // 1. Remove all Impl blocks and extract their children
         syms.retain_mut(|s| {
             if s.kind == SymbolKind::Impl {
-                let entry = extracted_methods.entry(s.name.clone()).or_default();
+                // PERF: Avoid unconditional allocation of name on cache hit.
+                let entry = if let Some(v) = extracted_methods.get_mut(s.name.as_str()) {
+                    v
+                } else {
+                    extracted_methods.insert(s.name.clone(), Vec::new());
+                    #[allow(clippy::expect_used)]
+                    extracted_methods.get_mut(s.name.as_str()).expect("inserted just above")
+                };
                 for mut method in std::mem::take(&mut s.children) {
                     // Update method's semantic path to be under the struct instead of the Impl
                     // Impl blocks have `#` suffix, we want it under the Struct which doesn't
@@ -871,7 +885,14 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                 }
 
                 let clean_name = s.name.split('#').next().unwrap_or(&s.name);
-                let count = impl_counts.entry(clean_name.to_string()).or_insert(0);
+                // PERF: Avoid unconditional allocation of clean_name on cache hit.
+                let count = if let Some(v) = impl_counts.get_mut(clean_name) {
+                    v
+                } else {
+                    impl_counts.insert(clean_name.to_string(), 0);
+                    #[allow(clippy::expect_used)]
+                    impl_counts.get_mut(clean_name).expect("inserted just above")
+                };
                 *count += 1;
 
                 let suffix = if *count > 1 {
@@ -1133,7 +1154,14 @@ fn walk_html_elements_flat(
                 crate::surgeon::SymbolKind::HtmlElement
             };
 
-            let count = tag_counts.entry(name.clone()).or_insert(0);
+            // PERF: Avoid unconditional allocation of name on cache hit.
+            let count = if let Some(v) = tag_counts.get_mut(name.as_str()) {
+                v
+            } else {
+                tag_counts.insert(name.clone(), 0);
+                #[allow(clippy::expect_used)]
+                tag_counts.get_mut(name.as_str()).expect("inserted just above")
+            };
             *count += 1;
             let nth = *count;
             let sym_name = if nth == 1 {
@@ -1350,7 +1378,14 @@ fn emit_jsx_symbol(
             SymbolKind::HtmlElement
         };
 
-        let count = tag_counts.entry(name.clone()).or_insert(0);
+        // PERF: Avoid unconditional allocation of name on cache hit.
+        let count = if let Some(v) = tag_counts.get_mut(name.as_str()) {
+            v
+        } else {
+            tag_counts.insert(name.clone(), 0);
+            #[allow(clippy::expect_used)]
+            tag_counts.get_mut(name.as_str()).expect("inserted just above")
+        };
         *count += 1;
         let nth = *count;
         let sym_name = if nth == 1 {
@@ -1459,7 +1494,14 @@ fn walk_css_rules(
             // @media, @keyframes, @supports …
             "media_statement" | "keyframes_statement" | "at_rule" => {
                 let at_name = extract_at_rule_name(child, source);
-                let count = at_counts.entry(at_name.clone()).or_insert(0);
+                // PERF: Avoid unconditional allocation of at_name on cache hit.
+                let count = if let Some(v) = at_counts.get_mut(at_name.as_str()) {
+                    v
+                } else {
+                    at_counts.insert(at_name.clone(), 0);
+                    #[allow(clippy::expect_used)]
+                    at_counts.get_mut(at_name.as_str()).expect("inserted just above")
+                };
                 *count += 1;
                 let nth = *count;
                 let sym_name = if nth == 1 {

@@ -1,0 +1,3 @@
+## 2024-05-17 - Avoid HashMap::entry allocation anti-pattern
+**Learning:** In hot loops, `HashMap::entry(key.clone()).or_insert(...)` unconditionally allocates on every cache hit. Using `if !map.contains_key(...) { map.insert(...); } map.get_mut(...).expect(...)` avoids the allocation but introduces multiple map lookups, causing its own performance hit.
+**Action:** The fastest pattern in safe Rust without NLL issues is using `if let Some(v) = map.get(key) { v.clone() } else { let v = Arc::new(...); map.insert(key.clone(), v.clone()); v }` for Arc/Rc values, or an equivalent standard `if let Some(v) = map.get_mut(key) { v } else { map.insert(...); map.get_mut(...).unwrap() }` block to avoid multiple lookup penalties and minimize `expect` logic.

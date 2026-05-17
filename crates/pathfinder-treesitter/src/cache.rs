@@ -121,6 +121,9 @@ impl AstCache {
     ///
     /// # Errors
     /// Returns `SurgeonError` if I/O fails or parsing fails.
+    ///
+    /// # Panics
+    /// Panics if the in-flight map is corrupted after insertion.
     #[instrument(skip(self), fields(cache_hit = false))]
     pub async fn get_or_parse(
         &self,
@@ -166,10 +169,14 @@ impl AstCache {
                     path: path.to_path_buf(),
                     reason: "In-flight lock poisoned".into(),
                 })?;
-            in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            // PERF: Avoid unconditional allocation of path on cache hit.
+            if let Some(v) = in_flight.get(path) {
+                v.clone()
+            } else {
+                let cell = Arc::new(OnceCell::new());
+                in_flight.insert(path.to_path_buf(), cell.clone());
+                cell
+            }
         };
 
         // Use get_or_init to ensure only one parse happens per file
@@ -241,6 +248,9 @@ impl AstCache {
     /// Returns `SurgeonError` if I/O fails or the script zone fails to parse.
     /// Template/style parse failures set `MultiZoneTree::degraded = true` but
     /// are non-fatal.
+    ///
+    /// # Panics
+    /// Panics if the in-flight map is corrupted after insertion.
     #[instrument(skip(self), fields(cache_hit = false))]
     pub async fn get_or_parse_vue(
         &self,
@@ -290,10 +300,14 @@ impl AstCache {
                         path: path.to_path_buf(),
                         reason: "Vue in-flight lock poisoned".into(),
                     })?;
-            vue_in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            // PERF: Avoid unconditional allocation of path on cache hit.
+            if let Some(v) = vue_in_flight.get(path) {
+                v.clone()
+            } else {
+                let cell = Arc::new(OnceCell::new());
+                vue_in_flight.insert(path.to_path_buf(), cell.clone());
+                cell
+            }
         };
 
         // Use get_or_init to ensure only one parse happens per file
