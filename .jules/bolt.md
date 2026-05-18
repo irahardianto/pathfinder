@@ -1,0 +1,3 @@
+## 2025-02-23 - Concurrent Initialization Bottleneck in LSP Client
+**Learning:** Wrapping a whole `HashMap` in a `tokio::sync::Mutex` creates unnecessary contention across independent entities, even when map entries themselves have individual locks. `init_locks` used a `tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>` which locked the entire map to check or insert a per-language initialization lock, causing artificial synchronization between unrelated language servers.
+**Action:** Replace `Arc<tokio::sync::Mutex<HashMap<K, V>>>` with `Arc<DashMap<K, V>>` for concurrent collections where operations on disjoint keys should not block each other.
