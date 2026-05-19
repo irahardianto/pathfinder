@@ -498,6 +498,13 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_path_display_without_symbol_chain() {
+        let input = "src/auth.ts";
+        let sp = SemanticPath::parse(input).expect("should parse");
+        assert_eq!(sp.to_string(), input);
+    }
+
+    #[test]
     fn test_semantic_path_empty_input() {
         assert!(SemanticPath::parse("").is_none());
     }
@@ -505,6 +512,19 @@ mod tests {
     #[test]
     fn test_semantic_path_empty_file_part() {
         assert!(SemanticPath::parse("::AuthService").is_none());
+    }
+
+    #[test]
+    fn test_symbol_chain_parse_empty() {
+        assert!(SymbolChain::parse("").is_none());
+        assert!(SymbolChain::parse("...").is_none());
+        assert!(SymbolChain::parse(".").is_none());
+    }
+
+    #[test]
+    fn test_symbol_parse_empty_or_invalid() {
+        assert!(Symbol::parse("").is_none());
+        assert!(Symbol::parse("test#invalid_index").is_none());
     }
 
     #[test]
@@ -531,6 +551,13 @@ mod tests {
 
         let h3 = VersionHash::compute(b"different content");
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_version_hash_from_raw() {
+        let raw = "sha256:1234567890abcdef".to_string();
+        let hash = VersionHash::from_raw(raw.clone());
+        assert_eq!(hash.as_str(), raw);
     }
 
     // ── VersionHash::short() tests ────────────────────────────────────────────
@@ -662,6 +689,19 @@ mod tests {
         // The resolved path escapes the workspace — that is expected here.
         // The Sandbox (not resolve) is responsible for rejection.
         assert!(resolved.to_string_lossy().contains("etc/passwd"));
+    }
+
+    #[test]
+    fn test_resolve_ignores_root_and_prefix() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = WorkspaceRoot::new(dir.path()).expect("create workspace root");
+
+        let root_dir_path = std::path::Path::new("/src/main.rs");
+        let resolved = root.resolve(root_dir_path);
+
+        // Ensure that absolute paths are normalized securely
+        assert!(resolved.starts_with(root.path()));
+        assert!(resolved.ends_with("src/main.rs"));
     }
 
     #[test]
