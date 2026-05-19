@@ -677,10 +677,14 @@ impl LspClient {
         // Acquire the init lock for this language to prevent duplicate spawn races
         let init_lock = {
             let mut locks = self.init_locks.lock().await;
-            locks
-                .entry(language_id.to_owned())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+            // PERF: Avoid HashMap::entry with .to_owned() to prevent unconditional allocations
+            if let Some(lock) = locks.get(language_id) {
+                lock.clone()
+            } else {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(language_id.to_owned(), lock.clone());
+                lock
+            }
         };
         let _guard = init_lock.lock().await;
 

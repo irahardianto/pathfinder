@@ -1,0 +1,3 @@
+## 2024-06-25 - HashMap::entry Unconditional Allocation
+**Learning:** Using `HashMap::entry(key.clone()).or_insert(...)` or `HashMap::entry(key.to_string())` causes an unconditional heap allocation on every single lookup, even on cache hits. In hot loops like the AST parser's symbol extractor (e.g. `make_unique_name`), this adds significant unnecessary overhead.
+**Action:** Instead of `entry`, use `if let Some(v) = map.get_mut(&key)` for lookups/mutations, and only allocate when inserting: `map.insert(key.clone(), val);`. This avoids the unconditional allocation and the multiple map lookup penalty of `contains_key`.

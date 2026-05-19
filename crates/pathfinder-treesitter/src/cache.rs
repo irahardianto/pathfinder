@@ -166,10 +166,14 @@ impl AstCache {
                     path: path.to_path_buf(),
                     reason: "In-flight lock poisoned".into(),
                 })?;
-            in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            // PERF: Avoid HashMap::entry with to_path_buf() to prevent unconditional allocations
+            if let Some(cell) = in_flight.get(path) {
+                cell.clone()
+            } else {
+                let cell = Arc::new(OnceCell::new());
+                in_flight.insert(path.to_path_buf(), cell.clone());
+                cell
+            }
         };
 
         // Use get_or_init to ensure only one parse happens per file
@@ -290,10 +294,14 @@ impl AstCache {
                         path: path.to_path_buf(),
                         reason: "Vue in-flight lock poisoned".into(),
                     })?;
-            vue_in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            // PERF: Avoid HashMap::entry with to_path_buf() to prevent unconditional allocations
+            if let Some(cell) = vue_in_flight.get(path) {
+                cell.clone()
+            } else {
+                let cell = Arc::new(OnceCell::new());
+                vue_in_flight.insert(path.to_path_buf(), cell.clone());
+                cell
+            }
         };
 
         // Use get_or_init to ensure only one parse happens per file
