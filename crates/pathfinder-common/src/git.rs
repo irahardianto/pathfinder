@@ -30,6 +30,16 @@ impl GitRunner for SystemGit {
         workspace_root: &Path,
         target: &str,
     ) -> Result<Vec<u8>, std::io::Error> {
+        // SECURITY: Git uses `--` to disambiguate revisions from paths, so we cannot safely
+        // use `--` to terminate option parsing for the revision argument.
+        // We must manually reject revision strings starting with `-` to prevent argument injection.
+        if target.starts_with('-') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "target revision cannot start with a hyphen (argument injection prevention)",
+            ));
+        }
+
         let output = tokio::process::Command::new("git")
             .current_dir(workspace_root)
             .args(["diff", "--name-only", target])
@@ -242,5 +252,25 @@ mod tests {
             .expect("should succeed");
 
         assert_eq!(result.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_diff_name_only_rejects_options() {
+        let runner = SystemGit;
+
+        let err = runner
+            .diff_name_only(Path::new("/repo"), "--output=/tmp/pwned")
+            .await
+            .expect_err("should reject arguments starting with a hyphen");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("argument injection prevention"));
+
+        let err2 = runner
+            .diff_name_only(Path::new("/repo"), "-pwned")
+            .await
+            .expect_err("should reject arguments starting with a hyphen");
+
+        assert_eq!(err2.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
