@@ -862,7 +862,9 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                     e
                 } else {
                     extracted_methods.insert(s.name.clone(), Vec::new());
-                    extracted_methods.get_mut(&s.name).unwrap_or_else(|| unreachable!())
+                    extracted_methods
+                        .get_mut(&s.name)
+                        .unwrap_or_else(|| unreachable!())
                 };
 
                 for mut method in std::mem::take(&mut s.children) {
@@ -890,7 +892,9 @@ fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
                     c
                 } else {
                     impl_counts.insert(clean_name.to_string(), 0);
-                    impl_counts.get_mut(clean_name).unwrap_or_else(|| unreachable!())
+                    impl_counts
+                        .get_mut(clean_name)
+                        .unwrap_or_else(|| unreachable!())
                 };
                 *count += 1;
 
@@ -1158,7 +1162,9 @@ fn walk_html_elements_flat(
                 c
             } else {
                 tag_counts.insert(name.clone(), 0);
-                tag_counts.get_mut(name.as_str()).unwrap_or_else(|| unreachable!())
+                tag_counts
+                    .get_mut(name.as_str())
+                    .unwrap_or_else(|| unreachable!())
             };
             *count += 1;
             let nth = *count;
@@ -1381,7 +1387,9 @@ fn emit_jsx_symbol(
             c
         } else {
             tag_counts.insert(name.clone(), 0);
-            tag_counts.get_mut(name.as_str()).unwrap_or_else(|| unreachable!())
+            tag_counts
+                .get_mut(name.as_str())
+                .unwrap_or_else(|| unreachable!())
         };
         *count += 1;
         let nth = *count;
@@ -1496,7 +1504,9 @@ fn walk_css_rules(
                     c
                 } else {
                     at_counts.insert(at_name.clone(), 0);
-                    at_counts.get_mut(&at_name).unwrap_or_else(|| unreachable!())
+                    at_counts
+                        .get_mut(&at_name)
+                        .unwrap_or_else(|| unreachable!())
                 };
                 *count += 1;
                 let nth = *count;
