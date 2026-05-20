@@ -426,6 +426,8 @@ pub enum DegradedReason {
     GrepFallbackImplScoped,
     /// Grep fallback result from global search.
     GrepFallbackGlobal,
+    /// Grep fallback for `read_with_deep_context` dependencies via heuristic call parsing.
+    GrepFallbackDependencies,
     /// Language unsupported; filter was bypassed to return results.
     UnsupportedLanguageFilterBypassed,
     /// Language is not supported.
@@ -446,6 +448,7 @@ impl fmt::Display for DegradedReason {
             DegradedReason::GrepFallbackFileScoped => "grep_fallback_file_scoped",
             DegradedReason::GrepFallbackImplScoped => "grep_fallback_impl_scoped",
             DegradedReason::GrepFallbackGlobal => "grep_fallback_global",
+            DegradedReason::GrepFallbackDependencies => "grep_fallback_dependencies",
             DegradedReason::UnsupportedLanguageFilterBypassed => {
                 "unsupported_language_filter_bypassed"
             }

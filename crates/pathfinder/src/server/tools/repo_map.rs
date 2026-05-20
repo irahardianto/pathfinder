@@ -69,10 +69,42 @@ async fn count_source_files(root: &Path) -> usize {
     count
 }
 
+/// Convert the full `LspLanguageStatus` map into a flat `language → status` string map.
+///
+/// Uses the same two-phase readiness model as `lsp_health_impl`:
+/// - `"ready"`: `navigation_ready = Some(true)`
+/// - `"warming_up"`: LSP connected but not yet navigation-ready
+/// - `"starting"`: uptime present but no capabilities reported
+/// - `"unavailable"`: no connection info
+///
+/// Returns `None` when the map is empty (no LSP processes running).
+fn derive_lsp_status(
+    capability_status: &std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus>,
+) -> Option<std::collections::HashMap<String, String>> {
+    if capability_status.is_empty() {
+        return None;
+    }
+    let map = capability_status
+        .iter()
+        .map(|(lang, status)| {
+            let s = if status.navigation_ready == Some(true) {
+                "ready"
+            } else if status.uptime_seconds.is_some() {
+                "warming_up"
+            } else {
+                "unavailable"
+            };
+            (lang.clone(), s.to_owned())
+        })
+        .collect();
+    Some(map)
+}
+
 impl PathfinderServer {
     /// Build an empty-changes response when `changed_since` finds no diffs.
     async fn empty_changes_response(&self) -> Result<CallToolResult, ErrorData> {
         let capability_status = self.lawyer.capability_status().await;
+        let lsp_status = derive_lsp_status(&capability_status);
         let metadata = crate::server::types::GetRepoMapMetadata {
             tech_stack: vec![],
             files_scanned: 0,
@@ -91,6 +123,7 @@ impl PathfinderServer {
                 },
             },
             max_tokens_used: 0,
+            lsp_status,
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
             "No files changed since the specified ref. No skeleton generated.",
@@ -216,16 +249,22 @@ impl PathfinderServer {
         );
 
         // LT-4: Pre-warm LSP processes for languages found in the project skeleton.
-        // This runs in the background so get_repo_map returns immediately.
+        // PATCH-004: Use warm_start_for_languages_and_track which sets warm_start_complete flag.
         if !result.tech_stack.is_empty() {
             let lawyer = Arc::clone(&self.lawyer);
             let languages = result.tech_stack.clone();
+            
             tokio::spawn(async move {
-                lawyer.warm_start_for_languages(&languages);
+                lawyer.warm_start_for_languages_and_track(&languages);
+                tracing::info!(
+                    "PATCH-004: get_repo_map triggered warm_start_and_track for {} languages",
+                    languages.len()
+                );
             });
         }
 
         let capability_status = self.lawyer.capability_status().await;
+        let lsp_status = derive_lsp_status(&capability_status);
 
         let metadata = crate::server::types::GetRepoMapMetadata {
             tech_stack: result.tech_stack,
@@ -245,6 +284,7 @@ impl PathfinderServer {
                 },
             },
             max_tokens_used: max_tokens,
+            lsp_status,
         };
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(result.skeleton)]);
@@ -489,5 +529,102 @@ mod tests {
         // Give the spawned warm_start_for_languages task a chance to run.
         // With NoOpLawyer, it's a no-op, but we verify no panics occur.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // ── 1.3 lsp_status flat map ──────────────────────────────────────────────
+
+    /// Verify that `derive_lsp_status` returns `None` when the capability map is empty.
+    /// (no LSP processes running → field absent from JSON)
+    #[test]
+    fn test_derive_lsp_status_empty_map_returns_none() {
+        let empty: std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus> =
+            std::collections::HashMap::new();
+        assert!(
+            super::derive_lsp_status(&empty).is_none(),
+            "empty capability map must produce None lsp_status"
+        );
+    }
+
+    /// Verify `derive_lsp_status` produces the correct status strings.
+    /// - `navigation_ready=Some(true)` → `"ready"`
+    /// - `uptime_seconds=Some(_)` but no `navigation_ready` → `"warming_up"`
+    /// - neither → `"unavailable"`
+    #[test]
+    fn test_derive_lsp_status_correct_status_strings() {
+        use pathfinder_lsp::types::LspLanguageStatus;
+
+        let mut map = std::collections::HashMap::new();
+
+        // ready: navigation_ready = Some(true)
+        map.insert(
+            "rust".to_owned(),
+            LspLanguageStatus {
+                validation: false,
+                reason: String::new(),
+                navigation_ready: Some(true),
+                indexing_complete: None,
+                uptime_seconds: Some(30),
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+            },
+        );
+
+        // warming_up: uptime present, but navigation_ready not true
+        map.insert(
+            "typescript".to_owned(),
+            LspLanguageStatus {
+                validation: false,
+                reason: String::new(),
+                navigation_ready: None,
+                indexing_complete: None,
+                uptime_seconds: Some(5),
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+            },
+        );
+
+        // unavailable: no uptime, no navigation_ready
+        map.insert(
+            "python".to_owned(),
+            LspLanguageStatus {
+                validation: false,
+                reason: String::new(),
+                navigation_ready: None,
+                indexing_complete: None,
+                uptime_seconds: None,
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+            },
+        );
+
+        let result = super::derive_lsp_status(&map).expect("non-empty map must return Some");
+
+        assert_eq!(result.get("rust").map(String::as_str), Some("ready"));
+        assert_eq!(
+            result.get("typescript").map(String::as_str),
+            Some("warming_up")
+        );
+        assert_eq!(
+            result.get("python").map(String::as_str),
+            Some("unavailable")
+        );
     }
 }

@@ -827,7 +827,7 @@ The name `analyze_impact` reads as generic "impact analysis" — it could mean p
 
 ### Remediation
 
-**Step 1: Rename `analyze_impact` to `find_callers_callees`**
+**Step 1: Rename `analyze_impact` to `  s_callees`**
 
 File: `crates/pathfinder/src/server.rs`
 

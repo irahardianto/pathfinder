@@ -279,6 +279,10 @@ pub struct SearchCodebaseResponse {
     /// to use for the next page of results. Absent when not truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u32>,
+    /// Actionable hint when `filter_mode` removes all results.
+    /// Suggests retrying with `filter_mode=all` when matches exist but were filtered out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// A minimal match entry for files already in the agent's context (`known_files`)
@@ -381,6 +385,9 @@ pub struct GetRepoMapMetadata {
     pub capabilities: RepoCapabilities,
     /// Actual `max_tokens` used (may differ from requested due to auto-scaling).
     pub max_tokens_used: u32,
+    /// Flat map of language ID to status string (`"ready"`, `"warming_up"`, `"unavailable"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_status: Option<std::collections::HashMap<String, String>>,
 }
 
 /// The overall capabilities of the Pathfinder system.
@@ -678,6 +685,13 @@ pub struct LspHealthResponse {
     pub status: String,
     /// Per-language status details.
     pub languages: Vec<LspLanguageHealth>,
+    /// PATCH-004: Whether `warm_start` has completed.
+    ///
+    /// When `true`, all `warm_start` background tasks have finished (even if
+    /// some languages failed). When `false`, `warm_start` is still in progress.
+    /// This allows distinguishing "still warming up" from "warm_start finished
+    /// but LSP didn't report readiness".
+    pub warm_start_complete: bool,
 }
 
 /// Per-language LSP health status.
@@ -708,6 +722,10 @@ pub struct LspLanguageHealth {
     /// while still indexing in the background.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_duration_secs: Option<u64>,
     /// Whether navigation (`get_definition`, `analyze_impact`) is functional.
     ///
     /// `true` once the LSP initialize handshake completes with `definitionProvider: true`.

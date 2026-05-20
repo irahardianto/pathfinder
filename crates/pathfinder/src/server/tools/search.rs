@@ -160,6 +160,21 @@ impl PathfinderServer {
                     .and_then(|v| v.try_into().ok())
                     .unwrap_or(100);
 
+                // Hint for agents: if filter_mode removed all results, prompt retry with filter_mode=all.
+                // This prevents agents from falsely concluding the symbol does not exist.
+                let hint = if returned_count == 0
+                    && result.total_matches > 0
+                    && params.filter_mode != FilterMode::All
+                {
+                    Some(format!(
+                        "0 matches with filter_mode={:?} but {} match(es) exist with filter_mode=all. Retry with filter_mode='all' to include comments and strings.",
+                        params.filter_mode,
+                        result.total_matches,
+                    ))
+                } else {
+                    None
+                };
+
                 tracing::info!(
                     tool = "search_codebase",
                     total_matches = result.total_matches,
@@ -170,6 +185,7 @@ impl PathfinderServer {
                     coverage_percent,
                     filter_mode = ?params.filter_mode,
                     filter_bypassed = filter_was_bypassed,
+                    hint_emitted = hint.is_some(),
                     ripgrep_ms,
                     tree_sitter_parse_ms,
                     duration_ms,
@@ -190,6 +206,7 @@ impl PathfinderServer {
                     file_groups,
                     degraded,
                     degraded_reason,
+                    hint,
                     next_offset: if result.truncated {
                         #[allow(clippy::cast_possible_truncation)]
                         Some(params.offset + (returned_count as u32))
@@ -736,6 +753,129 @@ mod tests {
                 .map(std::string::ToString::to_string),
             Some("unsupported_language_filter_bypassed".to_string()),
             "degraded_reason must indicate filter was bypassed"
+        );
+    }
+
+    // ── 1.2 hint field: populated when filter_mode removes all results ─────
+
+    /// Verify that `hint` is set when `filter_mode=code_only` removes all results.
+    /// This prevents agents from falsely concluding a symbol doesn't exist.
+    #[tokio::test]
+    async fn test_search_hint_populated_when_filter_removes_all_results() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a Rust file that has the symbol ONLY in a comment
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/lib.rs"),
+            "// TODO: implement find_me\nfn other() {}\n",
+        )
+        .unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        // Surgeon reports the match as a "comment" node
+        surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .push(Ok("comment".to_string()));
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = SearchCodebaseParams {
+            query: "find_me".to_owned(),
+            is_regex: false,
+            path_glob: "**/*.rs".to_owned(),
+            exclude_glob: String::default(),
+            offset: 0,
+            max_results: 10,
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            // code_only will filter out the comment match
+            filter_mode: pathfinder_common::types::FilterMode::CodeOnly,
+        };
+        let result = server.search_codebase_impl(params).await;
+        let response = result.expect("search should succeed");
+
+        // No matches after filter
+        assert_eq!(
+            response.0.returned_count, 0,
+            "filter should remove comment match"
+        );
+        // But raw match count shows ripgrep found something
+        assert!(
+            response.0.raw_match_count > 0,
+            "raw_match_count must be positive"
+        );
+        // hint must be present to guide agent
+        assert!(
+            response.0.hint.is_some(),
+            "hint must be present when filter removed all results"
+        );
+        let hint = response.0.hint.as_ref().unwrap();
+        assert!(
+            hint.contains("filter_mode='all'"),
+            "hint must suggest filter_mode=all, got: {hint}"
+        );
+    }
+
+    /// Verify that `hint` is absent when `filter_mode=all` (no filtering applied).
+    #[tokio::test]
+    async fn test_search_hint_absent_when_no_filter_applied() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(ws_dir.path().join("src/lib.rs"), "fn find_me() {}\n").unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .push(Ok("code".to_string()));
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = SearchCodebaseParams {
+            query: "find_me".to_owned(),
+            is_regex: false,
+            path_glob: "**/*.rs".to_owned(),
+            exclude_glob: String::default(),
+            offset: 0,
+            max_results: 10,
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            filter_mode: pathfinder_common::types::FilterMode::All,
+        };
+        let result = server.search_codebase_impl(params).await;
+        let response = result.expect("search should succeed");
+
+        assert!(response.0.returned_count > 0, "should have results");
+        assert!(
+            response.0.hint.is_none(),
+            "hint must be absent when results are present"
         );
     }
 }
