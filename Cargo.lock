@@ -1037,6 +1037,7 @@ dependencies = [
  "pathfinder-mcp-lsp",
  "pathfinder-mcp-search",
  "pathfinder-mcp-treesitter",
+ "regex",
  "rmcp",
  "schemars",
  "serde",
