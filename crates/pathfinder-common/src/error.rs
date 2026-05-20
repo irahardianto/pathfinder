@@ -552,6 +552,58 @@ mod tests {
     }
 
     #[test]
+    fn test_symbol_not_found_hint_missing_separator() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs.MyStruct.method".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("semantic paths require '::' between the file and symbol"),
+            "hint should include missing separator guidance: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_symbol_not_found_hint_multiple_separators() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs::Outer::Inner::method".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("only one '::' is allowed — between the file path and the symbol"),
+            "hint should include multiple separators guidance: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_error_variants_without_hints() {
+        let errors = vec![
+            PathfinderError::IoError {
+                message: "disk full".into(),
+            },
+            PathfinderError::ParseError {
+                path: "a".into(),
+                reason: "a".into(),
+            },
+            PathfinderError::AmbiguousSymbol {
+                semantic_path: "a".into(),
+                matches: vec![],
+            },
+            PathfinderError::TokenBudgetExceeded { used: 0, budget: 0 },
+        ];
+
+        for err in errors {
+            assert!(
+                err.hint().is_none(),
+                "Error variant {} should not have a hint",
+                err.error_code()
+            );
+        }
+    }
+
+    #[test]
     fn test_hint_serialized_in_error_response() {
         let err = PathfinderError::AccessDenied {
             path: ".env".into(),
