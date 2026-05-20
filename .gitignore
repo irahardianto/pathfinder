@@ -20,6 +20,7 @@ Thumbs.db
 # Committing lcov.info embeds the local developer's absolute paths, which
 # causes DeepSource to fail to match source lines and stay in WAITING state.
 lcov.info
+coverage/
 
 .agents/
 .claude/
