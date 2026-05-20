@@ -488,6 +488,13 @@ impl Lawyer for MockLawyer {
             .clone()
     }
 
+    /// PATCH-004: Check whether `warm_start` has completed.
+    ///
+    /// `MockLawyer` has no `warm_start` mechanism, always returns `false`.
+    fn is_warm_start_complete(&self) -> bool {
+        false
+    }
+
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage> {
         self.missing_languages_result
             .lock()

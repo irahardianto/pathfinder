@@ -80,7 +80,6 @@ impl Lawyer for NoOpLawyer {
         Err(LspError::NoLspAvailable)
     }
 
-    /// IW-3 (DS-1): No LSP available — callers should skip LSP queries and degrade.
     async fn open_document(
         &self,
         _workspace_root: &Path,
@@ -103,6 +102,10 @@ impl Lawyer for NoOpLawyer {
     async fn force_respawn(&self, _language_id: &str) -> Result<(), LspError> {
         Err(LspError::NoLspAvailable)
     }
+
+    fn is_warm_start_complete(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +119,15 @@ mod tests {
 
     fn file() -> PathBuf {
         PathBuf::from("src/main.rs")
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_is_warm_start_complete() {
+        let lawyer = NoOpLawyer;
+        assert!(
+            !lawyer.is_warm_start_complete(),
+            "NoOpLawyer should report warm_start as not complete"
+        );
     }
 
     #[tokio::test]

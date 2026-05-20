@@ -3,6 +3,15 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// How indexing completion was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum IndexingCompletionSource {
+    /// LSP sent `WorkDoneProgressEnd` notification.
+    Progress,
+    /// Timeout elapsed without `WorkDoneProgressEnd`, assumed complete.
+    TimeoutFallback,
+}
+
 /// Language server status for a single LSP language slot.
 ///
 /// Returned by the `get_repo_map` and validation tools to communicate the
@@ -43,6 +52,10 @@ pub struct LspLanguageStatus {
     /// `None` when the server omits `serverInfo` or the process is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_duration_secs: Option<u64>,
 }
 
 /// The location of a symbol's definition in the workspace.

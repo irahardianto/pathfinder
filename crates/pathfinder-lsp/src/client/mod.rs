@@ -22,7 +22,9 @@ pub use detect::{
     detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage,
 };
 
-use crate::types::{CallHierarchyCall, CallHierarchyItem, ReferenceLocation};
+use crate::types::{
+    CallHierarchyCall, CallHierarchyItem, IndexingCompletionSource, ReferenceLocation,
+};
 use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -34,10 +36,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// LSP-HEALTH-001 Task 6.1: Fallback timeout for indexing completion.
-/// Non-Rust LSPs (gopls, tsserver, pyright) may not emit `WorkDoneProgressEnd`
-/// notifications. After this many seconds, assume indexing is complete.
-const INDEXING_FALLBACK_TIMEOUT_SECS: u64 = 30;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -67,6 +65,8 @@ struct LanguageState {
     /// carrying a `WorkDoneProgressEnd` token for the initial indexing job.
     /// Never reset to `false` once set — processes don't re-index unless restarted.
     indexing_complete: Arc<std::sync::atomic::AtomicBool>,
+    indexing_completion_source: Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
+    indexing_duration_secs: Arc<std::sync::Mutex<Option<u64>>>,
     /// MT-3: Live capabilities — reflects initial `initialize` capabilities PLUS
     /// any dynamic registrations received via `client/registerCapability`.
     ///
@@ -109,8 +109,21 @@ impl ProcessEntry {
                     .live_capabilities
                     .read()
                     .expect("live_capabilities lock");
-                // COEX-1: Override diagnostics_strategy to None when in coexistence mode
-                // to prevent the costly validation cycle from racing with the external LSP.
+                #[allow(clippy::expect_used)]
+                let indexing_source = state
+                    .indexing_completion_source
+                    .lock()
+                    .expect("indexing_completion_source lock")
+                    .as_ref()
+                    .map(|source| match source {
+                        IndexingCompletionSource::Progress => "progress".to_string(),
+                        IndexingCompletionSource::TimeoutFallback => "timeout_fallback".to_string(),
+                    });
+                #[allow(clippy::expect_used)]
+                let indexing_duration_secs = *state
+                    .indexing_duration_secs
+                    .lock()
+                    .expect("indexing_duration_secs lock");
                 let effective_diag_strategy = if state.in_coexistence_mode {
                     DiagnosticsStrategy::None
                 } else {
@@ -128,6 +141,8 @@ impl ProcessEntry {
                         .load(std::sync::atomic::Ordering::Relaxed),
                     state.spawned_at.elapsed().as_secs(),
                     caps.server_name.as_deref(),
+                    indexing_source,
+                    indexing_duration_secs,
                 )
             }
             Self::Unavailable(_) => validation_status_from_parts(
@@ -139,6 +154,8 @@ impl ProcessEntry {
                 false,
                 false,
                 0,
+                None,
+                None,
                 None,
             ),
         }
@@ -165,6 +182,8 @@ fn validation_status_from_parts(
     indexing_complete: bool,
     uptime_seconds: u64,
     server_name: Option<&str>,
+    indexing_source: Option<String>,
+    indexing_duration_secs: Option<u64>,
 ) -> crate::types::LspLanguageStatus {
     if !running {
         return crate::types::LspLanguageStatus {
@@ -179,6 +198,8 @@ fn validation_status_from_parts(
             supports_diagnostics: None,
             supports_formatting: None,
             server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
         };
     }
     let navigation_ready = Some(supports_definition);
@@ -203,6 +224,8 @@ fn validation_status_from_parts(
             supports_diagnostics: Some(true),
             supports_formatting: Some(supports_formatting),
             server_name: server_name.map(ToOwned::to_owned),
+            indexing_source,
+            indexing_duration_secs,
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
@@ -216,6 +239,8 @@ fn validation_status_from_parts(
             supports_diagnostics: Some(false),
             supports_formatting: Some(supports_formatting),
             server_name: server_name.map(ToOwned::to_owned),
+            indexing_source,
+            indexing_duration_secs,
         },
     }
 }
@@ -319,6 +344,22 @@ pub struct LspClient {
     /// Keyed by the file URI string. `did_open` sets version 1.
     /// `did_close` removes the entry.
     doc_versions: Arc<DashMap<String, std::sync::atomic::AtomicI32>>,
+    /// PATCH-004: Flag set to `true` when all `warm_start` tasks have completed.
+    ///
+    /// This allows `lsp_health` to distinguish "still warming" from "`warm_start`
+    /// finished but LSP didn't report readiness".
+    warm_start_complete: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[allow(clippy::match_same_arms)]
+fn indexing_timeout_for_language(lang: &str) -> Duration {
+    match lang {
+        "java" => Duration::from_mins(2),
+        "typescript" | "javascript" => Duration::from_secs(45),
+        "go" | "python" => Duration::from_secs(30),
+        "rust" => Duration::from_mins(1),
+        _ => Duration::from_secs(30),
+    }
 }
 
 impl LspClient {
@@ -355,6 +396,7 @@ impl LspClient {
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::clone(&shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         // Spawn idle-timeout background task
@@ -365,62 +407,14 @@ impl LspClient {
 
         Ok(client)
     }
-    /// Kick off LSP processes for all detected languages in background tasks.
+    /// PATCH-004: Kick off `warm_start` for specific languages and track completion.
     ///
-    /// This is a fire-and-forget call — it returns immediately. Each language's
-    /// process is spawned via `tokio::spawn`, giving it a head start on
-    /// initialization while the agent issues non-LSP tool calls (e.g.
-    /// `get_repo_map`, `search_codebase`).
+    /// Spawns background tasks for the specified languages, then spawns another
+    /// background task that waits for all `warm_start` tasks to complete and
+    /// sets the `warm_start_complete` flag.
     ///
-    /// Failures are logged as warnings. The lazy `ensure_process` path will
-    /// handle retries on the first actual LSP tool call.
-    pub fn warm_start(&self) {
-        let languages: Vec<String> = self
-            .descriptors
-            .iter()
-            .map(|d| d.language_id.clone())
-            .collect();
-
-        if languages.is_empty() {
-            tracing::debug!("LSP warm_start: no languages detected, skipping");
-            return;
-        }
-
-        tracing::info!(
-            languages = ?languages,
-            "LSP warm_start: spawning background initialization"
-        );
-
-        for lang in languages {
-            let client = self.clone();
-            tokio::spawn(async move {
-                tracing::debug!(language = %lang, "LSP warm_start: starting process");
-                match client.ensure_process(&lang).await {
-                    Ok(()) => {
-                        tracing::info!(language = %lang, "LSP warm_start: ready");
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            language = %lang,
-                            error = %e,
-                            "LSP warm_start: failed (will retry lazily on first use)"
-                        );
-                    }
-                }
-            });
-        }
-    }
-    /// LT-4: Pre-warm specific languages based on project analysis.
-    /// LT-4: Pre-warm specific languages based on project analysis.
-    ///
-    /// Unlike `warm_start()` which starts ALL detected languages, this method
-    /// only starts the explicitly requested ones. Used by `get_repo_map` to
-    /// pre-warm LSP processes for languages discovered in the project skeleton.
-    ///
-    /// Languages not in `self.descriptors` or already running are silently skipped.
-    /// Errors during initialization are logged but not propagated — lazy recovery
-    /// on first use is always available.
-    pub fn warm_start_for_languages(&self, language_ids: &[String]) {
+    /// Returns immediately (fire-and-forget).
+    pub fn warm_start_for_languages_and_track(&self, language_ids: &[String]) {
         let known: std::collections::HashSet<&str> = self
             .descriptors
             .iter()
@@ -434,7 +428,79 @@ impl LspClient {
             .collect();
 
         if to_start.is_empty() {
+            tracing::debug!("PATCH-004: warm_start_for_languages_and_track: no new languages to start");
             return;
+        }
+
+        tracing::info!(
+            languages = ?to_start,
+            "PATCH-004: warm_start_for_languages_and_track — pre-warming and tracking"
+        );
+
+        let warm_flag = Arc::clone(&self.warm_start_complete);
+        let mut handles = Vec::new();
+        let num_languages = to_start.len();
+
+        for lang in to_start {
+            let client = self.clone();
+            let lang = lang.clone();
+            handles.push(tokio::spawn(async move {
+                tracing::debug!(language = %lang, "PATCH-004: warm_start starting");
+                match client.ensure_process(&lang).await {
+                    Ok(()) => {
+                        tracing::info!(language = %lang, "PATCH-004: warm_start complete");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            language = %lang,
+                            error = %e,
+                            "PATCH-004: warm_start failed (will retry lazily)"
+                        );
+                    }
+                }
+            }));
+        }
+
+        // Spawn task to wait for all warm_start handles and set completion flag
+        tokio::spawn(async move {
+            for handle in handles {
+                let _ = handle.await; // Ignore task result, failures logged above
+            }
+            warm_flag.store(true, std::sync::atomic::Ordering::Release);
+            tracing::info!(
+                "PATCH-004: warm_start_complete flag set after {} languages",
+                num_languages
+            );
+        });
+    }
+    /// LT-4: Pre-warm specific languages based on project analysis.
+    /// LT-4: Pre-warm specific languages based on project analysis.
+    ///
+    /// Unlike `warm_start()` which starts ALL detected languages, this method
+    /// only starts the explicitly requested ones. Used by `get_repo_map` to
+    /// pre-warm LSP processes for languages discovered in the project skeleton.
+    ///
+    /// Languages not in `self.descriptors` or already running are silently skipped.
+    /// Errors during initialization are logged but not propagated — lazy recovery
+    /// on first use is always available.
+    pub fn warm_start_for_languages(
+        &self,
+        language_ids: &[String],
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let known: std::collections::HashSet<&str> = self
+            .descriptors
+            .iter()
+            .map(|d| d.language_id.as_str())
+            .collect();
+
+        let to_start: Vec<&String> = language_ids
+            .iter()
+            .filter(|lang| known.contains(lang.as_str()))
+            .filter(|lang| !self.processes.contains_key(lang.as_str()))
+            .collect();
+
+        if to_start.is_empty() {
+            return Vec::new();
         }
 
         tracing::info!(
@@ -442,10 +508,11 @@ impl LspClient {
             "LT-4: warm_start_for_languages — pre-warming requested languages"
         );
 
+        let mut handles = Vec::new();
         for lang in to_start {
             let client = self.clone();
             let lang = lang.clone();
-            tokio::spawn(async move {
+            handles.push(tokio::spawn(async move {
                 tracing::debug!(language = %lang, "LT-4: warm_start_for_languages — starting");
                 match client.ensure_process(&lang).await {
                     Ok(()) => {
@@ -459,8 +526,9 @@ impl LspClient {
                         );
                     }
                 }
-            });
+            }));
         }
+        handles
     }
 
     /// LT-4: Extend idle timer for a language without making an LSP request.
@@ -728,23 +796,34 @@ impl LspClient {
     /// `WorkDoneProgressEnd` notifications. After 30 seconds, assume indexing is
     /// complete to prevent eternal "`in_progress`" status.
     fn spawn_indexing_timeout_fallback(
-        language_id: String,
+        language_id: &str,
         indexing_complete: &Arc<std::sync::atomic::AtomicBool>,
+        indexing_completion_source: &Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
+        indexing_duration_secs: &Arc<std::sync::Mutex<Option<u64>>>,
+        spawned_at: Instant,
     ) {
         let timeout_flag = Arc::clone(indexing_complete);
-        let timeout_lang = language_id;
+        let source_flag = Arc::clone(indexing_completion_source);
+        let duration_flag = Arc::clone(indexing_duration_secs);
+        let timeout_lang = language_id.to_owned();
+        let timeout_duration = indexing_timeout_for_language(language_id);
         tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(
-                INDEXING_FALLBACK_TIMEOUT_SECS,
-            ))
-            .await;
+            tokio::time::sleep(timeout_duration).await;
             if !timeout_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 timeout_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                let duration_secs = spawned_at.elapsed().as_secs();
+                #[allow(clippy::expect_used)]
+                {
+                    *source_flag.lock().expect("source_flag lock") =
+                        Some(IndexingCompletionSource::TimeoutFallback);
+                    *duration_flag.lock().expect("duration_flag lock") = Some(duration_secs);
+                }
                 tracing::info!(
                     language = %timeout_lang,
-                    timeout_sec = INDEXING_FALLBACK_TIMEOUT_SECS,
-                    "LSP: no WorkDoneProgressEnd received after {INDEXING_FALLBACK_TIMEOUT_SECS}s — \
-                     assuming indexing complete (timeout fallback for gopls/tsserver/pyright)"
+                    duration_sec = duration_secs,
+                    source = "timeout_fallback",
+                    "LSP: no WorkDoneProgressEnd received — \
+                     assuming indexing complete (timeout fallback)"
                 );
             }
         });
@@ -845,21 +924,35 @@ impl LspClient {
         // Create indexing_complete flag — will be set by the progress watcher task
         // when the LSP emits WorkDoneProgressEnd for its initial indexing job.
         let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indexing_completion_source = Arc::new(std::sync::Mutex::new(None));
+        let indexing_duration_secs = Arc::new(std::sync::Mutex::new(None));
         let spawned_at = Instant::now();
 
-        // Spawn a background task that monitors $/progress notifications from the
-        // LSP and sets indexing_complete when the initial indexing token closes.
         let indexing_flag = Arc::clone(&indexing_complete);
+        let indexing_source_flag = Arc::clone(&indexing_completion_source);
+        let indexing_duration_flag = Arc::clone(&indexing_duration_secs);
         let lang_id_for_watcher = language_id.clone();
         let dispatcher_for_watcher = Arc::clone(&self.dispatcher);
+        let spawned_at_for_watcher = spawned_at;
         tokio::spawn(async move {
-            progress_watcher_task(lang_id_for_watcher, dispatcher_for_watcher, indexing_flag).await;
+            progress_watcher_task(
+                lang_id_for_watcher,
+                dispatcher_for_watcher,
+                indexing_flag,
+                indexing_source_flag,
+                indexing_duration_flag,
+                spawned_at_for_watcher,
+            )
+            .await;
         });
 
-        // LSP-HEALTH-001 Task 6.1: Progress watcher timeout fallback
-        // Non-Rust LSPs (gopls, tsserver, pyright) may not emit WorkDoneProgressEnd
-        // notifications. After 30 seconds, assume indexing is complete.
-        Self::spawn_indexing_timeout_fallback(language_id.clone(), &indexing_complete);
+        Self::spawn_indexing_timeout_fallback(
+            &language_id,
+            &indexing_complete,
+            &indexing_completion_source,
+            &indexing_duration_secs,
+            spawned_at,
+        );
 
         // MT-3: Create the shared live_capabilities from the initial snapshot.
         // The registration_watcher_task will mutate this as dynamic registrations arrive.
@@ -898,6 +991,8 @@ impl LspClient {
                 restart_count: attempt,
                 spawned_at,
                 indexing_complete,
+                indexing_completion_source,
+                indexing_duration_secs,
                 live_capabilities,
                 in_coexistence_mode,
             })),
@@ -1203,8 +1298,11 @@ impl LspClient {
 #[async_trait]
 impl Lawyer for LspClient {
     /// LT-4: Trait implementation delegates to the inherent method.
-    fn warm_start_for_languages(&self, language_ids: &[String]) {
-        LspClient::warm_start_for_languages(self, language_ids);
+    fn warm_start_for_languages(
+        &self,
+        language_ids: &[String],
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        LspClient::warm_start_for_languages(self, language_ids)
     }
 
     /// LT-4: Trait implementation delegates to the inherent method.
@@ -1505,6 +1603,8 @@ impl Lawyer for LspClient {
                     supports_diagnostics: None,
                     supports_formatting: None,
                     server_name: None,
+                    indexing_source: None,
+                    indexing_duration_secs: None,
                 },
                 |entry| entry.to_validation_status(&desc.command),
             );
@@ -1519,6 +1619,14 @@ impl Lawyer for LspClient {
 
     async fn force_respawn(&self, language_id: &str) -> Result<(), LspError> {
         LspClient::force_respawn(self, language_id).await
+    }
+
+    fn is_warm_start_complete(&self) -> bool {
+        self.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn warm_start_for_languages_and_track(&self, language_ids: &[String]) {
+        LspClient::warm_start_for_languages_and_track(self, language_ids);
     }
 }
 fn parse_definition_response(
@@ -1987,6 +2095,9 @@ async fn progress_watcher_task(
     language_id: String,
     dispatcher: Arc<RequestDispatcher>,
     indexing_complete: Arc<std::sync::atomic::AtomicBool>,
+    indexing_completion_source: Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
+    indexing_duration_secs: Arc<std::sync::Mutex<Option<u64>>>,
+    spawned_at: Instant,
 ) {
     let mut rx = dispatcher.subscribe_notifications();
     tracing::debug!(language = %language_id, "progress_watcher_task: started");
@@ -2002,13 +2113,33 @@ async fn progress_watcher_task(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if kind == "end" {
-                        // WorkDoneProgressEnd — the LSP has finished at least one major
-                        // work token (typically initial indexing).
-                        if !indexing_complete.load(std::sync::atomic::Ordering::Relaxed) {
+                        if indexing_complete.load(std::sync::atomic::Ordering::Relaxed) {
+                            let duration_secs = spawned_at.elapsed().as_secs();
+                            tracing::warn!(
+                                language = %language_id,
+                                duration_sec = duration_secs,
+                                "LSP: WorkDoneProgressEnd arrived {0}s after timeout fallback already fired — consider increasing timeout",
+                                duration_secs
+                            );
+                        } else {
+                            let duration_secs = spawned_at.elapsed().as_secs();
                             indexing_complete.store(true, std::sync::atomic::Ordering::Relaxed);
+                            #[allow(clippy::expect_used)]
+                            {
+                                *indexing_completion_source
+                                    .lock()
+                                    .expect("indexing_completion_source lock") =
+                                    Some(IndexingCompletionSource::Progress);
+                                *indexing_duration_secs
+                                    .lock()
+                                    .expect("indexing_duration_secs lock") = Some(duration_secs);
+                            }
                             tracing::info!(
                                 language = %language_id,
-                                "LSP: WorkDoneProgressEnd received — indexing_complete = true"
+                                duration_sec = duration_secs,
+                                source = "progress",
+                                "LSP: WorkDoneProgressEnd received after {0}s — indexing complete",
+                                duration_secs
                             );
                         }
                     }
@@ -2555,6 +2686,8 @@ mod tests {
             false, // indexing_complete
             10,    // uptime_seconds
             None,  // server_name
+            None,
+            None,
         );
         assert!(
             status.validation,
@@ -2580,6 +2713,8 @@ mod tests {
             true,  // indexing_complete
             42,    // uptime_seconds
             None,  // server_name
+            None,
+            None,
         );
         assert!(status.validation);
         assert_eq!(status.indexing_complete, Some(true));
@@ -2598,6 +2733,8 @@ mod tests {
             false,
             true,
             5,
+            None,
+            None,
             None,
         );
         assert!(
@@ -2626,6 +2763,8 @@ mod tests {
             false,
             0,
             None,
+            None,
+            None,
         );
         assert!(status.uptime_seconds.is_some());
         assert!(status.indexing_complete.is_some());
@@ -2648,6 +2787,8 @@ mod tests {
             false, // indexing_complete (still indexing)
             5,     // uptime_seconds
             None,  // server_name
+            None,
+            None,
         );
         // Navigation ready regardless of diagnostics and indexing status
         assert_eq!(status.navigation_ready, Some(true));
@@ -2670,6 +2811,8 @@ mod tests {
             true,  // indexing_complete
             10,    // uptime_seconds
             None,  // server_name
+            None,
+            None,
         );
         // Navigation not ready because LSP doesn't have definitionProvider capability
         assert_eq!(status.navigation_ready, Some(false));
@@ -2690,6 +2833,8 @@ mod tests {
             false,                     // irrelevant when !running
             0,                         // irrelevant when !running
             None,                      // server_name
+            None,
+            None,
         );
         assert_eq!(status.navigation_ready, None);
         assert_eq!(status.indexing_complete, None);
@@ -3066,7 +3211,7 @@ mod tests {
         // start_process will fail, but the method must not panic.
         let client = client_with_descriptors(vec!["rust", "go", "typescript"], HashMap::new());
         // Only request "go" — "rust" and "typescript" should remain unstarted.
-        client.warm_start_for_languages(&["go".to_owned()]);
+        let _ = client.warm_start_for_languages(&["go".to_owned()]);
         // No process should be running (no real binary), but no panic.
     }
 
@@ -3076,15 +3221,15 @@ mod tests {
         // must skip it without error (idempotent).
         let client = client_with_descriptors(vec!["rust"], HashMap::new());
         // Call twice — should be safe and not panic.
-        client.warm_start_for_languages(&["rust".to_owned()]);
-        client.warm_start_for_languages(&["rust".to_owned()]);
+        let _ = client.warm_start_for_languages(&["rust".to_owned()]);
+        let _ = client.warm_start_for_languages(&["rust".to_owned()]);
     }
 
     #[tokio::test]
     async fn test_warm_start_for_languages_ignores_unknown() {
         // Languages not in descriptors should be silently ignored.
         let client = client_with_descriptors(vec!["rust"], HashMap::new());
-        client.warm_start_for_languages(&["unknown_lang".to_owned()]);
+        let _ = client.warm_start_for_languages(&["unknown_lang".to_owned()]);
     }
 
     #[tokio::test]
@@ -3117,6 +3262,8 @@ mod tests {
             true,
             100,
             Some("rust-analyzer"),
+            None,
+            None,
         );
 
         assert!(!status.validation);
@@ -3144,6 +3291,8 @@ mod tests {
             true,
             100,
             Some("rust-analyzer"),
+            None,
+            None,
         );
 
         assert!(status.validation);
@@ -3171,6 +3320,8 @@ mod tests {
             false,
             50,
             Some("gopls"),
+            None,
+            None,
         );
 
         assert!(status.validation);
@@ -3196,6 +3347,8 @@ mod tests {
             false,
             true,
             200,
+            None,
+            None,
             None,
         );
 
@@ -3224,6 +3377,8 @@ mod tests {
             true,
             10,
             None,
+            None,
+            None,
         );
 
         assert!(status.validation);
@@ -3243,6 +3398,8 @@ mod tests {
             true,
             0,
             Some("custom-lsp-server"),
+            None,
+            None,
         );
 
         assert_eq!(status.server_name, Some("custom-lsp-server".to_owned()));
@@ -3260,6 +3417,8 @@ mod tests {
             true,
             0,
             None, // no server name
+            None,
+            None,
         );
 
         assert!(status.server_name.is_none());
@@ -3323,5 +3482,45 @@ mod tests {
 
         // All guards should be dropped
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_indexing_timeout_java_is_120s() {
+        assert_eq!(
+            indexing_timeout_for_language("java"),
+            Duration::from_mins(2)
+        );
+    }
+
+    #[test]
+    fn test_indexing_timeout_typescript_is_45s() {
+        assert_eq!(
+            indexing_timeout_for_language("typescript"),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            indexing_timeout_for_language("javascript"),
+            Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn test_indexing_timeout_rust_is_60s() {
+        assert_eq!(
+            indexing_timeout_for_language("rust"),
+            Duration::from_mins(1)
+        );
+    }
+
+    #[test]
+    fn test_indexing_timeout_unknown_is_30s() {
+        assert_eq!(
+            indexing_timeout_for_language("unknown"),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            indexing_timeout_for_language("csharp"),
+            Duration::from_secs(30)
+        );
     }
 }

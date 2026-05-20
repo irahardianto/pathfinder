@@ -175,13 +175,37 @@ pub trait Lawyer: Send + Sync {
     /// no descriptor is registered for the language.
     async fn force_respawn(&self, language_id: &str) -> Result<(), LspError>;
 
+    /// PATCH-004: Check whether `warm_start` has completed.
+    ///
+    /// Returns `true` if all `warm_start` tasks have finished, `false` otherwise.
+    /// This is used by `lsp_health` to report accurate status.
+    /// Default implementation returns `false` (no `warm_start` has been triggered).
+    fn is_warm_start_complete(&self) -> bool {
+        false
+    }
+
     /// LT-4: Pre-warm LSP processes for specific languages.
     ///
     /// Called after `get_repo_map` to start LSPs for languages found in the
     /// project skeleton before the agent explicitly requests LSP operations.
     ///
+    /// PATCH-004: Returns `Vec<JoinHandle<()>>` for tracking `warm_start` completion.
     /// Default implementation is a no-op (used by `NoOpLawyer` and `MockLawyer`).
-    fn warm_start_for_languages(&self, _language_ids: &[String]) {}
+    fn warm_start_for_languages(
+        &self,
+        _language_ids: &[String],
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        Vec::new()
+    }
+
+    /// PATCH-004: Kick off `warm_start` for specific languages and track completion.
+    ///
+    /// Like `warm_start_for_languages` but also sets the `warm_start_complete` flag
+    /// when all tasks finish. Default implementation delegates to
+    /// `warm_start_for_languages` and ignores handles (no completion tracking).
+    fn warm_start_for_languages_and_track(&self, language_ids: &[String]) {
+        let _ = self.warm_start_for_languages(language_ids);
+    }
 
     /// LT-4: Extend idle timer for a language without making an LSP request.
     ///
