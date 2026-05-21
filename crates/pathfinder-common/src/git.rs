@@ -30,6 +30,13 @@ impl GitRunner for SystemGit {
         workspace_root: &Path,
         target: &str,
     ) -> Result<Vec<u8>, std::io::Error> {
+        if target.starts_with('-') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "target revision cannot start with a hyphen (argument injection risk)",
+            ));
+        }
+
         let output = tokio::process::Command::new("git")
             .current_dir(workspace_root)
             .args(["diff", "--name-only", target])
@@ -242,5 +249,16 @@ mod tests {
             .expect("should succeed");
 
         assert_eq!(result.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_system_git_rejects_hyphen_target() {
+        let runner = SystemGit;
+        let err = runner
+            .diff_name_only(Path::new("/repo"), "-foo")
+            .await
+            .expect_err("should reject targets starting with a hyphen");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("argument injection risk"));
     }
 }
