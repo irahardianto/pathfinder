@@ -3026,7 +3026,7 @@ mod tests {
             .read_symbol_scope_results
             .lock()
             .unwrap()
-            .push(Ok(make_scope())); // Need one scope for the primary source
+            .push(Ok(make_scope()));
         surgeon
             .read_symbol_scope_results
             .lock()
@@ -3598,7 +3598,7 @@ mod tests {
             .read_symbol_scope_results
             .lock()
             .unwrap()
-            .push(Ok(make_scope())); // Primary target scope
+            .push(Ok(make_scope()));
         surgeon
             .read_symbol_scope_results
             .lock()
@@ -3608,8 +3608,7 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         // Empty call hierarchy
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
-        // Empty call hierarchy on retry
-        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![])); // For retry
         // Probe: goto_definition returns Ok(None) → LSP is still warming up
         // MockLawyer::default() already returns Ok(None) for goto_definition, so no extra setup needed.
 

@@ -3183,7 +3183,7 @@ mod tests {
     #[tokio::test]
     async fn test_warm_start_no_languages_is_noop() {
         let client = client_no_languages();
-        client.warm_start(); // Should not panic
+        client.warm_start_for_languages_and_track(&[]); // Should not panic
                              // Give spawned tasks a chance to run
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

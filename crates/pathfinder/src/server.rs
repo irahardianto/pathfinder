@@ -134,9 +134,10 @@ impl PathfinderServer {
                     // Kick off background initialization so LSP processes are
                     // already loading while the agent issues its first non-LSP
                     // tool calls (get_repo_map, search_codebase, etc.).
-                    // PATCH-004: Instead of warming up all descriptors, we only warm up
-                    // the ones requested by the agent explicitly via get_repo_map. The background
-                    // worker will trigger them lazily if an explicit request is omitted.
+
+                    // Note: warm_start was removed as part of an optimization (PATCH-004)
+                    // The background worker will lazily initialize the processes when they
+                    // are required by tool calls (e.g. read_source_file).
 
                     tracing::info!(
                         workspace = %workspace_root.path().display(),
