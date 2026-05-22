@@ -2861,6 +2861,7 @@ mod tests {
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -2897,6 +2898,7 @@ mod tests {
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -3180,7 +3182,7 @@ mod tests {
     #[tokio::test]
     async fn test_warm_start_no_languages_is_noop() {
         let client = client_no_languages();
-        client.warm_start(); // Should not panic
+        client.warm_start_for_languages_and_track(&[]); // Should not panic
                              // Give spawned tasks a chance to run
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
