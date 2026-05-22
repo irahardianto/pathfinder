@@ -66,6 +66,23 @@ pub async fn get_changed_files_since<R: GitRunner>(
     workspace_root: &Path,
     target: &str,
 ) -> Result<HashSet<PathBuf>, std::io::Error> {
+    // 🛡️ SECURITY: Prevent argument injection
+    // Since `--` cannot safely be used to terminate option parsing in git diff
+    // for revisions (git treats `--` as a disambiguator between revisions and paths),
+    // we must explicitly reject any target starting with `-` to prevent
+    // attackers from injecting options (e.g. `--output=/some/file`).
+    if target.starts_with('-') {
+        tracing::warn!(
+            operation = "get_changed_files_since",
+            target = target,
+            "Rejected target starting with '-' to prevent argument injection"
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "target cannot start with '-'",
+        ));
+    }
+
     tracing::debug!(
         operation = "get_changed_files_since",
         target = target,
@@ -242,5 +259,15 @@ mod tests {
             .expect("should succeed");
 
         assert_eq!(result.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_changed_files_since_rejects_argument_injection() {
+        let runner = FakeGitRunner::ok("");
+        let err = get_changed_files_since(&runner, Path::new("/repo"), "--output=/some/file")
+            .await
+            .expect_err("should reject inputs starting with '-'");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

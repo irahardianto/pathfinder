@@ -1,0 +1,4 @@
+## 2024-05-24 - Git Command Argument Injection
+**Vulnerability:** The `get_changed_files_since` function in `crates/pathfinder-common/src/git.rs` accepted untrusted input (`target`) and appended it directly to a `tokio::process::Command` without checking if it started with a hyphen.
+**Learning:** Git cannot safely use `--` to terminate option parsing for revision parameters because Git uses `--` to disambiguate revisions from paths. If a user provided a revision starting with `-` (e.g. `--output=/some/file` or `--ext-diff`), it would be parsed as an option to `git diff`, leading to argument injection.
+**Prevention:** Explicitly reject untrusted input strings starting with `-` when they are expected to be positional arguments for Git commands, since `--` cannot be relied upon to stop option parsing for revisions.
