@@ -166,10 +166,13 @@ impl AstCache {
                     path: path.to_path_buf(),
                     reason: "In-flight lock poisoned".into(),
                 })?;
-            in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+
+            // PERF: Avoid unconditional PathBuf allocation on cache hits.
+            if !in_flight.contains_key(path) {
+                in_flight.insert(path.to_path_buf(), Arc::new(OnceCell::new()));
+            }
+
+            in_flight.get(path).unwrap_or_else(|| unreachable!()).clone()
         };
 
         // Use get_or_init to ensure only one parse happens per file
@@ -290,10 +293,12 @@ impl AstCache {
                         path: path.to_path_buf(),
                         reason: "Vue in-flight lock poisoned".into(),
                     })?;
-            vue_in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            // PERF: Avoid unconditional PathBuf allocation on cache hits.
+            if !vue_in_flight.contains_key(path) {
+                vue_in_flight.insert(path.to_path_buf(), Arc::new(OnceCell::new()));
+            }
+
+            vue_in_flight.get(path).unwrap_or_else(|| unreachable!()).clone()
         };
 
         // Use get_or_init to ensure only one parse happens per file
