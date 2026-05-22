@@ -428,7 +428,9 @@ impl LspClient {
             .collect();
 
         if to_start.is_empty() {
-            tracing::debug!("PATCH-004: warm_start_for_languages_and_track: no new languages to start");
+            tracing::debug!(
+                "PATCH-004: warm_start_for_languages_and_track: no new languages to start"
+            );
             return;
         }
 
@@ -1622,7 +1624,8 @@ impl Lawyer for LspClient {
     }
 
     fn is_warm_start_complete(&self) -> bool {
-        self.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed)
+        self.warm_start_complete
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn warm_start_for_languages_and_track(&self, language_ids: &[String]) {

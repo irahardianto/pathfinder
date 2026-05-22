@@ -689,7 +689,7 @@ pub struct LspHealthResponse {
     ///
     /// When `true`, all `warm_start` background tasks have finished (even if
     /// some languages failed). When `false`, `warm_start` is still in progress.
-    /// This allows distinguishing "still warming up" from "warm_start finished
+    /// This allows distinguishing "still warming up" from "`warm_start` finished
     /// but LSP didn't report readiness".
     pub warm_start_complete: bool,
 }

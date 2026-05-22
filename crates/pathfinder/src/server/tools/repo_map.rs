@@ -253,7 +253,7 @@ impl PathfinderServer {
         if !result.tech_stack.is_empty() {
             let lawyer = Arc::clone(&self.lawyer);
             let languages = result.tech_stack.clone();
-            
+
             tokio::spawn(async move {
                 lawyer.warm_start_for_languages_and_track(&languages);
                 tracing::info!(

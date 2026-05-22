@@ -112,144 +112,252 @@ enum CallDirection {
     Outgoing,
 }
 
-    /// Result of LSP call-hierarchy resolution for `read_with_deep_context`.
-    struct LspResolution {
-        dependencies: Vec<crate::server::types::DeepContextDependency>,
-        degraded: bool,
-        degraded_reason: Option<DegradedReason>,
-        engines: Vec<&'static str>,
-        dependencies_truncated: bool,
-    }
+/// Result of LSP call-hierarchy resolution for `read_with_deep_context`.
+struct LspResolution {
+    dependencies: Vec<crate::server::types::DeepContextDependency>,
+    degraded: bool,
+    degraded_reason: Option<DegradedReason>,
+    engines: Vec<&'static str>,
+    dependencies_truncated: bool,
+}
 
-    /// PATCH-005: Extract function call patterns from symbol body using language-aware regex.
-    ///
-    /// Returns candidate function names that might be called by this symbol.
-    /// Filters out language keywords and caps at 20 candidates.
-    fn extract_call_candidates(
-        symbol_content: &str,
-        language: &str,
-    ) -> Vec<String> {
-        let pattern = match language {
-            "rust" => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-            "go" => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-            "typescript" | "javascript" => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(|\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-            "python" => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(|\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-            "java" => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-            _ => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-        };
+/// PATCH-005: Extract function call patterns from symbol body using language-aware regex.
+///
+/// Returns candidate function names that might be called by this symbol.
+/// Filters out language keywords and caps at 20 candidates.
+#[allow(clippy::too_many_lines)]
+fn extract_call_candidates(symbol_content: &str, language: &str) -> Vec<String> {
+    let pattern = match language {
+        "typescript" | "javascript" | "python" => {
+            r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(|\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\("
+        }
+        _ => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
+    };
 
-        let re = regex::Regex::new(pattern).unwrap_or_else(|_| {
-            tracing::warn!(language = language, "PATCH-005: failed to compile call pattern, using fallback");
-            regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(").unwrap()
-        });
+    let re = regex::Regex::new(pattern).unwrap_or_else(|_| {
+        tracing::warn!(
+            language = language,
+            "PATCH-005: failed to compile call pattern, using fallback"
+        );
+        #[allow(clippy::expect_used)]
+        let fallback = regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(").expect("fallback regex is valid");
+        fallback
+    });
 
-        let keywords: &[&str] = match language {
-            "rust" => &[
-                "if", "else", "for", "while", "loop", "match", "return", "break", "continue",
-                "let", "mut", "const", "static", "struct", "enum", "trait", "impl", "fn",
-                "type", "where", "use", "mod", "pub", "crate", "super", "self", "Self",
-                "move", "ref", "unsafe", "async", "await",
-            ],
-            "go" => &[
-                "if", "else", "for", "range", "switch", "case", "default", "return", "break",
-                "continue", "go", "defer", "goto", "fallthrough", "select", "chan",
-                "make", "new", "func", "type", "var", "const", "struct", "interface", "import",
-                "package",
-            ],
-            "typescript" | "javascript" => &[
-                "if", "else", "for", "while", "switch", "case", "break", "continue", "return",
-                "function", "class", "interface", "type", "const", "let", "var", "new", "this",
-                "super", "static", "async", "await", "import", "export", "from", "as",
-                "try", "catch", "finally", "throw", "yield", "typeof", "instanceof", "in",
-            ],
-            "python" => &[
-                "if", "elif", "else", "for", "while", "def", "class", "return", "break",
-                "continue", "yield", "async", "await", "import", "from", "as", "try", "except",
-                "finally", "raise", "with", "lambda", "global", "nonlocal", "assert", "pass",
-            ],
-            "java" => &[
-                "if", "else", "for", "while", "switch", "case", "break", "continue", "return",
-                "try", "catch", "finally", "throw", "new", "class", "interface", "extends",
-                "implements", "instanceof", "import", "package", "void", "int", "long", "float",
-                "double", "boolean", "char", "byte", "short", "final", "static", "synchronized",
-                "native",
-            ],
-            _ => &["if", "else", "for", "while", "return", "break", "continue"],
-        };
+    let keywords: &[&str] = match language {
+        "rust" => &[
+            "if", "else", "for", "while", "loop", "match", "return", "break", "continue", "let",
+            "mut", "const", "static", "struct", "enum", "trait", "impl", "fn", "type", "where",
+            "use", "mod", "pub", "crate", "super", "self", "Self", "move", "ref", "unsafe",
+            "async", "await",
+        ],
+        "go" => &[
+            "if",
+            "else",
+            "for",
+            "range",
+            "switch",
+            "case",
+            "default",
+            "return",
+            "break",
+            "continue",
+            "go",
+            "defer",
+            "goto",
+            "fallthrough",
+            "select",
+            "chan",
+            "make",
+            "new",
+            "func",
+            "type",
+            "var",
+            "const",
+            "struct",
+            "interface",
+            "import",
+            "package",
+        ],
+        "typescript" | "javascript" => &[
+            "if",
+            "else",
+            "for",
+            "while",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "return",
+            "function",
+            "class",
+            "interface",
+            "type",
+            "const",
+            "let",
+            "var",
+            "new",
+            "this",
+            "super",
+            "static",
+            "async",
+            "await",
+            "import",
+            "export",
+            "from",
+            "as",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "yield",
+            "typeof",
+            "instanceof",
+            "in",
+        ],
+        "python" => &[
+            "if", "elif", "else", "for", "while", "def", "class", "return", "break", "continue",
+            "yield", "async", "await", "import", "from", "as", "try", "except", "finally", "raise",
+            "with", "lambda", "global", "nonlocal", "assert", "pass",
+        ],
+        "java" => &[
+            "if",
+            "else",
+            "for",
+            "while",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "return",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "new",
+            "class",
+            "interface",
+            "extends",
+            "implements",
+            "instanceof",
+            "import",
+            "package",
+            "void",
+            "int",
+            "long",
+            "float",
+            "double",
+            "boolean",
+            "char",
+            "byte",
+            "short",
+            "final",
+            "static",
+            "synchronized",
+            "native",
+        ],
+        _ => &["if", "else", "for", "while", "return", "break", "continue"],
+    };
 
-        let mut candidates = std::collections::HashSet::new();
+    let mut candidates = std::collections::HashSet::new();
 
-        for caps in re.captures_iter(symbol_content) {
-            let name = caps.get(1).or_else(|| caps.get(2));
-            if let Some(m) = name {
-                let name = m.as_str();
-                if !keywords.contains(&name) {
-                    candidates.insert(name.to_owned());
-                }
+    for caps in re.captures_iter(symbol_content) {
+        let name = caps.get(1).or_else(|| caps.get(2));
+        if let Some(m) = name {
+            let name = m.as_str();
+            if !keywords.contains(&name) {
+                candidates.insert(name.to_owned());
             }
         }
-
-        let mut result: Vec<String> = candidates.into_iter().collect();
-        result.truncate(20);
-        result
     }
 
-    impl PathfinderServer {
-        /// Resolve LSP call-hierarchy dependencies for a symbol.
-        ///
-        /// PATCH-005: When LSP is degraded, falls back to grep-based dependency discovery
-        /// by parsing the symbol body for function calls and resolving each via search.
-        ///
-        /// Extracted from `read_with_deep_context` to reduce nesting depth.
-        /// Prepares the call hierarchy, then fetches outgoing calls and
-        /// maps them to `DeepContextDependency` entries. Includes LSP warmup
-        /// retry logic (3-second wait + re-probe) mirroring `get_definition_impl`.
-        #[expect(
-            clippy::too_many_lines,
-            reason = "Call-hierarchy resolution with LSP warmup probe + retry + grep fallback. Linear structure for readability."
-        )]
-        async fn resolve_lsp_dependencies(
-            &self,
-            semantic_path: &pathfinder_common::types::SemanticPath,
-            start_line: usize,
-            name_column: usize,
-            project_only: bool,
-            max_dependencies: u32,
-        ) -> LspResolution {
-            let mut dependencies = Vec::new();
-            let mut degraded = true;
-            let mut degraded_reason = Some(DegradedReason::NoLsp);
-            let mut engines = vec!["tree-sitter"];
-            let mut dependencies_truncated = false;
+    let mut result: Vec<String> = candidates.into_iter().collect();
+    result.truncate(20);
+    result
+}
 
-            let lsp_result = self
-                .lawyer
-                .call_hierarchy_prepare(
-                    self.workspace_root.path(),
-                    &semantic_path.file_path,
-                    u32::try_from(start_line + 1).unwrap_or(1),
-                    u32::try_from(name_column + 1).unwrap_or(1),
-                )
-                .await;
+impl PathfinderServer {
+    /// Resolve LSP call-hierarchy dependencies for a symbol.
+    ///
+    /// PATCH-005: When LSP is degraded, falls back to grep-based dependency discovery
+    /// by parsing the symbol body for function calls and resolving each via search.
+    ///
+    /// Extracted from `read_with_deep_context` to reduce nesting depth.
+    /// Prepares the call hierarchy, then fetches outgoing calls and
+    /// maps them to `DeepContextDependency` entries. Includes LSP warmup
+    /// retry logic (3-second wait + re-probe) mirroring `get_definition_impl`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Call-hierarchy resolution with LSP warmup probe + retry + grep fallback. Linear structure for readability."
+    )]
+    async fn resolve_lsp_dependencies(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        start_line: usize,
+        name_column: usize,
+        project_only: bool,
+        max_dependencies: u32,
+    ) -> LspResolution {
+        let mut dependencies = Vec::new();
+        let mut degraded = true;
+        let mut degraded_reason = Some(DegradedReason::NoLsp);
+        let mut engines = vec!["tree-sitter"];
+        let mut dependencies_truncated = false;
 
-            match lsp_result {
-                Ok(items) if !items.is_empty() => {
-                    dependencies_truncated = self
-                        .append_outgoing_deps(
-                            &items[0],
-                            &mut dependencies,
-                            &mut engines,
-                            &mut degraded,
-                            &mut degraded_reason,
-                            project_only,
-                            max_dependencies,
-                        )
-                        .await;
-                }
-                Ok(_) => {
-                    let probe = self
+        let lsp_result = self
+            .lawyer
+            .call_hierarchy_prepare(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(start_line + 1).unwrap_or(1),
+                u32::try_from(name_column + 1).unwrap_or(1),
+            )
+            .await;
+
+        match lsp_result {
+            Ok(items) if !items.is_empty() => {
+                dependencies_truncated = self
+                    .append_outgoing_deps(
+                        &items[0],
+                        &mut dependencies,
+                        &mut engines,
+                        &mut degraded,
+                        &mut degraded_reason,
+                        project_only,
+                        max_dependencies,
+                    )
+                    .await;
+            }
+            Ok(_) => {
+                let probe = self
+                    .lawyer
+                    .goto_definition(
+                        self.workspace_root.path(),
+                        &semantic_path.file_path,
+                        u32::try_from(start_line + 1).unwrap_or(1),
+                        u32::try_from(name_column + 1).unwrap_or(1),
+                    )
+                    .await;
+
+                if matches!(probe, Ok(Some(_))) {
+                    engines.push("lsp");
+                    degraded = false;
+                    degraded_reason = None;
+                } else {
+                    engines.push("lsp");
+
+                    tracing::info!(
+                        tool = "read_with_deep_context",
+                        semantic_path = %semantic_path,
+                        "read_with_deep_context: call_hierarchy_prepare returned [] and goto_definition \
+                         probe returned no result — LSP likely warming up, waiting 3s and retrying"
+                    );
+
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                    let retry_result = self
                         .lawyer
-                        .goto_definition(
+                        .call_hierarchy_prepare(
                             self.workspace_root.path(),
                             &semantic_path.file_path,
                             u32::try_from(start_line + 1).unwrap_or(1),
@@ -257,221 +365,203 @@ enum CallDirection {
                         )
                         .await;
 
-                    if matches!(probe, Ok(Some(_))) {
-                        engines.push("lsp");
-                        degraded = false;
-                        degraded_reason = None;
-                    } else {
-                        engines.push("lsp");
-
-                        tracing::info!(
-                            tool = "read_with_deep_context",
-                            semantic_path = %semantic_path,
-                            "read_with_deep_context: call_hierarchy_prepare returned [] and goto_definition \
-                             probe returned no result — LSP likely warming up, waiting 3s and retrying"
-                        );
-
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-                        let retry_result = self
-                            .lawyer
-                            .call_hierarchy_prepare(
-                                self.workspace_root.path(),
-                                &semantic_path.file_path,
-                                u32::try_from(start_line + 1).unwrap_or(1),
-                                u32::try_from(name_column + 1).unwrap_or(1),
-                            )
-                            .await;
-
-                        match retry_result {
-                            Ok(retry_items) if !retry_items.is_empty() => {
-                                tracing::info!(
-                                    tool = "read_with_deep_context",
-                                    semantic_path = %semantic_path,
-                                    "read_with_deep_context: call_hierarchy_prepare succeeded on retry after warmup wait"
-                                );
-                                dependencies_truncated = self
-                                    .append_outgoing_deps(
-                                        &retry_items[0],
-                                        &mut dependencies,
-                                        &mut engines,
-                                        &mut degraded,
-                                        &mut degraded_reason,
-                                        project_only,
-                                        max_dependencies,
-                                    )
-                                    .await;
-                            }
-                            _ => {
-                                tracing::info!(
-                                    tool = "read_with_deep_context",
-                                    semantic_path = %semantic_path,
-                                    "read_with_deep_context: retry also returned empty — attempting grep fallback (PATCH-005)"
-                                );
-                                (degraded, degraded_reason) = self.attempt_grep_fallback(
+                    match retry_result {
+                        Ok(retry_items) if !retry_items.is_empty() => {
+                            tracing::info!(
+                                tool = "read_with_deep_context",
+                                semantic_path = %semantic_path,
+                                "read_with_deep_context: call_hierarchy_prepare succeeded on retry after warmup wait"
+                            );
+                            dependencies_truncated = self
+                                .append_outgoing_deps(
+                                    &retry_items[0],
+                                    &mut dependencies,
+                                    &mut engines,
+                                    &mut degraded,
+                                    &mut degraded_reason,
+                                    project_only,
+                                    max_dependencies,
+                                )
+                                .await;
+                        }
+                        _ => {
+                            tracing::info!(
+                                tool = "read_with_deep_context",
+                                semantic_path = %semantic_path,
+                                "read_with_deep_context: retry also returned empty — attempting grep fallback (PATCH-005)"
+                            );
+                            (degraded, degraded_reason) = self
+                                .attempt_grep_fallback(
                                     semantic_path,
                                     &mut dependencies,
                                     &mut engines,
                                     project_only,
                                     max_dependencies,
-                                ).await;
-                            }
+                                )
+                                .await;
                         }
                     }
                 }
-                Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
-                    tracing::info!(
-                        tool = "read_with_deep_context",
-                        semantic_path = %semantic_path,
-                        "read_with_deep_context: NoLspAvailable — attempting grep fallback (PATCH-005)"
-                    );
-                    (degraded, degraded_reason) = self.attempt_grep_fallback(
+            }
+            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
+                tracing::info!(
+                    tool = "read_with_deep_context",
+                    semantic_path = %semantic_path,
+                    "read_with_deep_context: NoLspAvailable — attempting grep fallback (PATCH-005)"
+                );
+                (degraded, degraded_reason) = self
+                    .attempt_grep_fallback(
                         semantic_path,
                         &mut dependencies,
                         &mut engines,
                         project_only,
                         max_dependencies,
-                    ).await;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tool = "read_with_deep_context",
-                        error = %e,
-                        "call_hierarchy_prepare failed"
-                    );
-                }
+                    )
+                    .await;
             }
-
-            LspResolution {
-                dependencies,
-                degraded,
-                degraded_reason,
-                engines,
-                dependencies_truncated,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "read_with_deep_context",
+                    error = %e,
+                    "call_hierarchy_prepare failed"
+                );
             }
         }
 
-        /// PATCH-005: Resolve a candidate function name to its definition using grep search.
-        async fn resolve_candidate_via_grep(
-            &self,
-            candidate: &str,
-            language: &str,
-            max_results_per_candidate: usize,
-        ) -> Option<(String, u32, String)> {
-            let pattern = match language {
-                "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{candidate}\b"),
-                "go" => format!(r"func\s+{candidate}\b"),
-                "typescript" | "javascript" => {
-                    format!(r"(?:(?:export\s+(?:default\s*)?)?function\s+{candidate}\b|(?:{candidate}\s*:\s*)[^{{]*\([^)]*\)\s*=>)")
-                }
-                "python" => format!(r"(?:async\s+)?def\s+{candidate}\b"),
-                "java" => {
-                    format!(r"(?:(?:public|private|protected|static|final|synchronized|native|abstract|transient)\s+)*[A-Z][a-zA-Z0-9_]*\s+{candidate}\b")
-                }
-                _ => format!(r"\b(?:fn|def|function|class|struct|type|interface)\s+{candidate}\b"),
-            };
-
-            self.scout
-                .search(&pathfinder_search::SearchParams {
-                    workspace_root: self.workspace_root.path().to_path_buf(),
-                    query: pattern,
-                    is_regex: true,
-                    max_results: max_results_per_candidate,
-                    path_glob: format!("**/*.{}", language),
-                    exclude_glob: String::default(),
-                    context_lines: 0,
-                    offset: 0,
-                })
-                .await
-                .ok()
-                .and_then(|result| {
-                    result.matches.first().map(|m| {
-                        (m.file.clone(), u32::try_from(m.line).unwrap_or(u32::MAX), m.content.clone())
-                    })
-                })
+        LspResolution {
+            dependencies,
+            degraded,
+            degraded_reason,
+            engines,
+            dependencies_truncated,
         }
+    }
 
-        /// PATCH-005: Attempt grep-based dependency discovery when LSP is unavailable.
-        async fn attempt_grep_fallback(
-            &self,
-            semantic_path: &pathfinder_common::types::SemanticPath,
-            dependencies: &mut Vec<crate::server::types::DeepContextDependency>,
-            engines: &mut Vec<&'static str>,
-            project_only: bool,
-            max_dependencies: u32,
-        ) -> (bool, Option<DegradedReason>) {
-            let scope_result = match self
-                .surgeon
-                .read_symbol_scope(self.workspace_root.path(), semantic_path)
-                .await
-            {
-                Ok(s) => s,
-                Err(_) => {
-                    tracing::warn!(
-                        tool = "read_with_deep_context",
-                        semantic_path = %semantic_path,
-                        "PATCH-005: failed to read symbol scope for grep fallback"
-                    );
-                    return (true, Some(DegradedReason::GrepFallbackDependencies));
-                }
-            };
+    /// PATCH-005: Resolve a candidate function name to its definition using grep search.
+    async fn resolve_candidate_via_grep(
+        &self,
+        candidate: &str,
+        language: &str,
+        max_results_per_candidate: usize,
+    ) -> Option<(String, u32, String)> {
+        let pattern = match language {
+            "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{candidate}\b"),
+            "go" => format!(r"func\s+{candidate}\b"),
+            "typescript" | "javascript" => {
+                format!(
+                    r"(?:(?:export\s+(?:default\s*)?)?function\s+{candidate}\b|(?:{candidate}\s*:\s*)[^{{]*\([^)]*\)\s*=>)"
+                )
+            }
+            "python" => format!(r"(?:async\s+)?def\s+{candidate}\b"),
+            "java" => {
+                format!(
+                    r"(?:(?:public|private|protected|static|final|synchronized|native|abstract|transient)\s+)*[A-Z][a-zA-Z0-9_]*\s+{candidate}\b"
+                )
+            }
+            _ => format!(r"\b(?:fn|def|function|class|struct|type|interface)\s+{candidate}\b"),
+        };
 
-            let language = &scope_result.language;
-            let candidates = extract_call_candidates(&scope_result.content, language);
+        self.scout
+            .search(&pathfinder_search::SearchParams {
+                workspace_root: self.workspace_root.path().to_path_buf(),
+                query: pattern,
+                is_regex: true,
+                max_results: max_results_per_candidate,
+                path_glob: format!("**/*.{language}"),
+                exclude_glob: String::default(),
+                context_lines: 0,
+                offset: 0,
+            })
+            .await
+            .ok()
+            .and_then(|result| {
+                result.matches.first().map(|m| {
+                    (
+                        m.file.clone(),
+                        u32::try_from(m.line).unwrap_or(u32::MAX),
+                        m.content.clone(),
+                    )
+                })
+            })
+    }
 
-            if candidates.is_empty() {
-                tracing::info!(
+    /// PATCH-005: Attempt grep-based dependency discovery when LSP is unavailable.
+    async fn attempt_grep_fallback(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        dependencies: &mut Vec<crate::server::types::DeepContextDependency>,
+        engines: &mut Vec<&'static str>,
+        project_only: bool,
+        max_dependencies: u32,
+    ) -> (bool, Option<DegradedReason>) {
+        let Ok(scope_result) = self
+            .surgeon
+            .read_symbol_scope(self.workspace_root.path(), semantic_path)
+            .await else {
+                tracing::warn!(
                     tool = "read_with_deep_context",
                     semantic_path = %semantic_path,
-                    "PATCH-005: grep fallback found no call candidates"
+                    "PATCH-005: failed to read symbol scope for grep fallback"
                 );
                 return (true, Some(DegradedReason::GrepFallbackDependencies));
-            }
+            };
 
+        let language = &scope_result.language;
+        let candidates = extract_call_candidates(&scope_result.content, language);
+
+        if candidates.is_empty() {
             tracing::info!(
                 tool = "read_with_deep_context",
                 semantic_path = %semantic_path,
-                candidate_count = candidates.len(),
-                "PATCH-005: grep fallback resolving {} candidates",
-                candidates.len()
+                "PATCH-005: grep fallback found no call candidates"
             );
-
-            let max_deps = max_dependencies as usize;
-
-            for candidate in candidates {
-                if dependencies.len() >= max_deps {
-                    break;
-                }
-
-                if let Some((file, line, signature)) = self
-                    .resolve_candidate_via_grep(&candidate, language, 2)
-                    .await
-                {
-                    if project_only && (!is_source_file(&file) || !is_workspace_file(&file)) {
-                        continue;
-                    }
-
-                    let dep_path = format!("{}::{}", file, candidate);
-                    dependencies.push(crate::server::types::DeepContextDependency {
-                        semantic_path: dep_path,
-                        signature,
-                        file,
-                        line: line as usize,
-                    });
-                }
-            }
-
-            engines.push("ripgrep");
-            tracing::info!(
-                tool = "read_with_deep_context",
-                semantic_path = %semantic_path,
-                resolved_count = dependencies.len(),
-                "PATCH-005: grep fallback resolved {} dependencies",
-                dependencies.len()
-            );
-
-            (true, Some(DegradedReason::GrepFallbackDependencies))
+            return (true, Some(DegradedReason::GrepFallbackDependencies));
         }
+
+        tracing::info!(
+            tool = "read_with_deep_context",
+            semantic_path = %semantic_path,
+            candidate_count = candidates.len(),
+            "PATCH-005: grep fallback resolving {} candidates",
+            candidates.len()
+        );
+
+        let max_deps = max_dependencies as usize;
+
+        for candidate in candidates {
+            if dependencies.len() >= max_deps {
+                break;
+            }
+
+            if let Some((file, line, signature)) = self
+                .resolve_candidate_via_grep(&candidate, language, 2)
+                .await
+            {
+                if project_only && (!is_source_file(&file) || !is_workspace_file(&file)) {
+                    continue;
+                }
+
+                let dep_path = format!("{file}::{candidate}");
+                dependencies.push(crate::server::types::DeepContextDependency {
+                    semantic_path: dep_path,
+                    signature,
+                    file,
+                    line: line as usize,
+                });
+            }
+        }
+
+        engines.push("ripgrep");
+        tracing::info!(
+            tool = "read_with_deep_context",
+            semantic_path = %semantic_path,
+            resolved_count = dependencies.len(),
+            "PATCH-005: grep fallback resolved {} dependencies",
+            dependencies.len()
+        );
+
+        (true, Some(DegradedReason::GrepFallbackDependencies))
+    }
 
     /// Fetch outgoing call-hierarchy items and append them as dependencies.
     /// Returns `true` if results were truncated due to `max_dependencies` limit.
@@ -2936,7 +3026,12 @@ mod tests {
             .read_symbol_scope_results
             .lock()
             .unwrap()
-            .push(Ok(make_scope()));
+            .push(Ok(make_scope())); // Need one scope for the primary source
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope())); // Need a second scope for attempt_grep_fallback
 
         let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
         let ws_dir = tempdir().expect("temp dir");
@@ -2965,9 +3060,9 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(text_content, "⚠️ DEGRADED (no_lsp) — Dependencies may be incomplete. LSP was unavailable or still warming.\n\n0 dependencies loaded\n\nfn login() { }");
+        assert_eq!(text_content, "⚠️ DEGRADED (grep_fallback_dependencies) — Dependencies may be incomplete. LSP was unavailable or still warming.\n\n0 dependencies loaded\n\nfn login() { }");
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::GrepFallbackDependencies));
         assert!(val.dependencies.is_empty());
     }
 
@@ -3503,10 +3598,17 @@ mod tests {
             .read_symbol_scope_results
             .lock()
             .unwrap()
-            .push(Ok(make_scope()));
+            .push(Ok(make_scope())); // Primary target scope
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope())); // Grep fallback scope
 
         let lawyer = Arc::new(MockLawyer::default());
         // Empty call hierarchy
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // Empty call hierarchy on retry
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
         // Probe: goto_definition returns Ok(None) → LSP is still warming up
         // MockLawyer::default() already returns Ok(None) for goto_definition, so no extra setup needed.
@@ -3674,10 +3776,16 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(make_scope()));
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope())); // Extra for grep fallback
 
         let lawyer = Arc::new(MockLawyer::default());
         // Empty call hierarchy
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![])); // For retry
         // Probe: goto_definition returns Ok(None) → LSP is still warming up
         // MockLawyer::default() already returns Ok(None) for goto_definition, so no extra setup needed.
 
@@ -3699,7 +3807,7 @@ mod tests {
         );
         assert_eq!(
             val.degraded_reason,
-            Some(DegradedReason::LspWarmupEmptyUnverified),
+            Some(DegradedReason::GrepFallbackDependencies),
             "degraded_reason must indicate warmup ambiguity"
         );
         assert!(val.dependencies.is_empty());
