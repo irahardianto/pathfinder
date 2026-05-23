@@ -30,9 +30,19 @@ impl GitRunner for SystemGit {
         workspace_root: &Path,
         target: &str,
     ) -> Result<Vec<u8>, std::io::Error> {
+        // SECURITY: Prevent argument injection via untrusted target strings.
+        // Git cannot use `--` to safely terminate option parsing for revisions,
+        // so we must reject any revision that looks like an option.
+        if target.starts_with('-') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "git diff target cannot start with a hyphen (security invariant)",
+            ));
+        }
+
         let output = tokio::process::Command::new("git")
             .current_dir(workspace_root)
-            .args(["diff", "--name-only", target])
+            .args(["diff", "--name-only", target, "--"])
             .output()
             .await?;
 
@@ -242,5 +252,16 @@ mod tests {
             .expect("should succeed");
 
         assert_eq!(result.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_changed_files_since_rejects_hyphen_target() {
+        // Covers: Security invariant that git diff target cannot start with a hyphen.
+        let result = SystemGit
+            .diff_name_only(Path::new("/repo"), "--output=/tmp/pwned")
+            .await;
+
+        let err = result.expect_err("should reject target starting with hyphen");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

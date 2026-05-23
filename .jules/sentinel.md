@@ -1,0 +1,4 @@
+## 2024-05-23 - Prevent Command Injection in Git Diff Target
+**Vulnerability:** The `git diff` invocation in `get_changed_files_since` accepted an unvalidated user string (`target`) directly. If a user provided a string starting with a hyphen (e.g., `--output=/tmp/file`), git could interpret it as a command-line option rather than a revision, leading to command/argument injection.
+**Learning:** For git, passing `--` prior to the revision does not reliably prevent argument injection because Git uses `--` to disambiguate revisions from paths, not options from revisions.
+**Prevention:** Always validate untrusted strings intended for `std::process::Command` when they are positional arguments, especially explicitly rejecting values starting with `-` when they represent revisions or branches in tools like `git`.
