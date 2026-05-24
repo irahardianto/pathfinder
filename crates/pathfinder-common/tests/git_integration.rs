@@ -189,3 +189,21 @@ async fn test_system_git_diff_fails_outside_repo() {
         "diff_name_only must fail outside a git repository"
     );
 }
+
+/// Verify that `diff_name_only` rejects targets starting with `-` to prevent
+/// argument injection.
+#[tokio::test]
+async fn test_system_git_diff_rejects_options_as_target() {
+    let repo = git_repo_with_initial_commit();
+    let root = repo.path();
+
+    let git = SystemGit;
+    let result = git.diff_name_only(root, "--no-index").await;
+
+    assert!(
+        result.is_err(),
+        "diff_name_only must reject targets starting with '-'"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
