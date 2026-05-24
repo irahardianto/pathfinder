@@ -56,6 +56,13 @@ pub struct LspLanguageStatus {
     pub indexing_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_duration_secs: Option<u64>,
+    /// Whether the LSP warm-start process has completed.
+    ///
+    /// `true` means the client successfully sent all warm-start requests
+    /// (didOpen notifications) and the LSP has had time to process them.
+    /// `false` or `None` means warm-start is still in progress or was not attempted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_start_complete: Option<bool>,
 }
 
 /// The location of a symbol's definition in the workspace.

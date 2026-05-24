@@ -200,8 +200,10 @@ fn validation_status_from_parts(
             server_name: None,
             indexing_source: None,
             indexing_duration_secs: None,
+            warm_start_complete: None,
         };
     }
+
     let navigation_ready = Some(supports_definition);
 
     match diagnostics_strategy {
@@ -226,6 +228,7 @@ fn validation_status_from_parts(
             server_name: server_name.map(ToOwned::to_owned),
             indexing_source,
             indexing_duration_secs,
+            warm_start_complete: None,
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
@@ -241,6 +244,7 @@ fn validation_status_from_parts(
             server_name: server_name.map(ToOwned::to_owned),
             indexing_source,
             indexing_duration_secs,
+            warm_start_complete: None,
         },
     }
 }
@@ -407,6 +411,19 @@ impl LspClient {
 
         Ok(client)
     }
+    /// PATCH-004: Kick off `warm_start` for all detected languages.
+    ///
+    /// Equivalent to calling `warm_start_for_languages_and_track` for every
+    /// known language descriptor.
+    pub fn warm_start(&self) {
+        let all: Vec<String> = self
+            .descriptors
+            .iter()
+            .map(|d| d.language_id.clone())
+            .collect();
+        self.warm_start_for_languages_and_track(&all);
+    }
+
     /// PATCH-004: Kick off `warm_start` for specific languages and track completion.
     ///
     /// Spawns background tasks for the specified languages, then spawns another
@@ -428,7 +445,9 @@ impl LspClient {
             .collect();
 
         if to_start.is_empty() {
-            tracing::debug!("PATCH-004: warm_start_for_languages_and_track: no new languages to start");
+            tracing::debug!(
+                "PATCH-004: warm_start_for_languages_and_track: no new languages to start"
+            );
             return;
         }
 
@@ -1605,6 +1624,7 @@ impl Lawyer for LspClient {
                     server_name: None,
                     indexing_source: None,
                     indexing_duration_secs: None,
+                    warm_start_complete: None,
                 },
                 |entry| entry.to_validation_status(&desc.command),
             );
@@ -1622,7 +1642,8 @@ impl Lawyer for LspClient {
     }
 
     fn is_warm_start_complete(&self) -> bool {
-        self.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed)
+        self.warm_start_complete
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn warm_start_for_languages_and_track(&self, language_ids: &[String]) {
@@ -2861,6 +2882,7 @@ mod tests {
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -2897,6 +2919,7 @@ mod tests {
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

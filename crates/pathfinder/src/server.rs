@@ -339,6 +339,7 @@ mod tests {
     use pathfinder_common::types::FilterMode;
     use pathfinder_search::{MockScout, SearchMatch, SearchResult};
     use pathfinder_treesitter::mock::MockSurgeon;
+    use pathfinder_treesitter::surgeon::{AccessLevel, ExtractedSymbol, SymbolKind};
     use rmcp::model::ErrorCode;
     use std::fs;
     use tempfile::tempdir;
@@ -493,6 +494,7 @@ mod tests {
                 context_before: vec![],
                 context_after: vec![],
                 enclosing_semantic_path: None,
+                is_definition: None,
                 version_hash: "sha256:123".to_owned(),
                 known: None,
             }],
@@ -508,6 +510,21 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(Some("test_query_func".to_owned())));
+        mock_surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(Some(ExtractedSymbol {
+                name: "test_query_func".to_owned(),
+                semantic_path: "test_query_func".to_owned(),
+                kind: SymbolKind::Function,
+                byte_range: 0..1,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: AccessLevel::Public,
+                children: vec![],
+            })));
 
         let server = PathfinderServer::with_engines(
             ws,
@@ -541,7 +558,7 @@ mod tests {
         assert_eq!(calls[0].query, "test_query");
         assert!(calls[0].is_regex);
 
-        let surgeon_calls = mock_surgeon.enclosing_symbol_calls.lock().unwrap();
+        let surgeon_calls = mock_surgeon.enclosing_symbol_detail_calls.lock().unwrap();
         assert_eq!(surgeon_calls.len(), 1);
         assert_eq!(surgeon_calls[0].1, std::path::PathBuf::from("src/main.rs"));
         assert_eq!(surgeon_calls[0].2, 10);
@@ -588,6 +605,7 @@ mod tests {
             context_before: vec![],
             context_after: vec![],
             enclosing_semantic_path: None,
+            is_definition: None,
             version_hash: "sha256:abc".to_owned(),
             known: None,
         }
@@ -615,9 +633,15 @@ mod tests {
         let mock_surgeon = Arc::new(MockSurgeon::new());
         // 3 matches → 3 calls: code, comment, code
         // enclosing_symbol called 3 times → return None each (default "code" below)
+        // enclosing_symbol_detail called 3 times → return None each
         // node_type_at_position called 3 times → pre-configure results
         mock_surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+        mock_surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .extend([Ok(None), Ok(None), Ok(None)]);
@@ -684,6 +708,11 @@ mod tests {
             .unwrap()
             .extend([Ok(None), Ok(None), Ok(None)]);
         mock_surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+        mock_surgeon
             .node_type_at_position_results
             .lock()
             .unwrap()
@@ -738,6 +767,12 @@ mod tests {
         // enclosing_symbol: all return None
         mock_surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+        // enclosing_symbol_detail: all return None
+        mock_surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .extend([Ok(None), Ok(None), Ok(None)]);
@@ -970,6 +1005,7 @@ mod tests {
                     context_before: vec!["before".to_owned()],
                     context_after: vec!["after".to_owned()],
                     enclosing_semantic_path: None,
+                    is_definition: None,
                     version_hash: "sha256:abc".to_owned(),
                     known: None,
                 },
@@ -981,6 +1017,7 @@ mod tests {
                     context_before: vec!["ctx_before".to_owned()],
                     context_after: vec!["ctx_after".to_owned()],
                     enclosing_semantic_path: None,
+                    is_definition: None,
                     version_hash: "sha256:xyz".to_owned(),
                     known: None,
                 },
@@ -995,6 +1032,11 @@ mod tests {
         // Two matches → two enrichment calls
         mock_surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None)]);
+        mock_surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .extend([Ok(None), Ok(None)]);
@@ -1072,6 +1114,7 @@ mod tests {
                 context_before: vec!["before".to_owned()],
                 context_after: vec![],
                 enclosing_semantic_path: None,
+                is_definition: None,
                 version_hash: "sha256:abc".to_owned(),
                 known: None,
             }],
@@ -1084,6 +1127,11 @@ mod tests {
         let mock_surgeon = Arc::new(MockSurgeon::new());
         mock_surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        mock_surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .push(Ok(None));
@@ -1133,6 +1181,7 @@ mod tests {
                     context_before: vec![],
                     context_after: vec![],
                     enclosing_semantic_path: None,
+                    is_definition: None,
                     version_hash: "sha256:auth".to_owned(),
                     known: None,
                 },
@@ -1144,6 +1193,7 @@ mod tests {
                     context_before: vec![],
                     context_after: vec![],
                     enclosing_semantic_path: None,
+                    is_definition: None,
                     version_hash: "sha256:auth".to_owned(),
                     known: None,
                 },
@@ -1156,6 +1206,7 @@ mod tests {
                     context_before: vec!["prev".to_owned()],
                     context_after: vec![],
                     enclosing_semantic_path: None,
+                    is_definition: None,
                     version_hash: "sha256:main".to_owned(),
                     known: None,
                 },
@@ -1170,6 +1221,11 @@ mod tests {
         // 3 enrichments
         mock_surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None)]);
+        mock_surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .extend([Ok(None), Ok(None), Ok(None)]);

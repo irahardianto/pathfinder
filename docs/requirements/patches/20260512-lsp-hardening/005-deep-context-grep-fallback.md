@@ -1,7 +1,7 @@
 # 005: Grep Fallback for `read_with_deep_context`
 
 **Epic**: 2 — LSP Hardening
-**Status**: ☐ Pending
+**Status**: ✓ Complete
 **Severity**: Medium
 **Risk**: Medium — adds heuristic dependency discovery; may produce false positives
 

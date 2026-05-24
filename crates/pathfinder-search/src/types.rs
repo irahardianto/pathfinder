@@ -73,6 +73,14 @@ pub struct SearchMatch {
     pub enclosing_semantic_path: Option<String>,
     /// SHA-256 content fingerprint of the matched file.
     pub version_hash: String,
+    /// Whether this match is at a definition position (fn, struct, class, etc.).
+    ///
+    /// Computed during Tree-sitter enrichment by checking if the match position
+    /// coincides with a symbol definition line. `None` when enrichment was skipped
+    /// (e.g., unsupported language). `Some(true)` means the match is a definition,
+    /// `Some(false)` means it is a reference/call site.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_definition: Option<bool>,
     /// `true` when this file was listed in `known_files`.
     ///
     /// When set, `content`, `context_before`, and `context_after` are empty.

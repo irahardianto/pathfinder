@@ -60,13 +60,13 @@ Each spec is a self-contained, bite-sized deliverable with acceptance criteria a
 | [002-search-hint-field.md](./002-search-hint-field.md) | Add zero-result hint to `search_codebase` | ✅ Done |
 | [003-repo-map-lsp-status.md](./003-repo-map-lsp-status.md) | Surface LSP status in `get_repo_map` | ✅ Done |
 
-### Epic 2: LSP Hardening (Medium Risk, High Impact) — Next
+### Epic 2: LSP Hardening (Medium Risk, High Impact) — In Progress
 
 | Spec | Title | Status |
 |------|-------|--------|
-| [004-warm-start-tracking.md](./004-warm-start-tracking.md) | Track `warm_start` completion + expose in `lsp_health` | ☐ Pending |
+| [004-warm-start-tracking.md](./004-warm-start-tracking.md) | Track `warm_start` completion + expose in `lsp_health` | ✅ Done |
 | [005-deep-context-grep-fallback.md](./005-deep-context-grep-fallback.md) | Grep fallback for `read_with_deep_context` | ☐ Pending |
-| [006-per-language-indexing-timeouts.md](./006-per-language-indexing-timeouts.md) | Per-language indexing timeouts (enhances LSP-HEALTH-001 Task 6) | ☐ Pending |
+| [006-per-language-indexing-timeouts.md](./006-per-language-indexing-timeouts.md) | Per-language indexing timeouts (enhances LSP-HEALTH-001 Task 6) | ✅ Done |
 
 ### Epic 3: Richer Grep Fallbacks (Medium Risk, Medium Impact)
 

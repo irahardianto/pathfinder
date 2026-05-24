@@ -4,7 +4,7 @@ use crate::language::SupportedLanguage;
 use crate::surgeon::{ExtractedSymbol, Surgeon};
 use crate::symbols::{
     did_you_mean, extract_symbols_from_multizone, extract_symbols_from_tree, find_enclosing_symbol,
-    resolve_symbol_chain,
+    find_enclosing_symbol_ref, resolve_symbol_chain,
 };
 use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::Path;
@@ -154,8 +154,18 @@ impl Surgeon for TreeSitterSurgeon {
         line: usize,
     ) -> Result<Option<String>, SurgeonError> {
         let (_, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
-        // `find_enclosing_symbol` uses 0-indexed lines; `line` is 1-indexed.
         Ok(find_enclosing_symbol(&symbols, line.saturating_sub(1)))
+    }
+
+    #[instrument(skip(self, workspace_root))]
+    async fn enclosing_symbol_detail(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: usize,
+    ) -> Result<Option<ExtractedSymbol>, SurgeonError> {
+        let (_, _, _, symbols) = self.cached_parse(workspace_root, file_path).await?;
+        Ok(find_enclosing_symbol_ref(&symbols, line.saturating_sub(1)).cloned())
     }
 
     #[instrument(skip(self, workspace_root))]

@@ -120,6 +120,19 @@ pub trait Surgeon: Send + Sync {
         line: usize,
     ) -> Result<Option<String>, SurgeonError>;
 
+    /// Find the innermost symbol enclosing the given 1-indexed line,
+    /// returning the full [`ExtractedSymbol`] (including `start_line` for
+    /// computing `is_definition`).
+    async fn enclosing_symbol_detail(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: usize,
+    ) -> Result<Option<ExtractedSymbol>, SurgeonError> {
+        let _ = (workspace_root, file_path, line);
+        Ok(None)
+    }
+
     /// Classify the AST node at a given source position.
     ///
     /// Walks the AST from the leaf node at `(line, column)` upward, returning

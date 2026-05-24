@@ -189,10 +189,11 @@ impl Sink for MatchCollector<'_> {
             column,
             content: content.clone(),
             context_before: std::mem::take(&mut self.context_before_buf).into(),
-            context_after: Vec::new(), // filled later by `context()`
+            context_after: Vec::new(),
             enclosing_semantic_path: None,
+            is_definition: None,
             version_hash: self.version_hash.clone(),
-            known: None, // set to Some(true) by search_codebase_impl for known_files
+            known: None,
         };
 
         // This matching line itself acts as "before context" for a subsequent adjacent overlap match

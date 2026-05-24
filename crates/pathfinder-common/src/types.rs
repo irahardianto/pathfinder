@@ -459,6 +459,100 @@ impl fmt::Display for DegradedReason {
     }
 }
 
+/// Actionable guidance for handling degraded tool responses.
+///
+/// Gives agents machine-readable next steps: whether to retry, which fallback
+/// tool to use, how trustworthy the results are, and whether the degradation
+/// is permanent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ActionableGuidance {
+    /// Whether retrying after a delay is recommended.
+    pub retry_recommended: bool,
+    /// How many seconds to wait before retrying (if `retry_recommended` is true).
+    pub retry_after_seconds: Option<u32>,
+    /// Fallback tool to use for authoritative results (if available).
+    pub fallback_tool: Option<String>,
+    /// Trust level of the degraded results.
+    ///
+    /// - `"unreliable"`: Results should not be trusted, especially empty counts.
+    /// - `"heuristic"`: Best-effort grep-based results. Verify manually.
+    /// - `"partial"`: Some features unavailable, but available results are correct.
+    /// - `"none"`: Results are unavailable for this language.
+    pub trust_level: String,
+    /// Whether this degradation is permanent (won't improve on retry).
+    pub permanent: bool,
+}
+
+impl DegradedReason {
+    /// Returns actionable guidance for handling this degraded reason.
+    ///
+    /// Maps each degradation scenario to recommended next steps for agents:
+    /// - Retry timing (transient vs permanent)
+    /// - Fallback tool to use
+    /// - Trust level of the current results
+    #[must_use]
+    pub fn guidance(&self) -> ActionableGuidance {
+        match self {
+            DegradedReason::NoLsp => ActionableGuidance {
+                retry_recommended: false,
+                retry_after_seconds: None,
+                fallback_tool: Some("search_codebase".to_owned()),
+                trust_level: "partial".to_owned(),
+                permanent: true,
+            },
+            DegradedReason::LspWarmupEmptyUnverified => ActionableGuidance {
+                retry_recommended: true,
+                retry_after_seconds: Some(15),
+                fallback_tool: None,
+                trust_level: "unreliable".to_owned(),
+                permanent: false,
+            },
+            DegradedReason::LspWarmupGrepFallback | DegradedReason::LspTimeoutGrepFallback => {
+                ActionableGuidance {
+                    retry_recommended: true,
+                    retry_after_seconds: Some(30),
+                    fallback_tool: Some("search_codebase".to_owned()),
+                    trust_level: "heuristic".to_owned(),
+                    permanent: false,
+                }
+            }
+            DegradedReason::LspErrorGrepFallback
+            | DegradedReason::NoLspGrepFallback
+            | DegradedReason::GrepFallbackFileScoped
+            | DegradedReason::GrepFallbackImplScoped
+            | DegradedReason::GrepFallbackGlobal
+            | DegradedReason::GrepFallbackDependencies => ActionableGuidance {
+                retry_recommended: false,
+                retry_after_seconds: None,
+                fallback_tool: Some("search_codebase".to_owned()),
+                trust_level: "heuristic".to_owned(),
+                permanent: true,
+            },
+            DegradedReason::UnsupportedLanguageFilterBypassed => ActionableGuidance {
+                retry_recommended: false,
+                retry_after_seconds: None,
+                fallback_tool: Some("read_file".to_owned()),
+                trust_level: "partial".to_owned(),
+                permanent: true,
+            },
+            DegradedReason::UnsupportedLanguage => ActionableGuidance {
+                retry_recommended: false,
+                retry_after_seconds: None,
+                fallback_tool: Some("read_file".to_owned()),
+                trust_level: "none".to_owned(),
+                permanent: true,
+            },
+            DegradedReason::GitError => ActionableGuidance {
+                retry_recommended: true,
+                retry_after_seconds: Some(5),
+                fallback_tool: None,
+                trust_level: "partial".to_owned(),
+                permanent: false,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -740,5 +834,34 @@ mod tests {
             DegradedReason::GrepFallbackGlobal.to_string(),
             "grep_fallback_global"
         );
+    }
+
+    #[test]
+    fn test_degraded_reason_guidance_no_lsp() {
+        use super::DegradedReason;
+        let g = DegradedReason::NoLsp.guidance();
+        assert!(!g.retry_recommended);
+        assert!(g.permanent);
+        assert_eq!(g.fallback_tool.as_deref(), Some("search_codebase"));
+        assert_eq!(g.trust_level, "partial");
+    }
+
+    #[test]
+    fn test_degraded_reason_guidance_warmup_retry() {
+        use super::DegradedReason;
+        let g = DegradedReason::LspWarmupEmptyUnverified.guidance();
+        assert!(g.retry_recommended);
+        assert_eq!(g.retry_after_seconds, Some(15));
+        assert!(!g.permanent);
+    }
+
+    #[test]
+    fn test_degraded_reason_guidance_grep_fallback_permanent() {
+        use super::DegradedReason;
+        let g = DegradedReason::LspErrorGrepFallback.guidance();
+        assert!(!g.retry_recommended);
+        assert!(g.permanent);
+        assert_eq!(g.fallback_tool.as_deref(), Some("search_codebase"));
+        assert_eq!(g.trust_level, "heuristic");
     }
 }

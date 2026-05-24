@@ -19,8 +19,8 @@ use std::path::Path;
 /// Prevents unbounded memory growth when `max_results` is set to a large value.
 const ENRICHMENT_CONCURRENCY: usize = 32;
 
-/// Per-match enrichment output: `(enclosing_symbol_path, node_type)`.
-type EnrichResult = (Option<String>, String);
+/// Per-match enrichment output: `(enclosing_semantic_path, node_type, is_definition)`.
+type EnrichResult = (Option<String>, String, Option<bool>);
 
 impl PathfinderServer {
     /// Core logic for the `search_codebase` tool.
@@ -206,6 +206,7 @@ impl PathfinderServer {
                     file_groups,
                     degraded,
                     degraded_reason,
+                    actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
                     hint,
                     next_offset: if result.truncated {
                         #[allow(clippy::cast_possible_truncation)]
@@ -258,21 +259,28 @@ impl PathfinderServer {
                 let line = usize::try_from(line_u64).unwrap_or(usize::MAX);
                 let column = usize::try_from(column_u64).unwrap_or(0);
 
-                let symbol = self
+                let detail = self
                     .surgeon
-                    .enclosing_symbol(self.workspace_root.path(), file_path, line)
+                    .enclosing_symbol_detail(self.workspace_root.path(), file_path, line)
                     .await
                     .ok()
-                    .flatten()
-                    .map(|s| format!("{file}::{s}"));
+                    .flatten();
+
+                let (symbol, is_definition) = if let Some(ref sym) = detail {
+                    let path = format!("{file}::{}", sym.semantic_path);
+                    let is_def = sym.start_line == line.saturating_sub(1);
+                    (Some(path), Some(is_def))
+                } else {
+                    (None, None)
+                };
 
                 let node_type = self
                     .surgeon
                     .node_type_at_position(self.workspace_root.path(), file_path, line, column)
                     .await
-                    .unwrap_or_else(|_| "code".to_owned()); // degrade gracefully on unsupported files
+                    .unwrap_or_else(|_| "code".to_owned());
 
-                (symbol, node_type)
+                (symbol, node_type, is_definition)
             })
             .buffer_unordered(ENRICHMENT_CONCURRENCY)
             .collect()
@@ -281,8 +289,9 @@ impl PathfinderServer {
         enrichment
             .into_iter()
             .zip(matches.iter_mut())
-            .map(|((symbol, node_type), m)| {
+            .map(|((symbol, node_type, is_definition), m)| {
                 m.enclosing_semantic_path = symbol;
+                m.is_definition = is_definition;
                 node_type
             })
             .collect()
@@ -358,6 +367,7 @@ fn build_file_groups(
                     line: m.line,
                     column: m.column,
                     enclosing_semantic_path: m.enclosing_semantic_path.clone(),
+                    is_definition: m.is_definition,
                     known: true,
                 });
             } else {
@@ -368,6 +378,7 @@ fn build_file_groups(
                     context_before: m.context_before.clone(),
                     context_after: m.context_after.clone(),
                     enclosing_semantic_path: m.enclosing_semantic_path.clone(),
+                    is_definition: m.is_definition,
                 });
             }
         }
@@ -415,6 +426,11 @@ mod tests {
         // Pre-configure surgeon for enrichment calls (1 match expected)
         surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .push(Ok(None));
@@ -496,12 +512,22 @@ mod tests {
             .unwrap()
             .push(Ok(None));
         surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
             .node_type_at_position_results
             .lock()
             .unwrap()
             .push(Ok("code".to_string()));
         surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .push(Ok(None));
@@ -582,8 +608,9 @@ mod tests {
                 content: "fn main() {}".to_owned(),
                 context_before: vec![],
                 context_after: vec![],
-                version_hash: "hash".to_owned(),
                 enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_owned(),
                 known: None,
             },
             SearchMatch {
@@ -593,8 +620,9 @@ mod tests {
                 content: "// a comment".to_owned(),
                 context_before: vec![],
                 context_after: vec![],
-                version_hash: "hash".to_owned(),
                 enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_owned(),
                 known: None,
             },
         ];
@@ -619,8 +647,9 @@ mod tests {
                 content: "fn main() {}".to_owned(),
                 context_before: vec![],
                 context_after: vec![],
-                version_hash: "hash".to_owned(),
                 enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_owned(),
                 known: None,
             },
             SearchMatch {
@@ -630,8 +659,9 @@ mod tests {
                 content: "// a comment".to_owned(),
                 context_before: vec![],
                 context_after: vec![],
-                version_hash: "hash".to_owned(),
                 enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_owned(),
                 known: None,
             },
             SearchMatch {
@@ -641,8 +671,9 @@ mod tests {
                 content: "\"a string\"".to_owned(),
                 context_before: vec![],
                 context_after: vec![],
-                version_hash: "hash".to_owned(),
                 enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_owned(),
                 known: None,
             },
         ];
@@ -668,8 +699,9 @@ mod tests {
                 content: "fn main() {}".to_owned(),
                 context_before: vec![],
                 context_after: vec![],
-                version_hash: "hash".to_owned(),
                 enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_owned(),
                 known: None,
             },
             SearchMatch {
@@ -679,8 +711,9 @@ mod tests {
                 content: "// a comment".to_owned(),
                 context_before: vec![],
                 context_after: vec![],
-                version_hash: "hash".to_owned(),
                 enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_owned(),
                 known: None,
             },
         ];
@@ -710,6 +743,11 @@ mod tests {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .push(Ok(None));
@@ -784,6 +822,11 @@ mod tests {
             .unwrap()
             .push(Ok(None));
         surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
             .node_type_at_position_results
             .lock()
             .unwrap()
@@ -845,6 +888,11 @@ mod tests {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
             .push(Ok(None));

@@ -7,7 +7,7 @@
 //! can remove its struct's allow without touching unrelated items.
 #![allow(dead_code)] // Fields are read by serde deserialization, not by name
 
-use pathfinder_common::types::DegradedReason;
+use pathfinder_common::types::{ActionableGuidance, DegradedReason};
 use rmcp::schemars;
 use rmcp::serde::{self, Deserialize, Serialize};
 
@@ -283,6 +283,11 @@ pub struct SearchCodebaseResponse {
     /// Suggests retrying with `filter_mode=all` when matches exist but were filtered out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Machine-readable guidance when `degraded` is `true`.
+    /// Tells the agent whether to retry, what fallback tool to use, and whether
+    /// results are trustworthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_guidance: Option<ActionableGuidance>,
 }
 
 /// A minimal match entry for files already in the agent's context (`known_files`)
@@ -299,6 +304,9 @@ pub struct GroupedKnownMatch {
     /// AST symbol enclosing this match (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enclosing_semantic_path: Option<String>,
+    /// Whether this match is at a definition position (fn, struct, class, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_definition: Option<bool>,
     /// Always `true` — signals this match was suppressed because the file is known.
     pub known: bool,
 }
@@ -354,6 +362,9 @@ pub struct GroupedMatch {
     /// AST symbol enclosing this match (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enclosing_semantic_path: Option<String>,
+    /// Whether this match is at a definition position (fn, struct, class, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_definition: Option<bool>,
 }
 
 /// The metadata embedded in `structured_content` for `get_repo_map`.
@@ -381,6 +392,9 @@ pub struct GetRepoMapMetadata {
     /// Reason for degradation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<DegradedReason>,
+    /// Machine-readable guidance when `degraded` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_guidance: Option<ActionableGuidance>,
     /// System capabilities available for this repository.
     pub capabilities: RepoCapabilities,
     /// Actual `max_tokens` used (may differ from requested due to auto-scaling).
@@ -503,6 +517,9 @@ pub struct ReadWithDeepContextMetadata {
     /// Reason for degradation (e.g., `"no_lsp"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<DegradedReason>,
+    /// Machine-readable guidance when `degraded` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_guidance: Option<ActionableGuidance>,
     /// IW-2: LSP readiness signal at the time of the call.
     ///
     /// - `"ready"`: LSP is fully operational — results are authoritative.
@@ -531,6 +548,9 @@ pub struct GetDefinitionResponse {
     /// Reason for degradation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<DegradedReason>,
+    /// Machine-readable guidance when `degraded` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_guidance: Option<ActionableGuidance>,
     /// IW-2: LSP readiness at the time of the call.
     ///
     /// - `"ready"`: LSP operational — definition is authoritative.
@@ -584,6 +604,9 @@ pub struct AnalyzeImpactMetadata {
     /// Absent when `degraded` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<DegradedReason>,
+    /// Machine-readable guidance when `degraded` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_guidance: Option<ActionableGuidance>,
     /// LSP readiness at the time of the call.
     ///
     /// - `"ready"`: LSP is fully operational — results are authoritative.
@@ -618,6 +641,9 @@ pub struct FindAllReferencesMetadata {
     /// Machine-readable reason for degradation (e.g., `no_lsp`, `lsp_crash`, `lsp_timeout`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<DegradedReason>,
+    /// Machine-readable guidance when `degraded` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_guidance: Option<ActionableGuidance>,
     /// LSP readiness at the time of the call.
     ///
     /// - `"ready"`: LSP is fully operational — results are authoritative.
@@ -689,7 +715,7 @@ pub struct LspHealthResponse {
     ///
     /// When `true`, all `warm_start` background tasks have finished (even if
     /// some languages failed). When `false`, `warm_start` is still in progress.
-    /// This allows distinguishing "still warming up" from "warm_start finished
+    /// This allows distinguishing "still warming up" from "`warm_start` finished
     /// but LSP didn't report readiness".
     pub warm_start_complete: bool,
 }

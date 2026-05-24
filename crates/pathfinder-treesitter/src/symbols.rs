@@ -989,15 +989,23 @@ pub fn did_you_mean(
 /// Find the innermost symbol enclosing a given 0-indexed row.
 #[must_use]
 pub fn find_enclosing_symbol(symbols: &[ExtractedSymbol], row: usize) -> Option<String> {
+    find_enclosing_symbol_ref(symbols, row).map(|s| s.semantic_path.clone())
+}
+
+/// Find the innermost symbol enclosing the given 0-indexed row,
+/// returning a reference to the full [`ExtractedSymbol`] (including `start_line`).
+#[must_use]
+pub fn find_enclosing_symbol_ref(
+    symbols: &[ExtractedSymbol],
+    row: usize,
+) -> Option<&ExtractedSymbol> {
     fn search<'a>(syms: &'a [ExtractedSymbol], row: usize, best: &mut Option<&'a ExtractedSymbol>) {
         for s in syms {
             if s.start_line <= row && row <= s.end_line {
-                // If this is tighter than the current best match, replace it
                 if let Some(current_best) = best {
                     let current_lines = current_best.end_line - current_best.start_line;
                     let target_lines = s.end_line - s.start_line;
                     if target_lines <= current_lines {
-                        // Favor deeper children with same line bounds
                         *best = Some(s);
                     }
                 } else {
@@ -1005,15 +1013,13 @@ pub fn find_enclosing_symbol(symbols: &[ExtractedSymbol], row: usize) -> Option<
                 }
             }
 
-            // Always recurse into children because Rust impl methods might be
-            // reparented under a struct whose line bounds do not contain them.
             search(&s.children, row, best);
         }
     }
 
     let mut best_match: Option<&ExtractedSymbol> = None;
     search(symbols, row, &mut best_match);
-    best_match.map(|s| s.semantic_path.clone())
+    best_match
 }
 
 // ─── Vue multi-zone symbol extraction ─────────────────────────────────────────

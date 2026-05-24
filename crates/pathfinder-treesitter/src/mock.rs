@@ -32,6 +32,8 @@ pub struct MockSurgeon {
     pub extract_symbols_results: Mutex<Vec<Result<Vec<ExtractedSymbol>, SurgeonError>>>,
     /// Pre-configured return values for finding enclosing symbols.
     pub enclosing_symbol_results: Mutex<Vec<Result<Option<String>, SurgeonError>>>,
+    /// Pre-configured return values for finding enclosing symbol details (including `start_line`).
+    pub enclosing_symbol_detail_results: Mutex<Vec<Result<Option<ExtractedSymbol>, SurgeonError>>>,
     /// Pre-configured return values for generating repository skeletons.
     pub generate_skeleton_results: Mutex<Vec<Result<crate::repo_map::RepoMapResult, SurgeonError>>>,
     /// Pre-configured return values for `node_type_at_position`.
@@ -47,6 +49,8 @@ pub struct MockSurgeon {
     pub extract_symbols_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
     /// Recorded `(workspace_root, file_path, line)` for each `enclosing_symbol` call.
     pub enclosing_symbol_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
+    /// Recorded `(workspace_root, file_path, line)` for each `enclosing_symbol_detail` call.
+    pub enclosing_symbol_detail_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
     /// Recorded arguments for each `generate_skeleton` call.
     #[allow(clippy::type_complexity)]
     pub generate_skeleton_calls:
@@ -175,6 +179,28 @@ impl Surgeon for MockSurgeon {
         assert!(
             !results.is_empty(),
             "MockSurgeon: Unexpected call to enclosing_symbol"
+        );
+        results.remove(0)
+    }
+
+    async fn enclosing_symbol_detail(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        line: usize,
+    ) -> Result<Option<ExtractedSymbol>, SurgeonError> {
+        self.enclosing_symbol_detail_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((workspace_root.to_path_buf(), file_path.to_path_buf(), line));
+
+        let mut results = self
+            .enclosing_symbol_detail_results
+            .lock()
+            .expect("mutex poisoned");
+        assert!(
+            !results.is_empty(),
+            "MockSurgeon: Unexpected call to enclosing_symbol_detail"
         );
         results.remove(0)
     }

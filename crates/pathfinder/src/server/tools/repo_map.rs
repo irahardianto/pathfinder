@@ -115,6 +115,7 @@ impl PathfinderServer {
             visibility_degraded: None,
             degraded: false,
             degraded_reason: None,
+            actionable_guidance: None,
             capabilities: RepoCapabilities {
                 search: true,
                 lsp: LspCapabilities {
@@ -253,7 +254,7 @@ impl PathfinderServer {
         if !result.tech_stack.is_empty() {
             let lawyer = Arc::clone(&self.lawyer);
             let languages = result.tech_stack.clone();
-            
+
             tokio::spawn(async move {
                 lawyer.warm_start_for_languages_and_track(&languages);
                 tracing::info!(
@@ -276,6 +277,7 @@ impl PathfinderServer {
             visibility_degraded: None,
             degraded,
             degraded_reason,
+            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             capabilities: RepoCapabilities {
                 search: true,
                 lsp: LspCapabilities {
@@ -572,6 +574,7 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
+                warm_start_complete: None,
             },
         );
 
@@ -592,6 +595,7 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
+                warm_start_complete: None,
             },
         );
 
@@ -612,6 +616,7 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
+                warm_start_complete: None,
             },
         );
 
