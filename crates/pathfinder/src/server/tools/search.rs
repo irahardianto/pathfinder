@@ -125,7 +125,7 @@ impl PathfinderServer {
                 let known_set: std::collections::HashSet<String> = params
                     .known_files
                     .iter()
-                    .map(|p| normalize_path(p))
+                    .map(|p| normalize_path(p).to_owned())
                     .collect();
 
                 // Build grouped output if requested.
@@ -140,7 +140,7 @@ impl PathfinderServer {
                 let flat_matches: Vec<SearchMatch> = filtered_matches
                     .into_iter()
                     .map(|mut m| {
-                        if known_set.contains(&normalize_path(&m.file)) {
+                        if known_set.contains(normalize_path(&m.file)) {
                             m.content = String::default();
                             m.context_before = vec![];
                             m.context_after = vec![];
@@ -320,8 +320,10 @@ fn apply_filter_mode(
 ///
 /// Both stored match paths and caller-supplied `known_files` entries may or may
 /// not have a leading `./`. Normalising both sides ensures consistent lookups.
-fn normalize_path(p: &str) -> String {
-    p.strip_prefix("./").unwrap_or(p).to_owned()
+// PERF: Zero-allocation path normalisation to avoid unconditionally cloning strings.
+#[inline]
+fn normalize_path(p: &str) -> &str {
+    p.strip_prefix("./").unwrap_or(p)
 }
 
 /// Build the grouped response for `group_by_file: true`.
@@ -338,11 +340,17 @@ fn build_file_groups(
     let mut groups: HashMap<String, SearchResultGroup> = HashMap::new();
 
     for m in matches {
-        let key = normalize_path(&m.file);
-        if !groups.contains_key(&key) {
+        let key_str = normalize_path(&m.file);
+
+        // Use contains_key first to satisfy the borrow checker, avoiding the
+        // "cannot borrow `groups` as mutable more than once at a time" error (E0499)
+        // that occurs when keeping the mutable reference from get_mut alive
+        // across the entire if-else block.
+        if !groups.contains_key(key_str) {
+            let key = key_str.to_owned();
             order.push(key.clone());
             groups.insert(
-                key.clone(),
+                key,
                 SearchResultGroup {
                     file: m.file.clone(),
                     version_hash: m.version_hash.clone(),
@@ -352,24 +360,25 @@ fn build_file_groups(
                 },
             );
         }
-        if let Some(group) = groups.get_mut(&key) {
-            if known_set.contains(&key) {
-                group.known_matches.push(GroupedKnownMatch {
-                    line: m.line,
-                    column: m.column,
-                    enclosing_semantic_path: m.enclosing_semantic_path.clone(),
-                    known: true,
-                });
-            } else {
-                group.matches.push(GroupedMatch {
-                    line: m.line,
-                    column: m.column,
-                    content: m.content.clone(),
-                    context_before: m.context_before.clone(),
-                    context_after: m.context_after.clone(),
-                    enclosing_semantic_path: m.enclosing_semantic_path.clone(),
-                });
-            }
+
+        let group = groups.get_mut(key_str).unwrap_or_else(|| unreachable!());
+
+        if known_set.contains(key_str) {
+            group.known_matches.push(GroupedKnownMatch {
+                line: m.line,
+                column: m.column,
+                enclosing_semantic_path: m.enclosing_semantic_path.clone(),
+                known: true,
+            });
+        } else {
+            group.matches.push(GroupedMatch {
+                line: m.line,
+                column: m.column,
+                content: m.content.clone(),
+                context_before: m.context_before.clone(),
+                context_after: m.context_after.clone(),
+                enclosing_semantic_path: m.enclosing_semantic_path.clone(),
+            });
         }
     }
 
