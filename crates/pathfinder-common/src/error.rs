@@ -588,4 +588,30 @@ mod tests {
         assert_eq!(response.details["path"], "../../etc/passwd");
         assert_eq!(response.details["workspace_root"], "/workspace");
     }
+
+    #[test]
+    fn test_symbol_not_found_hint_missing_separator() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/auth.ts.login".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("semantic paths require '::' between the file and symbol"),
+            "hint should mention missing '::' separator: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_symbol_not_found_hint_multiple_separators() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/auth.ts::AuthService::login".into(),
+            did_you_mean: vec![],
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("only one '::' is allowed"),
+            "hint should mention multiple '::' separators: {hint}"
+        );
+    }
 }
