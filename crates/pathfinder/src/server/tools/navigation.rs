@@ -2227,6 +2227,201 @@ impl PathfinderServer {
         }
     }
 
+    /// Composite tool: returns source + callers/callees + references in one call.
+    ///
+    /// Orchestrates `read_symbol_scope` + `analyze_impact` + `find_all_references`.
+    /// Uses depth=2 and capped references for bounded responses.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn symbol_overview_impl(
+        &self,
+        params: crate::server::types::SymbolOverviewParams,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+
+        tracing::info!(
+            tool = "symbol_overview",
+            semantic_path = %params.semantic_path,
+            "symbol_overview: start"
+        );
+
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
+
+        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            return Err(pathfinder_to_error_data(&e));
+        }
+
+        let scope = self
+            .surgeon
+            .read_symbol_scope(self.workspace_root.path(), &semantic_path)
+            .await
+            .map_err(treesitter_error_to_error_data)?;
+
+        let source = Some(crate::server::types::SymbolSource {
+            content: scope.content.clone(),
+            start_line: scope.start_line,
+            end_line: scope.end_line,
+            language: scope.language.clone(),
+        });
+
+        let file_content =
+            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
+                .await
+                .unwrap_or_default();
+        let _doc_guard = self
+            .lawyer
+            .open_document(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                &file_content,
+            )
+            .await;
+
+        let impact_params = crate::server::types::AnalyzeImpactParams {
+            semantic_path: params.semantic_path.clone(),
+            max_depth: 2,
+            max_references: params.max_callers_callees,
+            project_only: params.project_only,
+        };
+
+        let impact_result = self.analyze_impact_impl(impact_params).await;
+
+        let (impact, impact_degraded, impact_reason) = match impact_result {
+            Ok(result) => {
+                let meta: crate::server::types::AnalyzeImpactMetadata =
+                    serde_json::from_value(result.structured_content.unwrap_or_default())
+                        .unwrap_or_default();
+                let summary = if meta.incoming.is_none() && meta.outgoing.is_none() {
+                    None
+                } else {
+                    Some(crate::server::types::ImpactSummary {
+                        incoming: meta.incoming.map(|incoming| {
+                            incoming.into_iter().map(|r| {
+                                crate::server::types::SymbolOverviewImpactEntry {
+                                    semantic_path: r.semantic_path,
+                                    file: r.file,
+                                    line: r.line,
+                                    snippet: r.snippet,
+                                    direction: r.direction,
+                                }
+                            }).collect()
+                        }),
+                        outgoing: meta.outgoing.map(|outgoing| {
+                            outgoing.into_iter().map(|r| {
+                                crate::server::types::SymbolOverviewImpactEntry {
+                                    semantic_path: r.semantic_path,
+                                    file: r.file,
+                                    line: r.line,
+                                    snippet: r.snippet,
+                                    direction: r.direction,
+                                }
+                            }).collect()
+                        }),
+                        degraded: meta.degraded,
+                    })
+                };
+                (summary, meta.degraded, meta.degraded_reason)
+            }
+            Err(_) => (None, true, Some(DegradedReason::LspErrorGrepFallback)),
+        };
+
+        let refs_params = crate::server::types::FindAllReferencesParams {
+            semantic_path: params.semantic_path.clone(),
+        };
+
+        let refs_result = self.find_all_references_impl(refs_params).await;
+
+        let (references, refs_degraded, refs_reason, files_referenced) = match refs_result {
+            Ok(result) => {
+                let meta: crate::server::types::FindAllReferencesMetadata =
+                    serde_json::from_value(result.structured_content.unwrap_or_default())
+                        .unwrap_or_default();
+                let refs = meta.references.map(|refs| {
+                    refs.into_iter().map(|r| {
+                        crate::server::types::SymbolOverviewReference {
+                            file: r.file,
+                            line: r.line,
+                            column: r.column,
+                            snippet: r.snippet,
+                        }
+                    }).collect()
+                });
+                (refs, meta.degraded, meta.degraded_reason, meta.files_referenced)
+            }
+            Err(_) => (None, true, Some(DegradedReason::LspErrorGrepFallback), 0),
+        };
+
+        let duration_ms = start.elapsed().as_millis();
+
+        let degraded = impact_degraded || refs_degraded;
+        let degraded_reason = if impact_degraded {
+            impact_reason
+        } else if refs_degraded {
+            refs_reason
+        } else {
+            None
+        };
+
+        let lsp_readiness = if degraded {
+            match degraded_reason {
+                Some(DegradedReason::NoLsp) => Some("unavailable".to_owned()),
+                _ => Some("warming_up".to_owned()),
+            }
+        } else {
+            Some("ready".to_owned())
+        };
+
+        let response = crate::server::types::SymbolOverviewResponse {
+            source,
+            impact: impact.clone(),
+            references: references.clone(),
+            files_referenced,
+            degraded,
+            degraded_reason,
+            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
+            lsp_readiness,
+        };
+
+        let source_block = format!(
+            "SYMBOL: {} ({} lines)\n",
+            params.semantic_path,
+            scope.end_line - scope.start_line
+        );
+
+        let impact_block = if let Some(ref imp) = impact {
+            let inc = imp.incoming.as_ref().map_or(0, Vec::len);
+            let out = imp.outgoing.as_ref().map_or(0, Vec::len);
+            let deg = if imp.degraded { " (degraded)" } else { "" };
+            format!("CALLERS: {inc} direct{deg}\nCALLEES: {out}{deg}\n")
+        } else {
+            "CALLERS: unavailable\nCALLEES: unavailable\n".to_owned()
+        };
+
+        let refs_block = if let Some(ref refs) = references {
+            let total = refs.len();
+            format!("REFERENCES: {total} total across {files_referenced} files\n")
+        } else {
+            "REFERENCES: unavailable\n".to_owned()
+        };
+
+        let degraded_block = if degraded {
+            let reason_str = degraded_reason.as_ref().map_or("unknown", |r| r.to_string().leak());
+            format!("DEGRADED: yes ({reason_str})\n")
+        } else {
+            "DEGRADED: no (LSP-backed, authoritative)\n".to_owned()
+        };
+
+        let extra = if degraded { "\n" } else { "" };
+        let text = format!(
+            "{source_block}{impact_block}{refs_block}{degraded_block}{extra}[completed in {duration_ms}ms]"
+        );
+
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
+        result.structured_content = serialize_metadata(&response);
+        Ok(result)
+    }
+
     /// Check LSP health status.
     ///
     /// Tests whether LSP navigation tools (`get_definition`, `analyze_impact`,

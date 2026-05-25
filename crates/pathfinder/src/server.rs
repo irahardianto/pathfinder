@@ -298,6 +298,17 @@ impl PathfinderServer {
     }
 
     #[tool(
+        name = "symbol_overview",
+        description = "Get comprehensive information about a symbol in one call: source code, callers, callees, and references. Combines read_symbol_scope + find_callers_callees + find_all_references into a single response. Use for initial analysis before refactoring. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). Returns source code, impact analysis (callers/callees), and all reference locations. When degraded, partial results are returned with LSP fallback indicators."
+    )]
+    async fn symbol_overview(
+        &self,
+        Parameters(params): Parameters<crate::server::types::SymbolOverviewParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.symbol_overview_impl(params).await
+    }
+
+    #[tool(
         name = "lsp_health",
         description = "Check LSP health per language. Returns overall status (ready / warming_up / starting / unavailable) and per-language details. Use this when navigation tools return degraded results, or at session start to know which languages have full LSP support. Pass `language` to check a specific language, or omit to check all. When status is not 'ready', navigation tools may return incomplete results."
     )]
