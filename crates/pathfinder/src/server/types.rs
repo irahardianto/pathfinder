@@ -114,6 +114,95 @@ pub struct GetRepoMapParams {
     pub include_tests: bool,
 }
 
+/// Parameters for `symbol_overview`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SymbolOverviewParams {
+    /// Semantic path (e.g., `src/auth.ts::AuthService.login`).
+    /// MUST include file path and '::'.
+    pub semantic_path: String,
+    /// Filter dependencies to workspace/project files only.
+    #[serde(default)]
+    pub project_only: Option<bool>,
+    /// Maximum number of callers/callees to return per direction.
+    #[serde(default = "default_max_references")]
+    pub max_callers_callees: u32,
+    /// Maximum number of references to return.
+    #[serde(default = "default_max_references")]
+    pub max_references: u32,
+}
+
+/// Response for `symbol_overview`.
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct SymbolOverviewResponse {
+    /// Source code and location of the symbol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SymbolSource>,
+    /// Impact analysis (incoming callers + outgoing callees).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<ImpactSummary>,
+    /// Reference locations across the codebase.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub references: Option<Vec<SymbolOverviewReference>>,
+    /// Total number of files containing references.
+    pub files_referenced: usize,
+    /// Whether any component was degraded.
+    pub degraded: bool,
+    /// Reason for degradation, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<DegradedReason>,
+    /// Machine-readable guidance when `degraded` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_guidance: Option<ActionableGuidance>,
+    /// LSP readiness at the time of the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_readiness: Option<String>,
+}
+
+/// Source code block for `symbol_overview`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SymbolSource {
+    /// Content of the symbol (source code).
+    pub content: String,
+    /// Starting line number (1-indexed).
+    pub start_line: usize,
+    /// Ending line number (1-indexed).
+    pub end_line: usize,
+    /// Programming language.
+    pub language: String,
+}
+
+/// Impact summary for `symbol_overview`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ImpactSummary {
+    /// Direct callers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming: Option<Vec<SymbolOverviewImpactEntry>>,
+    /// Direct callees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outgoing: Option<Vec<SymbolOverviewImpactEntry>>,
+    /// Whether the impact analysis was degraded.
+    pub degraded: bool,
+}
+
+/// A single entry in the impact summary.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SymbolOverviewImpactEntry {
+    pub semantic_path: String,
+    pub file: String,
+    pub line: usize,
+    pub snippet: String,
+    pub direction: String,
+}
+
+/// A reference location in `symbol_overview`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SymbolOverviewReference {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub snippet: String,
+}
+
 /// Parameters for `read_symbol_scope`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSymbolScopeParams {
@@ -583,7 +672,7 @@ pub struct ImpactReference {
 }
 
 /// The metadata embedded in `structured_content` for `analyze_impact` / `find_callers_callees`.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactMetadata {
     /// Symbols that call the target (caller graph).
     /// `null` when `degraded` is `true` — LSP was unavailable so callers are **unknown**.
@@ -628,7 +717,7 @@ pub struct FindAllReferencesParams {
 }
 
 /// The metadata embedded in `structured_content` for `find_all_references`.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct FindAllReferencesMetadata {
     /// All reference locations for the target symbol.
     /// Empty array `[]` means LSP confirmed zero references.
@@ -821,6 +910,10 @@ pub const fn default_depth() -> u32 {
 #[must_use]
 pub const fn default_max_depth() -> u32 {
     3
+}
+#[must_use]
+pub const fn default_max_callers_callees() -> u32 {
+    20
 }
 #[must_use]
 pub const fn default_max_references() -> u32 {
