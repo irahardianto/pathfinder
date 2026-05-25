@@ -30,6 +30,17 @@ impl GitRunner for SystemGit {
         workspace_root: &Path,
         target: &str,
     ) -> Result<Vec<u8>, std::io::Error> {
+        // SECURITY: Prevent argument injection via `target`. Git uses `--` to
+        // disambiguate revisions from paths, so we cannot safely use `--` here
+        // to terminate option parsing. Instead, we reject any target starting
+        // with `-`.
+        if target.starts_with('-') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid git revision: cannot start with '-'",
+            ));
+        }
+
         let output = tokio::process::Command::new("git")
             .current_dir(workspace_root)
             .args(["diff", "--name-only", target])
