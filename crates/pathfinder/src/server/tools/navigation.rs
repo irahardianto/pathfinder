@@ -2296,26 +2296,28 @@ impl PathfinderServer {
                 } else {
                     Some(crate::server::types::ImpactSummary {
                         incoming: meta.incoming.map(|incoming| {
-                            incoming.into_iter().map(|r| {
-                                crate::server::types::SymbolOverviewImpactEntry {
+                            incoming
+                                .into_iter()
+                                .map(|r| crate::server::types::SymbolOverviewImpactEntry {
                                     semantic_path: r.semantic_path,
                                     file: r.file,
                                     line: r.line,
                                     snippet: r.snippet,
                                     direction: r.direction,
-                                }
-                            }).collect()
+                                })
+                                .collect()
                         }),
                         outgoing: meta.outgoing.map(|outgoing| {
-                            outgoing.into_iter().map(|r| {
-                                crate::server::types::SymbolOverviewImpactEntry {
+                            outgoing
+                                .into_iter()
+                                .map(|r| crate::server::types::SymbolOverviewImpactEntry {
                                     semantic_path: r.semantic_path,
                                     file: r.file,
                                     line: r.line,
                                     snippet: r.snippet,
                                     direction: r.direction,
-                                }
-                            }).collect()
+                                })
+                                .collect()
                         }),
                         degraded: meta.degraded,
                     })
@@ -2337,16 +2339,21 @@ impl PathfinderServer {
                     serde_json::from_value(result.structured_content.unwrap_or_default())
                         .unwrap_or_default();
                 let refs = meta.references.map(|refs| {
-                    refs.into_iter().map(|r| {
-                        crate::server::types::SymbolOverviewReference {
+                    refs.into_iter()
+                        .map(|r| crate::server::types::SymbolOverviewReference {
                             file: r.file,
                             line: r.line,
                             column: r.column,
                             snippet: r.snippet,
-                        }
-                    }).collect()
+                        })
+                        .collect()
                 });
-                (refs, meta.degraded, meta.degraded_reason, meta.files_referenced)
+                (
+                    refs,
+                    meta.degraded,
+                    meta.degraded_reason,
+                    meta.files_referenced,
+                )
             }
             Err(_) => (None, true, Some(DegradedReason::LspErrorGrepFallback), 0),
         };
@@ -2405,7 +2412,9 @@ impl PathfinderServer {
         };
 
         let degraded_block = if degraded {
-            let reason_str = degraded_reason.as_ref().map_or("unknown", |r| r.to_string().leak());
+            let reason_str = degraded_reason
+                .as_ref()
+                .map_or("unknown", |r| r.to_string().leak());
             format!("DEGRADED: yes ({reason_str})\n")
         } else {
             "DEGRADED: no (LSP-backed, authoritative)\n".to_owned()
