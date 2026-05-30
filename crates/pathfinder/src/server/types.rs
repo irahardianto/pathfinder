@@ -907,7 +907,7 @@ pub struct LspLanguageHealth {
     /// `None` when LSP is running or language not detected at all.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub install_hint: Option<String>,
-     /// Tools that are degraded (using fallback) for this language.
+    /// Tools that are degraded (using fallback) for this language.
     ///
     /// Empty when LSP is fully operational. Lists which tools lose LSP support
     /// with detailed severity and description for each.

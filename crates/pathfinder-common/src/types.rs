@@ -206,10 +206,7 @@ impl VersionHash {
         // Internal layout: "sha256:" (7 bytes) + 64 hex chars (from compute)
         // Return chars [7..14] — the first 7 hex chars, no prefix.
         // Gracefully handle malformed hashes by returning available chars.
-        let hex_part = self
-            .0
-            .strip_prefix(Self::PREFIX)
-            .unwrap_or(&self.0); // Handle missing prefix
+        let hex_part = self.0.strip_prefix(Self::PREFIX).unwrap_or(&self.0); // Handle missing prefix
         if hex_part.len() < Self::MIN_HEX_CHARS {
             // Malformed hash — return whatever we have
             hex_part

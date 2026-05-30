@@ -156,17 +156,14 @@ impl PathfinderServer {
                             .ok()
                     });
 
-                    let language = metadata
-                        .as_ref()
-                        .map(|m| m.language.clone())
-                        .or_else(|| {
-                            let lang = language_from_path(Path::new(file_path));
-                            if lang == "text" {
-                                None
-                            } else {
-                                Some(lang)
-                            }
-                        });
+                    let language = metadata.as_ref().map(|m| m.language.clone()).or_else(|| {
+                        let lang = language_from_path(Path::new(file_path));
+                        if lang == "text" {
+                            None
+                        } else {
+                            Some(lang)
+                        }
+                    });
 
                     let (content, total_lines) = if let Some(content) = content {
                         let truncated = truncate_content(&content, params.max_lines_per_file);

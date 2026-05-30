@@ -84,9 +84,7 @@ pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> E
 /// Output format: `DEGRADED ({reason}) — {trust description} — {fallback} — {retry}`
 /// Every tool uses this function so agents can parse degraded notices uniformly.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-pub(crate) fn format_degraded_notice(
-    reason: &pathfinder_common::types::DegradedReason,
-) -> String {
+pub(crate) fn format_degraded_notice(reason: &pathfinder_common::types::DegradedReason) -> String {
     let guidance = reason.guidance();
     let mut parts = vec![format!("DEGRADED ({reason})")];
 
@@ -101,7 +99,9 @@ pub(crate) fn format_degraded_notice(
     }
 
     if let Some(fallback) = &guidance.fallback_tool {
-        parts.push(format!("fallback: use {fallback} for authoritative results"));
+        parts.push(format!(
+            "fallback: use {fallback} for authoritative results"
+        ));
     }
 
     if let Some(secs) = guidance.retry_after_seconds {
