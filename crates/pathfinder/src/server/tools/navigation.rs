@@ -287,7 +287,132 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
     }
 }
 
+/// SPEC 007: Language-aware regex patterns for definition search.
+///
+/// Returns language-specific regex patterns for finding symbol definitions.
+/// Used by `find_symbol` and `fallback_definition_grep` for grep-based fallbacks.
+///
+/// # Patterns
+///
+/// | Extension | Patterns |
+/// |-----------|----------|
+/// | `rs` | Functions (`fn`), types (`struct`, `enum`, `trait`, `type`, `mod`), constants (`const`, `static`) |
+/// | `ts`/`tsx`/`js`/`jsx` | Functions (`function`), classes (`class`, `interface`, `type`, `enum`), variable declarations |
+/// | `py` | Functions (`def`), classes (`class`), module-level assignments |
+/// | `go` | Functions (`func`), types (`type`), constants (`const`, `var`) |
+/// | Other | Bare word boundary fallback |
+///
+pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
+    match ext {
+        "rs" => vec![
+            format!(
+                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+{symbol_name}\b"
+            ),
+            format!(
+                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:struct|enum|trait|type|mod)\s+{symbol_name}\b"
+            ),
+            format!(
+                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const|static)\s+{symbol_name}\b"
+            ),
+        ],
+        "ts" | "tsx" | "js" | "jsx" => vec![
+            format!(
+                r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{symbol_name}\b"
+            ),
+            format!(
+                r"(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+{symbol_name}\b"
+            ),
+            format!(
+                r"(?:export\s+)?(?:const|let|var)\s+{symbol_name}\s*[=:]"
+            ),
+        ],
+        "py" => vec![
+            format!(r"(?:async\s+)?def\s+{symbol_name}\b"),
+            format!(r"class\s+{symbol_name}\b"),
+            format!(r"^{symbol_name}\s*[=:]"),
+        ],
+        "go" => vec![
+            format!(r"func\s+(?:\([^)]+\)\s+)?{symbol_name}\b"),
+            format!(r"type\s+{symbol_name}\s+"),
+            format!(r"(?:const|var)\s+{symbol_name}\b"),
+        ],
+        "java" => vec![
+            format!(
+                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:class|interface|enum|@interface)\s+{symbol_name}\b"
+            ),
+            format!(
+                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{symbol_name}\s*\("
+            ),
+        ],
+        _ => vec![format!(r"\b{symbol_name}\b")],
+    }
+}
+
 impl PathfinderServer {
+    /// SPEC 001 + SPEC 008: Grep-based reference search fallback for `analyze_impact`.
+    ///
+    /// When LSP is unavailable, warming up, or timed out, use this helper to find
+    /// symbol references using ripgrep with Tree-sitter enrichment (SPEC 008).
+    ///
+    /// SPEC 008: Uses `search_codebase_impl` with `filter_mode=CodeOnly` to exclude
+    /// matches in comments and string literals.
+    ///
+    /// Returns `Some(refs)` if references found, `None` if none found.
+    /// Updates `files_referenced` with the files containing matches.
+    async fn grep_reference_fallback(
+        &self,
+        symbol_name: &str,
+        definition_path: &std::path::Path,
+        files_referenced: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<crate::server::types::ImpactReference>> {
+        let search_params = crate::server::types::SearchCodebaseParams {
+            query: symbol_name.to_string(),
+            is_regex: false,
+            path_glob: "**/*".to_string(),
+            filter_mode: pathfinder_common::types::FilterMode::CodeOnly,
+            max_results: 20,
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            exclude_glob: String::new(),
+            offset: 0,
+        };
+
+        let result = self.search_codebase_impl(search_params).await.ok()?;
+
+        if result.0.matches.is_empty() {
+            return None;
+        }
+
+        let refs: Vec<crate::server::types::ImpactReference> = result
+            .0
+            .matches
+            .into_iter()
+            .filter(|m| {
+                let m_path = std::path::Path::new(&m.file);
+                is_source_file(&m.file) && m_path != definition_path
+            })
+            .take(10)
+            .map(|m| {
+                files_referenced.insert(m.file.clone());
+                crate::server::types::ImpactReference {
+                    semantic_path: format!("{}::{symbol_name}", m.file),
+                    file: m.file,
+                    line: usize::try_from(m.line).unwrap_or(usize::MAX),
+                    snippet: m.content,
+                    direction: "incoming_heuristic".to_string(),
+                    depth: 0,
+                }
+            })
+            .collect();
+
+        if refs.is_empty() {
+            None
+        } else {
+            Some(refs)
+        }
+    }
+
     /// Resolve LSP call-hierarchy dependencies for a symbol.
     ///
     /// PATCH-005: When LSP is degraded, falls back to grep-based dependency discovery
@@ -1639,9 +1764,6 @@ impl PathfinderServer {
                     degraded = true;
                     degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
 
-                    // Use grep-based reference search as a heuristic fallback when LSP is warming up.
-                    // Results may over-count (string references) or under-count (indirect calls),
-                    // but give the agent a starting point.
                     let symbol_name = semantic_path
                         .symbol_chain
                         .as_ref()
@@ -1649,54 +1771,21 @@ impl PathfinderServer {
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
 
-                    let search_result = self
-                        .scout
-                        .search(&pathfinder_search::SearchParams {
-                            workspace_root: self.workspace_root.path().to_path_buf(),
-                            query: symbol_name.clone(),
-                            is_regex: false,
-                            max_results: 20,
-                            path_glob: "**/*".to_owned(),
-                            exclude_glob: String::default(),
-                            context_lines: 0,
-                            offset: 0,
-                        })
-                        .await;
-
-                    if let Ok(result) = search_result {
-                        if !result.matches.is_empty() {
-                            let refs: Vec<crate::server::types::ImpactReference> = result
-                                .matches
-                                .into_iter()
-                                // Exclude the definition file itself AND non-source files (docs, configs).
-                                // is_source_file filters out .md, .txt, .json, .yaml, etc. to reduce false positives.
-                                .filter(|m| {
-                                    let m_path = std::path::Path::new(&m.file);
-                                    is_source_file(&m.file)
-                                        && m_path != std::path::Path::new(&semantic_path.file_path)
-                                })
-                                .take(10) // Cap at 10 heuristic references to avoid overwhelming output
-                                .map(|m| {
-                                    files_referenced.insert(m.file.clone());
-                                    crate::server::types::ImpactReference {
-                                        semantic_path: format!("{}::{symbol_name}", m.file),
-                                        file: m.file,
-                                        line: usize::try_from(m.line).unwrap_or(usize::MAX),
-                                        snippet: m.content,
-                                        // Grep fallback: heuristic, direction is assumed incoming
-                                        direction: "incoming_heuristic".to_owned(),
-                                        depth: 0,
-                                    }
-                                })
-                                .collect();
-                            incoming = Some(refs);
-                            degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-                            tracing::info!(
-                                tool = "analyze_impact",
-                                references_found = incoming.as_ref().map_or(0, Vec::len),
-                                "analyze_impact: grep-based fallback references found during LSP warmup"
-                            );
-                        }
+                    if let Some(refs) = self
+                        .grep_reference_fallback(
+                            &symbol_name,
+                            &semantic_path.file_path,
+                            &mut files_referenced,
+                        )
+                        .await
+                    {
+                        incoming = Some(refs);
+                        degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                        tracing::info!(
+                            tool = "analyze_impact",
+                            references_found = incoming.as_ref().map_or(0, Vec::len),
+                            "analyze_impact: grep-based fallback references found during LSP warmup"
+                        );
                     }
                 }
             }
@@ -1717,54 +1806,21 @@ impl PathfinderServer {
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
 
-                let search_result = self
-                    .scout
-                    .search(&pathfinder_search::SearchParams {
-                        workspace_root: self.workspace_root.path().to_path_buf(),
-                        query: symbol_name.clone(),
-                        is_regex: false,
-                        max_results: 20,
-                        path_glob: "**/*".to_owned(),
-                        exclude_glob: String::default(),
-                        context_lines: 0,
-                        offset: 0,
-                    })
-                    .await;
-
-                if let Ok(result) = search_result {
-                    if !result.matches.is_empty() {
-                        let refs: Vec<crate::server::types::ImpactReference> = result
-                            .matches
-                            .into_iter()
-                            // Exclude the definition file itself AND non-source files (docs, configs).
-                            // is_source_file filters out .md, .txt, .json, .yaml, etc. to reduce false positives.
-                            .filter(|m| {
-                                let m_path = std::path::Path::new(&m.file);
-                                is_source_file(&m.file)
-                                    && m_path != std::path::Path::new(&semantic_path.file_path)
-                            })
-                            .take(10) // Cap at 10 heuristic references to avoid overwhelming output
-                            .map(|m| {
-                                files_referenced.insert(m.file.clone());
-                                crate::server::types::ImpactReference {
-                                    semantic_path: format!("{}::{symbol_name}", m.file),
-                                    file: m.file,
-                                    line: usize::try_from(m.line).unwrap_or(usize::MAX),
-                                    snippet: m.content,
-                                    // Grep fallback: heuristic, direction is assumed incoming
-                                    direction: "incoming_heuristic".to_owned(),
-                                    depth: 0,
-                                }
-                            })
-                            .collect();
-                        incoming = Some(refs);
-                        degraded_reason = Some(DegradedReason::NoLspGrepFallback);
-                        tracing::info!(
-                            tool = "analyze_impact",
-                            references_found = incoming.as_ref().map_or(0, Vec::len),
-                            "analyze_impact: grep-based fallback references found"
-                        );
-                    }
+                if let Some(refs) = self
+                    .grep_reference_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    incoming = Some(refs);
+                    degraded_reason = Some(DegradedReason::NoLspGrepFallback);
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        references_found = incoming.as_ref().map_or(0, Vec::len),
+                        "analyze_impact: grep-based fallback references found"
+                    );
                 }
                 // Keep degraded = true to signal this is heuristic data
             }
@@ -1783,63 +1839,57 @@ impl PathfinderServer {
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
 
-                let search_result = self
-                    .scout
-                    .search(&pathfinder_search::SearchParams {
-                        workspace_root: self.workspace_root.path().to_path_buf(),
-                        query: symbol_name.clone(),
-                        is_regex: false,
-                        max_results: 20,
-                        path_glob: "**/*".to_owned(),
-                        exclude_glob: String::default(),
-                        context_lines: 0,
-                        offset: 0,
-                    })
-                    .await;
-
-                if let Ok(result) = search_result {
-                    if !result.matches.is_empty() {
-                        let refs: Vec<crate::server::types::ImpactReference> = result
-                            .matches
-                            .into_iter()
-                            // Exclude the definition file itself AND non-source files (docs, configs).
-                            // is_source_file filters out .md, .txt, .json, .yaml, etc. to reduce false positives.
-                            .filter(|m| {
-                                let m_path = std::path::Path::new(&m.file);
-                                is_source_file(&m.file)
-                                    && m_path != std::path::Path::new(&semantic_path.file_path)
-                            })
-                            .take(10) // Cap at 10 heuristic references to avoid overwhelming output
-                            .map(|m| {
-                                files_referenced.insert(m.file.clone());
-                                crate::server::types::ImpactReference {
-                                    semantic_path: format!("{}::{symbol_name}", m.file),
-                                    file: m.file,
-                                    line: usize::try_from(m.line).unwrap_or(usize::MAX),
-                                    snippet: m.content,
-                                    // Grep fallback: heuristic, direction is assumed incoming
-                                    direction: "incoming_heuristic".to_owned(),
-                                    depth: 0,
-                                }
-                            })
-                            .collect();
-                        incoming = Some(refs);
-                        degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
-                        tracing::info!(
-                            tool = "analyze_impact",
-                            references_found = incoming.as_ref().map_or(0, Vec::len),
-                            "analyze_impact: grep-based fallback references found after timeout"
-                        );
-                    }
+                if let Some(refs) = self
+                    .grep_reference_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    incoming = Some(refs);
+                    degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        references_found = incoming.as_ref().map_or(0, Vec::len),
+                        "analyze_impact: grep-based fallback references found after timeout"
+                    );
                 }
                 // Keep degraded = true to signal this is heuristic data
             }
             Err(e) => {
+                degraded = true;
+                degraded_reason = Some(DegradedReason::NoLsp);
+
                 tracing::warn!(
                     tool = "analyze_impact",
                     error = %e,
                     "call_hierarchy_prepare failed"
                 );
+
+                let symbol_name = semantic_path
+                    .symbol_chain
+                    .as_ref()
+                    .and_then(|c| c.segments.last())
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+
+                if let Some(refs) = self
+                    .grep_reference_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    incoming = Some(refs);
+                    degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        references_found = incoming.as_ref().map_or(0, Vec::len),
+                        "analyze_impact: grep-based fallback references found after LSP error"
+                    );
+                }
             }
         }
 
@@ -4217,6 +4267,12 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(make_scope()));
+        // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
 
         let ws_dir = tempdir().expect("temp dir");
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
@@ -4298,6 +4354,13 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(make_scope()));
+        // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        // We have 4 matches, so push 4 results
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None), Ok(None)]);
 
         let ws_dir = tempdir().expect("temp dir");
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
