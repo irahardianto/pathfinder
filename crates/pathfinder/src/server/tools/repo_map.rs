@@ -1,6 +1,8 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
-use crate::server::helpers::{format_degraded_notice, pathfinder_to_error_data, serialize_metadata};
+use crate::server::helpers::{
+    format_degraded_notice, pathfinder_to_error_data, serialize_metadata,
+};
 use crate::server::types::{
     default_max_tokens, GetRepoMapParams, LspCapabilities, RepoCapabilities,
 };
@@ -572,6 +574,7 @@ mod tests {
     /// - `navigation_ready=Some(false)` OR `indexing_complete=Some(false)` → `"warming_up"`
     /// - `uptime_seconds=Some(_)` but no capability info → `"starting"`
     /// - neither → `"unavailable"`
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn test_derive_lsp_status_correct_status_strings() {
         use pathfinder_lsp::types::LspLanguageStatus;
@@ -686,10 +689,7 @@ mod tests {
         let result = super::derive_lsp_status(&map).expect("non-empty map must return Some");
 
         assert_eq!(result.get("rust").map(String::as_str), Some("ready"));
-        assert_eq!(
-            result.get("csharp").map(String::as_str),
-            Some("warming_up")
-        );
+        assert_eq!(result.get("csharp").map(String::as_str), Some("warming_up"));
         assert_eq!(result.get("go").map(String::as_str), Some("warming_up"));
         assert_eq!(
             result.get("typescript").map(String::as_str),

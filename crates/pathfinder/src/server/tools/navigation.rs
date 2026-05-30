@@ -12,9 +12,8 @@
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{
-    format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
-    serialize_metadata,
-    treesitter_error_to_error_data,
+    format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
+    require_symbol_target, serialize_metadata, treesitter_error_to_error_data,
 };
 use crate::server::types::{
     AnalyzeImpactParams, GetDefinitionParams, GetDefinitionResponse, ReadWithDeepContextParams,
@@ -315,23 +314,15 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
             format!(
                 r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+{name}\b"
             ),
-            format!(
-                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:struct|enum|trait|type|mod)\s+{name}\b"
-            ),
-            format!(
-                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const|static)\s+{name}\b"
-            ),
+            format!(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:struct|enum|trait|type|mod)\s+{name}\b"),
+            format!(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const|static)\s+{name}\b"),
         ],
         "ts" | "tsx" | "js" | "jsx" => vec![
-            format!(
-                r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{name}\b"
-            ),
+            format!(r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{name}\b"),
             format!(
                 r"(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+{name}\b"
             ),
-            format!(
-                r"(?:export\s+)?(?:const|let|var)\s+{name}\s*[=:]"
-            ),
+            format!(r"(?:export\s+)?(?:const|let|var)\s+{name}\s*[=:]"),
             format!(
                 r"(?:export\s+)?(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?\s*=>"
             ),
@@ -2653,26 +2644,28 @@ impl PathfinderServer {
                 } else {
                     Some(crate::server::types::ImpactSummary {
                         incoming: meta.incoming.map(|incoming| {
-                            incoming.into_iter().map(|r| {
-                                crate::server::types::SymbolOverviewImpactEntry {
+                            incoming
+                                .into_iter()
+                                .map(|r| crate::server::types::SymbolOverviewImpactEntry {
                                     semantic_path: r.semantic_path,
                                     file: r.file,
                                     line: r.line,
                                     snippet: r.snippet,
                                     direction: r.direction,
-                                }
-                            }).collect()
+                                })
+                                .collect()
                         }),
                         outgoing: meta.outgoing.map(|outgoing| {
-                            outgoing.into_iter().map(|r| {
-                                crate::server::types::SymbolOverviewImpactEntry {
+                            outgoing
+                                .into_iter()
+                                .map(|r| crate::server::types::SymbolOverviewImpactEntry {
                                     semantic_path: r.semantic_path,
                                     file: r.file,
                                     line: r.line,
                                     snippet: r.snippet,
                                     direction: r.direction,
-                                }
-                            }).collect()
+                                })
+                                .collect()
                         }),
                         degraded: meta.degraded,
                     })
@@ -2696,16 +2689,21 @@ impl PathfinderServer {
                     serde_json::from_value(result.structured_content.unwrap_or_default())
                         .unwrap_or_default();
                 let refs = meta.references.map(|refs| {
-                    refs.into_iter().map(|r| {
-                        crate::server::types::SymbolOverviewReference {
+                    refs.into_iter()
+                        .map(|r| crate::server::types::SymbolOverviewReference {
                             file: r.file,
                             line: r.line,
                             column: r.column,
                             snippet: r.snippet,
-                        }
-                    }).collect()
+                        })
+                        .collect()
                 });
-                (refs, meta.degraded, meta.degraded_reason, meta.files_referenced)
+                (
+                    refs,
+                    meta.degraded,
+                    meta.degraded_reason,
+                    meta.files_referenced,
+                )
             }
             Err(_) => (None, true, Some(DegradedReason::LspErrorGrepFallback), 0),
         };
@@ -3517,8 +3515,11 @@ mod tests {
         let src_dir = ws_dir.path().join("src");
         std::fs::create_dir_all(&src_dir).expect("create src dir");
         std::fs::write(src_dir.join("auth.rs"), "fn login() { }").expect("create auth.rs");
-        std::fs::write(src_dir.join("token.rs"), "fn validate_token() -> bool { true }")
-            .expect("create token.rs");
+        std::fs::write(
+            src_dir.join("token.rs"),
+            "fn validate_token() -> bool { true }",
+        )
+        .expect("create token.rs");
         std::fs::write(src_dir.join("main.rs"), "fn main() {}").expect("create main.rs");
         std::fs::write(src_dir.join("service.rs"), "fn login() { }").expect("create service.rs");
         std::fs::write(src_dir.join("user.rs"), "struct User { name: String }")
@@ -4627,11 +4628,12 @@ mod tests {
             .unwrap()
             .push(Ok(make_scope()));
         // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        // We have 1 match, so push 1 enclosing_symbol_detail_result
         surgeon
-            .read_symbol_scope_results
+            .enclosing_symbol_detail_results
             .lock()
             .unwrap()
-            .push(Ok(make_scope()));
+            .push(Ok(None));
 
         let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
@@ -5123,7 +5125,16 @@ mod tests {
     async fn test_lsp_health_no_probe_for_recently_started() {
         let surgeon = Arc::new(MockSurgeon::default());
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+        // Remove Rust files created by make_temp_workspace to prevent liveness probe
+        let src_dir = ws_dir.path().join("src");
+        let _ = std::fs::remove_file(src_dir.join("main.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.rs"));
+        let _ = std::fs::remove_file(src_dir.join("token.rs"));
+        let _ = std::fs::remove_file(src_dir.join("service.rs"));
+        let _ = std::fs::remove_file(src_dir.join("user.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.go"));
 
         // Mock a Rust LSP that just started (5 seconds ago)
         lawyer.set_capability_status(std::collections::HashMap::from([(
@@ -5178,7 +5189,16 @@ mod tests {
     async fn test_lsp_health_no_probe_for_already_ready() {
         let surgeon = Arc::new(MockSurgeon::default());
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+        // Remove Rust files created by make_temp_workspace to prevent liveness probe
+        let src_dir = ws_dir.path().join("src");
+        let _ = std::fs::remove_file(src_dir.join("main.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.rs"));
+        let _ = std::fs::remove_file(src_dir.join("token.rs"));
+        let _ = std::fs::remove_file(src_dir.join("service.rs"));
+        let _ = std::fs::remove_file(src_dir.join("user.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.go"));
 
         // Mock a Rust LSP that's already ready
         lawyer.set_capability_status(std::collections::HashMap::from([(
@@ -5244,9 +5264,20 @@ mod tests {
 
         // Create some probe files
         let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
-        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+
+        // Remove Rust files created by make_temp_workspace to test "no Rust file" scenario
+        let src_dir = ws_dir.path().join("src");
+        let _ = std::fs::remove_file(src_dir.join("main.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.rs"));
+        let _ = std::fs::remove_file(src_dir.join("token.rs"));
+        let _ = std::fs::remove_file(src_dir.join("service.rs"));
+        let _ = std::fs::remove_file(src_dir.join("user.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.go"));
+
+        // Create test probe files
+        std::fs::create_dir_all(&src_dir).unwrap();
         std::fs::write(ws_dir.path().join("main.go"), "package main").unwrap();
-        std::fs::write(ws_dir.path().join("src/index.ts"), "export const x = 1;").unwrap();
+        std::fs::write(src_dir.join("index.ts"), "export const x = 1;").unwrap();
 
         // Test finding probe files
         assert_eq!(
