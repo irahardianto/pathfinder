@@ -160,15 +160,19 @@ impl PathfinderServer {
                     .and_then(|v| v.try_into().ok())
                     .unwrap_or(100);
 
-                // Hint for agents: if filter_mode removed all results, prompt retry with filter_mode=all.
-                // This prevents agents from falsely concluding the symbol does not exist.
+                let filter_mode_name = match params.filter_mode {
+                    FilterMode::All => "all",
+                    FilterMode::CodeOnly => "code_only",
+                    FilterMode::CommentsOnly => "comments_only",
+                };
+
                 let hint = if returned_count == 0
                     && result.total_matches > 0
                     && params.filter_mode != FilterMode::All
                 {
                     Some(format!(
-                        "0 matches with filter_mode={:?} but {} match(es) exist with filter_mode=all. Retry with filter_mode='all' to include comments and strings.",
-                        params.filter_mode,
+                        "0 matches with filter_mode={} but {} match(es) exist with filter_mode=all. Retry with filter_mode='all' to see all match types.",
+                        filter_mode_name,
                         result.total_matches,
                     ))
                 } else {
