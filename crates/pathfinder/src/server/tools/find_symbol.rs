@@ -328,7 +328,7 @@ impl PathfinderServer {
             symbols: unique_matches,
             total_found: u32::try_from(total_found).unwrap_or(u32::MAX),
             search_strategy,
-            duration_ms: u64::try_from(duration_ms).unwrap_or(u64::MAX),
+            duration_ms: Some(u64::try_from(duration_ms).unwrap_or(u64::MAX)),
         }))
     }
 }

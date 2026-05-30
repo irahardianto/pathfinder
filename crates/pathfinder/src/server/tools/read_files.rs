@@ -52,7 +52,7 @@ impl PathfinderServer {
                 files: vec![],
                 succeeded: 0,
                 failed: 0,
-                duration_ms,
+                duration_ms: Some(duration_ms),
             };
             let mut result = CallToolResult::success(vec![rmcp::model::Content::text(format!(
                 "[completed in {duration_ms}ms]"
@@ -103,7 +103,7 @@ impl PathfinderServer {
             files: file_results,
             succeeded,
             failed,
-            duration_ms: u64::try_from(duration_ms).unwrap_or(u64::MAX),
+            duration_ms: Some(u64::try_from(duration_ms).unwrap_or(u64::MAX)),
         };
         let mut result = CallToolResult::success(vec![rmcp::model::Content::text(format!(
             "[completed in {}ms]",
@@ -156,7 +156,17 @@ impl PathfinderServer {
                             .ok()
                     });
 
-                    let language = metadata.as_ref().map(|m| m.language.clone());
+                    let language = metadata
+                        .as_ref()
+                        .map(|m| m.language.clone())
+                        .or_else(|| {
+                            let lang = language_from_path(Path::new(file_path));
+                            if lang == "text" {
+                                None
+                            } else {
+                                Some(lang)
+                            }
+                        });
 
                     let (content, total_lines) = if let Some(content) = content {
                         let truncated = truncate_content(&content, params.max_lines_per_file);
