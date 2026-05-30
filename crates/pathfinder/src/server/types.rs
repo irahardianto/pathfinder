@@ -863,12 +863,120 @@ pub struct LspLanguageHealth {
     /// `None` when LSP is running or language not detected at all.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub install_hint: Option<String>,
-    /// Tools that are degraded (using fallback) for this language.
+     /// Tools that are degraded (using fallback) for this language.
     ///
     /// Empty when LSP is fully operational. Lists which tools lose LSP support
     /// with detailed severity and description for each.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub degraded_tools: Vec<DegradedToolInfo>,
+}
+
+// ── find_symbol tool types ─────────────────────────────────────────
+
+/// Parameters for `find_symbol`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindSymbolParams {
+    /// Bare symbol name to search for (e.g., [`AuthService`]).
+    pub name: String,
+    /// Optional filter by symbol kind (e.g., `class`, `function`, `struct`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Optional glob pattern to limit search scope (e.g., `src/**/*.ts`).
+    #[serde(default = "default_path_glob")]
+    pub path_glob: String,
+    /// Maximum results to return (default 10).
+    #[serde(default = "find_symbol_default_max_results")]
+    pub max_results: u32,
+}
+
+#[must_use]
+pub const fn find_symbol_default_max_results() -> u32 {
+    10
+}
+
+/// A single symbol found by `find_symbol`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct FoundSymbol {
+    /// Full semantic path (<file::symbol>).
+    pub semantic_path: String,
+    /// Symbol kind (e.g., "class", "function", "struct", "interface", "enum").
+    pub kind: String,
+    /// File path relative to workspace root.
+    pub file: String,
+    /// 1-indexed line where the symbol is defined.
+    pub line: u64,
+    /// First 100 characters of the definition line.
+    pub preview: String,
+}
+
+/// Response from `find_symbol`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindSymbolResponse {
+    /// Matching symbols found.
+    pub symbols: Vec<FoundSymbol>,
+    /// Total number of matches found (before truncation).
+    pub total_found: u32,
+    /// Search strategy used: "ripgrep+treesitter", "ripgrep+fallback".
+    pub search_strategy: String,
+    /// Time taken in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+// ── read_files tool types ─────────────────────────────────────────
+
+/// Parameters for `read_files`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadFilesParams {
+    /// File paths to read (max 10 per call).
+    pub paths: Vec<String>,
+    /// Detail level for source files: `source_only`, `compact`, `full`.
+    #[serde(default = "read_files_default_detail_level")]
+    pub detail_level: String,
+    /// Maximum lines per file (default 500).
+    #[serde(default = "default_max_lines")]
+    pub max_lines_per_file: u32,
+}
+
+#[must_use]
+pub fn read_files_default_detail_level() -> String {
+    "source_only".to_string()
+}
+
+/// Result for a single file in `read_files`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct FileResult {
+    /// File path.
+    pub path: String,
+    /// File content (None if error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Language of the file (e.g., "rust", "typescript", "toml").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Total lines in the file (or lines returned if truncated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<u32>,
+    /// SHA-256 hash of the file content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_hash: Option<String>,
+    /// Error message if file could not be read (e.g., "file not found", "sandbox denied").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response from `read_files`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadFilesResponse {
+    /// Results for each requested file.
+    pub files: Vec<FileResult>,
+    /// Number of files successfully read.
+    pub succeeded: u32,
+    /// Number of files that failed to read.
+    pub failed: u32,
+    /// Time taken in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Helper to skip serializing false values for `probe_verified`.

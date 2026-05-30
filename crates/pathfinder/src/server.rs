@@ -68,9 +68,9 @@ mod tools;
 pub mod types;
 
 use types::{
-    AnalyzeImpactParams, GetDefinitionParams, GetRepoMapParams, ReadFileParams,
-    ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams, SearchCodebaseParams,
-    SearchCodebaseResponse,
+    AnalyzeImpactParams, FindSymbolParams, GetDefinitionParams, GetRepoMapParams,
+    ReadFileParams, ReadFilesParams, ReadSourceFileParams, ReadSymbolScopeParams,
+    ReadWithDeepContextParams, SearchCodebaseParams, SearchCodebaseResponse,
 };
 
 use pathfinder_common::config::PathfinderConfig;
@@ -205,7 +205,7 @@ impl PathfinderServer {
     }
 }
 
-// ── Tool Router (defines all 9 tools) ──────────────────────────────
+// ── Tool Router (defines all 13 tools) ──────────────────────────────
 
 #[tool_router]
 impl PathfinderServer {
@@ -276,6 +276,17 @@ impl PathfinderServer {
     }
 
     #[tool(
+        name = "find_symbol",
+        description = "Resolve a bare symbol name to its file::symbol semantic path(s). Use when you know a symbol's name but not its file. Returns matching definitions with file, line, kind, and a code preview. Faster than get_repo_map + search_codebase."
+    )]
+    async fn find_symbol(
+        &self,
+        Parameters(params): Parameters<FindSymbolParams>,
+    ) -> Result<Json<types::FindSymbolResponse>, ErrorData> {
+        self.find_symbol_impl(params).await
+    }
+
+    #[tool(
         name = "find_callers_callees",
         description = "Find all callers (incoming) and callees (outgoing) of a symbol — who calls this function and what does it call? Use max_depth=3 (default) for standard refactoring, max_depth=4-5 for large-scale API changes. LSP-powered with grep fallback. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). When `degraded=true` is true, `incoming`/`outgoing` are `null` (not `[]`) — do NOT treat empty as \"confirmed no callers\". When not degraded: empty arrays `[]` = LSP confirmed: truly zero callers/callees."
     )]
@@ -328,6 +339,17 @@ impl PathfinderServer {
         Parameters(params): Parameters<ReadFileParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         self.read_file_impl(params).await
+    }
+
+    #[tool(
+        name = "read_files",
+        description = "Batch read multiple files in a single call with per-file error resilience. For source files (.rs, .ts, .tsx, .go, .py, .vue, .js, .jsx), returns AST-parsed content. For config files (.json, .yaml, .toml, .env, Dockerfile), returns raw content. Max 10 files per call."
+    )]
+    async fn read_files(
+        &self,
+        Parameters(params): Parameters<ReadFilesParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.read_files_impl(params).await
     }
 }
 
