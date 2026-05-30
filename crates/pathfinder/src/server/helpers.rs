@@ -8,6 +8,14 @@ use pathfinder_common::types::SemanticPath;
 use rmcp::model::{ErrorCode, ErrorData};
 use std::path::Path;
 
+/// Spec 5.1: Convert a `Duration::as_millis()` (u128) to u64 for JSON responses.
+/// Millisecond timestamps will never overflow u64 in practice.
+#[allow(clippy::cast_possible_truncation)]
+#[must_use]
+pub fn millis_to_u64(millis: u128) -> u64 {
+    millis as u64
+}
+
 // ── Error Helpers ─────────────────────────────────────────────────
 
 /// Convert a [`PathfinderError`] to an [`ErrorData`] that MCP callers can
@@ -67,6 +75,40 @@ pub(crate) fn treesitter_error_to_error_data(e: pathfinder_treesitter::SurgeonEr
 /// Wrap a plain IO / infrastructure message in an [`ErrorData`].
 pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
     ErrorData::internal_error(msg, None)
+}
+
+// ── Degraded Mode Formatting ────────────────────────────────────────
+
+/// Format a standardized degraded-mode text prefix for agent consumption.
+///
+/// Output format: `DEGRADED ({reason}) — {trust description} — {fallback} — {retry}`
+/// Every tool uses this function so agents can parse degraded notices uniformly.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn format_degraded_notice(
+    reason: &pathfinder_common::types::DegradedReason,
+) -> String {
+    let guidance = reason.guidance();
+    let mut parts = vec![format!("DEGRADED ({reason})")];
+
+    match guidance.trust_level.as_str() {
+        "unreliable" => parts.push("results are UNRELIABLE, do not trust empty counts".into()),
+        "heuristic" => {
+            parts.push("results are heuristic (grep-based), verify manually".into());
+        }
+        "partial" => parts.push("results are PARTIAL, some features unavailable".into()),
+        "none" => parts.push("results are UNAVAILABLE for this language".into()),
+        _ => {}
+    }
+
+    if let Some(fallback) = &guidance.fallback_tool {
+        parts.push(format!("fallback: use {fallback} for authoritative results"));
+    }
+
+    if let Some(secs) = guidance.retry_after_seconds {
+        parts.push(format!("retry after ~{secs}s for LSP-backed results"));
+    }
+
+    parts.join(" — ")
 }
 
 // ── Language Detection ──────────────────────────────────────────────
@@ -166,6 +208,7 @@ mod tests {
             PathfinderError::SymbolNotFound {
                 semantic_path: "src/auth.ts::login".into(),
                 did_you_mean: vec![],
+                retry_after_seconds: None,
             },
             PathfinderError::AmbiguousSymbol {
                 semantic_path: "src/auth.ts::login".into(),

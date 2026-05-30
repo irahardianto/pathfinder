@@ -616,8 +616,14 @@ pub struct ReadWithDeepContextMetadata {
     /// - `"unavailable"`: No LSP; Tree-sitter fallback used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_readiness: Option<String>,
+    /// Whether the LSP warm-start is still in progress at the time of the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_start_in_progress: Option<bool>,
     /// `true` when the `max_dependencies` limit was reached and results were truncated.
     pub dependencies_truncated: bool,
+    /// Spec 5.1: Wall-clock duration of the tool call in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// The response for `get_definition`.
@@ -647,6 +653,17 @@ pub struct GetDefinitionResponse {
     /// - `"unavailable"`: No LSP; result is from ripgrep heuristics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_readiness: Option<String>,
+    /// Whether the LSP warm-start is still in progress at the time of the call.
+    /// When `true`, retrying after 15-30s may yield better results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_start_in_progress: Option<bool>,
+    /// Spec 5.1: Wall-clock duration of the tool call in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Spec 5.2: How the definition was resolved.
+    /// One of: `lsp`, `lsp_retry`, `grep_file`, `grep_impl`, `grep_global`, `grep_broad`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_strategy: Option<String>,
 }
 
 /// A single reference in an impact analysis.
@@ -703,8 +720,14 @@ pub struct AnalyzeImpactMetadata {
     /// - `"unavailable"`: No LSP; results degraded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_readiness: Option<String>,
+    /// Whether the LSP warm-start is still in progress at the time of the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_start_in_progress: Option<bool>,
     /// `true` when the `max_references` limit was reached and results were truncated.
     pub references_truncated: bool,
+    /// Spec 5.1: Wall-clock duration of the tool call in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 // ── Find All References Tool Types ─────────────────────────────────────
@@ -714,6 +737,12 @@ pub struct AnalyzeImpactMetadata {
 pub struct FindAllReferencesParams {
     /// Semantic path to the target symbol (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
+    /// Maximum number of references to return. Default: 50.
+    #[serde(default = "default_max_references")]
+    pub max_results: u32,
+    /// Number of results to skip (for pagination).
+    #[serde(default)]
+    pub offset: u32,
 }
 
 /// The metadata embedded in `structured_content` for `find_all_references`.
@@ -723,6 +752,12 @@ pub struct FindAllReferencesMetadata {
     /// Empty array `[]` means LSP confirmed zero references.
     /// `null` when `degraded` is `true` — LSP was unavailable.
     pub references: Option<Vec<ReferenceLocation>>,
+    /// Total number of references found (before pagination).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_references: Option<usize>,
+    /// Whether the results were truncated due to `max_results`.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub truncated: bool,
     /// Total number of files containing references.
     pub files_referenced: usize,
     /// Whether the reference lookup was degraded (LSP unavailable or crashed).
@@ -740,6 +775,9 @@ pub struct FindAllReferencesMetadata {
     /// - `"unavailable"`: No LSP; results degraded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_readiness: Option<String>,
+    /// Whether the LSP warm-start is still in progress at the time of the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_start_in_progress: Option<bool>,
 }
 
 /// A single reference location for `find_all_references`.
@@ -807,6 +845,12 @@ pub struct LspHealthResponse {
     /// This allows distinguishing "still warming up" from "`warm_start` finished
     /// but LSP didn't report readiness".
     pub warm_start_complete: bool,
+    /// Spec 1.3: Known limitations of the current LSP setup.
+    ///
+    /// Populated with actionable limitations that agents should be aware of,
+    /// such as missing capabilities or languages that require manual setup.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub known_limitations: Vec<String>,
 }
 
 /// Per-language LSP health status.

@@ -12,7 +12,8 @@
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{
-    parse_semantic_path, pathfinder_to_error_data, require_symbol_target, serialize_metadata,
+    format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+    serialize_metadata,
     treesitter_error_to_error_data,
 };
 use crate::server::types::{
@@ -29,6 +30,10 @@ use rmcp::model::{CallToolResult, ErrorData};
 /// Re-probes every 2 minutes to detect LSPs that became non-responsive after
 /// initial readiness (e.g., stuck indexing, memory pressure, internal deadlock).
 const LIVENESS_PROBE_INTERVAL_SECS: u64 = 120;
+
+/// BUG-4: Wall-clock timeout for BFS traversal in `analyze_impact`.
+/// Prevents infinite loops if the LSP keeps returning more references.
+const BFS_TIMEOUT_SECS: u64 = 30;
 
 /// File extensions considered source code for grep fallback filtering.
 ///
@@ -107,6 +112,7 @@ fn is_workspace_file(file: &str) -> bool {
 ///
 /// `Incoming` traverses callers (who calls this symbol).
 /// `Outgoing` traverses callees (what this symbol calls).
+#[derive(Debug)]
 enum CallDirection {
     Incoming,
     Outgoing,
@@ -303,48 +309,54 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
 /// | Other | Bare word boundary fallback |
 ///
 pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
+    let name = regex::escape(symbol_name);
     match ext {
         "rs" => vec![
             format!(
-                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+{symbol_name}\b"
+                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+{name}\b"
             ),
             format!(
-                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:struct|enum|trait|type|mod)\s+{symbol_name}\b"
+                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:struct|enum|trait|type|mod)\s+{name}\b"
             ),
             format!(
-                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const|static)\s+{symbol_name}\b"
+                r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const|static)\s+{name}\b"
             ),
         ],
         "ts" | "tsx" | "js" | "jsx" => vec![
             format!(
-                r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{symbol_name}\b"
+                r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{name}\b"
             ),
             format!(
-                r"(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+{symbol_name}\b"
+                r"(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+{name}\b"
             ),
             format!(
-                r"(?:export\s+)?(?:const|let|var)\s+{symbol_name}\s*[=:]"
+                r"(?:export\s+)?(?:const|let|var)\s+{name}\s*[=:]"
+            ),
+            format!(
+                r"(?:export\s+)?(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?\s*=>"
             ),
         ],
         "py" => vec![
-            format!(r"(?:async\s+)?def\s+{symbol_name}\b"),
-            format!(r"class\s+{symbol_name}\b"),
-            format!(r"^{symbol_name}\s*[=:]"),
+            format!(r"(?:async\s+)?def\s+{name}\b"),
+            format!(r"class\s+{name}\b"),
+            format!(r"^{name}\s*[=:]"),
         ],
         "go" => vec![
-            format!(r"func\s+(?:\([^)]+\)\s+)?{symbol_name}\b"),
-            format!(r"type\s+{symbol_name}\s+"),
-            format!(r"(?:const|var)\s+{symbol_name}\b"),
+            format!(r"func\s+(?:\([^)]+\)\s+)?{name}\b"),
+            format!(r"func\s+(?:\([^)]*\[[^\]]*\][^)]*\)\s+)?{name}\b"),
+            format!(r"type\s+{name}\s+"),
+            format!(r"type\s+{name}\s*\["),
+            format!(r"(?:const|var)\s+{name}\b"),
         ],
         "java" => vec![
             format!(
-                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:class|interface|enum|@interface)\s+{symbol_name}\b"
+                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:class|interface|enum|@interface)\s+{name}\b"
             ),
             format!(
-                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{symbol_name}\s*\("
+                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{name}\s*\("
             ),
         ],
-        _ => vec![format!(r"\b{symbol_name}\b")],
+        _ => vec![format!(r"\b{name}\b")],
     }
 }
 
@@ -810,6 +822,20 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        // Early file existence check — avoid tree-sitter parse on nonexistent files
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            tracing::warn!(
+                tool = "get_definition",
+                path = %abs_file.display(),
+                "file not found"
+            );
+            return Err(pathfinder_to_error_data(&err));
+        }
+
         // Resolve the symbol position via Tree-sitter to get line/column
         let ts_start = std::time::Instant::now();
         let symbol_scope = self
@@ -823,19 +849,40 @@ impl PathfinderServer {
         // guaranteed on all exit paths (success, error, early return).
         // rust-analyzer requires files to be in its document buffer to resolve
         // definitions. Without this, it returns null for all navigation.
-        let file_content =
-            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
-                .await
-                .unwrap_or_default();
+        let file_path = self.workspace_root.path().join(&semantic_path.file_path);
+        let file_content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "get_definition",
+                    path = %file_path.display(),
+                    error = %e,
+                    "file read failed — LSP will receive empty content, goto_definition may return null"
+                );
+                String::new()
+            }
+        };
         // `_doc_guard` is held until the end of this function; dropping it fires did_close.
-        let _doc_guard = self
+        let _doc_guard = match self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
             )
-            .await;
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "get_definition",
+                    semantic_path = %semantic_path,
+                    error = %e,
+                    "open_document failed — LSP queries may return degraded results"
+                );
+                None
+            }
+        };
 
         // Query LSP for the definition location at the symbol's start line
         let lsp_start = std::time::Instant::now();
@@ -877,6 +924,9 @@ impl PathfinderServer {
                     degraded_reason: None,
                     actionable_guidance: None,
                     lsp_readiness: Some("ready".to_owned()),
+                    warm_start_in_progress: Some(false),
+                    duration_ms: Some(millis_to_u64(duration_ms)),
+                    resolution_strategy: Some("lsp".to_owned()),
                 }))
             }
             Ok(None) => {
@@ -917,6 +967,9 @@ impl PathfinderServer {
                         degraded_reason: None,
                         actionable_guidance: None,
                         lsp_readiness: Some("warming_up".to_owned()),
+                        warm_start_in_progress: Some(true),
+                        duration_ms: Some(millis_to_u64(start.elapsed().as_millis())),
+                        resolution_strategy: Some("lsp_retry".to_owned()),
                     }));
                 }
 
@@ -953,9 +1006,18 @@ impl PathfinderServer {
                     "get_definition: no definition found (LSP None, grep empty)"
                 );
                 let did_you_mean_suggestions = self.compute_did_you_mean(&semantic_path).await;
+
+                // Spec 2.4: Check if LSP is still warming up and suggest retry delay
+                let retry_after = if self.lawyer.is_warm_start_complete() {
+                    None
+                } else {
+                    Some(10u32) // 10 seconds when warmup is in progress
+                };
+
                 Err(pathfinder_to_error_data(&PathfinderError::SymbolNotFound {
                     semantic_path: params.semantic_path,
                     did_you_mean: did_you_mean_suggestions,
+                    retry_after_seconds: retry_after,
                 }))
             }
             Err(LspError::NoLspAvailable) => {
@@ -1079,12 +1141,12 @@ impl PathfinderServer {
     /// Mirrors the pattern used by all other tools in the suite.
     fn get_def_to_call_result(def: &GetDefinitionResponse) -> rmcp::model::CallToolResult {
         let text = if def.degraded {
-            let reason = def
+            let notice = def
                 .degraded_reason
                 .as_ref()
-                .map_or_else(|| "unknown".to_owned(), ToString::to_string);
+                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
             format!(
-                "⚠️ DEGRADED ({reason}) — Result is from grep heuristic, not LSP. May not be the authoritative definition.\n{}:L{} — {}",
+                "{notice}\n{}:L{} — {}",
                 def.file,
                 def.line,
                 if def.preview.is_empty() {
@@ -1161,7 +1223,12 @@ impl PathfinderServer {
         }
 
         // Strategy 3: Global search with file-proximity scoring
-        self.grep_definition_global(symbol_name).await
+        if let Some(result) = self.grep_definition_global(symbol_name.clone()).await {
+            return Some(result);
+        }
+
+        // Spec 2.3: Strategy 4: Broad symbol search when definition patterns fail
+        self.grep_symbol_broad(&symbol_name).await
     }
 
     /// Search for a definition within a specific file.
@@ -1174,8 +1241,9 @@ impl PathfinderServer {
         // Rust: `pub fn`, `pub(crate) fn`, `pub async fn`, bare `fn`
         // TypeScript: `export function`, `export default function`, bare `function`
         // Python: `def`, `async def`
+        let name = regex::escape(&symbol_name);
         let pattern = format!(
-            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
+            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{name}\\b"
         );
 
         // Use the file as a specific path glob. Convert to forward-slash
@@ -1208,6 +1276,9 @@ impl PathfinderServer {
                     degraded_reason: Some(DegradedReason::GrepFallbackFileScoped),
                     actionable_guidance: Some(DegradedReason::GrepFallbackFileScoped.guidance()),
                     lsp_readiness: Some("unavailable".to_owned()),
+                    warm_start_in_progress: None,
+                    duration_ms: None,
+                    resolution_strategy: Some("grep_file".to_owned()),
                 });
             }
         }
@@ -1221,7 +1292,8 @@ impl PathfinderServer {
         method_name: &str,
     ) -> Option<GetDefinitionResponse> {
         // First find files containing the impl block
-        let impl_pattern = format!(r"impl\s+(?:<[^>]+>\s+)?{parent_name}\\b");
+        let parent_escaped = regex::escape(parent_name);
+        let impl_pattern = format!(r"impl\s+(?:<[^>]+>\s+)?{parent_escaped}\\b");
         let search_result = self
             .scout
             .search(&pathfinder_search::SearchParams {
@@ -1239,8 +1311,9 @@ impl PathfinderServer {
         if let Ok(result) = search_result {
             for m in &result.matches {
                 // Now search within this specific file for the method
+                let method_escaped = regex::escape(method_name);
                 let method_pattern = format!(
-                    r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_name}\\b"
+                    r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\\b"
                 );
                 let file_search = self
                     .scout
@@ -1270,6 +1343,9 @@ impl PathfinderServer {
                                 DegradedReason::GrepFallbackImplScoped.guidance(),
                             ),
                             lsp_readiness: Some("unavailable".to_owned()),
+                            warm_start_in_progress: None,
+                            duration_ms: None,
+                            resolution_strategy: Some("grep_impl".to_owned()),
                         });
                     }
                 }
@@ -1285,8 +1361,9 @@ impl PathfinderServer {
         // Rust: `pub fn`, `pub(crate) fn`, `pub async fn`, bare `fn`
         // TypeScript: `export function`, `export default function`, bare `function`
         // Python: `def`, `async def`
+        let name = regex::escape(&symbol_name);
         let pattern = format!(
-            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{symbol_name}\\b"
+            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{name}\\b"
         );
 
         let search_result = self
@@ -1316,6 +1393,52 @@ impl PathfinderServer {
                     degraded_reason: Some(DegradedReason::GrepFallbackGlobal),
                     actionable_guidance: Some(DegradedReason::GrepFallbackGlobal.guidance()),
                     lsp_readiness: Some("unavailable".to_owned()),
+                    warm_start_in_progress: None,
+                    duration_ms: None,
+                    resolution_strategy: Some("grep_global".to_owned()),
+                });
+            }
+        }
+        None
+    }
+
+    /// Spec 2.3: Broad cross-file symbol search fallback when definition patterns fail.
+    ///
+    /// Searches for the bare symbol name (not just definition patterns) across all
+    /// source files. Returns the first match that looks like a symbol definition or reference.
+    async fn grep_symbol_broad(&self, symbol_name: &str) -> Option<GetDefinitionResponse> {
+        let name = regex::escape(symbol_name);
+        let pattern = format!(r"\b{name}\\b");
+
+        let search_result = self
+            .scout
+            .search(&pathfinder_search::SearchParams {
+                workspace_root: self.workspace_root.path().to_path_buf(),
+                query: pattern,
+                is_regex: true,
+                max_results: 20,
+                path_glob: "**/*".to_owned(),
+                exclude_glob: "**/{test,tests,mock}*/**".to_owned(),
+                offset: 0,
+                context_lines: 1,
+            })
+            .await;
+
+        if let Ok(result) = search_result {
+            if !result.matches.is_empty() {
+                let m = &result.matches[0];
+                return Some(GetDefinitionResponse {
+                    file: m.file.clone(),
+                    line: u32::try_from(m.line).unwrap_or(u32::MAX),
+                    column: u32::try_from(m.column).unwrap_or(1),
+                    preview: m.content.clone(),
+                    degraded: true,
+                    degraded_reason: Some(DegradedReason::GrepFallbackGlobal),
+                    actionable_guidance: Some(DegradedReason::GrepFallbackGlobal.guidance()),
+                    lsp_readiness: Some("unavailable".to_owned()),
+                    warm_start_in_progress: None,
+                    duration_ms: None,
+                    resolution_strategy: Some("grep_broad".to_owned()),
                 });
             }
         }
@@ -1359,6 +1482,20 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        // Early file existence check — avoid tree-sitter parse on nonexistent files
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            tracing::warn!(
+                tool = "read_with_deep_context",
+                path = %abs_file.display(),
+                "file not found"
+            );
+            return Err(pathfinder_to_error_data(&err));
+        }
+
         // Fetch the symbol scope (Tree-sitter)
         let ts_start = std::time::Instant::now();
         let scope = self
@@ -1369,19 +1506,40 @@ impl PathfinderServer {
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         // IW-3 (DS-1 gap fix): RAII document lifecycle — did_close fires on all exits.
-        let file_content =
-            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
-                .await
-                .unwrap_or_default();
+        let file_path = self.workspace_root.path().join(&semantic_path.file_path);
+        let file_content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "read_with_deep_context",
+                    path = %file_path.display(),
+                    error = %e,
+                    "file read failed — LSP will receive empty content"
+                );
+                String::new()
+            }
+        };
         // `_doc_guard` fires did_close automatically when this function returns.
-        let _doc_guard = self
+        let _doc_guard = match self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
             )
-            .await;
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "read_with_deep_context",
+                    semantic_path = %semantic_path,
+                    error = %e,
+                    "open_document failed — LSP queries may return degraded results"
+                );
+                None
+            }
+        };
 
         let project_only = params.project_only.unwrap_or(true);
         let max_dependencies = params.max_dependencies;
@@ -1430,6 +1588,11 @@ impl PathfinderServer {
         } else {
             Some("ready".to_owned())
         };
+        let warm_start_in_progress = match lsp_readiness.as_deref() {
+            Some("warming_up") => Some(true),
+            Some("ready") => Some(false),
+            _ => None,
+        };
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
@@ -1439,7 +1602,9 @@ impl PathfinderServer {
             degraded_reason,
             actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
+            warm_start_in_progress,
             dependencies_truncated,
+            duration_ms: Some(millis_to_u64(duration_ms)),
         };
 
         // Build the dependency block: list each callee signature, file, and line.
@@ -1457,11 +1622,11 @@ impl PathfinderServer {
 
         // Prepend degradation notice when in degraded mode
         let text = if degraded {
-            let reason = degraded_reason
+            let notice = degraded_reason
                 .as_ref()
-                .map_or_else(|| "unknown".to_owned(), ToString::to_string);
+                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
             format!(
-                "⚠️ DEGRADED ({reason}) — Dependencies may be incomplete. LSP was unavailable or still warming.\n\n{dep_count} dependencies loaded{dep_block}\n\n{}",
+                "{notice}\n\n{dep_count} dependencies loaded{dep_block}\n\n{}",
                 scope.content
             )
         } else {
@@ -1477,6 +1642,8 @@ impl PathfinderServer {
 
     /// Performs BFS traversal of the call hierarchy in the specified direction.
     ///
+    /// BUG-4: Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
+    ///
     /// Returns the collected references and the maximum depth reached during traversal.
     async fn bfs_call_hierarchy(
         &self,
@@ -1487,6 +1654,9 @@ impl PathfinderServer {
         project_only: bool,
         remaining_references: &mut u32,
     ) -> (Vec<crate::server::types::ImpactReference>, u32) {
+        let timeout = tokio::time::Duration::from_secs(BFS_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now() + timeout;
+
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((initial_item.clone(), 0));
         let mut seen = std::collections::HashSet::new();
@@ -1502,6 +1672,16 @@ impl PathfinderServer {
                 continue;
             }
             if *remaining_references == 0 {
+                break;
+            }
+
+            // BUG-4: Check wall-clock timeout
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    direction = ?direction,
+                    timeout_secs = BFS_TIMEOUT_SECS,
+                    "BFS traversal exceeded wall-clock timeout, returning partial results"
+                );
                 break;
             }
 
@@ -1628,6 +1808,20 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        // Early file existence check — avoid tree-sitter parse on nonexistent files
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            tracing::warn!(
+                tool = "analyze_impact",
+                path = %abs_file.display(),
+                "file not found"
+            );
+            return Err(pathfinder_to_error_data(&err));
+        }
+
         // 1. Fetch the symbol scope (Tree-sitter) to get start line
         let ts_start = std::time::Instant::now();
         let scope = match self
@@ -1650,19 +1844,40 @@ impl PathfinderServer {
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         // IW-3 (DS-1 gap fix): RAII document lifecycle — did_close fires on all exits.
-        let file_content =
-            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
-                .await
-                .unwrap_or_default();
+        let file_path = self.workspace_root.path().join(&semantic_path.file_path);
+        let file_content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    path = %file_path.display(),
+                    error = %e,
+                    "file read failed — LSP will receive empty content"
+                );
+                String::new()
+            }
+        };
         // `_doc_guard` fires did_close automatically when this function returns.
-        let _doc_guard = self
+        let _doc_guard = match self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
             )
-            .await;
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    semantic_path = %semantic_path,
+                    error = %e,
+                    "open_document failed — LSP queries may return degraded results"
+                );
+                None
+            }
+        };
 
         let lsp_start = std::time::Instant::now();
         // Use Option<Vec> to distinguish "unknown" (LSP unavailable) from "verified empty" (LSP confirmed zero).
@@ -1910,6 +2125,11 @@ impl PathfinderServer {
         } else {
             Some("ready".to_owned())
         };
+        let warm_start_in_progress = match lsp_readiness.as_deref() {
+            Some("warming_up") => Some(true),
+            Some("ready") => Some(false),
+            _ => None,
+        };
 
         tracing::info!(
             tool = "analyze_impact",
@@ -1933,16 +2153,18 @@ impl PathfinderServer {
             degraded_reason,
             actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
+            warm_start_in_progress,
             references_truncated,
+            duration_ms: Some(millis_to_u64(duration_ms)),
         };
 
         // Build honest text output based on actual results listing every
         // reference so agents can act without parsing structured_content.
         let mut text_parts = Vec::new();
         if degraded {
-            let reason_str = degraded_reason_cloned
+            let notice = degraded_reason_cloned
                 .as_ref()
-                .map_or_else(|| "unknown".to_owned(), ToString::to_string);
+                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
 
             let symbol_name = semantic_path
                 .symbol_chain
@@ -1951,9 +2173,7 @@ impl PathfinderServer {
                 .map(|s| s.name.clone())
                 .unwrap_or_default();
 
-            text_parts.push(format!(
-                "⚠️ DEGRADED ({reason_str}) — LSP call hierarchy unavailable for this symbol."
-            ));
+            text_parts.push(notice);
             text_parts.push(String::new());
             text_parts.push("   Common causes:".to_owned());
             text_parts.push("   - Interface types without concrete implementations in source (JPA repositories)".to_owned());
@@ -2048,6 +2268,20 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        // Early file existence check — avoid tree-sitter parse on nonexistent files
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            tracing::warn!(
+                tool = "find_all_references",
+                path = %abs_file.display(),
+                "file not found"
+            );
+            return Err(pathfinder_to_error_data(&err));
+        }
+
         let ts_start = std::time::Instant::now();
         let symbol_scope = self
             .surgeon
@@ -2056,18 +2290,39 @@ impl PathfinderServer {
             .map_err(treesitter_error_to_error_data)?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
-        let file_content =
-            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
-                .await
-                .unwrap_or_default();
-        let _doc_guard = self
+        let file_path = self.workspace_root.path().join(&semantic_path.file_path);
+        let file_content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "find_all_references",
+                    path = %file_path.display(),
+                    error = %e,
+                    "file read failed — LSP will receive empty content"
+                );
+                String::new()
+            }
+        };
+        let _doc_guard = match self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
             )
-            .await;
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "find_all_references",
+                    semantic_path = %semantic_path,
+                    error = %e,
+                    "open_document failed — LSP queries may return degraded results"
+                );
+                None
+            }
+        };
 
         let lsp_start = std::time::Instant::now();
         let lsp_result = self
@@ -2129,6 +2384,17 @@ impl PathfinderServer {
                 let mut all_references = references.clone();
                 all_references.extend(implementations.clone());
 
+                // Spec 4.4: Apply pagination
+                let total_references = all_references.len();
+                let offset = usize::try_from(params.offset).unwrap_or(0);
+                let max_results = usize::try_from(params.max_results).unwrap_or(50);
+                let truncated = all_references.len() > offset.saturating_add(max_results);
+                let paginated: Vec<_> = all_references
+                    .into_iter()
+                    .skip(offset)
+                    .take(max_results)
+                    .collect();
+
                 tracing::info!(
                     tool = "find_all_references",
                     references_count = references.len(),
@@ -2185,12 +2451,15 @@ impl PathfinderServer {
                 };
 
                 let metadata = crate::server::types::FindAllReferencesMetadata {
-                    references: Some(all_references),
+                    references: Some(paginated),
+                    total_references: Some(total_references),
+                    truncated,
                     files_referenced,
                     degraded: false,
                     degraded_reason: None,
                     actionable_guidance: None,
                     lsp_readiness: Some("ready".to_owned()),
+                    warm_start_in_progress: Some(false),
                 };
 
                 let mut result =
@@ -2212,17 +2481,21 @@ impl PathfinderServer {
 
                 let metadata = crate::server::types::FindAllReferencesMetadata {
                     references: None,
+                    total_references: None,
+                    truncated: false,
                     files_referenced: 0,
                     degraded: true,
                     degraded_reason: Some(DegradedReason::NoLsp),
                     actionable_guidance: Some(DegradedReason::NoLsp.guidance()),
                     lsp_readiness: Some("unavailable".to_owned()),
+                    warm_start_in_progress: None,
                 };
 
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                         format!(
-                            "⚠️ DEGRADED (no_lsp) — References unknown. Use search_codebase to manually find usages of `{}`",
+                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`",
+                            format_degraded_notice(&DegradedReason::NoLsp),
                             params.semantic_path
                         ),
                     )]);
@@ -2253,22 +2526,26 @@ impl PathfinderServer {
                 } else {
                     "unavailable"
                 };
+                let warm_start_in_progress = if is_timeout { Some(true) } else { None };
 
                 let metadata = crate::server::types::FindAllReferencesMetadata {
                     references: None,
+                    total_references: None,
+                    truncated: false,
                     files_referenced: 0,
                     degraded: true,
                     degraded_reason: Some(degraded_reason),
                     actionable_guidance: Some(degraded_reason.guidance()),
                     lsp_readiness: Some(lsp_readiness.to_owned()),
+                    warm_start_in_progress,
                 };
 
-                let reason_str = degraded_reason.to_string();
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                         format!(
-                            "⚠️ DEGRADED ({}) — References unknown. Use search_codebase to manually find usages of `{}`",
-                            reason_str, params.semantic_path
+                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`",
+                            format_degraded_notice(&degraded_reason),
+                            params.semantic_path
                         ),
                     )]);
                 result.structured_content = crate::server::helpers::serialize_metadata(&metadata);
@@ -2301,6 +2578,15 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        // Early file existence check
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
         let scope = self
             .surgeon
             .read_symbol_scope(self.workspace_root.path(), &semantic_path)
@@ -2314,18 +2600,39 @@ impl PathfinderServer {
             language: scope.language.clone(),
         });
 
-        let file_content =
-            tokio::fs::read_to_string(self.workspace_root.path().join(&semantic_path.file_path))
-                .await
-                .unwrap_or_default();
-        let _doc_guard = self
+        let file_path = self.workspace_root.path().join(&semantic_path.file_path);
+        let file_content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "symbol_overview",
+                    path = %file_path.display(),
+                    error = %e,
+                    "file read failed — LSP will receive empty content"
+                );
+                String::new()
+            }
+        };
+        let _doc_guard = match self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
                 &file_content,
             )
-            .await;
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "symbol_overview",
+                    semantic_path = %semantic_path,
+                    error = %e,
+                    "open_document failed — LSP queries may return degraded results"
+                );
+                None
+            }
+        };
 
         let impact_params = crate::server::types::AnalyzeImpactParams {
             semantic_path: params.semantic_path.clone(),
@@ -2377,6 +2684,8 @@ impl PathfinderServer {
 
         let refs_params = crate::server::types::FindAllReferencesParams {
             semantic_path: params.semantic_path.clone(),
+            max_results: 50,
+            offset: 0,
         };
 
         let refs_result = self.find_all_references_impl(refs_params).await;
@@ -2455,8 +2764,10 @@ impl PathfinderServer {
         };
 
         let degraded_block = if degraded {
-            let reason_str = degraded_reason.as_ref().map_or("unknown", |r| r.to_string().leak());
-            format!("DEGRADED: yes ({reason_str})\n")
+            let notice = degraded_reason
+                .as_ref()
+                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
+            format!("{notice}\n")
         } else {
             "DEGRADED: no (LSP-backed, authoritative)\n".to_owned()
         };
@@ -2799,10 +3110,42 @@ impl PathfinderServer {
             overall_status = "unavailable";
         }
 
+        let mut known_limitations = Vec::new();
+
+        if !missing_languages.is_empty() {
+            let langs: Vec<&str> = missing_languages
+                .iter()
+                .map(|m| m.language_id.as_str())
+                .collect();
+            known_limitations.push(format!(
+                "Missing LSP binaries for: {}. Install them for full navigation support.",
+                langs.join(", ")
+            ));
+        }
+
+        for lang_health in &languages {
+            if lang_health.supports_call_hierarchy == Some(false)
+                && lang_health.supports_definition == Some(true)
+            {
+                known_limitations.push(format!(
+                    "{}: call hierarchy not supported — analyze_impact uses grep fallback (less accurate)",
+                    lang_health.language
+                ));
+            }
+        }
+
+        if !self.lawyer.is_warm_start_complete() {
+            known_limitations.push(
+                "LSP warm_start still in progress — results may be incomplete until indexing finishes"
+                    .to_owned(),
+            );
+        }
+
         let response = crate::server::types::LspHealthResponse {
             status: overall_status.to_owned(),
             languages,
             warm_start_complete: self.lawyer.is_warm_start_complete(),
+            known_limitations,
         };
 
         // Build a concise human-readable summary for the text channel.
@@ -3153,7 +3496,7 @@ mod tests {
         mock_surgeon: Arc<MockSurgeon>,
         mock_lawyer: Arc<MockLawyer>,
     ) -> (PathfinderServer, tempfile::TempDir) {
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -3166,6 +3509,22 @@ mod tests {
             mock_lawyer,
         );
         (server, ws_dir)
+    }
+
+    /// Create a tempdir with standard test files so the file existence check passes.
+    fn make_temp_workspace() -> tempfile::TempDir {
+        let ws_dir = tempdir().expect("temp dir");
+        let src_dir = ws_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::write(src_dir.join("auth.rs"), "fn login() { }").expect("create auth.rs");
+        std::fs::write(src_dir.join("token.rs"), "fn validate_token() -> bool { true }")
+            .expect("create token.rs");
+        std::fs::write(src_dir.join("main.rs"), "fn main() {}").expect("create main.rs");
+        std::fs::write(src_dir.join("service.rs"), "fn login() { }").expect("create service.rs");
+        std::fs::write(src_dir.join("user.rs"), "struct User { name: String }")
+            .expect("create user.rs");
+        std::fs::write(src_dir.join("auth.go"), "func login() {}").expect("create auth.go");
+        ws_dir
     }
 
     fn make_scope() -> SymbolScope {
@@ -3224,7 +3583,7 @@ mod tests {
 
         // Default MockLawyer returns Ok(None); use NoOpLawyer for NoLspAvailable
         let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -3301,7 +3660,7 @@ mod tests {
             .extend([Ok(make_scope()), Ok(make_scope())]);
 
         let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -3327,7 +3686,7 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(text_content, "⚠️ DEGRADED (grep_fallback_dependencies) — Dependencies may be incomplete. LSP was unavailable or still warming.\n\n0 dependencies loaded\n\nfn login() { }");
+        assert_eq!(text_content, "DEGRADED (grep_fallback_dependencies) — results are heuristic (grep-based), verify manually — fallback: use search_codebase for authoritative results\n\n0 dependencies loaded\n\nfn login() { }");
         assert!(val.degraded);
         assert_eq!(
             val.degraded_reason,
@@ -3414,7 +3773,7 @@ mod tests {
             .push(Ok(make_scope()));
 
         let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -3574,7 +3933,7 @@ mod tests {
             .unwrap()
             .push(Ok(make_scope()));
 
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -3643,7 +4002,7 @@ mod tests {
             .unwrap()
             .push(Ok(make_scope()));
 
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -3747,7 +4106,7 @@ mod tests {
         let _lawyer = Arc::new(MockLawyer::default());
 
         // Use NoOpLawyer (NoLspAvailable path) + MockScout with results
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -4269,12 +4628,12 @@ mod tests {
             .push(Ok(make_scope()));
         // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
         surgeon
-            .enclosing_symbol_detail_results
+            .read_symbol_scope_results
             .lock()
             .unwrap()
-            .push(Ok(None));
+            .push(Ok(make_scope()));
 
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -4362,7 +4721,7 @@ mod tests {
             .unwrap()
             .extend([Ok(None), Ok(None), Ok(None), Ok(None)]);
 
-        let ws_dir = tempdir().expect("temp dir");
+        let ws_dir = make_temp_workspace();
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);

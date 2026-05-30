@@ -25,6 +25,9 @@ pub enum PathfinderError {
         semantic_path: String,
         /// Similar symbol names suggested by the system (Levenshtein distance).
         did_you_mean: Vec<String>,
+        /// Spec 2.4: Suggested retry delay in seconds when LSP is warming up.
+        /// None means the symbol doesn't exist (no amount of retrying will help).
+        retry_after_seconds: Option<u32>,
     },
 
     /// Semantic path is malformed or missing required '::' separator.
@@ -116,7 +119,15 @@ impl PathfinderError {
             Self::SymbolNotFound {
                 semantic_path,
                 did_you_mean,
+                retry_after_seconds,
             } => {
+                // Spec 2.4: Include retry hint when warm-up is in progress
+                if let Some(seconds) = retry_after_seconds {
+                    return Some(format!(
+                        "LSP is still warming up (initial indexing). Retry in {seconds} seconds."
+                    ));
+                }
+
                 // Detect path separator confusion: agent may have used `.` instead of `::`
                 // (e.g., `src/lib.rs.MyStruct.method` instead of `src/lib.rs::MyStruct.method`)
                 // or used `::` between nested symbols where `.` is expected.
@@ -129,7 +140,7 @@ impl PathfinderError {
                 } else if semantic_path.matches("::").count() > 1 {
                     Some(
                         " Note: only one '::' is allowed — between the file path and the symbol. \
-                         Nested symbols within the file use '.' (e.g., 'src/lib.rs::Outer.Inner.method')."
+                          Nested symbols within the file use '.' (e.g., 'src/lib.rs::Outer.Inner.method')."
                     )
                 } else {
                     None
@@ -137,10 +148,16 @@ impl PathfinderError {
 
                 if did_you_mean.is_empty() {
                     // No suggestions — the symbol might be in a different file than what the agent guessed.
-                    // Suggest search_codebase to find which file actually defines this symbol.
-                    let symbol_name = semantic_path.split("::").last().unwrap_or(semantic_path);
+                    // Suggest find_symbol and search_codebase to locate the correct file.
+                    let base_name = semantic_path
+                        .split("::")
+                        .last()
+                        .unwrap_or(semantic_path)
+                        .split('.')
+                        .next()
+                        .unwrap_or(semantic_path);
                     Some(format!(
-                        "Symbol not found in the specified file. Use search_codebase(query=\"{symbol_name}\") to find which file defines this symbol, then use the correct file path in the semantic path.{}",
+                        "Symbol not found in the specified file. Use find_symbol(name=\"{base_name}\") to locate the correct file, or search_codebase(query=\"{base_name}\") to search the entire workspace.{}",
                         separator_hint.unwrap_or("")
                     ))
                 } else {
@@ -159,7 +176,8 @@ impl PathfinderError {
                     .to_owned(),
             ),
             Self::FileNotFound { .. } => Some(
-                "Verify the file path is relative to the workspace root and the file exists."
+                "Verify the file path is relative to the workspace root and the file exists. \
+                 Use search_codebase(query=\"...\") to find the correct path, or get_repo_map to see all files."
                     .to_owned(),
             ),
             Self::InvalidSemanticPath { input, .. } => Some(format!(
@@ -219,8 +237,16 @@ impl PathfinderError {
 
     fn to_details(&self) -> serde_json::Value {
         match self {
-            Self::SymbolNotFound { did_you_mean, .. } => {
-                serde_json::json!({ "did_you_mean": did_you_mean })
+            Self::SymbolNotFound {
+                did_you_mean,
+                retry_after_seconds,
+                ..
+            } => {
+                let mut details = serde_json::json!({ "did_you_mean": did_you_mean });
+                if let Some(seconds) = retry_after_seconds {
+                    details["retry_after_seconds"] = serde_json::json!(seconds);
+                }
+                details
             }
             Self::AmbiguousSymbol { matches, .. } => {
                 serde_json::json!({ "matches": matches })
@@ -285,6 +311,7 @@ mod tests {
         let err = PathfinderError::SymbolNotFound {
             semantic_path: "src/auth.ts::AuthService.login".into(),
             did_you_mean: vec!["AuthService.logout".into()],
+            retry_after_seconds: None,
         };
         assert_eq!(err.error_code(), "SYMBOL_NOT_FOUND");
     }
@@ -437,6 +464,7 @@ mod tests {
             PathfinderError::SymbolNotFound {
                 semantic_path: "a".into(),
                 did_you_mean: vec![],
+                retry_after_seconds: None,
             },
             PathfinderError::AmbiguousSymbol {
                 semantic_path: "a".into(),
@@ -482,6 +510,7 @@ mod tests {
         let err = PathfinderError::SymbolNotFound {
             semantic_path: "src/auth.ts::startServer".into(),
             did_you_mean: vec!["stopServer".into(), "startService".into()],
+            retry_after_seconds: None,
         };
         let response = err.to_error_response();
         let suggestions = response.details["did_you_mean"]
@@ -497,6 +526,7 @@ mod tests {
         let err = PathfinderError::SymbolNotFound {
             semantic_path: "src/auth.ts::login".into(),
             did_you_mean: vec!["logout".into(), "logIn".into()],
+            retry_after_seconds: None,
         };
         let hint = err.hint().expect("should have hint");
         assert!(
@@ -514,6 +544,7 @@ mod tests {
         let err = PathfinderError::SymbolNotFound {
             semantic_path: "src/auth.ts::unknown".into(),
             did_you_mean: vec![],
+            retry_after_seconds: None,
         };
         let hint = err
             .hint()
@@ -524,6 +555,22 @@ mod tests {
             hint.contains("search_codebase"),
             "hint should suggest search_codebase to find the correct file: {hint}"
         );
+    }
+
+    #[test]
+    fn test_symbol_not_found_retry_hint_during_warmup() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/main.rs::foo".into(),
+            did_you_mean: vec![],
+            retry_after_seconds: Some(10),
+        };
+        let hint = err.hint().expect("should have hint during warmup");
+        assert!(
+            hint.contains("Retry in 10 seconds"),
+            "hint should mention retry delay: {hint}"
+        );
+        let response = err.to_error_response();
+        assert_eq!(response.details["retry_after_seconds"], 10);
     }
 
     #[test]

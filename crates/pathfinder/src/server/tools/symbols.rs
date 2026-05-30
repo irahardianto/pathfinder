@@ -32,6 +32,20 @@ impl PathfinderServer {
             return Err(pathfinder_to_error_data(&e));
         }
 
+        // Early file existence check — avoid tree-sitter parse on nonexistent files
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            tracing::warn!(
+                tool = "read_symbol_scope",
+                path = %abs_file.display(),
+                "file not found"
+            );
+            return Err(pathfinder_to_error_data(&err));
+        }
+
         // Delegate to surgeon
         let ts_start = std::time::Instant::now();
         match self

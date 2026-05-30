@@ -266,7 +266,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "get_definition",
-        description = "Jump to where a symbol is defined. Returns the definition's file, line, column, and a code preview. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). If you don't know which file defines a symbol, use search_codebase first to locate it. LSP-powered — follows imports, re-exports, and type aliases across files. Falls back to ripgrep when LSP is unavailable. Check `degraded` in response."
+        description = "Jump to where a symbol is defined. Returns the definition's file, line, column, and a code preview. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). If you don't know which file defines a symbol, use search_codebase first to locate it. LSP-powered — follows imports, re-exports, and type aliases across files. Falls back to ripgrep when LSP is unavailable. Check `degraded` in response. When SYMBOL_NOT_FOUND includes `retry_after_seconds`, the LSP is still warming up — retry after the indicated delay."
     )]
     async fn get_definition(
         &self,
@@ -321,7 +321,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "lsp_health",
-        description = "Check LSP health per language. Returns overall status (ready / warming_up / starting / unavailable) and per-language details. Use this when navigation tools return degraded results, or at session start to know which languages have full LSP support. Pass `language` to check a specific language, or omit to check all. When status is not 'ready', navigation tools may return incomplete results."
+        description = "Check LSP health per language. Returns overall status (ready / warming_up / starting / unavailable) and per-language details. Use this when navigation tools return degraded results, or at session start to know which languages have full LSP support. Pass `language` to check a specific language, or omit to check all. When status is not 'ready', navigation tools may return incomplete results. Response includes `known_limitations` listing missing capabilities. Pass `action=\"restart\"` with `language` to force-restart a stuck LSP."
     )]
     async fn lsp_health(
         &self,
@@ -919,6 +919,10 @@ mod tests {
     #[tokio::test]
     async fn test_read_symbol_scope_routes_to_surgeon_and_handles_success() {
         let ws_dir = tempdir().expect("temp dir");
+        // Create test file so file existence check passes
+        let src_dir = ws_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::write(src_dir.join("auth.go"), "func Login() {}").expect("create auth.go");
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
@@ -973,6 +977,10 @@ mod tests {
     #[tokio::test]
     async fn test_read_symbol_scope_handles_surgeon_error() {
         let ws_dir = tempdir().expect("temp dir");
+        // Create test file so file existence check passes
+        let src_dir = ws_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::write(src_dir.join("auth.go"), "func Login() {}").expect("create auth.go");
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);

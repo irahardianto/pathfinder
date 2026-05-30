@@ -42,6 +42,7 @@ impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
             SurgeonError::SymbolNotFound { path, did_you_mean } => Self::SymbolNotFound {
                 semantic_path: path,
                 did_you_mean,
+                retry_after_seconds: None,
             },
             SurgeonError::FileNotFound(path) => Self::FileNotFound { path },
             SurgeonError::UnsupportedLanguage(path) => Self::UnsupportedLanguage { path },

@@ -203,9 +203,19 @@ impl VersionHash {
     /// ```
     #[must_use]
     pub fn short(&self) -> &str {
-        // Internal layout: "sha256:" (7 bytes) + 64 hex chars
+        // Internal layout: "sha256:" (7 bytes) + 64 hex chars (from compute)
         // Return chars [7..14] — the first 7 hex chars, no prefix.
-        &self.0[Self::PREFIX.len()..Self::PREFIX.len() + Self::MIN_HEX_CHARS]
+        // Gracefully handle malformed hashes by returning available chars.
+        let hex_part = self
+            .0
+            .strip_prefix(Self::PREFIX)
+            .unwrap_or(&self.0); // Handle missing prefix
+        if hex_part.len() < Self::MIN_HEX_CHARS {
+            // Malformed hash — return whatever we have
+            hex_part
+        } else {
+            &hex_part[..Self::MIN_HEX_CHARS]
+        }
     }
 
     /// Check whether an agent-supplied hash token matches this hash.
@@ -663,6 +673,27 @@ mod tests {
             full["sha256:".len()..].starts_with(hash.short()),
             "full hex must start with short()"
         );
+    }
+
+    /// `short()` must gracefully handle malformed hashes (too short).
+    #[test]
+    fn test_version_hash_short_handles_malformed_short() {
+        let hash = VersionHash::from_raw("sha256:a1b2".to_string());
+        assert_eq!(hash.short(), "a1b2", "short() returns all available chars");
+    }
+
+    /// `short()` must gracefully handle malformed hashes (no prefix).
+    #[test]
+    fn test_version_hash_short_handles_malformed_no_prefix() {
+        let hash = VersionHash::from_raw("abcdef".to_string());
+        assert_eq!(hash.short(), "abcdef", "short() returns entire string");
+    }
+
+    /// `short()` must gracefully handle malformed hashes (just prefix).
+    #[test]
+    fn test_version_hash_short_handles_malformed_only_prefix() {
+        let hash = VersionHash::from_raw("sha256:".to_string());
+        assert_eq!(hash.short(), "", "short() returns empty string");
     }
 
     // ── VersionHash::matches() tests ──────────────────────────────────────────

@@ -1,6 +1,6 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
-use crate::server::helpers::{pathfinder_to_error_data, serialize_metadata};
+use crate::server::helpers::{format_degraded_notice, pathfinder_to_error_data, serialize_metadata};
 use crate::server::types::{
     default_max_tokens, GetRepoMapParams, LspCapabilities, RepoCapabilities,
 };
@@ -299,7 +299,16 @@ impl PathfinderServer {
             lsp_status,
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(result.skeleton)]);
+        let text = if degraded {
+            let notice = degraded_reason
+                .as_ref()
+                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
+            format!("{notice}\n{}", result.skeleton)
+        } else {
+            result.skeleton
+        };
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
