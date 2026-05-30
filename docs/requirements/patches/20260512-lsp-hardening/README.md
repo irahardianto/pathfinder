@@ -1,7 +1,7 @@
 # PATCH-LSP-HARDENING: Pathfinder LSP Reliability & Agent Ergonomics
 
 **Date**: 2026-05-12
-**Status**: In Progress (Epic 1 ✅ → Epic 2 next)
+**Status**: ✅ COMPLETE (All 4 epics implemented)
 **Affects**: Pathfinder MCP v0.9.x
 **Priority**: P0–P2 across 4 epics
 
@@ -60,27 +60,27 @@ Each spec is a self-contained, bite-sized deliverable with acceptance criteria a
 | [002-search-hint-field.md](./002-search-hint-field.md) | Add zero-result hint to `search_codebase` | ✅ Done |
 | [003-repo-map-lsp-status.md](./003-repo-map-lsp-status.md) | Surface LSP status in `get_repo_map` | ✅ Done |
 
-### Epic 2: LSP Hardening (Medium Risk, High Impact) — In Progress
+### Epic 2: LSP Hardening (Medium Risk, High Impact) ✅ COMPLETE
 
 | Spec | Title | Status |
 |------|-------|--------|
 | [004-warm-start-tracking.md](./004-warm-start-tracking.md) | Track `warm_start` completion + expose in `lsp_health` | ✅ Done |
-| [005-deep-context-grep-fallback.md](./005-deep-context-grep-fallback.md) | Grep fallback for `read_with_deep_context` | ☐ Pending |
+| [005-deep-context-grep-fallback.md](./005-deep-context-grep-fallback.md) | Grep fallback for `read_with_deep_context` | ✅ Done |
 | [006-per-language-indexing-timeouts.md](./006-per-language-indexing-timeouts.md) | Per-language indexing timeouts (enhances LSP-HEALTH-001 Task 6) | ✅ Done |
 
-### Epic 3: Richer Grep Fallbacks (Medium Risk, Medium Impact)
+### Epic 3: Richer Grep Fallbacks (Medium Risk, Medium Impact) ✅ COMPLETE
 
 | Spec | Title | Status |
 |------|-------|--------|
-| [007-language-aware-definition-patterns.md](./007-language-aware-definition-patterns.md) | Language-aware regex patterns for grep fallbacks | ☐ Pending |
-| [008-callsite-aware-grep.md](./008-callsite-aware-grep.md) | Tree-sitter enriched grep for `analyze_impact` | ☐ Pending |
+| [007-language-aware-definition-patterns.md](./007-language-aware-definition-patterns.md) | Language-aware regex patterns for grep fallbacks | ✅ Done |
+| [008-callsite-aware-grep.md](./008-callsite-aware-grep.md) | Tree-sitter enriched grep for `analyze_impact` | ✅ Done |
 
-### Epic 4: New Tools (Higher Risk, High Impact)
+### Epic 4: New Tools (Higher Risk, High Impact) ✅ COMPLETE
 
 | Spec | Title | Status |
 |------|-------|--------|
-| [009-find-symbol-tool.md](./009-find-symbol-tool.md) | `find_symbol` — bare name → semantic path discovery | ☐ Pending |
-| [010-read-files-batch-tool.md](./010-read-files-batch-tool.md) | `read_files` — batch multi-file read in one call | ☐ Pending |
+| [009-find-symbol-tool.md](./009-find-symbol-tool.md) | `find_symbol` — bare name → semantic path discovery | ✅ Done |
+| [010-read-files-batch-tool.md](./010-read-files-batch-tool.md) | `read_files` — batch multi-file read in one call | ✅ Done |
 
 ---
 
