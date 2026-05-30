@@ -1,7 +1,7 @@
 # 008: Call-Site Aware Grep for `analyze_impact`
 
 **Epic**: 3 — Richer Grep Fallbacks
-**Status**: ☐ Pending
+**Status**: ✅ Complete (2026-05-12)
 **Severity**: Medium
 **Risk**: Medium — adds tree-sitter enrichment to grep fallback path
 **Depends on**: 001 (grep_reference_fallback extracted)

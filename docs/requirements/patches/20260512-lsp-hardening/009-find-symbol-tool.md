@@ -1,7 +1,7 @@
 # 009: `find_symbol` Tool
 
 **Epic**: 4 — New Tools
-**Status**: ☐ Pending
+**Status**: ✅ Complete (2026-05-12)
 **Severity**: High (agent ergonomics)
 **Risk**: Higher — new MCP tool, schema addition, prompt inventory update
 **Depends on**: 007 (language-aware definition patterns)

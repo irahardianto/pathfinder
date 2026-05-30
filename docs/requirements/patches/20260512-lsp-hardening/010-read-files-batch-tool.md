@@ -1,7 +1,7 @@
 # 010: `read_files` Batch Tool
 
 **Epic**: 4 — New Tools
-**Status**: ☐ Pending
+**Status**: ✅ Complete (2026-05-12)
 **Severity**: Medium (agent ergonomics)
 **Risk**: Higher — new MCP tool, schema addition
 

@@ -1,7 +1,7 @@
 # 007: Language-Aware Definition Patterns
 
 **Epic**: 3 — Richer Grep Fallbacks
-**Status**: ☐ Pending
+**Status**: ✅ Complete (2026-05-12)
 **Severity**: Medium
 **Risk**: Medium — regex changes affect false-positive/negative rates
 
