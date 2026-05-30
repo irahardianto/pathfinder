@@ -22,6 +22,9 @@ Check once per session.
 | Jump to definition | `get_definition` | LSP with ripgrep fallback |
 | Find callers and callees | `find_callers_callees` | Callers + callees via LSP call hierarchy. Default max_depth=3. |
 | Find all references | `find_all_references` | All usages including non-call references (field access, imports, type annotations) |
+| Resolve symbol by name | `find_symbol` | Bare name → file::symbol paths. Filter by `kind` ("class", "function", "struct"). |
+| Batch read files | `read_files` | Multiple files in one call. AST for source files, raw for config. Max 10 files. |
+| Symbol overview | `symbol_overview` | Source + callers + callees + references in one call |
 | LSP status | `lsp_health` | Check when navigation returns `degraded: true` |
 | Read config file | `read_file` | For YAML, TOML, JSON, .env, Dockerfile |
 

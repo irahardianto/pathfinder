@@ -284,6 +284,9 @@ the symbol might be defined in a different file. The semantic path requires the
 | Read one function precisely | `read_symbol_scope` |
 | Read a full source file | `read_source_file` (use `detail_level="source_only"` for minimal tokens) |
 | Find a function by name/pattern | `search_codebase` → `read_symbol_scope` |
+| Resolve a symbol name to its file | `find_symbol` (faster than search_codebase for name lookup) |
+| Batch read multiple files | `read_files` (max 10 files per call) |
+| Get full symbol overview | `symbol_overview` (source + callers + callees + refs) |
 | See all callers of a function | `find_callers_callees` |
 | See all callees of a function | `read_with_deep_context` or `find_callers_callees` |
 | Find ALL references (including non-call) | `find_all_references` |
@@ -299,9 +302,10 @@ If tools are not available, fall back transparently:
 | Pathfinder | Built-in |
 |---|---|
 | `read_symbol_scope` / `read_with_deep_context` | `Read` with line ranges |
-| `read_source_file` / `read_file` | `Read` |
+| `read_source_file` / `read_file` / `read_files` | `Read` |
 | `search_codebase` | `Grep` |
 | `get_repo_map` | `Glob` or `ls` |
 | `find_callers_callees` / `get_definition` | `Grep` (approximate) |
+| `find_symbol` / `symbol_overview` | `Grep` + `Read` (approximate) |
 
 Do not block on Pathfinder. Complete the work with built-in tools.
