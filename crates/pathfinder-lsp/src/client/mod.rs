@@ -277,7 +277,7 @@ impl Drop for InFlightGuard {
 ///
 /// ## Usage
 ///
-/// ```ignore
+/// ```text
 /// let _guard = client.open_document(&workspace, &file_path, &content).await?;
 /// // do LSP work…
 /// // `_guard` drops here → `did_close` sent automatically
@@ -3547,5 +3547,33 @@ mod tests {
             indexing_timeout_for_language("csharp"),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn test_warm_start_complete_flag_transitions_false_to_true() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+        assert!(!client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
+                 "warm_start_complete should be false initially");
+    }
+
+    #[tokio::test]
+    async fn test_warm_start_complete_true_after_all_tasks_complete() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+        assert!(!client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
+                 "warm_start_complete should be false before warm_start");
+
+        client.warm_start();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        assert!(client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
+                "warm_start_complete should be true after tasks complete");
+    }
+
+    #[tokio::test]
+    async fn test_warm_start_partial_failure_still_sets_complete_flag() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+        client.warm_start();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        assert!(client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
+                "warm_start_complete should be true even if some languages failed");
     }
 }

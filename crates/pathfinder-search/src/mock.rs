@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 /// A configurable fake `Scout` for unit testing.
 ///
 /// # Usage
-/// ```ignore
+/// ```text
 /// let mut mock = MockScout::default();
 /// mock.set_result(Ok(SearchResult { matches: vec![], total_matches: 0, truncated: false }));
 /// let server = PathfinderServer::with_scout(Arc::new(mock), ...);

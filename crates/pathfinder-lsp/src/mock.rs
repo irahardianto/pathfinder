@@ -5,7 +5,7 @@
 //! server.
 //!
 //! # Usage
-//! ```rust,ignore
+//! ```text
 //! let mock = MockLawyer::default();
 //! mock.set_goto_definition_result(Ok(Some(DefinitionLocation {
 //!     file: "src/main.rs".into(),
