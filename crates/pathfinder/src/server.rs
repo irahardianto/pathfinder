@@ -277,7 +277,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "find_symbol",
-        description = "Resolve a bare symbol name to its file::symbol semantic path(s). Use when you know a symbol's name but not its file. Returns matching definitions with file, line, kind, and a code preview. Faster than get_repo_map + search_codebase."
+        description = "Resolve a bare symbol name to its file::symbol semantic path(s). Use when you know a symbol's name but not its file. Returns matching definitions with file, line, kind, and a code preview. Filter by `kind` (e.g. \"class\", \"function\", \"struct\") to narrow results. Use `path_glob` to limit search scope. Faster than get_repo_map + search_codebase for symbol lookup."
     )]
     async fn find_symbol(
         &self,
@@ -288,7 +288,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "find_callers_callees",
-        description = "Find all callers (incoming) and callees (outgoing) of a symbol — who calls this function and what does it call? Use max_depth=3 (default) for standard refactoring, max_depth=4-5 for large-scale API changes. LSP-powered with grep fallback. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). When `degraded=true` is true, `incoming`/`outgoing` are `null` (not `[]`) — do NOT treat empty as \"confirmed no callers\". When not degraded: empty arrays `[]` = LSP confirmed: truly zero callers/callees."
+        description = "Find all callers (incoming) and callees (outgoing) of a symbol — who calls this function and what does it call? Use max_depth=3 (default) for standard refactoring, max_depth=4-5 for large-scale API changes. LSP-powered with grep fallback. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). When `degraded=true`, `incoming`/`outgoing` are `null` (not `[]`) — do NOT treat empty as \"confirmed no callers\". When not degraded: empty arrays `[]` = LSP confirmed zero callers/callees. Use `project_only=true` (default) to exclude stdlib/vendor refs. Use `max_references` (default 50) to cap output."
     )]
     async fn find_callers_callees(
         &self,
@@ -299,7 +299,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "find_all_references",
-        description = "Find all references to a symbol across the entire codebase. Uses LSP textDocument/references to find all usages (function calls, field accesses, imports, etc.). Unlike find_callers_callees (call hierarchy only), this returns every reference including type annotations, imports, and field access. IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/mod.rs::func'). LSP-powered. When degraded, use search_codebase as fallback."
+        description = "Find all references to a symbol across the entire codebase. Uses LSP textDocument/references to find all usages (function calls, field accesses, imports, etc.). Unlike find_callers_callees (call hierarchy only), this returns every reference including type annotations, imports, and field access. Supports `max_results` (default 50) and `offset` for pagination through large result sets. IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/mod.rs::func'). LSP-powered. When degraded, use search_codebase as fallback."
     )]
     async fn find_all_references(
         &self,
@@ -310,7 +310,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "symbol_overview",
-        description = "Get comprehensive information about a symbol in one call: source code, callers, callees, and references. Combines read_symbol_scope + find_callers_callees + find_all_references into a single response. Use for initial analysis before refactoring. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). Returns source code, impact analysis (callers/callees), and all reference locations. When degraded, partial results are returned with LSP fallback indicators."
+        description = "Get comprehensive information about a symbol in one call: source code, callers, callees, and references. Combines read_symbol_scope + find_callers_callees + find_all_references. Use `project_only=true` (default) to filter out stdlib/vendor references. Use `max_callers_callees` and `max_references` to cap output. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). When degraded, partial results are returned with LSP fallback indicators."
     )]
     async fn symbol_overview(
         &self,
@@ -321,7 +321,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "lsp_health",
-        description = "Check LSP health per language. Returns overall status (ready / warming_up / starting / unavailable) and per-language details. Use this when navigation tools return degraded results, or at session start to know which languages have full LSP support. Pass `language` to check a specific language, or omit to check all. When status is not 'ready', navigation tools may return incomplete results. Response includes `known_limitations` listing missing capabilities. Pass `action=\"restart\"` with `language` to force-restart a stuck LSP."
+        description = "Check LSP health per language. Returns overall status (ready / warming_up / starting / unavailable) and per-language details including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use this to diagnose why a navigation tool returned degraded results. Pass `language` to check a specific language, or omit to check all. Pass `action=\"restart\"` with `language` to force-restart a stuck LSP process."
     )]
     async fn lsp_health(
         &self,
@@ -343,7 +343,7 @@ impl PathfinderServer {
 
     #[tool(
         name = "read_files",
-        description = "Batch read multiple files in a single call with per-file error resilience. For source files (.rs, .ts, .tsx, .go, .py, .vue, .js, .jsx), returns AST-parsed content. For config files (.json, .yaml, .toml, .env, Dockerfile), returns raw content. Max 10 files per call."
+        description = "Batch read multiple files in a single call with per-file error resilience. Max 10 files per call. For source files (.rs, .ts, .tsx, .go, .py, .vue, .js, .jsx), returns AST-parsed content. For config files (.json, .yaml, .toml, .env, Dockerfile), returns raw content. Use `detail_level` to control output (\"source_only\", \"compact\", \"full\"). Use `max_lines_per_file` to cap output per file (default 500)."
     )]
     async fn read_files(
         &self,
