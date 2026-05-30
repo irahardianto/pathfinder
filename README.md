@@ -51,7 +51,7 @@ Pathfinder solves these problems by providing:
 
 ### Key Features
 
-- 🛠️ **10 MCP Tools** — covering code navigation, semantic discovery, file reading, and impact analysis.
+- 🛠️ **13 MCP Tools** — covering code navigation, semantic discovery, file reading, impact analysis, and batch operations.
 - 🌐 **8 Languages** — native Tree-sitter support for Go, Java, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
 - ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
@@ -203,7 +203,7 @@ For any MCP-compatible client, the minimum effective setup is to inject the **AG
 <!-- TOOLS -->
 ## Tools
 
-Pathfinder exposes 10 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
+Pathfinder exposes 13 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
 
 ### 🔍 Search & Navigation
 
@@ -217,13 +217,16 @@ Pathfinder exposes 10 tools organized into three categories. Every tool operates
 | `get_definition` | Jump to where a symbol is defined. Provide a semantic path to a reference and get the definition's file, line, and a code preview. |
 | `find_callers_callees` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius of a change and tracing call chains. |
 | `find_all_references` | Find all references to a symbol across the entire codebase — every usage including function calls, field accesses, imports, and type annotations. LSP-powered with grep fallback. |
-| `lsp_health` | Check per-language LSP readiness — including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use this to diagnose why a navigation tool returned degraded results. |
+| `find_symbol` | Resolve a bare symbol name to its `file::symbol` semantic path(s). Use when you know a symbol's name but not its file. Filter by `kind` (e.g., `class`, `function`, `struct`). Faster than `get_repo_map` + `search_codebase` for symbol lookup. |
+| `symbol_overview` | Get comprehensive symbol information in one call: source code, callers, callees, and all references. Combines `read_symbol_scope` + `find_callers_callees` + `find_all_references`. Ideal for initial analysis before refactoring. |
+| `lsp_health` | Check per-language LSP readiness — including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use this to diagnose why a navigation tool returned degraded results. Supports `action="restart"` to force-restart a stuck LSP. |
 
 ### 📁 File Reading
 
 | Tool | Description |
 |---|---|
 | `read_file` | Read raw file content with pagination (`start_line`, `max_lines`). Best for configuration files (YAML, TOML, Dockerfile). For source code, prefer `read_symbol_scope`. |
+| `read_files` | Batch read multiple files in a single call with per-file error resilience. AST-parsed for source files, raw content for config files. Max 10 files per call. Supports `detail_level` and `max_lines_per_file` controls. |
 
 <!-- ARCHITECTURE -->
 ## Architecture
@@ -246,7 +249,9 @@ pathfinder/
 │   │               ├── file_ops.rs
 │   │               ├── repo_map.rs
 │   │               ├── source_file.rs
-│   │               └── symbols.rs
+│   │               ├── symbols.rs
+│   │               ├── find_symbol.rs
+│   │               └── read_files.rs
 │   │
 │   ├── pathfinder-common/       # Shared types, errors, config, sandbox
 │   ├── pathfinder-treesitter/   # The Surgeon — AST parsing & symbol extraction
@@ -386,6 +391,9 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] Java language support (Tree-sitter + jdtls LSP integration)
 - [x] `find_all_references` tool (LSP `textDocument/references`)
 - [x] `find_callers_callees` tool (renamed from `analyze_impact` for clarity)
+- [x] `find_symbol` tool — resolve bare symbol names to semantic paths
+- [x] `read_files` tool — batch multi-file reading with per-file error resilience
+- [x] `symbol_overview` tool — composite source + callers + callees + references in one call
 - [ ] Additional language support (C/C++, C#, Kotlin, etc.)
 - [ ] Custom LSP server command overrides via configuration file
 
