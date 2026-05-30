@@ -78,6 +78,12 @@ async fn count_source_files(root: &Path) -> usize {
 /// - `"unavailable"`: no connection info
 ///
 /// Returns `None` when the map is empty (no LSP processes running).
+///
+/// Status logic matches `lsp_health_impl` two-phase readiness model:
+/// - `navigation_ready == Some(true)` → `"ready"`
+/// - `navigation_ready == Some(false) || indexing_complete == Some(false)` → `"warming_up"`
+/// - `uptime_seconds.is_some()` (process running, no capability data yet) → `"starting"`
+/// - else → `"unavailable"`
 fn derive_lsp_status(
     capability_status: &std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus>,
 ) -> Option<std::collections::HashMap<String, String>> {
@@ -89,8 +95,12 @@ fn derive_lsp_status(
         .map(|(lang, status)| {
             let s = if status.navigation_ready == Some(true) {
                 "ready"
-            } else if status.uptime_seconds.is_some() {
+            } else if status.navigation_ready == Some(false)
+                || status.indexing_complete == Some(false)
+            {
                 "warming_up"
+            } else if status.uptime_seconds.is_some() {
+                "starting"
             } else {
                 "unavailable"
             };
@@ -548,8 +558,10 @@ mod tests {
     }
 
     /// Verify `derive_lsp_status` produces the correct status strings.
+    /// Matches `lsp_health_impl` two-phase readiness model:
     /// - `navigation_ready=Some(true)` → `"ready"`
-    /// - `uptime_seconds=Some(_)` but no `navigation_ready` → `"warming_up"`
+    /// - `navigation_ready=Some(false)` OR `indexing_complete=Some(false)` → `"warming_up"`
+    /// - `uptime_seconds=Some(_)` but no capability info → `"starting"`
     /// - neither → `"unavailable"`
     #[test]
     fn test_derive_lsp_status_correct_status_strings() {
@@ -578,7 +590,49 @@ mod tests {
             },
         );
 
-        // warming_up: uptime present, but navigation_ready not true
+        // warming_up: navigation_ready = Some(false)
+        map.insert(
+            "csharp".to_owned(),
+            LspLanguageStatus {
+                validation: false,
+                reason: String::new(),
+                navigation_ready: Some(false),
+                indexing_complete: None,
+                uptime_seconds: Some(15),
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                warm_start_complete: None,
+            },
+        );
+
+        // warming_up: indexing_complete = Some(false)
+        map.insert(
+            "go".to_owned(),
+            LspLanguageStatus {
+                validation: false,
+                reason: String::new(),
+                navigation_ready: None,
+                indexing_complete: Some(false),
+                uptime_seconds: Some(10),
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                warm_start_complete: None,
+            },
+        );
+
+        // starting: uptime present, but no capability signals yet (lazy start)
         map.insert(
             "typescript".to_owned(),
             LspLanguageStatus {
@@ -624,8 +678,13 @@ mod tests {
 
         assert_eq!(result.get("rust").map(String::as_str), Some("ready"));
         assert_eq!(
-            result.get("typescript").map(String::as_str),
+            result.get("csharp").map(String::as_str),
             Some("warming_up")
+        );
+        assert_eq!(result.get("go").map(String::as_str), Some("warming_up"));
+        assert_eq!(
+            result.get("typescript").map(String::as_str),
+            Some("starting")
         );
         assert_eq!(
             result.get("python").map(String::as_str),
