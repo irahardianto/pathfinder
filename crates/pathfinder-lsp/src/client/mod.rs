@@ -448,6 +448,8 @@ impl LspClient {
             tracing::debug!(
                 "PATCH-004: warm_start_for_languages_and_track: no new languages to start"
             );
+            self.warm_start_complete
+                .store(true, std::sync::atomic::Ordering::Release);
             return;
         }
 
