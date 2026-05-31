@@ -67,6 +67,9 @@ struct LanguageState {
     indexing_complete: Arc<std::sync::atomic::AtomicBool>,
     indexing_completion_source: Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
     indexing_duration_secs: Arc<std::sync::Mutex<Option<u64>>>,
+    /// Last reported indexing progress percentage (0-100) from `$/progress` notifications.
+    /// `None` when the LSP does not report progress or indexing is complete.
+    indexing_progress_percent: Arc<std::sync::Mutex<Option<u8>>>,
     /// MT-3: Live capabilities — reflects initial `initialize` capabilities PLUS
     /// any dynamic registrations received via `client/registerCapability`.
     ///
@@ -124,6 +127,11 @@ impl ProcessEntry {
                     .indexing_duration_secs
                     .lock()
                     .expect("indexing_duration_secs lock");
+                #[allow(clippy::expect_used)]
+                let indexing_progress_pct = *state
+                    .indexing_progress_percent
+                    .lock()
+                    .expect("indexing_progress_percent lock");
                 let effective_diag_strategy = if state.in_coexistence_mode {
                     DiagnosticsStrategy::None
                 } else {
@@ -143,6 +151,7 @@ impl ProcessEntry {
                     caps.server_name.as_deref(),
                     indexing_source,
                     indexing_duration_secs,
+                    indexing_progress_pct,
                 )
             }
             Self::Unavailable(_) => validation_status_from_parts(
@@ -154,6 +163,7 @@ impl ProcessEntry {
                 false,
                 false,
                 0,
+                None,
                 None,
                 None,
                 None,
@@ -184,6 +194,7 @@ fn validation_status_from_parts(
     server_name: Option<&str>,
     indexing_source: Option<String>,
     indexing_duration_secs: Option<u64>,
+    indexing_progress_pct: Option<u8>,
 ) -> crate::types::LspLanguageStatus {
     if !running {
         return crate::types::LspLanguageStatus {
@@ -230,7 +241,7 @@ fn validation_status_from_parts(
             indexing_source,
             indexing_duration_secs,
             warm_start_complete: None,
-            indexing_progress_percent: None,
+            indexing_progress_percent: if indexing_complete { None } else { indexing_progress_pct },
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
@@ -247,7 +258,7 @@ fn validation_status_from_parts(
             indexing_source,
             indexing_duration_secs,
             warm_start_complete: None,
-            indexing_progress_percent: None,
+            indexing_progress_percent: if indexing_complete { None } else { indexing_progress_pct },
         },
     }
 }
@@ -950,11 +961,13 @@ impl LspClient {
         let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let indexing_completion_source = Arc::new(std::sync::Mutex::new(None));
         let indexing_duration_secs = Arc::new(std::sync::Mutex::new(None));
+        let indexing_progress = Arc::new(std::sync::Mutex::new(None::<u8>));
         let spawned_at = Instant::now();
 
         let indexing_flag = Arc::clone(&indexing_complete);
         let indexing_source_flag = Arc::clone(&indexing_completion_source);
         let indexing_duration_flag = Arc::clone(&indexing_duration_secs);
+        let indexing_progress_flag = Arc::clone(&indexing_progress);
         let lang_id_for_watcher = language_id.clone();
         let dispatcher_for_watcher = Arc::clone(&self.dispatcher);
         let spawned_at_for_watcher = spawned_at;
@@ -965,6 +978,7 @@ impl LspClient {
                 indexing_flag,
                 indexing_source_flag,
                 indexing_duration_flag,
+                indexing_progress_flag,
                 spawned_at_for_watcher,
             )
             .await;
@@ -1017,6 +1031,7 @@ impl LspClient {
                 indexing_complete,
                 indexing_completion_source,
                 indexing_duration_secs,
+                indexing_progress_percent: indexing_progress,
                 live_capabilities,
                 in_coexistence_mode,
             })),
@@ -2124,6 +2139,7 @@ async fn progress_watcher_task(
     indexing_complete: Arc<std::sync::atomic::AtomicBool>,
     indexing_completion_source: Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
     indexing_duration_secs: Arc<std::sync::Mutex<Option<u64>>>,
+    indexing_progress_percent: Arc<std::sync::Mutex<Option<u8>>>,
     spawned_at: Instant,
 ) {
     let mut rx = dispatcher.subscribe_notifications();
@@ -2160,6 +2176,10 @@ async fn progress_watcher_task(
                                 *indexing_duration_secs
                                     .lock()
                                     .expect("indexing_duration_secs lock") = Some(duration_secs);
+                                // Clear progress percent — indexing is complete.
+                                *indexing_progress_percent
+                                    .lock()
+                                    .expect("indexing_progress_percent lock") = None;
                             }
                             tracing::info!(
                                 language = %language_id,
@@ -2167,6 +2187,27 @@ async fn progress_watcher_task(
                                 source = "progress",
                                 "LSP: WorkDoneProgressEnd received after {0}s — indexing complete",
                                 duration_secs
+                            );
+                        }
+                    } else if kind == "report" {
+                        // Parse percentage from report events.
+                        // LSP spec: WorkDoneProgressReport has optional `percentage` (0-100).
+                        if let Some(pct) = msg
+                            .pointer("/params/value/percentage")
+                            .and_then(serde_json::Value::as_u64)
+                        {
+                            let clamped = u8::try_from(pct.min(100)).unwrap_or(100);
+                            #[allow(clippy::expect_used)]
+                            {
+                                *indexing_progress_percent
+                                    .lock()
+                                    .expect("indexing_progress_percent lock") =
+                                    Some(clamped);
+                            }
+                            tracing::debug!(
+                                language = %language_id,
+                                percentage = clamped,
+                                "LSP: indexing progress report"
                             );
                         }
                     }
@@ -2715,6 +2756,7 @@ mod tests {
             None,  // server_name
             None,
             None,
+            None,
         );
         assert!(
             status.validation,
@@ -2742,6 +2784,7 @@ mod tests {
             None,  // server_name
             None,
             None,
+            None,
         );
         assert!(status.validation);
         assert_eq!(status.indexing_complete, Some(true));
@@ -2760,6 +2803,7 @@ mod tests {
             false,
             true,
             5,
+            None,
             None,
             None,
             None,
@@ -2792,6 +2836,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(status.uptime_seconds.is_some());
         assert!(status.indexing_complete.is_some());
@@ -2814,6 +2859,7 @@ mod tests {
             false, // indexing_complete (still indexing)
             5,     // uptime_seconds
             None,  // server_name
+            None,
             None,
             None,
         );
@@ -2840,6 +2886,7 @@ mod tests {
             None,  // server_name
             None,
             None,
+            None,
         );
         // Navigation not ready because LSP doesn't have definitionProvider capability
         assert_eq!(status.navigation_ready, Some(false));
@@ -2860,6 +2907,7 @@ mod tests {
             false,                     // irrelevant when !running
             0,                         // irrelevant when !running
             None,                      // server_name
+            None,
             None,
             None,
         );
@@ -3293,6 +3341,7 @@ mod tests {
             Some("rust-analyzer"),
             None,
             None,
+            None,
         );
 
         assert!(!status.validation);
@@ -3320,6 +3369,7 @@ mod tests {
             true,
             100,
             Some("rust-analyzer"),
+            None,
             None,
             None,
         );
@@ -3351,6 +3401,7 @@ mod tests {
             Some("gopls"),
             None,
             None,
+            None,
         );
 
         assert!(status.validation);
@@ -3376,6 +3427,7 @@ mod tests {
             false,
             true,
             200,
+            None,
             None,
             None,
             None,
@@ -3408,6 +3460,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert!(status.validation);
@@ -3429,6 +3482,7 @@ mod tests {
             Some("custom-lsp-server"),
             None,
             None,
+            None,
         );
 
         assert_eq!(status.server_name, Some("custom-lsp-server".to_owned()));
@@ -3446,6 +3500,7 @@ mod tests {
             true,
             0,
             None, // no server name
+            None,
             None,
             None,
         );
