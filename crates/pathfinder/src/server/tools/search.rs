@@ -273,6 +273,9 @@ impl PathfinderServer {
 
                 let (symbol, is_definition) = if let Some(ref sym) = detail {
                     let path = format!("{file}::{}", sym.semantic_path);
+                    // Guard: ripgrep returns 1-indexed lines, tree-sitter uses 0-indexed.
+                    // `saturating_sub(1)` converts; assert catches unexpected 0-indexed input.
+                    debug_assert!(line > 0, "ripgrep line should be 1-indexed, got 0");
                     let is_def = sym.start_line == line.saturating_sub(1);
                     (Some(path), Some(is_def))
                 } else {
