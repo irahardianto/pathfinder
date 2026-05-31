@@ -604,7 +604,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         );
@@ -626,7 +625,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         );
@@ -648,7 +646,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         );
@@ -670,7 +667,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         );
@@ -692,7 +688,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         );

@@ -159,6 +159,17 @@ impl PathfinderServer {
                             continue;
                         }
 
+                        // Apply sandbox policy check
+                        if let Err(e) = self.sandbox.check(file_path) {
+                            tracing::warn!(
+                                tool = "find_symbol",
+                                file = %m.file,
+                                error = %e,
+                                "sandbox denied access to file"
+                            );
+                            continue;
+                        }
+
                         // Apply user's path_glob as directory filter when the
                         // search used extension-specific globs instead.
                         if let Some(ref prefix) = user_path_prefix {

@@ -339,6 +339,23 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
     }
 }
 
+/// PATCH-005: Map tree-sitter language ID to file glob pattern.
+///
+/// Used by `resolve_candidate_via_grep` to search for definition files.
+fn language_to_file_glob(language: &str) -> &str {
+    match language {
+        "rust" => "**/*.rs",
+        "typescript" => "**/*.ts",
+        "tsx" => "**/*.tsx",
+        "javascript" => "**/*.{js,jsx}",
+        "python" => "**/*.py",
+        "go" => "**/*.go",
+        "vue" => "**/*.vue",
+        "java" => "**/*.java",
+        _ => "**/*",
+    }
+}
+
 /// SPEC 007: Language-aware regex patterns for definition search.
 ///
 /// Returns language-specific regex patterns for finding symbol definitions.
@@ -429,7 +446,18 @@ impl PathfinderServer {
             offset: 0,
         };
 
-        let result = self.search_codebase_impl(search_params).await.ok()?;
+        let result = match self.search_codebase_impl(search_params).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "grep_reference_fallback",
+                    symbol = %symbol_name,
+                    error = %e,
+                    "search_codebase_impl failed during grep fallback"
+                );
+                return None;
+            }
+        };
 
         if result.0.matches.is_empty() {
             return None;
@@ -446,8 +474,12 @@ impl PathfinderServer {
             .take(10)
             .map(|m| {
                 files_referenced.insert(m.file.clone());
+                let semantic_path = m
+                    .enclosing_semantic_path
+                    .clone()
+                    .unwrap_or_else(|| format!("{}::{symbol_name}", m.file));
                 crate::server::types::ImpactReference {
-                    semantic_path: format!("{}::{symbol_name}", m.file),
+                    semantic_path,
                     file: m.file,
                     line: usize::try_from(m.line).unwrap_or(usize::MAX),
                     snippet: m.content,
@@ -654,7 +686,7 @@ impl PathfinderServer {
                 query: pattern,
                 is_regex: true,
                 max_results: max_results_per_candidate,
-                path_glob: format!("**/*.{language}"),
+                path_glob: language_to_file_glob(language).to_string(),
                 exclude_glob: String::default(),
                 context_lines: 0,
                 offset: 0,
@@ -1370,54 +1402,61 @@ impl PathfinderServer {
     }
 
     /// Search for a definition within a specific file.
+    ///
+    /// Uses language-aware patterns from `definition_patterns` (SPEC 007).
     async fn grep_definition_in_file(
         &self,
         symbol_name: String,
         file_path: std::path::PathBuf,
     ) -> Option<GetDefinitionResponse> {
-        // Match definition patterns with optional preceding visibility modifier.
-        // Rust: `pub fn`, `pub(crate) fn`, `pub async fn`, bare `fn`
-        // TypeScript: `export function`, `export default function`, bare `function`
-        // Python: `def`, `async def`
-        let name = regex::escape(&symbol_name);
-        let pattern = format!(
-            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{name}\\b"
-        );
+        // Extract file extension to determine which language patterns to use
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        // Get language-specific definition patterns
+        let patterns = definition_patterns(ext, &symbol_name);
 
         // Use the file as a specific path glob. Convert to forward-slash
         // format for ripgrep compatibility across platforms.
         let glob = file_path.to_string_lossy().replace('\\', "/");
 
-        let search_result = self
-            .scout
-            .search(&pathfinder_search::SearchParams {
-                workspace_root: self.workspace_root.path().to_path_buf(),
-                query: pattern,
-                is_regex: true,
-                max_results: 5,
-                path_glob: glob,
-                exclude_glob: String::default(),
-                context_lines: 0,
-                offset: 0,
-            })
-            .await;
+        // Try each pattern in sequence until a match is found
+        for pattern in patterns {
+            let search_result = self
+                .scout
+                .search(&pathfinder_search::SearchParams {
+                    workspace_root: self.workspace_root.path().to_path_buf(),
+                    query: pattern,
+                    is_regex: true,
+                    max_results: 5,
+                    path_glob: glob.clone(),
+                    exclude_glob: String::default(),
+                    context_lines: 0,
+                    offset: 0,
+                })
+                .await;
 
-        if let Ok(result) = search_result {
-            if !result.matches.is_empty() {
-                let m = &result.matches[0];
-                return Some(GetDefinitionResponse {
-                    file: m.file.clone(),
-                    line: u32::try_from(m.line).unwrap_or(u32::MAX),
-                    column: u32::try_from(m.column).unwrap_or(1),
-                    preview: m.content.clone(),
-                    degraded: true,
-                    degraded_reason: Some(DegradedReason::GrepFallbackFileScoped),
-                    actionable_guidance: Some(DegradedReason::GrepFallbackFileScoped.guidance()),
-                    lsp_readiness: Some("unavailable".to_owned()),
-                    warm_start_in_progress: None,
-                    duration_ms: None,
-                    resolution_strategy: Some("grep_file".to_owned()),
-                });
+            if let Ok(result) = search_result {
+                if !result.matches.is_empty() {
+                    let m = &result.matches[0];
+                    return Some(GetDefinitionResponse {
+                        file: m.file.clone(),
+                        line: u32::try_from(m.line).unwrap_or(u32::MAX),
+                        column: u32::try_from(m.column).unwrap_or(1),
+                        preview: m.content.clone(),
+                        degraded: true,
+                        degraded_reason: Some(DegradedReason::GrepFallbackFileScoped),
+                        actionable_guidance: Some(
+                            DegradedReason::GrepFallbackFileScoped.guidance(),
+                        ),
+                        lsp_readiness: Some("unavailable".to_owned()),
+                        warm_start_in_progress: None,
+                        duration_ms: None,
+                        resolution_strategy: Some("grep_file".to_owned()),
+                    });
+                }
             }
         }
         None
@@ -1431,7 +1470,7 @@ impl PathfinderServer {
     ) -> Option<GetDefinitionResponse> {
         // First find files containing the impl block
         let parent_escaped = regex::escape(parent_name);
-        let impl_pattern = format!(r"impl\s+(?:<[^>]+>\s+)?{parent_escaped}\\b");
+        let impl_pattern = format!(r"impl\s+(?:<[^>]+>\s+)?{parent_escaped}\b");
         let search_result = self
             .scout
             .search(&pathfinder_search::SearchParams {
@@ -1451,7 +1490,7 @@ impl PathfinderServer {
                 // Now search within this specific file for the method
                 let method_escaped = regex::escape(method_name);
                 let method_pattern = format!(
-                    r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\\b"
+                    r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\b"
                 );
                 let file_search = self
                     .scout
@@ -1501,7 +1540,7 @@ impl PathfinderServer {
         // Python: `def`, `async def`
         let name = regex::escape(&symbol_name);
         let pattern = format!(
-            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{name}\\b"
+            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{name}\b"
         );
 
         let search_result = self
@@ -1546,7 +1585,7 @@ impl PathfinderServer {
     /// source files. Returns the first match that looks like a symbol definition or reference.
     async fn grep_symbol_broad(&self, symbol_name: &str) -> Option<GetDefinitionResponse> {
         let name = regex::escape(symbol_name);
-        let pattern = format!(r"\b{name}\\b");
+        let pattern = format!(r"\b{name}\b");
 
         let search_result = self
             .scout
@@ -5229,7 +5268,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5276,7 +5314,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5323,7 +5360,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5374,7 +5410,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5443,7 +5478,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5503,7 +5537,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5568,7 +5601,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5747,7 +5779,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5871,7 +5902,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -5962,7 +5992,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6010,7 +6039,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6057,7 +6085,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6099,7 +6126,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6153,7 +6179,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6227,7 +6252,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6284,7 +6308,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6349,7 +6372,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6402,7 +6424,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -6475,7 +6496,6 @@ mod tests {
                 server_name: None,
                 indexing_source: None,
                 indexing_duration_secs: None,
-                warm_start_complete: None,
                 indexing_progress_percent: None,
             },
         )]));
@@ -7061,5 +7081,416 @@ mod tests {
             50,
             "default_max_dependencies must be 50 per the implementation"
         );
+    }
+
+    // ── language_to_file_glob tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_language_to_file_glob_rust() {
+        assert_eq!(super::language_to_file_glob("rust"), "**/*.rs");
+    }
+
+    #[test]
+    fn test_language_to_file_glob_typescript() {
+        assert_eq!(super::language_to_file_glob("typescript"), "**/*.ts");
+    }
+
+    #[test]
+    fn test_language_to_file_glob_tsx() {
+        assert_eq!(super::language_to_file_glob("tsx"), "**/*.tsx");
+    }
+
+    #[test]
+    fn test_language_to_file_glob_javascript() {
+        assert_eq!(
+            super::language_to_file_glob("javascript"),
+            "**/*.{js,jsx}"
+        );
+    }
+
+    #[test]
+    fn test_language_to_file_glob_python() {
+        assert_eq!(super::language_to_file_glob("python"), "**/*.py");
+    }
+
+    #[test]
+    fn test_language_to_file_glob_go() {
+        assert_eq!(super::language_to_file_glob("go"), "**/*.go");
+    }
+
+    #[test]
+    fn test_language_to_file_glob_vue() {
+        assert_eq!(super::language_to_file_glob("vue"), "**/*.vue");
+    }
+
+    #[test]
+    fn test_language_to_file_glob_java() {
+        assert_eq!(super::language_to_file_glob("java"), "**/*.java");
+    }
+
+    #[test]
+    fn test_language_to_file_glob_unknown_defaults_to_catch_all() {
+        assert_eq!(super::language_to_file_glob("haskell"), "**/*");
+        assert_eq!(super::language_to_file_glob(""), "**/*");
+    }
+
+    // ── definition_patterns tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_definition_patterns_rust_fn() {
+        let patterns = super::definition_patterns("rs", "my_function");
+        assert!(!patterns.is_empty(), "must return at least one pattern");
+        // First pattern should match function definitions
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        assert!(
+            re.is_match("pub async fn my_function("),
+            "must match 'pub async fn my_function('"
+        );
+        assert!(
+            re.is_match("fn my_function("),
+            "must match bare 'fn my_function('"
+        );
+        assert!(
+            !re.is_match("let my_function = 42"),
+            "must not match variable assignment"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_rust_struct() {
+        let patterns = super::definition_patterns("rs", "MyStruct");
+        assert!(patterns.len() >= 2, "must return patterns for types too");
+        let re = regex::Regex::new(&patterns[1]).expect("valid regex");
+        assert!(
+            re.is_match("pub(crate) struct MyStruct {"),
+            "must match 'pub(crate) struct MyStruct {{'"
+        );
+        assert!(
+            re.is_match("enum MyStruct {"),
+            "must match 'enum MyStruct {{'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_ts_export_class() {
+        let patterns = super::definition_patterns("ts", "AuthService");
+        assert!(!patterns.is_empty());
+        // Second pattern matches classes/interfaces
+        let re = regex::Regex::new(&patterns[1]).expect("valid regex");
+        assert!(
+            re.is_match("export default class AuthService {"),
+            "must match 'export default class AuthService {{'"
+        );
+        assert!(
+            re.is_match("export interface AuthService {"),
+            "must match 'export interface AuthService {{'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_py_async_def() {
+        let patterns = super::definition_patterns("py", "process_order");
+        assert!(!patterns.is_empty());
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        assert!(
+            re.is_match("async def process_order("),
+            "must match 'async def process_order('"
+        );
+        assert!(
+            re.is_match("def process_order("),
+            "must match 'def process_order('"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_py_class() {
+        let patterns = super::definition_patterns("py", "MyClass");
+        assert!(patterns.len() >= 2);
+        let re = regex::Regex::new(&patterns[1]).expect("valid regex");
+        assert!(re.is_match("class MyClass:"), "must match 'class MyClass:'");
+    }
+
+    #[test]
+    fn test_definition_patterns_go_receiver_method() {
+        let patterns = super::definition_patterns("go", "HandleRequest");
+        assert!(!patterns.is_empty());
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        assert!(
+            re.is_match("func (s *Service) HandleRequest("),
+            "must match receiver method"
+        );
+        assert!(
+            re.is_match("func HandleRequest("),
+            "must match bare function"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_go_type() {
+        let patterns = super::definition_patterns("go", "UserService");
+        assert!(patterns.len() >= 3, "go must have func + type + const/var");
+        let re = regex::Regex::new(&patterns[2]).expect("valid regex");
+        assert!(
+            re.is_match("type UserService struct {"),
+            "must match 'type UserService struct {{'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_unknown_extension_uses_fallback() {
+        let patterns = super::definition_patterns("java", "MyClass");
+        assert!(!patterns.is_empty());
+        // Java has its own patterns
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        assert!(
+            re.is_match("public class MyClass {"),
+            "must match Java class declaration"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_catch_all_extension() {
+        let patterns = super::definition_patterns("unknown_ext", "foo");
+        assert_eq!(patterns.len(), 1, "catch-all must return exactly one pattern");
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        assert!(re.is_match("foo"), "must match bare word");
+        assert!(!re.is_match("foobar"), "must not match partial word");
+    }
+
+    #[test]
+    fn test_definition_patterns_special_chars_escaped() {
+        // Symbol name with regex special characters must be escaped
+        let patterns = super::definition_patterns("rs", "my+function");
+        assert!(!patterns.is_empty());
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        // Must match literal "my+function", not "myXfunction"
+        assert!(re.is_match("fn my+function("));
+        assert!(!re.is_match("fn myXfunction("));
+    }
+
+    #[test]
+    fn test_definition_patterns_all_languages_compile() {
+        // Verify every extension returns valid regex patterns
+        let extensions = ["rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "xyz"];
+        for ext in &extensions {
+            let patterns = super::definition_patterns(ext, "TestSymbol");
+            for (i, pattern) in patterns.iter().enumerate() {
+                assert!(
+                    regex::Regex::new(pattern).is_ok(),
+                    "pattern {i} for ext '{ext}' must be valid regex: {pattern}"
+                );
+            }
+        }
+    }
+
+    // ── extract_call_candidates tests ──────────────────────────────────────
+
+    #[test]
+    fn test_extract_call_candidates_rust_basic() {
+        let code = r#"
+            fn process() {
+                fetch_user(id);
+                validate_order(&order);
+                charge_payment(amount);
+            }
+        "#;
+        let candidates = super::extract_call_candidates(code, "rust");
+        assert!(candidates.contains(&"fetch_user".to_string()));
+        assert!(candidates.contains(&"validate_order".to_string()));
+        assert!(candidates.contains(&"charge_payment".to_string()));
+    }
+
+    #[test]
+    fn test_extract_call_candidates_filters_keywords() {
+        let code = r#"
+            fn process() {
+                if condition { return; }
+                for item in items { do_something(item); }
+                while running { check(); }
+                match value { _ => {} }
+            }
+        "#;
+        let candidates = super::extract_call_candidates(code, "rust");
+        assert!(
+            !candidates.contains(&"if".to_string()),
+            "must filter 'if' keyword"
+        );
+        assert!(
+            !candidates.contains(&"for".to_string()),
+            "must filter 'for' keyword"
+        );
+        assert!(
+            !candidates.contains(&"while".to_string()),
+            "must filter 'while' keyword"
+        );
+        assert!(
+            !candidates.contains(&"match".to_string()),
+            "must filter 'match' keyword"
+        );
+        assert!(
+            !candidates.contains(&"return".to_string()),
+            "must filter 'return' keyword"
+        );
+        assert!(
+            candidates.contains(&"do_something".to_string()),
+            "must keep real function call"
+        );
+        assert!(
+            candidates.contains(&"check".to_string()),
+            "must keep real function call"
+        );
+    }
+
+    #[test]
+    fn test_extract_call_candidates_go_keywords() {
+        let code = r#"
+            func process() {
+                if err != nil { return err }
+                for _, v := range items { handle(v) }
+                select { case <-ch: }
+            }
+        "#;
+        let candidates = super::extract_call_candidates(code, "go");
+        assert!(!candidates.contains(&"if".to_string()));
+        assert!(!candidates.contains(&"for".to_string()));
+        assert!(!candidates.contains(&"range".to_string()));
+        assert!(!candidates.contains(&"select".to_string()));
+        assert!(candidates.contains(&"handle".to_string()));
+    }
+
+    #[test]
+    fn test_extract_call_candidates_python_keywords() {
+        let code = r#"
+def process():
+    if condition:
+        return result
+    for item in items:
+        handle(item)
+    raise ValueError("bad")
+        "#;
+        let candidates = super::extract_call_candidates(code, "python");
+        assert!(!candidates.contains(&"if".to_string()));
+        assert!(!candidates.contains(&"for".to_string()));
+        assert!(!candidates.contains(&"return".to_string()));
+        assert!(!candidates.contains(&"raise".to_string()));
+        assert!(candidates.contains(&"handle".to_string()));
+    }
+
+    #[test]
+    fn test_extract_call_candidates_deduplicates() {
+        let code = r#"
+            fn process() {
+                fetch(id);
+                fetch(id);
+                fetch(id);
+            }
+        "#;
+        let candidates = super::extract_call_candidates(code, "rust");
+        let count = candidates.iter().filter(|c| *c == "fetch").count();
+        assert_eq!(count, 1, "must deduplicate call candidates");
+    }
+
+    #[test]
+    fn test_extract_call_candidates_caps_at_20() {
+        // Generate 25 unique function calls
+        let mut code = String::from("fn process() {\n");
+        for i in 0..25 {
+            code.push_str(&format!("    func_{i}(x);\n"));
+        }
+        code.push('}');
+
+        let candidates = super::extract_call_candidates(&code, "rust");
+        assert!(
+            candidates.len() <= 20,
+            "must cap at 20 candidates, got {}",
+            candidates.len()
+        );
+    }
+
+    #[test]
+    fn test_extract_call_candidates_typescript_method_calls() {
+        let code = r#"
+            function process() {
+                user.getName();
+                order.calculateTotal();
+                service.validate(data);
+            }
+        "#;
+        let candidates = super::extract_call_candidates(code, "typescript");
+        // Method calls (obj.method()) should also be extracted for TS/JS
+        assert!(candidates.contains(&"getName".to_string()));
+        assert!(candidates.contains(&"calculateTotal".to_string()));
+        assert!(candidates.contains(&"validate".to_string()));
+    }
+
+    #[test]
+    fn test_extract_call_candidates_empty_input() {
+        let candidates = super::extract_call_candidates("", "rust");
+        assert!(candidates.is_empty(), "empty input must return empty vec");
+    }
+
+    #[test]
+    fn test_extract_call_candidates_no_calls() {
+        let code = "let x = 42;\nlet y = x + 1;";
+        let candidates = super::extract_call_candidates(code, "rust");
+        assert!(
+            candidates.is_empty(),
+            "no function calls must return empty vec"
+        );
+    }
+
+    // ── keywords_for_language tests ────────────────────────────────────────
+
+    #[test]
+    fn test_keywords_for_language_rust() {
+        let kw = super::keywords_for_language("rust");
+        assert!(kw.contains(&"fn"), "must contain 'fn'");
+        assert!(kw.contains(&"struct"), "must contain 'struct'");
+        assert!(kw.contains(&"impl"), "must contain 'impl'");
+        assert!(kw.contains(&"async"), "must contain 'async'");
+        assert!(kw.contains(&"await"), "must contain 'await'");
+        assert!(kw.len() > 20, "rust keywords must be comprehensive");
+    }
+
+    #[test]
+    fn test_keywords_for_language_go() {
+        let kw = super::keywords_for_language("go");
+        assert!(kw.contains(&"func"), "must contain 'func'");
+        assert!(kw.contains(&"defer"), "must contain 'defer'");
+        assert!(kw.contains(&"select"), "must contain 'select'");
+        assert!(kw.contains(&"chan"), "must contain 'chan'");
+    }
+
+    #[test]
+    fn test_keywords_for_language_typescript() {
+        let kw = super::keywords_for_language("typescript");
+        assert!(kw.contains(&"function"), "must contain 'function'");
+        assert!(kw.contains(&"class"), "must contain 'class'");
+        assert!(kw.contains(&"const"), "must contain 'const'");
+    }
+
+    #[test]
+    fn test_keywords_for_language_python() {
+        let kw = super::keywords_for_language("python");
+        assert!(kw.contains(&"def"), "must contain 'def'");
+        assert!(kw.contains(&"class"), "must contain 'class'");
+        assert!(kw.contains(&"raise"), "must contain 'raise'");
+    }
+
+    #[test]
+    fn test_keywords_for_language_java() {
+        let kw = super::keywords_for_language("java");
+        assert!(kw.contains(&"class"), "must contain 'class'");
+        assert!(kw.contains(&"interface"), "must contain 'interface'");
+        assert!(kw.contains(&"extends"), "must contain 'extends'");
+    }
+
+    #[test]
+    fn test_keywords_for_language_unknown_uses_default() {
+        let kw = super::keywords_for_language("haskell");
+        assert!(kw.contains(&"if"), "default must contain 'if'");
+        assert!(kw.contains(&"for"), "default must contain 'for'");
+        assert!(kw.contains(&"while"), "default must contain 'while'");
+        assert!(kw.contains(&"return"), "default must contain 'return'");
     }
 }

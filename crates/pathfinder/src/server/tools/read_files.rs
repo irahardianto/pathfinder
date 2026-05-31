@@ -172,19 +172,16 @@ impl PathfinderServer {
                         }
                     });
 
-                    let (content, total_lines) = if let Some(content) = content {
+                    let (content, total_lines, version_hash) = if let Some(content) = content {
+                        let version_hash = pathfinder_common::types::VersionHash::compute(content.as_bytes())
+                            .as_str()
+                            .to_string();
                         let truncated = truncate_content(&content, params.max_lines_per_file);
                         let total = u32::try_from(truncated.lines().count()).unwrap_or(u32::MAX);
-                        (Some(truncated), Some(total))
+                        (Some(truncated), Some(total), Some(version_hash))
                     } else {
-                        (None, None)
+                        (None, None, None)
                     };
-
-                    let version_hash = content.as_ref().map(|c| {
-                        pathfinder_common::types::VersionHash::compute(c.as_bytes())
-                            .as_str()
-                            .to_string()
-                    });
 
                     FileResult {
                         path: file_path.to_string(),

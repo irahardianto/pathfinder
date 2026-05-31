@@ -211,7 +211,6 @@ fn validation_status_from_parts(
             server_name: None,
             indexing_source: None,
             indexing_duration_secs: None,
-            warm_start_complete: None,
             indexing_progress_percent: None,
         };
     }
@@ -240,7 +239,6 @@ fn validation_status_from_parts(
             server_name: server_name.map(ToOwned::to_owned),
             indexing_source,
             indexing_duration_secs,
-            warm_start_complete: None,
             indexing_progress_percent: if indexing_complete { None } else { indexing_progress_pct },
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
@@ -257,7 +255,6 @@ fn validation_status_from_parts(
             server_name: server_name.map(ToOwned::to_owned),
             indexing_source,
             indexing_duration_secs,
-            warm_start_complete: None,
             indexing_progress_percent: if indexing_complete { None } else { indexing_progress_pct },
         },
     }
@@ -1644,7 +1641,6 @@ impl Lawyer for LspClient {
                     server_name: None,
                     indexing_source: None,
                     indexing_duration_secs: None,
-                    warm_start_complete: None,
                     indexing_progress_percent: None,
                 },
                 |entry| entry.to_validation_status(&desc.command),

@@ -36,7 +36,8 @@ The `derive_lsp_status()` helper converts `LspLanguageStatus` into a status stri
 | Condition | Status | Meaning |
 |-----------|--------|---------|
 | `navigation_ready == Some(true)` | `"ready"` | Navigation tools (get_definition, analyze_impact) are functional |
-| `uptime_seconds.is_some()` but not navigation_ready | `"warming_up"` | LSP process running, still indexing |
+| `navigation_ready == Some(false)` OR `indexing_complete == Some(false)` | `"warming_up"` | LSP connected, capabilities reported, still indexing |
+| `uptime_seconds.is_some()` but no capability data yet | `"starting"` | LSP process running but hasn't reported any capabilities (very early state) |
 | Neither | `"unavailable"` | No LSP process for this language |
 
 The field is `Option<HashMap<String, String>>` and serialized as `skip_serializing_if = "Option::is_none"` — absent from JSON when no LSP processes are running.
@@ -54,7 +55,8 @@ The field is `Option<HashMap<String, String>>` and serialized as `skip_serializi
 
 - [x] `lsp_status` absent from JSON when no LSP processes are running
 - [x] `lsp_status` present with `"ready"` for languages where `navigation_ready == Some(true)`
-- [x] `lsp_status` present with `"warming_up"` for languages with uptime but no navigation readiness
+- [x] `lsp_status` present with `"warming_up"` for languages with capabilities reported but not navigation-ready
+- [x] `lsp_status` present with `"starting"` for languages with uptime but no capability data yet
 - [x] `lsp_status` present with `"unavailable"` for languages with no uptime or navigation readiness
 - [x] Populated in both the main response path and the `empty_changes_response` (changed_since with no diffs)
 - [x] Does not duplicate data — mirrors `capabilities.lsp.per_language` in a flat format
@@ -67,7 +69,7 @@ The field is `Option<HashMap<String, String>>` and serialized as `skip_serializi
 | Test | File | Description |
 |------|------|-------------|
 | `test_derive_lsp_status_empty_map_returns_none` | `repo_map.rs` | Empty capability map → `None` |
-| `test_derive_lsp_status_correct_status_strings` | `repo_map.rs` | 3-language map with ready/warming_up/unavailable → correct strings |
+| `test_derive_lsp_status_correct_status_strings` | `repo_map.rs` | 5-language map with ready/warming_up/starting/unavailable → correct strings |
 
 ---
 
@@ -94,7 +96,11 @@ if response.metadata.lsp_status.get("rust") == "ready":
     # Safe to call get_definition, analyze_impact
     ...
 elif response.metadata.lsp_status.get("rust") == "warming_up":
-    # LSP is starting — grep fallbacks will be used automatically
+    # LSP connected but still indexing — grep fallbacks will be used automatically
     # Agent can proceed, or wait and re-check
+    ...
+elif response.metadata.lsp_status.get("rust") == "starting":
+    # LSP process running but no capabilities reported yet — very early state
+    # Agent should wait and re-check, or proceed with grep fallbacks
     ...
 ```
