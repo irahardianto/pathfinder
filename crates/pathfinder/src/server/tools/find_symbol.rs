@@ -72,7 +72,8 @@ impl PathfinderServer {
             || params.path_glob.contains("*.js")
             || params.path_glob.contains("*.jsx")
             || params.path_glob.contains("*.py")
-            || params.path_glob.contains("*.go");
+            || params.path_glob.contains("*.go")
+            || params.path_glob.contains("*.java");
 
         // Build patterns for all supported languages unless filtered
         let extensions = if has_ext_filter {
@@ -87,6 +88,7 @@ impl PathfinderServer {
                 ("jsx", String::from("**/*.jsx")),
                 ("py", String::from("**/*.py")),
                 ("go", String::from("**/*.go")),
+                ("java", String::from("**/*.java")),
             ]
         };
 

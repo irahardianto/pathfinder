@@ -67,14 +67,14 @@ Call `scout.search()` then `surgeon.classify_node_at_position()` for each match.
 
 ## Acceptance Criteria
 
-- [ ] Grep fallback results exclude matches in comments
-- [ ] Grep fallback results exclude matches in string literals
-- [ ] Code-only matches are preserved (function calls, type references)
-- [ ] Definition file still excluded
-- [ ] Result cap still 10
-- [ ] `enclosing_semantic_path` populated for each result (from tree-sitter enrichment)
-- [ ] No performance regression: enrichment must complete within 2s for typical workspaces
-- [ ] Falls back to raw grep if tree-sitter enrichment fails (resilient)
+- [x] Grep fallback results exclude matches in comments
+- [x] Grep fallback results exclude matches in string literals
+- [x] Code-only matches are preserved (function calls, type references)
+- [x] Definition file still excluded
+- [x] Result cap still 10
+- [x] `enclosing_semantic_path` populated for each result (from tree-sitter enrichment)
+- [x] No performance regression: enrichment must complete within 2s for typical workspaces
+- [x] Falls back to raw grep if tree-sitter enrichment fails (resilient)
 
 ---
 

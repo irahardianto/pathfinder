@@ -53,14 +53,14 @@ When `resolve_lsp_dependencies` returns `degraded: true` with empty dependencies
 
 ## Acceptance Criteria
 
-- [ ] When LSP returns degraded with empty deps, grep fallback runs automatically
-- [ ] Fallback extracts function call patterns from symbol body
-- [ ] Language keywords are filtered out (no `if`, `for`, `while`, etc. as "dependencies")
-- [ ] Each candidate is resolved to a definition file+line via grep search
-- [ ] Results capped at 50 dependencies
-- [ ] `degraded_reason` set to `GrepFallbackDependencies`
-- [ ] `degraded: true` remains set (results are heuristic, not authoritative)
-- [ ] Source code is always returned even when dependency discovery fails
+- [x] When LSP returns degraded with empty deps, grep fallback runs automatically
+- [x] Fallback extracts function call patterns from symbol body
+- [x] Language keywords are filtered out (no `if`, `for`, `while`, etc. as "dependencies")
+- [x] Each candidate is resolved to a definition file+line via grep search
+- [x] Results capped at 50 dependencies
+- [x] `degraded_reason` set to `GrepFallbackDependencies`
+- [x] `degraded: true` remains set (results are heuristic, not authoritative)
+- [x] Source code is always returned even when dependency discovery fails
 
 ---
 

@@ -46,19 +46,15 @@ impl PathfinderServer {
         tracing::info!(tool = "read_files", "read_files: start");
 
         if params.paths.is_empty() {
-            tracing::info!(tool = "read_files", "read_files: empty paths");
-            let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let response = ReadFilesResponse {
-                files: vec![],
-                succeeded: 0,
-                failed: 0,
-                duration_ms: Some(duration_ms),
-            };
-            let mut result = CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                "[completed in {duration_ms}ms]"
-            ))]);
-            result.structured_content = serialize_metadata(&response);
-            return Ok(result);
+            tracing::warn!(tool = "read_files", "empty paths");
+            return Err(ErrorData::invalid_params(
+                "Must provide at least 1 file path",
+                Some(serde_json::json!({
+                    "provided": 0,
+                    "min": 1,
+                    "max": 10
+                })),
+            ));
         }
 
         if params.paths.len() > 10 {
@@ -140,7 +136,7 @@ impl PathfinderServer {
                 filepath: file_path.to_string(),
                 start_line: 1,
                 end_line: None,
-                detail_level: "source_only".to_string(),
+                detail_level: params.detail_level.clone(),
             };
 
             match self.read_source_file_impl(rs_params).await {
@@ -492,16 +488,12 @@ mod tests {
             max_lines_per_file: 500,
         };
 
-        let result = server
-            .read_files_impl(params)
-            .await
-            .expect("should succeed");
-        let response: ReadFilesResponse =
-            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+        let result = server.read_files_impl(params).await;
 
-        assert_eq!(response.files.len(), 0);
-        assert_eq!(response.succeeded, 0);
-        assert_eq!(response.failed, 0);
+        // Empty paths should error (1-10 paths required by spec)
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
     #[tokio::test]

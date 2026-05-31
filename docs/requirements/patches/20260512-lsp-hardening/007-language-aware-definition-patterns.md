@@ -87,14 +87,14 @@ This function is used in:
 
 ## Acceptance Criteria
 
-- [ ] `definition_patterns` returns language-specific regex vectors for rs, ts/tsx/js/jsx, py, go
-- [ ] Rust patterns handle `pub(crate)`, `async`, `unsafe`, `const fn` variants
-- [ ] TypeScript patterns handle `export default`, `abstract class`
-- [ ] Python patterns handle `async def`, module-level assignments
-- [ ] Go patterns handle receiver methods `func (s *Service) Method(...)`
-- [ ] Unknown extensions fall back to bare `\b{symbol}\b`
-- [ ] All patterns are valid regex (compiled without error)
-- [ ] Integration with `fallback_definition_grep` replaces the current mega-regex
+- [x] `definition_patterns` returns language-specific regex vectors for rs, ts/tsx/js/jsx, py, go, java
+- [x] Rust patterns handle `pub(crate)`, `async`, `unsafe`, `const fn` variants
+- [x] TypeScript patterns handle `export default`, `abstract class`
+- [x] Python patterns handle `async def`, module-level assignments
+- [x] Go patterns handle receiver methods `func (s *Service) Method(...)`
+- [x] Unknown extensions fall back to bare `\b{symbol}\b`
+- [x] All patterns are valid regex (compiled without error)
+- [x] Integration with `fallback_definition_grep` replaces the current mega-regex
 
 ---
 

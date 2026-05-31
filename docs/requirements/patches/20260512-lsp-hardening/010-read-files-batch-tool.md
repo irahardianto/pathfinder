@@ -102,17 +102,17 @@ New MCP tool that reads multiple files in a single call with per-file error resi
 
 ## Acceptance Criteria
 
-- [ ] Tool registered in MCP tool list with JSON schema
-- [ ] Accepts 1–10 file paths in a single call
-- [ ] Returns `>10 paths` → error with clear message
-- [ ] Each file result includes `content`, `language`, `total_lines`, `version_hash` on success
-- [ ] Each file result includes `error` string on failure (file not found, sandbox denied, etc.)
-- [ ] Individual file errors don't fail the batch — `succeeded` and `failed` counts accurate
-- [ ] Sandbox check applied per-file
-- [ ] Source files get AST-based `detail_level` processing (symbols, etc.)
-- [ ] Config files (`json`, `yaml`, `toml`, `env`, `Dockerfile`) get raw content
-- [ ] `version_hash` matches what `read_source_file` would return for the same file
-- [ ] Response size bounded by `max_lines_per_file` per file
+- [x] Tool registered in MCP tool list with JSON schema
+- [x] Accepts 1–10 file paths in a single call (empty array returns empty success)
+- [x] Returns `>10 paths` → error with clear message
+- [x] Each file result includes `content`, `language`, `total_lines`, `version_hash` on success
+- [x] Each file result includes `error` string on failure (file not found, sandbox denied, etc.)
+- [x] Individual file errors don't fail the batch — `succeeded` and `failed` counts accurate
+- [x] Sandbox check applied per-file
+- [x] Source files get AST-based `detail_level` processing (symbols, etc.) — parameter now forwarded
+- [x] Config files (`json`, `yaml`, `toml`, `env`, `Dockerfile`) get raw content
+- [x] `version_hash` matches what `read_source_file` would return for the same file
+- [x] Response size bounded by `max_lines_per_file` per file
 
 ---
 

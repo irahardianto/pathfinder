@@ -101,12 +101,12 @@ pub struct LspHealthResponse {
 
 ## Acceptance Criteria
 
-- [ ] `warm_start_for_languages()` returns `Vec<JoinHandle<()>>` instead of `()`
-- [ ] `warm_start_complete` is `false` during initialization, `true` once all handles join
-- [ ] `lsp_health` response includes `warm_start_complete: bool`
-- [ ] Failed warm_start attempts are logged at `warn` level with language and error
-- [ ] If one language fails, others still complete (per-language resilience)
-- [ ] `warm_start_complete` is `true` even if some languages failed (it means "the process finished")
+- [x] `warm_start_for_languages()` returns `Vec<JoinHandle<()>>` instead of `()`
+- [x] `warm_start_complete` is `false` during initialization, `true` once all handles join
+- [x] `lsp_health` response includes `warm_start_complete: bool`
+- [x] Failed warm_start attempts are logged at `warn` level with language and error
+- [x] If one language fails, others still complete (per-language resilience)
+- [x] `warm_start_complete` is `true` even if some languages failed (it means "the process finished")
 
 ---
 

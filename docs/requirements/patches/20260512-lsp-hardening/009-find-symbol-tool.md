@@ -97,15 +97,15 @@ Workspace-only search (consistent with `project_only=true` default). Does not se
 
 ## Acceptance Criteria
 
-- [ ] Tool registered in MCP tool list with JSON schema
-- [ ] Bare name `"LspClient"` resolves to correct `crates/pathfinder-lsp/src/client/mod.rs::LspClient`
-- [ ] Optional `kind` filter limits results (e.g., `kind: "function"` excludes structs)
-- [ ] Optional `path_glob` scopes search (e.g., `src/**/*.ts` for TypeScript only)
-- [ ] Results sorted by relevance (exact match first)
-- [ ] `search_strategy` field indicates how results were found (`treesitter`, `grep`, `lsp`)
-- [ ] Sandbox check applied to all returned paths
-- [ ] Max 10 results by default
-- [ ] Handles no-results gracefully (empty `symbols` array, no error)
+- [x] Tool registered in MCP tool list with JSON schema
+- [x] Bare name `"LspClient"` resolves to correct `crates/pathfinder-lsp/src/client/mod.rs::LspClient`
+- [x] Optional `kind` filter limits results (e.g., `kind: "function"` excludes structs)
+- [x] Optional `path_glob` scopes search (e.g., `src/**/*.ts` for TypeScript only)
+- [x] Results sorted by relevance (exact match first)
+- [x] `search_strategy` field indicates how results were found (`treesitter`, `grep`, `lsp`)
+- [x] Sandbox check applied to all returned paths
+- [x] Max 10 results by default
+- [x] Handles no-results gracefully (empty `symbols` array, no error)
 
 ---
 

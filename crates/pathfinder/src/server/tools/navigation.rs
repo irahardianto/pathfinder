@@ -40,14 +40,18 @@ const BFS_TIMEOUT_SECS: u64 = 30;
 /// want results from actual source files, not documentation (.md), config
 /// (.json, .yaml, .toml), or other non-source files.
 const SOURCE_FILE_EXTENSIONS: &[&str] = &[
-    "rs",  // Rust
-    "go",  // Go
-    "ts",  // TypeScript
-    "tsx", // TypeScript + JSX
-    "js",  // JavaScript
-    "jsx", // JavaScript + JSX
-    "py",  // Python
-    "vue", // Vue Single-File Component
+    "rs",   // Rust
+    "go",   // Go
+    "ts",   // TypeScript
+    "tsx",  // TypeScript + JSX
+    "js",   // JavaScript
+    "jsx",  // JavaScript + JSX
+    "mjs",  // JavaScript (ESM module)
+    "cjs",  // JavaScript (CommonJS)
+    "py",   // Python
+    "pyi",  // Python type stub
+    "vue",  // Vue Single-File Component
+    "java", // Java
 ];
 
 /// Returns `true` if the file path has a source code extension.
@@ -642,8 +646,17 @@ impl PathfinderServer {
                 tracing::warn!(
                     tool = "read_with_deep_context",
                     error = %e,
-                    "call_hierarchy_prepare failed"
+                    "call_hierarchy_prepare failed — attempting grep fallback (PATCH-005)"
                 );
+                (degraded, degraded_reason) = self
+                    .attempt_grep_fallback(
+                        semantic_path,
+                        &mut dependencies,
+                        &mut engines,
+                        project_only,
+                        max_dependencies,
+                    )
+                    .await;
             }
         }
 
@@ -4662,7 +4675,8 @@ mod tests {
 
         let lawyer = Arc::new(MockLawyer::default());
         // Simulate LSP protocol error
-        lawyer.push_prepare_call_hierarchy_result(Err("LSP crashed".to_string()));
+        lawyer
+            .push_prepare_call_hierarchy_result(Err(LspError::Protocol("LSP crashed".to_string())));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -4706,7 +4720,7 @@ mod tests {
         // Prepare succeeds
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
         // But outgoing call fails
-        lawyer.push_outgoing_call_result(Err("outgoing failed".to_string()));
+        lawyer.push_outgoing_call_result(Err(LspError::Protocol("outgoing failed".to_string())));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -4972,7 +4986,9 @@ mod tests {
             call_sites: vec![9],
         }]));
         // Outgoing fails with LSP error
-        lawyer.push_outgoing_call_result(Err("LSP crashed during outgoing".to_string()));
+        lawyer.push_outgoing_call_result(Err(LspError::Protocol(
+            "LSP crashed during outgoing".to_string(),
+        )));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 

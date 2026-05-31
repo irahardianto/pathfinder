@@ -67,10 +67,10 @@ type GotoDefinitionFixture = Arc<Mutex<Option<Result<Option<DefinitionLocation>,
 type DidOpenErrorFixture = Arc<Mutex<Option<LspError>>>;
 
 /// Queue of results for `call_hierarchy_prepare`.
-type PrepareCallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyItem>, String>>>>;
+type PrepareCallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyItem>, LspError>>>>;
 
 /// Queue of results for `call_hierarchy_incoming` and `call_hierarchy_outgoing`.
-type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, String>>>>;
+type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, LspError>>>>;
 
 /// Configured result for `references`.
 type ReferencesFixture = Arc<Mutex<Option<Result<Vec<ReferenceLocation>, String>>>>;
@@ -145,7 +145,7 @@ impl MockLawyer {
     /// - `Some(Err(..))` when the queue has a configured error
     /// - `None` when the queue is empty (caller decides default behavior)
     fn pop_queued_result<T>(
-        mutex: &Arc<Mutex<Vec<Result<T, String>>>>,
+        mutex: &Arc<Mutex<Vec<Result<T, LspError>>>>,
     ) -> Option<Result<T, LspError>> {
         let mut guard = mutex
             .lock()
@@ -153,10 +153,7 @@ impl MockLawyer {
         if guard.is_empty() {
             return None;
         }
-        match guard.remove(0) {
-            Ok(item) => Some(Ok(item)),
-            Err(msg) => Some(Err(LspError::Protocol(msg))),
-        }
+        Some(guard.remove(0))
     }
 
     // ── goto_definition ───────────────────────────────────────────────────────
@@ -206,7 +203,7 @@ impl MockLawyer {
     /// Push a result onto the `call_hierarchy_prepare` queue.
     pub fn push_prepare_call_hierarchy_result(
         &self,
-        result: Result<Vec<CallHierarchyItem>, String>,
+        result: Result<Vec<CallHierarchyItem>, LspError>,
     ) {
         self.prepare_call_hierarchy_results
             .lock()
@@ -215,7 +212,7 @@ impl MockLawyer {
     }
 
     /// Push a result onto the `call_hierarchy_incoming` queue.
-    pub fn push_incoming_call_result(&self, result: Result<Vec<CallHierarchyCall>, String>) {
+    pub fn push_incoming_call_result(&self, result: Result<Vec<CallHierarchyCall>, LspError>) {
         self.incoming_call_results
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -223,7 +220,7 @@ impl MockLawyer {
     }
 
     /// Push a result onto the `call_hierarchy_outgoing` queue.
-    pub fn push_outgoing_call_result(&self, result: Result<Vec<CallHierarchyCall>, String>) {
+    pub fn push_outgoing_call_result(&self, result: Result<Vec<CallHierarchyCall>, LspError>) {
         self.outgoing_call_results
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
