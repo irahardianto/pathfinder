@@ -308,7 +308,10 @@ impl PathfinderServer {
             let notice = degraded_reason
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
-            format!("{notice}\n{}\n[completed in {duration_ms}ms]", result.skeleton)
+            format!(
+                "{notice}\n{}\n[completed in {duration_ms}ms]",
+                result.skeleton
+            )
         } else {
             format!("{}\n[completed in {duration_ms}ms]", result.skeleton)
         };
@@ -602,7 +605,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         );
 
@@ -624,7 +627,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         );
 
@@ -646,7 +649,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         );
 
@@ -668,7 +671,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         );
 
@@ -690,7 +693,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         );
 

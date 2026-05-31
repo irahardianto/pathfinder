@@ -3556,20 +3556,32 @@ mod tests {
     #[test]
     fn test_warm_start_complete_flag_transitions_false_to_true() {
         let client = client_with_descriptors(vec!["rust"], HashMap::new());
-        assert!(!client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
-                 "warm_start_complete should be false initially");
+        assert!(
+            !client
+                .warm_start_complete
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "warm_start_complete should be false initially"
+        );
     }
 
     #[tokio::test]
     async fn test_warm_start_complete_true_after_all_tasks_complete() {
         let client = client_with_descriptors(vec!["rust"], HashMap::new());
-        assert!(!client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
-                 "warm_start_complete should be false before warm_start");
+        assert!(
+            !client
+                .warm_start_complete
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "warm_start_complete should be false before warm_start"
+        );
 
         client.warm_start();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        assert!(client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
-                "warm_start_complete should be true after tasks complete");
+        assert!(
+            client
+                .warm_start_complete
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "warm_start_complete should be true after tasks complete"
+        );
     }
 
     #[tokio::test]
@@ -3577,7 +3589,11 @@ mod tests {
         let client = client_with_descriptors(vec!["rust"], HashMap::new());
         client.warm_start();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        assert!(client.warm_start_complete.load(std::sync::atomic::Ordering::Relaxed),
-                "warm_start_complete should be true even if some languages failed");
+        assert!(
+            client
+                .warm_start_complete
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "warm_start_complete should be true even if some languages failed"
+        );
     }
 }

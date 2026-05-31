@@ -216,7 +216,9 @@ impl PathfinderServer {
 
                 let mut contents = Vec::new();
                 if let Some(text) = final_content {
-                    contents.push(Content::text(format!("{text}\n[completed in {duration_ms}ms]")));
+                    contents.push(Content::text(format!(
+                        "{text}\n[completed in {duration_ms}ms]"
+                    )));
                 }
 
                 let mut result = CallToolResult::success(contents);

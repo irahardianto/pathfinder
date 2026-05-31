@@ -594,7 +594,10 @@ mod tests {
         };
         let response: crate::server::types::GetRepoMapMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
-        assert!(skeleton.starts_with("class Mock {}"), "skeleton: {skeleton}");
+        assert!(
+            skeleton.starts_with("class Mock {}"),
+            "skeleton: {skeleton}"
+        );
         assert_eq!(response.files_scanned, 1);
         assert_eq!(response.coverage_percent, 100);
         // Visibility filtering is now implemented via name-convention heuristics.

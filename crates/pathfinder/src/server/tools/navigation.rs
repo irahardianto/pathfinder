@@ -71,14 +71,8 @@ fn is_source_file(file: &str) -> bool {
 /// - TypeScript/JavaScript: files ending in `.test.ts`, `.spec.ts`, `.test.js`, `.spec.js`
 fn is_test_file(file: &str) -> bool {
     let path = std::path::Path::new(file);
-    let filename = path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("");
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "rs" => filename.ends_with("_test.rs") || filename == "test.rs",
@@ -1285,10 +1279,7 @@ impl PathfinderServer {
             .await
         {
             Ok(scope) => Ok(scope),
-            Err(pathfinder_treesitter::SurgeonError::SymbolNotFound {
-                path,
-                did_you_mean,
-            }) => {
+            Err(pathfinder_treesitter::SurgeonError::SymbolNotFound { path, did_you_mean }) => {
                 // Enrich the suggestions
                 let enriched = self
                     .enrich_did_you_mean(semantic_path_str, did_you_mean)
@@ -2428,7 +2419,10 @@ impl PathfinderServer {
         if let Some(test_refs) = &metadata.test_callers {
             if !test_refs.is_empty() {
                 text_parts.push(String::new());
-                text_parts.push(format!("TEST COVERAGE: {} test functions cover this symbol", test_refs.len()));
+                text_parts.push(format!(
+                    "TEST COVERAGE: {} test functions cover this symbol",
+                    test_refs.len()
+                ));
                 for r in test_refs {
                     text_parts.push(format!(
                         "  - {}::{} ({}:L{})",
@@ -2439,7 +2433,8 @@ impl PathfinderServer {
         } else if let Some(status) = &metadata.test_coverage_status {
             if status == "not_found" {
                 text_parts.push(String::new());
-                text_parts.push("TEST COVERAGE: no test functions found for this symbol".to_owned());
+                text_parts
+                    .push("TEST COVERAGE: no test functions found for this symbol".to_owned());
             } else if status == "unknown_degraded" {
                 text_parts.push(String::new());
                 text_parts.push("TEST COVERAGE: unknown (search degraded)".to_owned());
@@ -5121,7 +5116,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5168,7 +5163,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5215,7 +5210,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5266,7 +5261,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5335,7 +5330,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5395,7 +5390,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5460,7 +5455,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5639,7 +5634,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5763,7 +5758,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5854,7 +5849,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5902,7 +5897,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5949,7 +5944,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -5991,7 +5986,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -6045,7 +6040,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -6119,7 +6114,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -6176,7 +6171,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -6241,7 +6236,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -6294,7 +6289,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
@@ -6367,7 +6362,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
-                    indexing_progress_percent: None,
+                indexing_progress_percent: None,
             },
         )]));
 
