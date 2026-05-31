@@ -1410,10 +1410,7 @@ impl PathfinderServer {
         file_path: std::path::PathBuf,
     ) -> Option<GetDefinitionResponse> {
         // Extract file extension to determine which language patterns to use
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         // Get language-specific definition patterns
         let patterns = definition_patterns(ext, &symbol_name);
@@ -2693,10 +2690,7 @@ impl PathfinderServer {
                         .take(max_results)
                         .collect();
                     let remaining = max_results - impl_slice.len();
-                    let ref_slice: Vec<_> = references
-                        .into_iter()
-                        .take(remaining)
-                        .collect();
+                    let ref_slice: Vec<_> = references.into_iter().take(remaining).collect();
                     (impl_slice, ref_slice)
                 };
 
@@ -7102,10 +7096,7 @@ mod tests {
 
     #[test]
     fn test_language_to_file_glob_javascript() {
-        assert_eq!(
-            super::language_to_file_glob("javascript"),
-            "**/*.{js,jsx}"
-        );
+        assert_eq!(super::language_to_file_glob("javascript"), "**/*.{js,jsx}");
     }
 
     #[test]
@@ -7251,7 +7242,11 @@ mod tests {
     #[test]
     fn test_definition_patterns_catch_all_extension() {
         let patterns = super::definition_patterns("unknown_ext", "foo");
-        assert_eq!(patterns.len(), 1, "catch-all must return exactly one pattern");
+        assert_eq!(
+            patterns.len(),
+            1,
+            "catch-all must return exactly one pattern"
+        );
         let re = regex::Regex::new(&patterns[0]).expect("valid regex");
         assert!(re.is_match("foo"), "must match bare word");
         assert!(!re.is_match("foobar"), "must not match partial word");
@@ -7287,13 +7282,13 @@ mod tests {
 
     #[test]
     fn test_extract_call_candidates_rust_basic() {
-        let code = r#"
+        let code = r"
             fn process() {
                 fetch_user(id);
                 validate_order(&order);
                 charge_payment(amount);
             }
-        "#;
+        ";
         let candidates = super::extract_call_candidates(code, "rust");
         assert!(candidates.contains(&"fetch_user".to_string()));
         assert!(candidates.contains(&"validate_order".to_string()));
@@ -7302,14 +7297,14 @@ mod tests {
 
     #[test]
     fn test_extract_call_candidates_filters_keywords() {
-        let code = r#"
+        let code = r"
             fn process() {
                 if condition { return; }
                 for item in items { do_something(item); }
                 while running { check(); }
                 match value { _ => {} }
             }
-        "#;
+        ";
         let candidates = super::extract_call_candidates(code, "rust");
         assert!(
             !candidates.contains(&"if".to_string()),
@@ -7343,13 +7338,13 @@ mod tests {
 
     #[test]
     fn test_extract_call_candidates_go_keywords() {
-        let code = r#"
+        let code = r"
             func process() {
                 if err != nil { return err }
                 for _, v := range items { handle(v) }
                 select { case <-ch: }
             }
-        "#;
+        ";
         let candidates = super::extract_call_candidates(code, "go");
         assert!(!candidates.contains(&"if".to_string()));
         assert!(!candidates.contains(&"for".to_string()));
@@ -7378,19 +7373,20 @@ def process():
 
     #[test]
     fn test_extract_call_candidates_deduplicates() {
-        let code = r#"
+        let code = r"
             fn process() {
                 fetch(id);
                 fetch(id);
                 fetch(id);
             }
-        "#;
+        ";
         let candidates = super::extract_call_candidates(code, "rust");
         let count = candidates.iter().filter(|c| *c == "fetch").count();
         assert_eq!(count, 1, "must deduplicate call candidates");
     }
 
     #[test]
+    #[allow(clippy::format_push_string)]
     fn test_extract_call_candidates_caps_at_20() {
         // Generate 25 unique function calls
         let mut code = String::from("fn process() {\n");
@@ -7409,13 +7405,13 @@ def process():
 
     #[test]
     fn test_extract_call_candidates_typescript_method_calls() {
-        let code = r#"
+        let code = r"
             function process() {
                 user.getName();
                 order.calculateTotal();
                 service.validate(data);
             }
-        "#;
+        ";
         let candidates = super::extract_call_candidates(code, "typescript");
         // Method calls (obj.method()) should also be extracted for TS/JS
         assert!(candidates.contains(&"getName".to_string()));

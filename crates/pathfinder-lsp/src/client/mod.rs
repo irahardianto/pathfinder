@@ -239,7 +239,11 @@ fn validation_status_from_parts(
             server_name: server_name.map(ToOwned::to_owned),
             indexing_source,
             indexing_duration_secs,
-            indexing_progress_percent: if indexing_complete { None } else { indexing_progress_pct },
+            indexing_progress_percent: if indexing_complete {
+                None
+            } else {
+                indexing_progress_pct
+            },
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
@@ -255,7 +259,11 @@ fn validation_status_from_parts(
             server_name: server_name.map(ToOwned::to_owned),
             indexing_source,
             indexing_duration_secs,
-            indexing_progress_percent: if indexing_complete { None } else { indexing_progress_pct },
+            indexing_progress_percent: if indexing_complete {
+                None
+            } else {
+                indexing_progress_pct
+            },
         },
     }
 }
@@ -2197,8 +2205,7 @@ async fn progress_watcher_task(
                             {
                                 *indexing_progress_percent
                                     .lock()
-                                    .expect("indexing_progress_percent lock") =
-                                    Some(clamped);
+                                    .expect("indexing_progress_percent lock") = Some(clamped);
                             }
                             tracing::debug!(
                                 language = %language_id,
