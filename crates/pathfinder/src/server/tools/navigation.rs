@@ -73,11 +73,28 @@ fn is_test_file(file: &str) -> bool {
     let path = std::path::Path::new(file);
     let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let file_str = file.replace('\\', "/");
+
+    // Directory-based detection: files inside test/spec/__tests__ directories
+    if file_str.contains("/tests/")
+        || file_str.contains("/test/")
+        || file_str.contains("/spec/")
+        || file_str.contains("/specs/")
+        || file_str.contains("/__tests__/")
+        || file_str.contains("/__test__/")
+    {
+        return true;
+    }
 
     match ext {
         "rs" => filename.ends_with("_test.rs") || filename == "test.rs",
         "go" => filename.ends_with("_test.go"),
         "py" => filename.starts_with("test_") || filename == "conftest.py",
+        "java" => filename.ends_with("Test.java") || filename.ends_with("Tests.java"),
+        "kt" | "kts" => filename.ends_with("Test.kt") || filename.ends_with("Spec.kt"),
+        "cs" => filename.ends_with("Test.cs") || filename.ends_with("Tests.cs"),
+        "rb" => filename.ends_with("_test.rb") || filename.ends_with("_spec.rb"),
+        "dart" => filename.ends_with("_test.dart"),
         "ts" | "tsx" | "js" | "jsx" => {
             filename.ends_with(".test.ts")
                 || filename.ends_with(".spec.ts")
@@ -1006,6 +1023,7 @@ impl PathfinderServer {
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
                     def.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -1055,6 +1073,7 @@ impl PathfinderServer {
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
                     def.degraded_reason = Some(DegradedReason::NoLspGrepFallback);
+                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -1091,6 +1110,7 @@ impl PathfinderServer {
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
                     def.degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -1131,6 +1151,7 @@ impl PathfinderServer {
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
                     def.degraded = true;
                     def.degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
+                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -1251,11 +1272,21 @@ impl PathfinderServer {
                             path_glob: "**/*".to_owned(),
                             max_results: 3,
                         };
-                        if let Ok(response) = self.find_symbol_impl(find_params).await {
-                            for symbol in response.0.symbols {
-                                if !suggestions.contains(&symbol.semantic_path) {
-                                    suggestions.push(symbol.semantic_path);
+                        match self.find_symbol_impl(find_params).await {
+                            Ok(response) => {
+                                for symbol in response.0.symbols {
+                                    if !suggestions.contains(&symbol.semantic_path) {
+                                        suggestions.push(symbol.semantic_path);
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    symbol = %base_name.name,
+                                    error = %e,
+                                    "enrich_did_you_mean: cross-file search failed — \
+                                     agent will receive empty suggestions"
+                                );
                             }
                         }
                     }
@@ -2285,12 +2316,14 @@ impl PathfinderServer {
             if symbol_name.is_empty() {
                 (None, Some("not_found".to_owned()))
             } else {
-                // Search for the symbol name in test files
+                // Search for the symbol name in test files.
+                // Broad glob covers test, spec, __tests__ directories and
+                // files like foo_test.rs, foo.test.ts, foo_spec.rb, test_foo.py.
                 let search_params = pathfinder_search::SearchParams {
                     workspace_root: self.workspace_root.path().to_path_buf(),
                     query: symbol_name.clone(),
                     is_regex: false,
-                    path_glob: "**/*test*".to_owned(),
+                    path_glob: "**/*{test,spec,Test,Spec,__tests__}*".to_owned(),
                     exclude_glob: String::new(),
                     max_results: 100,
                     offset: 0,
@@ -2592,24 +2625,51 @@ impl PathfinderServer {
                     })
                     .collect();
 
-                let mut all_references = references.clone();
-                all_references.extend(implementations.clone());
-
-                // Spec 4.4: Apply pagination
-                let total_references = all_references.len();
+                // Spec 4.4: Apply pagination to each list separately
+                let total_references = references.len() + implementations.len();
                 let offset = usize::try_from(params.offset).unwrap_or(0);
                 let max_results = usize::try_from(params.max_results).unwrap_or(50);
-                let truncated = all_references.len() > offset.saturating_add(max_results);
-                let paginated: Vec<_> = all_references
-                    .into_iter()
-                    .skip(offset)
-                    .take(max_results)
-                    .collect();
+                let truncated = total_references > offset.saturating_add(max_results);
+
+                // Paginate implementations first, then references (matches display order)
+                let impl_count = implementations.len();
+                let ref_count = references.len();
+
+                let (paginated_impls, paginated_refs) = if offset >= impl_count {
+                    // Past implementations — paginate references only
+                    let ref_offset = offset - impl_count;
+                    (
+                        Vec::new(),
+                        references
+                            .into_iter()
+                            .skip(ref_offset)
+                            .take(max_results)
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    // Some or all implementations in range
+                    let impl_slice: Vec<_> = implementations
+                        .into_iter()
+                        .skip(offset)
+                        .take(max_results)
+                        .collect();
+                    let remaining = max_results - impl_slice.len();
+                    let ref_slice: Vec<_> = references
+                        .into_iter()
+                        .take(remaining)
+                        .collect();
+                    (impl_slice, ref_slice)
+                };
+
+                let paginated_len = paginated_impls.len() + paginated_refs.len();
+                let mut paginated = Vec::with_capacity(paginated_len);
+                paginated.extend(paginated_impls.clone());
+                paginated.extend(paginated_refs.clone());
 
                 tracing::info!(
                     tool = "find_all_references",
-                    references_count = references.len(),
-                    implementations_count = implementations.len(),
+                    references_count = ref_count,
+                    implementations_count = impl_count,
                     files_referenced,
                     tree_sitter_ms,
                     lsp_ms,
@@ -2618,15 +2678,12 @@ impl PathfinderServer {
                     "find_all_references: complete"
                 );
 
-                let ref_count = references.len();
-                let impl_count = implementations.len();
-
-                let implementations_text = if impl_count == 0 {
+                let implementations_text = if paginated_impls.is_empty() {
                     String::new()
                 } else {
                     let header =
                         format!("Implementations (extends/implements): {impl_count} found\n");
-                    let items: Vec<_> = implementations
+                    let items: Vec<_> = paginated_impls
                         .iter()
                         .map(|imp| {
                             format!("{}:{}:{}: {}", imp.file, imp.line, imp.column, imp.snippet)
@@ -2635,15 +2692,26 @@ impl PathfinderServer {
                     format!("{}{}\n", header, items.join("\n"))
                 };
 
-                let references_text = if ref_count == 0 {
+                let references_text = if paginated_refs.is_empty() {
                     String::new()
                 } else {
                     let header = format!("References: {ref_count} found\n");
-                    let items: Vec<_> = references
+                    let items: Vec<_> = paginated_refs
                         .iter()
                         .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
                         .collect();
                     format!("{}{}", header, items.join("\n"))
+                };
+
+                let pagination_note = if truncated {
+                    format!(
+                        "\n[showing {} of {} total — use offset={} for next page]\n",
+                        paginated_len,
+                        total_references,
+                        offset.saturating_add(max_results),
+                    )
+                } else {
+                    String::new()
                 };
 
                 let summary = if impl_count > 0 && ref_count > 0 {
@@ -2677,7 +2745,7 @@ impl PathfinderServer {
 
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                        format!("{summary}{implementations_text}{references_text}\n[completed in {duration_ms}ms]"),
+                        format!("{summary}{implementations_text}{references_text}{pagination_note}\n[completed in {duration_ms}ms]"),
                     )]);
                 result.structured_content = crate::server::helpers::serialize_metadata(&metadata);
                 Ok(result)
@@ -2861,9 +2929,16 @@ impl PathfinderServer {
 
         let (impact, impact_degraded, impact_reason) = match impact_result {
             Ok(result) => {
+                let raw = result.structured_content.unwrap_or_default();
                 let meta: crate::server::types::AnalyzeImpactMetadata =
-                    serde_json::from_value(result.structured_content.unwrap_or_default())
-                        .unwrap_or_default();
+                    serde_json::from_value(raw).unwrap_or_else(|e| {
+                        debug_assert!(false, "analyze_impact metadata deserialization failed: {e}");
+                        tracing::warn!(
+                            error = %e,
+                            "symbol_overview: analyze_impact metadata deserialization failed — using default"
+                        );
+                        crate::server::types::AnalyzeImpactMetadata::default()
+                    });
                 let summary = if meta.incoming.is_none() && meta.outgoing.is_none() {
                     None
                 } else {
@@ -2910,9 +2985,16 @@ impl PathfinderServer {
 
         let (references, refs_degraded, refs_reason, files_referenced) = match refs_result {
             Ok(result) => {
+                let raw = result.structured_content.unwrap_or_default();
                 let meta: crate::server::types::FindAllReferencesMetadata =
-                    serde_json::from_value(result.structured_content.unwrap_or_default())
-                        .unwrap_or_default();
+                    serde_json::from_value(raw).unwrap_or_else(|e| {
+                        debug_assert!(false, "find_all_references metadata deserialization failed: {e}");
+                        tracing::warn!(
+                            error = %e,
+                            "symbol_overview: find_all_references metadata deserialization failed — using default"
+                        );
+                        crate::server::types::FindAllReferencesMetadata::default()
+                    });
                 let refs = meta.references.map(|refs| {
                     refs.into_iter()
                         .map(|r| crate::server::types::SymbolOverviewReference {
@@ -3377,14 +3459,31 @@ impl PathfinderServer {
         // Agents reading plain text get actionable status without parsing JSON.
         let mut lang_lines = Vec::new();
         for l in &response.languages {
-            let mut header_parts = vec![format!("{}: {}", l.language, l.status)];
+            let mut detail_parts = Vec::new();
             if l.probe_verified {
-                header_parts.push("(probe_verified)".to_owned());
+                detail_parts.push("probe_verified".to_owned());
             }
+            // Spec 5.3: Show indexing status with progress percentage
             if let Some(ref idx) = l.indexing_status {
-                header_parts.push(format!("indexing: {idx}"));
+                if let Some(pct) = l.indexing_progress_percent {
+                    detail_parts.push(format!("indexing: {pct}%"));
+                } else if idx == "complete" {
+                    detail_parts.push("indexing: 100% complete".to_owned());
+                } else {
+                    detail_parts.push(format!("indexing: {idx}"));
+                }
+            } else if let Some(pct) = l.indexing_progress_percent {
+                detail_parts.push(format!("indexing: {pct}%"));
             }
-            lang_lines.push(header_parts.join(" "));
+            if let Some(ref uptime) = l.uptime {
+                detail_parts.push(format!("uptime: {uptime}"));
+            }
+            let details = if detail_parts.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", detail_parts.join(", "))
+            };
+            lang_lines.push(format!("{}: {}{}", l.language, l.status, details));
 
             if !l.degraded_tools.is_empty() {
                 let tools_with_severity: Vec<_> = l
@@ -3420,7 +3519,22 @@ impl PathfinderServer {
         let text = if lang_lines.is_empty() {
             format!("LSP status: {} — no languages detected", response.status)
         } else {
-            format!("LSP status: {}\n{}", response.status, lang_lines.join("\n"))
+            let mut parts = vec![
+                format!("LSP status: {}", response.status),
+                lang_lines.join("\n"),
+            ];
+            if !response.known_limitations.is_empty() {
+                parts.push(format!(
+                    "Known limitations:\n{}",
+                    response
+                        .known_limitations
+                        .iter()
+                        .map(|l| format!("  - {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+            parts.join("\n")
         };
 
         let mut res = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
