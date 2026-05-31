@@ -114,6 +114,7 @@ impl PathfinderError {
     /// `SYMBOL_NOT_FOUND` hints are dynamic and built from the `did_you_mean` suggestions.
     /// All other hints are static strings referencing specific Pathfinder tools.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn hint(&self) -> Option<String> {
         match self {
             Self::SymbolNotFound {
@@ -180,10 +181,17 @@ impl PathfinderError {
                  Use search_codebase(query=\"...\") to find the correct path, or get_repo_map to see all files."
                     .to_owned(),
             ),
-            Self::InvalidSemanticPath { input, .. } => Some(format!(
-                "'{input}' is missing the file path — did you mean 'crates/.../file.rs::{input}'? \
-                 Semantic paths must include the file path and '::' separator (e.g., 'src/auth.ts::AuthService.login')."
-            )),
+            Self::InvalidSemanticPath { input, issue } => {
+                if issue.contains("symbol target") {
+                    Some(format!(
+                        "'{input}' is a file path without a symbol target. This tool requires 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). If you want the full file content without symbol resolution, use read_source_file(filepath=\"{input}\") for AST-aware reading, or read_file(filepath=\"{input}\") for raw content."
+                    ))
+                } else {
+                    Some(format!(
+                        "'{input}' is not a valid semantic path. Use 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). The '::' separator is required between the file path and symbol name. Nested symbols within the same file use '.' (e.g., 'src/lib.rs::MyStruct.method')."
+                    ))
+                }
+            }
             Self::PathTraversal { .. } => Some(
                 "Path traversal is not allowed. Use a relative path without '..' components or absolute paths."
                     .to_owned(),
@@ -330,7 +338,24 @@ mod tests {
             issue: "y".into(),
         };
         let hint = err.hint().expect("should have hint");
-        assert!(hint.contains("'x' is missing"), "hint: {hint}");
+        assert!(hint.contains("not a valid semantic path"), "hint: {hint}");
+    }
+
+    #[test]
+    fn test_hint_bare_file_suggests_alternatives() {
+        let err = PathfinderError::InvalidSemanticPath {
+            input: "src/main.rs".into(),
+            issue: "this tool requires a symbol target — use 'file.rs::symbol' format".into(),
+        };
+        let hint = err.hint().expect("should have hint");
+        assert!(
+            hint.contains("read_source_file"),
+            "hint should suggest read_source_file: {hint}"
+        );
+        assert!(
+            hint.contains("read_file"),
+            "hint should suggest read_file: {hint}"
+        );
     }
 
     // ── GAP-008: LSP error hints ────────────────────────────────────

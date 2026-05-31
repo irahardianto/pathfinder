@@ -1,7 +1,7 @@
 //! `read_source_file` tool — AST-based full file symbol extraction via Tree-sitter.
 
 use crate::server::helpers::{
-    pathfinder_to_error_data, serialize_metadata, treesitter_error_to_error_data,
+    millis_to_u64, pathfinder_to_error_data, serialize_metadata, treesitter_error_to_error_data,
 };
 use crate::server::types::{ReadSourceFileMetadata, ReadSourceFileParams, SourceSymbol};
 use crate::server::PathfinderServer;
@@ -209,12 +209,14 @@ impl PathfinderServer {
 
                 let metadata = ReadSourceFileMetadata {
                     language,
+                    content: final_content.clone(),
                     symbols: final_symbols,
+                    duration_ms: Some(millis_to_u64(duration_ms)),
                 };
 
                 let mut contents = Vec::new();
                 if let Some(text) = final_content {
-                    contents.push(Content::text(text));
+                    contents.push(Content::text(format!("{text}\n[completed in {duration_ms}ms]")));
                 }
 
                 let mut result = CallToolResult::success(contents);

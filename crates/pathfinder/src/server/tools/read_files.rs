@@ -145,16 +145,23 @@ impl PathfinderServer {
 
             match self.read_source_file_impl(rs_params).await {
                 Ok(result) => {
-                    let content = result.content.first().and_then(|c| match &c.raw {
-                        rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    });
-
                     let structured_content_cloned = result.structured_content.clone();
                     let metadata = structured_content_cloned.and_then(|v| {
                         serde_json::from_value::<crate::server::types::ReadSourceFileMetadata>(v)
                             .ok()
                     });
+
+                    // Prefer clean content from metadata (without timing line appended).
+                    // Fall back to text output for backward compat.
+                    let content = metadata
+                        .as_ref()
+                        .and_then(|m| m.content.clone())
+                        .or_else(|| {
+                            result.content.first().and_then(|c| match &c.raw {
+                                rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+                                _ => None,
+                            })
+                        });
 
                     let language = metadata.as_ref().map(|m| m.language.clone()).or_else(|| {
                         let lang = language_from_path(Path::new(file_path));

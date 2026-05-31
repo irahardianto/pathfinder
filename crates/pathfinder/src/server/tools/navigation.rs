@@ -62,6 +62,42 @@ fn is_source_file(file: &str) -> bool {
     SOURCE_FILE_EXTENSIONS.contains(&ext)
 }
 
+/// Returns `true` if the file path looks like a test file.
+///
+/// Uses language-specific heuristics:
+/// - Rust: files ending in `_test.rs` or containing `mod tests`
+/// - Go: files ending in `_test.go`
+/// - Python: files starting with `test_` or containing test functions
+/// - TypeScript/JavaScript: files ending in `.test.ts`, `.spec.ts`, `.test.js`, `.spec.js`
+fn is_test_file(file: &str) -> bool {
+    let path = std::path::Path::new(file);
+    let filename = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    match ext {
+        "rs" => filename.ends_with("_test.rs") || filename == "test.rs",
+        "go" => filename.ends_with("_test.go"),
+        "py" => filename.starts_with("test_") || filename == "conftest.py",
+        "ts" | "tsx" | "js" | "jsx" => {
+            filename.ends_with(".test.ts")
+                || filename.ends_with(".spec.ts")
+                || filename.ends_with(".test.tsx")
+                || filename.ends_with(".spec.tsx")
+                || filename.ends_with(".test.js")
+                || filename.ends_with(".spec.js")
+                || filename.ends_with(".test.jsx")
+                || filename.ends_with(".spec.jsx")
+        }
+        _ => false,
+    }
+}
+
 /// Returns `true` if the file looks like it's from the user's workspace (not external/dependencies).
 ///
 /// Uses heuristic string matching — does not perform filesystem I/O — to avoid per-reference
@@ -316,6 +352,7 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
             ),
             format!(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:struct|enum|trait|type|mod)\s+{name}\b"),
             format!(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const|static)\s+{name}\b"),
+            format!(r"macro_rules!\s+{name}\b"),
         ],
         "ts" | "tsx" | "js" | "jsx" => vec![
             format!(r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{name}\b"),
@@ -1137,18 +1174,19 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
             format!(
-                "{notice}\n{}:L{} — {}",
+                "{notice}\n{}:L{} — {}\n[completed in {}ms]",
                 def.file,
                 def.line,
                 if def.preview.is_empty() {
                     "(no preview)"
                 } else {
                     &def.preview
-                }
+                },
+                def.duration_ms.unwrap_or(0),
             )
         } else {
             format!(
-                "{}:L{} col:{} — {}",
+                "{}:L{} col:{} — {}\n[completed in {}ms]",
                 def.file,
                 def.line,
                 def.column,
@@ -1156,7 +1194,8 @@ impl PathfinderServer {
                     "(no preview)"
                 } else {
                     &def.preview
-                }
+                },
+                def.duration_ms.unwrap_or(0),
             )
         };
         let mut res = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
@@ -1179,6 +1218,92 @@ impl PathfinderServer {
             return Vec::new();
         };
         did_you_mean(&symbols, symbol_chain, 3)
+    }
+
+    /// Spec 2.2 + 2.3: Enrich `did_you_mean` suggestions with:
+    /// 1. Separator correction (:: → . within symbol chain)
+    /// 2. Cross-file search via `find_symbol` when same-file suggestions empty
+    async fn enrich_did_you_mean(
+        &self,
+        semantic_path_str: &str,
+        original_suggestions: Vec<String>,
+    ) -> Vec<String> {
+        let mut suggestions = original_suggestions;
+
+        // Spec 2.2: Separator confusion correction
+        // If multiple '::' used, suggest the '.' variant
+        let parts: Vec<&str> = semantic_path_str.splitn(2, "::").collect();
+        if parts.len() == 2 {
+            let file_part = parts[0];
+            let symbol_part = parts[1];
+            if symbol_part.contains("::") {
+                let corrected_symbol = symbol_part.replace("::", ".");
+                let corrected_path = format!("{file_part}::{corrected_symbol}");
+                if !suggestions.contains(&corrected_path) {
+                    suggestions.insert(0, corrected_path);
+                }
+            }
+        }
+
+        // Spec 2.3: Cross-file search when same-file suggestions empty
+        if suggestions.is_empty() {
+            if let Ok(semantic_path) = parse_semantic_path(semantic_path_str) {
+                if let Some(chain) = &semantic_path.symbol_chain {
+                    if let Some(base_name) = chain.segments.last() {
+                        // Use find_symbol to search across files
+                        let find_params = crate::server::types::FindSymbolParams {
+                            name: base_name.name.clone(),
+                            kind: None,
+                            path_glob: "**/*".to_owned(),
+                            max_results: 3,
+                        };
+                        if let Ok(response) = self.find_symbol_impl(find_params).await {
+                            for symbol in response.0.symbols {
+                                if !suggestions.contains(&symbol.semantic_path) {
+                                    suggestions.push(symbol.semantic_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        suggestions
+    }
+
+    /// Wrapper around `surgeon.read_symbol_scope` that enriches `SymbolNotFound` errors
+    /// with separator correction (Spec 2.2) and cross-file search (Spec 2.3).
+    async fn read_symbol_scope_enriched(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        semantic_path_str: &str,
+    ) -> Result<pathfinder_common::types::SymbolScope, ErrorData> {
+        match self
+            .surgeon
+            .read_symbol_scope(self.workspace_root.path(), semantic_path)
+            .await
+        {
+            Ok(scope) => Ok(scope),
+            Err(pathfinder_treesitter::SurgeonError::SymbolNotFound {
+                path,
+                did_you_mean,
+            }) => {
+                // Enrich the suggestions
+                let enriched = self
+                    .enrich_did_you_mean(semantic_path_str, did_you_mean)
+                    .await;
+
+                Err(pathfinder_to_error_data(
+                    &pathfinder_common::error::PathfinderError::SymbolNotFound {
+                        semantic_path: path,
+                        did_you_mean: enriched,
+                        retry_after_seconds: None,
+                    },
+                ))
+            }
+            Err(e) => Err(treesitter_error_to_error_data(e)),
+        }
     }
 
     /// Grep-based fallback for definition resolution when LSP is unavailable or warming up.
@@ -1490,10 +1615,8 @@ impl PathfinderServer {
         // Fetch the symbol scope (Tree-sitter)
         let ts_start = std::time::Instant::now();
         let scope = self
-            .surgeon
-            .read_symbol_scope(self.workspace_root.path(), &semantic_path)
-            .await
-            .map_err(treesitter_error_to_error_data)?;
+            .read_symbol_scope_enriched(&semantic_path, &params.semantic_path)
+            .await?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         // IW-3 (DS-1 gap fix): RAII document lifecycle — did_close fires on all exits.
@@ -1584,6 +1707,13 @@ impl PathfinderServer {
             Some("ready") => Some(false),
             _ => None,
         };
+        let resolution_strategy = if engines.contains(&"lsp") {
+            Some("lsp_call_hierarchy".to_owned())
+        } else if degraded {
+            Some("treesitter_fallback".to_owned())
+        } else {
+            Some("treesitter_direct".to_owned())
+        };
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
@@ -1595,6 +1725,7 @@ impl PathfinderServer {
             lsp_readiness,
             warm_start_in_progress,
             dependencies_truncated,
+            resolution_strategy,
             duration_ms: Some(millis_to_u64(duration_ms)),
         };
 
@@ -1617,12 +1748,12 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
             format!(
-                "{notice}\n\n{dep_count} dependencies loaded{dep_block}\n\n{}",
+                "{notice}\n\n{dep_count} dependencies loaded{dep_block}\n\n{}\n[completed in {duration_ms}ms]",
                 scope.content
             )
         } else {
             format!(
-                "{dep_count} dependencies loaded{dep_block}\n\n{}",
+                "{dep_count} dependencies loaded{dep_block}\n\n{}\n[completed in {duration_ms}ms]",
                 scope.content
             )
         };
@@ -1816,8 +1947,7 @@ impl PathfinderServer {
         // 1. Fetch the symbol scope (Tree-sitter) to get start line
         let ts_start = std::time::Instant::now();
         let scope = match self
-            .surgeon
-            .read_symbol_scope(self.workspace_root.path(), &semantic_path)
+            .read_symbol_scope_enriched(&semantic_path, &params.semantic_path)
             .await
         {
             Ok(s) => s,
@@ -1829,7 +1959,7 @@ impl PathfinderServer {
                     duration_ms,
                     "tree-sitter read failed"
                 );
-                return Err(treesitter_error_to_error_data(e));
+                return Err(e);
             }
         };
         let tree_sitter_ms = ts_start.elapsed().as_millis();
@@ -2135,6 +2265,77 @@ impl PathfinderServer {
         );
         let references_truncated = max_references > 0 && remaining_references == 0;
 
+        let resolution_strategy = if engines.contains(&"lsp") {
+            Some("lsp_call_hierarchy".to_owned())
+        } else if degraded {
+            // Check which grep fallback was used based on degraded_reason
+            match &degraded_reason {
+                Some(
+                    DegradedReason::LspWarmupGrepFallback
+                    | DegradedReason::LspTimeoutGrepFallback
+                    | DegradedReason::LspErrorGrepFallback
+                    | DegradedReason::NoLspGrepFallback,
+                ) => Some("grep_file_scoped".to_owned()),
+                _ => Some("treesitter_fallback".to_owned()),
+            }
+        } else {
+            Some("treesitter_direct".to_owned())
+        };
+
+        // Spec 4.2: Test coverage search
+        let (test_callers, test_coverage_status) = if params.include_test_coverage {
+            let symbol_name = semantic_path
+                .symbol_chain
+                .as_ref()
+                .and_then(|c| c.segments.last())
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+
+            if symbol_name.is_empty() {
+                (None, Some("not_found".to_owned()))
+            } else {
+                // Search for the symbol name in test files
+                let search_params = pathfinder_search::SearchParams {
+                    workspace_root: self.workspace_root.path().to_path_buf(),
+                    query: symbol_name.clone(),
+                    is_regex: false,
+                    path_glob: "**/*test*".to_owned(),
+                    exclude_glob: String::new(),
+                    max_results: 100,
+                    offset: 0,
+                    context_lines: 2,
+                };
+
+                match self.scout.search(&search_params).await {
+                    Ok(results) => {
+                        let test_refs: Vec<crate::server::types::ImpactReference> = results
+                            .matches
+                            .into_iter()
+                            .filter(|m| is_test_file(&m.file))
+                            .take(20) // cap test references
+                            .map(|m| crate::server::types::ImpactReference {
+                                semantic_path: m.enclosing_semantic_path.unwrap_or_default(),
+                                file: m.file.clone(),
+                                line: usize::try_from(m.line).unwrap_or(0),
+                                snippet: m.content,
+                                direction: "test_coverage".to_owned(),
+                                depth: 0,
+                            })
+                            .collect();
+
+                        if test_refs.is_empty() {
+                            (None, Some("not_found".to_owned()))
+                        } else {
+                            (Some(test_refs), Some("found".to_owned()))
+                        }
+                    }
+                    Err(_) => (None, Some("unknown_degraded".to_owned())),
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         let metadata = crate::server::types::AnalyzeImpactMetadata {
             incoming,
             outgoing,
@@ -2146,6 +2347,9 @@ impl PathfinderServer {
             lsp_readiness,
             warm_start_in_progress,
             references_truncated,
+            resolution_strategy,
+            test_callers,
+            test_coverage_status,
             duration_ms: Some(millis_to_u64(duration_ms)),
         };
 
@@ -2220,6 +2424,29 @@ impl PathfinderServer {
             }
         }
 
+        // Spec 4.2: Test coverage section
+        if let Some(test_refs) = &metadata.test_callers {
+            if !test_refs.is_empty() {
+                text_parts.push(String::new());
+                text_parts.push(format!("TEST COVERAGE: {} test functions cover this symbol", test_refs.len()));
+                for r in test_refs {
+                    text_parts.push(format!(
+                        "  - {}::{} ({}:L{})",
+                        r.file, r.semantic_path, r.file, r.line
+                    ));
+                }
+            }
+        } else if let Some(status) = &metadata.test_coverage_status {
+            if status == "not_found" {
+                text_parts.push(String::new());
+                text_parts.push("TEST COVERAGE: no test functions found for this symbol".to_owned());
+            } else if status == "unknown_degraded" {
+                text_parts.push(String::new());
+                text_parts.push("TEST COVERAGE: unknown (search degraded)".to_owned());
+            }
+        }
+
+        text_parts.push(format!("[completed in {duration_ms}ms]"));
         let text = text_parts.join("\n");
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);
@@ -2275,10 +2502,8 @@ impl PathfinderServer {
 
         let ts_start = std::time::Instant::now();
         let symbol_scope = self
-            .surgeon
-            .read_symbol_scope(self.workspace_root.path(), &semantic_path)
-            .await
-            .map_err(treesitter_error_to_error_data)?;
+            .read_symbol_scope_enriched(&semantic_path, &params.semantic_path)
+            .await?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
         let file_path = self.workspace_root.path().join(&semantic_path.file_path);
@@ -2451,11 +2676,13 @@ impl PathfinderServer {
                     actionable_guidance: None,
                     lsp_readiness: Some("ready".to_owned()),
                     warm_start_in_progress: Some(false),
+                    duration_ms: Some(millis_to_u64(duration_ms)),
+                    resolution_strategy: Some("lsp_references".to_owned()),
                 };
 
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                        format!("{summary}{implementations_text}{references_text}"),
+                        format!("{summary}{implementations_text}{references_text}\n[completed in {duration_ms}ms]"),
                     )]);
                 result.structured_content = crate::server::helpers::serialize_metadata(&metadata);
                 Ok(result)
@@ -2480,12 +2707,14 @@ impl PathfinderServer {
                     actionable_guidance: Some(DegradedReason::NoLsp.guidance()),
                     lsp_readiness: Some("unavailable".to_owned()),
                     warm_start_in_progress: None,
+                    duration_ms: Some(millis_to_u64(duration_ms)),
+                    resolution_strategy: Some("treesitter_fallback".to_owned()),
                 };
 
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                         format!(
-                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`",
+                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`\n[completed in {duration_ms}ms]",
                             format_degraded_notice(&DegradedReason::NoLsp),
                             params.semantic_path
                         ),
@@ -2529,12 +2758,14 @@ impl PathfinderServer {
                     actionable_guidance: Some(degraded_reason.guidance()),
                     lsp_readiness: Some(lsp_readiness.to_owned()),
                     warm_start_in_progress,
+                    duration_ms: Some(millis_to_u64(duration_ms)),
+                    resolution_strategy: Some("treesitter_fallback".to_owned()),
                 };
 
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                         format!(
-                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`",
+                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`\n[completed in {duration_ms}ms]",
                             format_degraded_notice(&degraded_reason),
                             params.semantic_path
                         ),
@@ -2579,10 +2810,8 @@ impl PathfinderServer {
         }
 
         let scope = self
-            .surgeon
-            .read_symbol_scope(self.workspace_root.path(), &semantic_path)
-            .await
-            .map_err(treesitter_error_to_error_data)?;
+            .read_symbol_scope_enriched(&semantic_path, &params.semantic_path)
+            .await?;
 
         let source = Some(crate::server::types::SymbolSource {
             content: scope.content.clone(),
@@ -2630,6 +2859,7 @@ impl PathfinderServer {
             max_depth: 2,
             max_references: params.max_callers_callees,
             project_only: params.project_only,
+            include_test_coverage: false,
         };
 
         let impact_result = self.analyze_impact_impl(impact_params).await;
@@ -2882,6 +3112,7 @@ impl PathfinderServer {
                 navigation_ready: status.navigation_ready,
                 probe_verified: false,
                 install_hint: None,
+                indexing_progress_percent: status.indexing_progress_percent,
                 degraded_tools: compute_degraded_tools(status),
                 indexing_source: status.indexing_source.clone(),
                 indexing_duration_secs: status.indexing_duration_secs,
@@ -3083,6 +3314,7 @@ impl PathfinderServer {
                 navigation_ready: None,
                 probe_verified: false,
                 install_hint: Some(missing.install_hint.clone()),
+                indexing_progress_percent: None,
                 degraded_tools: vec![
                     crate::server::types::DegradedToolInfo {
                         tool: "analyze_impact".to_owned(),
@@ -3687,7 +3919,10 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(text_content, "DEGRADED (grep_fallback_dependencies) — results are heuristic (grep-based), verify manually — fallback: use search_codebase for authoritative results\n\n0 dependencies loaded\n\nfn login() { }");
+        assert!(
+            text_content.starts_with("DEGRADED (grep_fallback_dependencies) — results are heuristic (grep-based), verify manually — fallback: use search_codebase for authoritative results\n\n0 dependencies loaded\n\nfn login() { }"),
+            "text_content: {text_content}"
+        );
         assert!(val.degraded);
         assert_eq!(
             val.degraded_reason,
@@ -3746,9 +3981,9 @@ mod tests {
         let val: crate::server::types::ReadWithDeepContextMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert_eq!(
-            text_content,
-            "1 dependencies loaded\n  fn validate_token() -> bool (src/token.rs:L15)\n\nfn login() { }"
+        assert!(
+            text_content.starts_with("1 dependencies loaded\n  fn validate_token() -> bool (src/token.rs:L15)\n\nfn login() { }"),
+            "text_content: {text_content}"
         );
         assert!(!val.degraded);
         assert_eq!(val.degraded_reason, None);
@@ -4886,6 +5121,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -4932,6 +5168,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -4978,6 +5215,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5028,6 +5266,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5096,6 +5335,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5155,6 +5395,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5219,6 +5460,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5397,6 +5639,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5520,6 +5763,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5610,6 +5854,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5657,6 +5902,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5703,6 +5949,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5744,6 +5991,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5797,6 +6045,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5870,6 +6119,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5926,6 +6176,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -5990,6 +6241,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -6042,6 +6294,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 
@@ -6114,6 +6367,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         )]));
 

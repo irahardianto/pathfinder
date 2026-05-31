@@ -264,6 +264,11 @@ pub struct AnalyzeImpactParams {
     /// Prevents context overflow on large codebases. Default: 50.
     #[serde(default = "default_max_references")]
     pub max_references: u32,
+    /// When `true`, also search for test functions that cover this symbol.
+    /// Returns test references in a separate `test_callers` field.
+    /// Default: `false`.
+    #[serde(default)]
+    pub include_test_coverage: bool,
 }
 
 impl Default for AnalyzeImpactParams {
@@ -273,6 +278,7 @@ impl Default for AnalyzeImpactParams {
             max_depth: default_max_depth(),
             project_only: Some(true),
             max_references: default_max_references(),
+            include_test_coverage: false,
         }
     }
 }
@@ -377,6 +383,9 @@ pub struct SearchCodebaseResponse {
     /// results are trustworthy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actionable_guidance: Option<ActionableGuidance>,
+    /// Wall-clock time in milliseconds that this tool call took to complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// A minimal match entry for files already in the agent's context (`known_files`)
@@ -491,6 +500,9 @@ pub struct GetRepoMapMetadata {
     /// Flat map of language ID to status string (`"ready"`, `"warming_up"`, `"unavailable"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_status: Option<std::collections::HashMap<String, String>>,
+    /// Wall-clock time in milliseconds that this tool call took to complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// The overall capabilities of the Pathfinder system.
@@ -526,6 +538,9 @@ pub struct ReadSymbolScopeMetadata {
     pub end_line: usize,
     /// Programming language of the source symbol.
     pub language: String,
+    /// Wall-clock time in milliseconds that this tool call took to complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// A symbol output for `read_source_file`.
@@ -551,9 +566,16 @@ pub struct SourceSymbol {
 pub struct ReadSourceFileMetadata {
     /// Programming language of the source file.
     pub language: String,
+    /// Clean source content without timing metadata appended.
+    /// Provided so consumers like `read_files` get uncontaminated content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     /// Symbols extracted from the source file.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub symbols: Vec<SourceSymbol>,
+    /// Wall-clock time in milliseconds that this tool call took to complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// The metadata embedded in `structured_content` for `read_file`.
@@ -571,6 +593,9 @@ pub struct ReadFileMetadata {
     pub truncated: bool,
     /// Detected language of the file.
     pub language: String,
+    /// Wall-clock time in milliseconds that this tool call took to complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 // ── Navigation Tool Response Types ─────────────────────────────────
@@ -621,6 +646,10 @@ pub struct ReadWithDeepContextMetadata {
     pub warm_start_in_progress: Option<bool>,
     /// `true` when the `max_dependencies` limit was reached and results were truncated.
     pub dependencies_truncated: bool,
+    /// Spec 5.2: How the deep context was resolved.
+    /// One of: `lsp_call_hierarchy`, `grep_file_scoped`, `grep_impl_scoped`, `grep_global`, `grep_broad`, `treesitter_direct`, `treesitter_fallback`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_strategy: Option<String>,
     /// Spec 5.1: Wall-clock duration of the tool call in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
@@ -728,6 +757,18 @@ pub struct AnalyzeImpactMetadata {
     /// Spec 5.1: Wall-clock duration of the tool call in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Spec 5.2: How the call hierarchy was resolved.
+    /// One of: `lsp_call_hierarchy`, `grep_file_scoped`, `grep_impl_scoped`, `grep_global`, `grep_broad`, `treesitter_fallback`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_strategy: Option<String>,
+    /// Spec 4.2: Test functions that reference or test this symbol.
+    /// Populated when `include_test_coverage=true` was passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_callers: Option<Vec<ImpactReference>>,
+    /// Spec 4.2: Status of test coverage search.
+    /// One of: `"found"`, `"not_found"`, `"unknown_degraded"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_coverage_status: Option<String>,
 }
 
 // ── Find All References Tool Types ─────────────────────────────────────
@@ -778,6 +819,13 @@ pub struct FindAllReferencesMetadata {
     /// Whether the LSP warm-start is still in progress at the time of the call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warm_start_in_progress: Option<bool>,
+    /// Wall-clock time in milliseconds that this tool call took to complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Spec 5.2: How the references were resolved.
+    /// One of: `lsp_references`, `grep_file_scoped`, `grep_impl_scoped`, `grep_global`, `grep_broad`, `treesitter_fallback`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_strategy: Option<String>,
 }
 
 /// A single reference location for `find_all_references`.
@@ -907,6 +955,10 @@ pub struct LspLanguageHealth {
     /// `None` when LSP is running or language not detected at all.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub install_hint: Option<String>,
+    /// Indexing progress percentage (0-100) if the LSP reports it via workDoneProgress.
+    /// `None` when the LSP does not report progress or indexing is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_progress_percent: Option<u8>,
     /// Tools that are degraded (using fallback) for this language.
     ///
     /// Empty when LSP is fully operational. Lists which tools lose LSP support

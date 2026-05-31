@@ -63,6 +63,10 @@ pub struct LspLanguageStatus {
     /// `false` or `None` means warm-start is still in progress or was not attempted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warm_start_complete: Option<bool>,
+    /// Indexing progress percentage (0-100) if the LSP reports it via workDoneProgress.
+    /// `None` when the LSP does not report progress or indexing is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_progress_percent: Option<u8>,
 }
 
 /// The location of a symbol's definition in the workspace.

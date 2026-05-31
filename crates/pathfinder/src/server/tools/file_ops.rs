@@ -1,7 +1,8 @@
 //! File operation tools — `read_file`.
 
 use crate::server::helpers::{
-    io_error_data, language_from_path, pathfinder_to_error_data, serialize_metadata,
+    io_error_data, language_from_path, millis_to_u64, pathfinder_to_error_data,
+    serialize_metadata,
 };
 use crate::server::types::ReadFileParams;
 use crate::server::PathfinderServer;
@@ -107,9 +108,11 @@ impl PathfinderServer {
             file_size_bytes,
             truncated,
             language,
+            duration_ms: Some(millis_to_u64(duration_ms)),
         };
 
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(content)]);
+        let text = format!("{content}\n[completed in {duration_ms}ms]");
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }

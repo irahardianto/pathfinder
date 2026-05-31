@@ -1,6 +1,6 @@
 //! `search_codebase` tool — Ripgrep-backed text search with Tree-sitter enrichment.
 
-use crate::server::helpers::io_error_data;
+use crate::server::helpers::{io_error_data, millis_to_u64};
 use crate::server::types::{
     GroupedKnownMatch, GroupedMatch, SearchCodebaseParams, SearchCodebaseResponse,
     SearchResultGroup,
@@ -218,6 +218,7 @@ impl PathfinderServer {
                     } else {
                         None
                     },
+                    duration_ms: Some(millis_to_u64(duration_ms)),
                 }))
             }
             Err(err) => {

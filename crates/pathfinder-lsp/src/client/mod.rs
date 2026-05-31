@@ -201,6 +201,7 @@ fn validation_status_from_parts(
             indexing_source: None,
             indexing_duration_secs: None,
             warm_start_complete: None,
+            indexing_progress_percent: None,
         };
     }
 
@@ -229,6 +230,7 @@ fn validation_status_from_parts(
             indexing_source,
             indexing_duration_secs,
             warm_start_complete: None,
+            indexing_progress_percent: None,
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
@@ -245,6 +247,7 @@ fn validation_status_from_parts(
             indexing_source,
             indexing_duration_secs,
             warm_start_complete: None,
+            indexing_progress_percent: None,
         },
     }
 }
@@ -1627,6 +1630,7 @@ impl Lawyer for LspClient {
                     indexing_source: None,
                     indexing_duration_secs: None,
                     warm_start_complete: None,
+                    indexing_progress_percent: None,
                 },
                 |entry| entry.to_validation_status(&desc.command),
             );

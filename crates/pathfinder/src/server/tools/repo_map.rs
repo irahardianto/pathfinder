@@ -1,7 +1,7 @@
 //! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
 
 use crate::server::helpers::{
-    format_degraded_notice, pathfinder_to_error_data, serialize_metadata,
+    format_degraded_notice, millis_to_u64, pathfinder_to_error_data, serialize_metadata,
 };
 use crate::server::types::{
     default_max_tokens, GetRepoMapParams, LspCapabilities, RepoCapabilities,
@@ -137,6 +137,7 @@ impl PathfinderServer {
             },
             max_tokens_used: 0,
             lsp_status,
+            duration_ms: None,
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
             "No files changed since the specified ref. No skeleton generated.",
@@ -278,6 +279,7 @@ impl PathfinderServer {
 
         let capability_status = self.lawyer.capability_status().await;
         let lsp_status = derive_lsp_status(&capability_status);
+        let duration_ms = start.elapsed().as_millis();
 
         let metadata = crate::server::types::GetRepoMapMetadata {
             tech_stack: result.tech_stack,
@@ -299,15 +301,16 @@ impl PathfinderServer {
             },
             max_tokens_used: max_tokens,
             lsp_status,
+            duration_ms: Some(millis_to_u64(duration_ms)),
         };
 
         let text = if degraded {
             let notice = degraded_reason
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
-            format!("{notice}\n{}", result.skeleton)
+            format!("{notice}\n{}\n[completed in {duration_ms}ms]", result.skeleton)
         } else {
-            result.skeleton
+            format!("{}\n[completed in {duration_ms}ms]", result.skeleton)
         };
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
@@ -599,6 +602,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         );
 
@@ -620,6 +624,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         );
 
@@ -641,6 +646,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         );
 
@@ -662,6 +668,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         );
 
@@ -683,6 +690,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 warm_start_complete: None,
+                    indexing_progress_percent: None,
             },
         );
 
