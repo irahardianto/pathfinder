@@ -282,6 +282,11 @@ IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/auth.ts::Auth
 
 Example: `read_symbol_scope(semantic_path=\"src/auth.ts::AuthService.login\")`
 
+Error format:
+- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint` with recovery guidance. Use `find_symbol(name=...)` or `search_codebase(query=...)` to locate the correct path.
+- FILE_NOT_FOUND: includes `details.path`. Use `search_codebase(query=\"...\")` to find the correct path.
+- INVALID_SEMANTIC_PATH: includes `details.issue`. Ensure path uses `file::symbol` format.
+
 Common issues:
 - SYMBOL_NOT_FOUND: Use `find_symbol(name=\"SymbolName\")` to discover the correct path, or `read_source_file(filepath, detail_level=\"symbols\")` to see available symbols.
 - FILE_NOT_FOUND: Use `search_codebase` to find the correct path."
@@ -326,6 +331,10 @@ IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthS
 
 LSP-powered; first call may take 5–30s during LSP warmup. Check `degraded` in response — if true, dependencies may be incomplete. Source code is always returned even when degraded.
 
+Error format:
+- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
+- FILE_NOT_FOUND: includes `details.path`. Use `search_codebase` to find the correct path.
+
 Common issues:
 - No dependencies found with `degraded=true`: LSP not ready. Source code is still valid, but dependencies are heuristic or missing.
 - SYMBOL_NOT_FOUND: Use `find_symbol(name=\"SymbolName\")` to discover the correct path.
@@ -350,6 +359,10 @@ Alternative: Use `find_symbol` when you don't know which file defines it.
 IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). If you don't know which file defines a symbol, use `find_symbol` first.
 
 LSP-powered — follows imports, re-exports, and type aliases across files. Falls back to ripgrep when LSP is unavailable. Check `degraded` in response. When SYMBOL_NOT_FOUND includes `retry_after_seconds`, the LSP is still warming up — retry after the indicated delay.
+
+Error format:
+- SYMBOL_NOT_FOUND: includes `details.did_you_mean`, `details.retry_after_seconds`, and `hint`. Check `did_you_mean` for alternatives; retry after `retry_after_seconds` if LSP is warming up.
+- FILE_NOT_FOUND: includes `details.path`. Use `search_codebase` to find the correct path.
 
 Common issues:
 - Returns wrong definition: Grep fallback found a similar name. Check `degraded_reason`. Wait for LSP warmup and retry.
@@ -405,6 +418,10 @@ LSP-backed with grep fallback. Check `degraded` flag in response:
 - `degraded=true`: grep heuristic, may over/under-count. Use `search_codebase` to verify.
 - When `degraded=true`, `incoming`/`outgoing` are `null` (not `[]`) — do NOT treat empty as \"confirmed no callers\". When not degraded: empty arrays `[]` = LSP confirmed zero callers/callees.
 
+Error format:
+- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
+- FILE_NOT_FOUND: includes `details.path`.
+
 Example: `find_callers_callees(semantic_path=\"src/auth.ts::AuthService.login\", max_depth=3)`"
     )]
     async fn find_callers_callees(
@@ -422,6 +439,10 @@ Use when: Finding all usages of a symbol (not just callers), or when `find_calle
 Alternative: Use `find_callers_callees` for call hierarchy (incoming/outgoing callers). Use `search_codebase` for text pattern matching.
 
 Supports `max_results` (default 50) and `offset` for pagination through large result sets. IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/mod.rs::func'). LSP-powered. When degraded, use `search_codebase` as fallback.
+
+Error format:
+- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
+- FILE_NOT_FOUND: includes `details.path`.
 
 Common issues:
 - Empty results with `degraded=true`: LSP not ready. Results are unknown, NOT confirmed zero.
@@ -446,6 +467,10 @@ Use when: Initial analysis before refactoring, or when you need a complete pictu
 Alternative: Use individual tools (`read_symbol_scope`, `find_callers_callees`, `find_all_references`) for more control over parameters.
 
 Use `project_only=true` (default) to filter out stdlib/vendor references. Use `max_callers_callees` and `max_references` to cap output. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). When degraded, partial results are returned with LSP fallback indicators.
+
+Error format:
+- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
+- FILE_NOT_FOUND: includes `details.path`.
 
 Common issues:
 - Partial results with `degraded=true`: LSP not ready. Source code is always valid; callers/callees/references may be incomplete.
