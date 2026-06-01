@@ -39,6 +39,7 @@ use crate::client::capabilities::DetectedCapabilities;
 use crate::client::protocol::RequestDispatcher;
 use crate::client::transport::{read_message, write_message};
 use crate::LspError;
+use async_trait::async_trait;
 use command_group::AsyncCommandGroup as _;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -49,10 +50,52 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
+/// I/O boundary between `LspClient` and the LSP child process.
+///
+/// Production: [`ManagedProcess`] (real OS child via `tokio::process`).
+/// Tests: `FakeTransport` (in-memory channels, no OS process).
+///
+/// This trait captures ONLY the operations `LspClient` performs on a running
+/// process. Process lifecycle (spawn, shutdown, reap) remains in
+/// `ManagedProcess` and is not trait-virtualized — those are tested via
+/// integration tests with real child processes.
+#[async_trait]
+pub(super) trait LspTransport: Send + Sync {
+    /// Write a JSON-RPC message to the process stdin.
+    async fn send(&self, message: &Value) -> Result<(), LspError>;
+
+    /// Check if the transport is alive (process still running).
+    fn is_alive(&self) -> bool;
+
+    /// Get the last-used timestamp.
+    fn last_used(&self) -> Instant;
+
+    /// Set the last-used timestamp.
+    fn set_last_used(&self, when: Instant);
+
+    /// Get the in-flight request counter.
+    fn in_flight(&self) -> &Arc<AtomicU32>;
+
+    /// Get a snapshot of the detected capabilities.
+    #[allow(dead_code)] // Will be used in Phase 3C/3D tests
+    fn capabilities(&self) -> DetectedCapabilities;
+
+    /// Terminate the LSP process gracefully.
+    ///
+    /// Sends `shutdown` + `exit` requests, then force-kills after 2s.
+    async fn shutdown(&self, dispatcher: &RequestDispatcher);
+}
+
 /// A running LSP child process with its I/O handles.
 pub(super) struct ManagedProcess {
     /// The child process handle — kept alive until explicitly dropped.
-    pub(super) child: Child,
+    ///
+    /// Wrapped in `Arc<Mutex>` so that:
+    /// - `is_alive()` can call `try_wait()` with `&self` (required for trait)
+    /// - `ProcessLifecycle` can share the same handle for zombie reaping
+    ///
+    /// The lock is never contended: single reader task, single supervisor.
+    pub(super) child: Arc<tokio::sync::Mutex<Child>>,
     /// Exclusive write handle to the LSP's stdin.
     ///
     /// Wrapped in `Arc` so that `registration_watcher_task` (MT-3) can obtain
@@ -62,33 +105,55 @@ pub(super) struct ManagedProcess {
     /// Capabilities negotiated during `initialize`.
     pub(super) capabilities: DetectedCapabilities,
     /// Last time this process was used (for idle-timeout tracking).
-    pub(super) last_used: Instant,
+    ///
+    /// Wrapped in `Mutex` for interior mutability through `LspTransport` trait
+    /// (`&self` methods). The lock is never contended.
+    pub(super) last_used: std::sync::Mutex<Instant>,
     /// Number of in-flight requests (prevents idle timeout during active ops).
     pub(super) in_flight: Arc<AtomicU32>,
 }
+
 impl ManagedProcess {
-    /// Poll whether the child process is still alive **without blocking**.
+    /// Get a shared handle to the child process for lifecycle management.
     ///
-    /// Uses [`Child::try_wait`] — returns immediately:
-    /// - `true`  → process is still running (no exit status yet)
-    /// - `false` → process has exited (zombie or fully reaped)
-    ///
-    /// Used by the idle-timeout loop to proactively detect dead LSP processes
-    /// and evict them before they accumulate as zombies in the process table.
-    pub(super) fn is_alive(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(None) => true, // still running
+    /// Used by `start_process` to create `ProcessLifecycle` alongside the
+    /// transport, so that `reader_supervisor_task` and `idle_timeout_task`
+    /// can reap the OS zombie via `child.wait()`.
+    pub(super) fn child_handle(&self) -> Arc<tokio::sync::Mutex<Child>> {
+        Arc::clone(&self.child)
+    }
+}
+
+#[allow(clippy::expect_used)]
+#[async_trait]
+impl LspTransport for ManagedProcess {
+    async fn send(&self, message: &Value) -> Result<(), LspError> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut stdin = self.stdin.lock().await;
+            write_message(&mut *stdin, message).await
+        })
+        .await
+        .map_err(|_| LspError::Timeout {
+            operation: "send".to_owned(),
+            timeout_ms: 10_000,
+        })?
+    }
+
+    fn is_alive(&self) -> bool {
+        let Ok(mut child) = self.child.try_lock() else {
+            return true; // Lock contended — assume alive
+        };
+        match child.try_wait() {
+            Ok(None) => true,
             Ok(Some(status)) => {
                 tracing::debug!(
-                    pid = ?self.child.id(),
+                    pid = ?child.id(),
                     exit_status = ?status,
                     "ManagedProcess::is_alive: child has exited"
                 );
                 false
             }
             Err(e) => {
-                // try_wait only fails on I/O error (e.g., ECHILD after double-wait).
-                // Treat as dead — the process is unmanageable in this state.
                 tracing::warn!(
                     error = %e,
                     "ManagedProcess::is_alive: try_wait failed — treating as dead"
@@ -96,6 +161,44 @@ impl ManagedProcess {
                 false
             }
         }
+    }
+
+    fn last_used(&self) -> Instant {
+        *self.last_used.lock().expect("last_used lock")
+    }
+
+    fn set_last_used(&self, when: Instant) {
+        *self.last_used.lock().expect("last_used lock") = when;
+    }
+
+    fn in_flight(&self) -> &Arc<AtomicU32> {
+        &self.in_flight
+    }
+
+    fn capabilities(&self) -> DetectedCapabilities {
+        self.capabilities.clone()
+    }
+
+    async fn shutdown(&self, dispatcher: &RequestDispatcher) {
+        let (id, rx) = dispatcher.register();
+        let shutdown_req = RequestDispatcher::make_request(id, "shutdown", &Value::Null);
+        if let Ok(mut stdin) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), self.stdin.lock()).await
+        {
+            let _ = write_message(&mut *stdin, &shutdown_req).await;
+            // Await shutdown response (ignore error — server may be dead)
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
+            dispatcher.remove(id);
+
+            // Send exit notification
+            let exit_notif = RequestDispatcher::make_notification("exit", &Value::Null);
+            let _ = write_message(&mut *stdin, &exit_notif).await;
+            let _ = stdin.flush().await;
+        }
+
+        // Force-kill if still running
+        let mut child = self.child.lock().await;
+        let _ = child.kill().await;
     }
 }
 
@@ -175,10 +278,10 @@ pub(super) async fn spawn_and_initialize(
     );
 
     let process = ManagedProcess {
-        child,
+        child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin: Arc::new(Mutex::new(writer)),
         capabilities,
-        last_used: Instant::now(),
+        last_used: std::sync::Mutex::new(Instant::now()),
         in_flight: Arc::new(AtomicU32::new(0)),
     };
 
@@ -416,38 +519,6 @@ async fn build_initialize_request(
     ))
 }
 
-/// Send a JSON-RPC message to the process stdin.
-pub(super) async fn send(process: &ManagedProcess, message: &Value) -> Result<(), LspError> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let mut stdin = process.stdin.lock().await;
-        write_message(&mut *stdin, message).await
-    })
-    .await
-    .map_err(|_| LspError::Timeout {
-        operation: "send".to_owned(),
-        timeout_ms: 10_000,
-    })?
-}
-/// Write a JSON-RPC response to a shared stdin handle.
-///
-/// Used by `registration_watcher_task` (MT-3) to send `{}` responses to
-/// `client/registerCapability` / `client/unregisterCapability` server requests
-/// without needing a full `&ManagedProcess` borrow.
-pub(super) async fn send_via_stdin(
-    stdin: &Arc<Mutex<tokio::io::BufWriter<ChildStdin>>>,
-    message: &Value,
-) -> Result<(), LspError> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let mut guard = stdin.lock().await;
-        write_message(&mut *guard, message).await
-    })
-    .await
-    .map_err(|_| LspError::Timeout {
-        operation: "send_via_stdin".to_owned(),
-        timeout_ms: 10_000,
-    })?
-}
-
 /// Start the background reader task that dispatches incoming messages.
 ///
 /// The task runs until EOF on stdout (i.e., the LSP process exits),
@@ -475,30 +546,6 @@ pub(super) fn start_reader_task(
             }
         }
     })
-}
-
-/// Terminate the LSP child process gracefully.
-///
-/// Sends `shutdown` + `exit` requests, then force-kills after 2s.
-pub(super) async fn shutdown(process: &mut ManagedProcess, dispatcher: &RequestDispatcher) {
-    let (id, rx) = dispatcher.register();
-    let shutdown_req = RequestDispatcher::make_request(id, "shutdown", &Value::Null);
-    if let Ok(mut stdin) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), process.stdin.lock()).await
-    {
-        let _ = write_message(&mut *stdin, &shutdown_req).await;
-        // Await shutdown response (ignore error — server may be dead)
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
-        dispatcher.remove(id);
-
-        // Send exit notification
-        let exit_notif = RequestDispatcher::make_notification("exit", &Value::Null);
-        let _ = write_message(&mut *stdin, &exit_notif).await;
-        let _ = stdin.flush().await;
-    }
-
-    // Force-kill if still running
-    let _ = process.child.kill().await;
 }
 
 /// Convert a filesystem path to a `file://` URI string.
@@ -740,22 +787,23 @@ mod process_tests {
 
         let stdin = child_process.stdin.take().expect("Failed to take stdin");
 
-        let mut process = ManagedProcess {
-            child: child_process,
+        let process = ManagedProcess {
+            child: Arc::new(tokio::sync::Mutex::new(child_process)),
             stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
             capabilities: crate::client::capabilities::DetectedCapabilities::default(),
-            last_used: std::time::Instant::now(),
+            last_used: std::sync::Mutex::new(std::time::Instant::now()),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         let dispatcher = std::sync::Arc::new(RequestDispatcher::new());
 
         // Act
-        shutdown(&mut process, &dispatcher).await;
+        process.shutdown(&dispatcher).await;
 
         // Assert
         // Give the OS a moment to reap the process
-        let status = process.child.wait().await.expect("Failed to wait on child");
+        let mut child = process.child.lock().await;
+        let status = child.wait().await.expect("Failed to wait on child");
         assert!(
             !status.success(),
             "Process should have been killed, but exited successfully"
@@ -783,17 +831,17 @@ mod process_tests {
             .expect("Failed to spawn sleep");
         let stdin = child.stdin.take().expect("stdin piped");
         ManagedProcess {
-            child,
+            child: Arc::new(tokio::sync::Mutex::new(child)),
             stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
             capabilities: crate::client::capabilities::DetectedCapabilities::default(),
-            last_used: std::time::Instant::now(),
+            last_used: std::sync::Mutex::new(std::time::Instant::now()),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
     #[tokio::test]
     async fn test_is_alive_returns_true_for_running_process() {
-        let mut process = make_managed_process("10");
+        let process = make_managed_process("10");
         assert!(
             process.is_alive(),
             "Running sleep process should report alive"
@@ -802,9 +850,9 @@ mod process_tests {
 
     #[tokio::test]
     async fn test_is_alive_returns_false_after_kill() {
-        let mut process = make_managed_process("10");
+        let process = make_managed_process("10");
         // Kill the process
-        let _ = process.child.kill().await;
+        let _ = process.child.lock().await.kill().await;
         // Give OS time to mark it as exited
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(
@@ -816,7 +864,7 @@ mod process_tests {
     #[tokio::test]
     async fn test_is_alive_returns_false_for_exited_process() {
         // Use sleep 0 so the process exits immediately
-        let mut process = make_managed_process("0");
+        let process = make_managed_process("0");
         // Wait for it to exit naturally
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(

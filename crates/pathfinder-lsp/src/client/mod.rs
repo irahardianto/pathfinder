@@ -29,7 +29,7 @@ use crate::{DefinitionLocation, Lawyer, LspError};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use detect::LanguageLsp as LspDescriptor;
-use process::{send, send_via_stdin, shutdown, spawn_and_initialize, ManagedProcess};
+use process::{spawn_and_initialize, LspTransport};
 use protocol::RequestDispatcher;
 use serde_json::json;
 use std::collections::HashMap;
@@ -48,9 +48,21 @@ const MAX_BACKOFF_SECS: u64 = 60;
 /// Grace period between idle checks.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_mins(1);
 
+/// OS process lifecycle handle. Only present for real child processes.
+/// None for `FakeTransport` (no OS process to manage).
+struct ProcessLifecycle {
+    child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
+}
+
 struct LanguageState {
-    /// The running LSP process.
-    process: ManagedProcess,
+    /// The transport abstraction for sending/receiving JSON-RPC messages.
+    ///
+    /// Production: `ManagedProcess` (real OS child via `tokio::process`).
+    /// Tests: `FakeTransport` (in-memory channels, no OS process).
+    transport: Arc<dyn LspTransport>,
+    /// OS process lifecycle handle. Only present for real child processes.
+    /// None for `FakeTransport` (no OS process to manage).
+    lifecycle: Option<ProcessLifecycle>,
     /// Background reader task handle.
     reader_handle: tokio::task::JoinHandle<()>,
     /// Number of times we have restarted this LSP (used in M3 crash recovery UI).
@@ -580,7 +592,7 @@ impl LspClient {
     pub fn touch_language(&self, language_id: &str) {
         if let Some(mut entry) = self.processes.get_mut(language_id) {
             if let ProcessEntry::Running(state) = entry.value_mut() {
-                state.process.last_used = Instant::now();
+                state.transport.set_last_used(Instant::now());
                 tracing::trace!(
                     language = language_id,
                     "LT-4: idle timer refreshed from file operation"
@@ -727,17 +739,20 @@ impl LspClient {
         // Without this, the old child process becomes an OS zombie —
         // it is removed from our tracking map but still occupies a PID
         // in the process table until the parent calls wait().
-        if let Some((_, ProcessEntry::Running(mut state))) = self.processes.remove(language_id) {
+        if let Some((_, ProcessEntry::Running(state))) = self.processes.remove(language_id) {
             tracing::info!(
                 language = %language_id,
                 "LSP: force_respawn — killing existing process before respawn"
             );
             state.reader_handle.abort();
-            shutdown(&mut state.process, &self.dispatcher).await;
-        } else {
-            // Unavailable entry — just remove it
-            self.processes.remove(language_id);
+            state.transport.shutdown(&self.dispatcher).await;
+            // Reap the OS zombie if present
+            if let Some(ref lifecycle) = state.lifecycle {
+                let _ = lifecycle.child.lock().await.wait().await;
+            }
         }
+        // Unavailable entry already removed by the remove() call above.
+        // If no entry existed, remove() is a no-op.
 
         // Spawn fresh at attempt 0 (no backoff delay)
         self.start_process(descriptor, 0).await
@@ -1001,11 +1016,20 @@ impl LspClient {
         // The registration_watcher_task will mutate this as dynamic registrations arrive.
         let live_capabilities = Arc::new(std::sync::RwLock::new(process.capabilities.clone()));
 
+        // Extract child handle for ProcessLifecycle before wrapping in Arc<dyn LspTransport>
+        let child_handle = process.child_handle();
+        let lifecycle = ProcessLifecycle {
+            child: child_handle,
+        };
+
+        // Wrap ManagedProcess into Arc<dyn LspTransport> for trait-based access
+        let transport: Arc<dyn LspTransport> = Arc::new(process);
+        let transport_for_reg = Arc::clone(&transport);
+
         // MT-3: Spawn the registration watcher task.
         // It listens for client/registerCapability and client/unregisterCapability
         // server requests, responds with {}, and updates live_capabilities.
         let caps_for_reg = Arc::clone(&live_capabilities);
-        let stdin_for_reg = Arc::clone(&process.stdin);
         let lang_id_for_reg = language_id.clone();
         let dispatcher_for_reg = Arc::clone(&self.dispatcher);
         tokio::spawn(async move {
@@ -1013,7 +1037,7 @@ impl LspClient {
                 lang_id_for_reg,
                 dispatcher_for_reg,
                 caps_for_reg,
-                stdin_for_reg,
+                transport_for_reg,
             )
             .await;
         });
@@ -1029,7 +1053,8 @@ impl LspClient {
         self.processes.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
-                process,
+                transport,
+                lifecycle: Some(lifecycle),
                 reader_handle: supervisor_handle,
                 restart_count: attempt,
                 spawned_at,
@@ -1174,7 +1199,7 @@ impl LspClient {
     fn touch(&self, language_id: &str) {
         if let Some(mut entry) = self.processes.get_mut(language_id) {
             if let ProcessEntry::Running(state) = entry.value_mut() {
-                state.process.last_used = Instant::now();
+                state.transport.set_last_used(Instant::now());
             }
         }
     }
@@ -1215,11 +1240,11 @@ impl LspClient {
                 );
                 return Err(LspError::ConnectionLost);
             }
-            let counter = Arc::clone(&state.process.in_flight);
+            let counter = Arc::clone(state.transport.in_flight());
             InFlightGuard::new(counter)
         };
 
-        // Write the request to stdin
+        // Write the request to stdin via transport
         {
             let Some(entry) = self.processes.get(language_id) else {
                 return Err(LspError::NoLspAvailable);
@@ -1227,7 +1252,7 @@ impl LspClient {
             let ProcessEntry::Running(state) = entry.value() else {
                 return Err(LspError::NoLspAvailable);
             };
-            send(&state.process, &message).await?;
+            state.transport.send(&message).await?;
         }
 
         // Await response with timeout
@@ -1256,7 +1281,7 @@ impl LspClient {
         let message = RequestDispatcher::make_notification(method, &params);
         match self.processes.get(language_id) {
             Some(entry) => match entry.value() {
-                ProcessEntry::Running(state) => send(&state.process, &message).await,
+                ProcessEntry::Running(state) => state.transport.send(&message).await,
                 ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
             },
             None => Err(LspError::NoLspAvailable),
@@ -1272,7 +1297,7 @@ impl LspClient {
             Some(entry) => match entry.value() {
                 ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
                 // MT-3: Read from live_capabilities (includes dynamic registrations) rather
-                // than process.capabilities (initial snapshot only).
+                // than transport.capabilities() (initial snapshot only).
                 #[allow(clippy::expect_used)] // RwLock poisoning is unrecoverable
                 ProcessEntry::Running(state) => Ok(state
                     .live_capabilities
@@ -2085,14 +2110,16 @@ async fn reader_supervisor_task(
     // calling `wait()` on it frees the PID slot immediately rather than leaving
     // the process as a zombie until the next idle-loop sweep (up to 60s later)
     // or until Pathfinder itself exits.
-    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&language_id) {
+    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&language_id) {
         tracing::debug!(
             language = %language_id,
             "LSP: supervisor reaping child process to free PID slot"
         );
         state.reader_handle.abort();
         // Reap the OS zombie. Ignore the result — we just need to call wait().
-        let _ = state.process.child.wait().await;
+        if let Some(ref lifecycle) = state.lifecycle {
+            let _ = lifecycle.child.lock().await.wait().await;
+        }
 
         // GAP-Z3: On crash, insert UnavailableState so ensure_process applies
         // exponential backoff on the next recovery attempt. Without this, a
@@ -2245,7 +2272,7 @@ async fn registration_watcher_task(
     language_id: String,
     dispatcher: Arc<RequestDispatcher>,
     live_capabilities: Arc<std::sync::RwLock<DetectedCapabilities>>,
-    stdin: Arc<tokio::sync::Mutex<tokio::io::BufWriter<tokio::process::ChildStdin>>>,
+    transport: Arc<dyn LspTransport>,
 ) {
     let mut rx = dispatcher.subscribe_server_requests();
     tracing::debug!(language = %language_id, "registration_watcher_task: started");
@@ -2323,7 +2350,7 @@ async fn registration_watcher_task(
                         "id": id_val,
                         "result": null
                     });
-                    if let Err(e) = send_via_stdin(&stdin, &response).await {
+                    if let Err(e) = transport.send(&response).await {
                         tracing::warn!(
                             language = %language_id,
                             error = %e,
@@ -2363,10 +2390,13 @@ async fn idle_timeout_task(
                 tracing::info!("LSP: shutdown signal received, terminating all processes");
                 let keys: Vec<String> = processes.iter().map(|e| e.key().clone()).collect();
                 for lang in keys {
-                    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&lang) {
+                    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
                         tracing::debug!(language = %lang, "LSP: shutting down process");
                         state.reader_handle.abort();
-                        shutdown(&mut state.process, &dispatcher).await;
+                        state.transport.shutdown(&dispatcher).await;
+                        if let Some(ref lifecycle) = state.lifecycle {
+                            let _ = lifecycle.child.lock().await.wait().await;
+                        }
                     }
                 }
                 tracing::info!("LSP: all processes terminated");
@@ -2384,7 +2414,7 @@ async fn idle_timeout_task(
                     .filter_map(|mut entry| {
                         if let ProcessEntry::Running(state) = entry.value_mut() {
                             // is_alive() returns true if still running → we want the dead ones
-                            if state.process.is_alive() {
+                            if state.transport.is_alive() {
                                 None
                             } else {
                                 Some(entry.key().clone())
@@ -2396,7 +2426,7 @@ async fn idle_timeout_task(
                     .collect();
 
                 for lang in dead_languages {
-                    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&lang) {
+                    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
                         tracing::error!(
                             language = %lang,
                             "LSP: zombie reap — process died outside reader task, \
@@ -2404,7 +2434,9 @@ async fn idle_timeout_task(
                         );
                         state.reader_handle.abort();
                         // Fully reap the OS zombie to free its PID slot.
-                        let _ = state.process.child.wait().await;
+                        if let Some(ref lifecycle) = state.lifecycle {
+                            let _ = lifecycle.child.lock().await.wait().await;
+                        }
                     }
                 }
 
@@ -2415,8 +2447,8 @@ async fn idle_timeout_task(
                         let lang = entry.key();
                         if let ProcessEntry::Running(state) = entry.value() {
                             // Only remove if idle timeout elapsed AND no in-flight requests
-                            if state.process.last_used.elapsed() > DEFAULT_IDLE_TIMEOUT
-                                && state.process.in_flight.load(Ordering::Relaxed) == 0
+                            if state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
+                                && state.transport.in_flight().load(Ordering::Relaxed) == 0
                             {
                                 Some(lang.clone())
                             } else {
@@ -2429,7 +2461,7 @@ async fn idle_timeout_task(
                     .collect();
 
                 for lang in languages_to_remove {
-                    if let Some((_lang, ProcessEntry::Running(mut state))) = processes.remove(&lang) {
+                    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
                         tracing::info!(
                             language = %lang,
                             restarts = state.restart_count,
@@ -2437,7 +2469,10 @@ async fn idle_timeout_task(
                         );
                         // Abort the supervisor task to prevent it from logging after cleanup
                         state.reader_handle.abort();
-                        shutdown(&mut state.process, &dispatcher).await;
+                        state.transport.shutdown(&dispatcher).await;
+                        if let Some(ref lifecycle) = state.lifecycle {
+                            let _ = lifecycle.child.lock().await.wait().await;
+                        }
                     }
                 }
             }
@@ -2445,11 +2480,390 @@ async fn idle_timeout_task(
     }
 }
 
+/// Pure logic result for progress notification handling.
+#[derive(Debug, PartialEq, Copy, Clone)]
+#[allow(dead_code)] // Used in tests, will be used by progress_watcher_task in Phase 3D
+enum ProgressAction {
+    /// `WorkDoneProgressEnd` received.
+    End {
+        duration_secs: Option<u64>,
+    },
+    /// `WorkDoneProgressReport` received with percentage.
+    Report {
+        percentage: u8,
+    },
+    /// No action required (not a progress notification or missing fields).
+    None,
+}
+
+/// Extract progress action from a JSON-RPC notification message.
+/// Pure function: no side effects, deterministic output.
+#[allow(dead_code)] // Will be used by progress_watcher_task in Phase 3D
+fn extract_progress_action(msg: &serde_json::Value) -> ProgressAction {
+    let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    
+    if method != "$/progress" && !method.starts_with("window/workDoneProgress") {
+        return ProgressAction::None;
+    }
+    
+    let kind = msg
+        .pointer("/params/value/kind")
+        .and_then(|v| v.as_str());
+    
+    match kind {
+        Some("end") => ProgressAction::End { duration_secs: None },
+        Some("report") => {
+            let percentage = msg
+                .pointer("/params/value/percentage")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let clamped = u8::try_from(percentage.min(100)).unwrap_or(100);
+            ProgressAction::Report { percentage: clamped }
+        }
+        _ => ProgressAction::None,
+    }
+}
+
+/// Apply a progress action to the given state.
+/// Pure function with mutable input (for efficiency).
+#[allow(dead_code)] // Will be used by progress_watcher_task in Phase 3D
+fn apply_progress_action(
+    action: ProgressAction,
+    indexing_complete: &std::sync::atomic::AtomicBool,
+    indexing_completion_source: &std::sync::Mutex<Option<IndexingCompletionSource>>,
+    indexing_duration_secs: &std::sync::Mutex<Option<u64>>,
+    indexing_progress_percent: &std::sync::Mutex<Option<u8>>,
+    spawned_at: Instant,
+) {
+    match action {
+        ProgressAction::End { .. } => {
+            let was_already_complete = indexing_complete.swap(true, Ordering::SeqCst);
+            if was_already_complete {
+                return;
+            }
+            
+            let duration = spawned_at.elapsed().as_secs();
+            
+            if let Ok(mut source) = indexing_completion_source.lock() {
+                *source = Some(IndexingCompletionSource::Progress);
+            }
+            if let Ok(mut dur) = indexing_duration_secs.lock() {
+                *dur = Some(duration);
+            }
+            if let Ok(mut progress) = indexing_progress_percent.lock() {
+                *progress = None;
+            }
+        }
+        ProgressAction::Report { percentage } => {
+            if let Ok(mut progress) = indexing_progress_percent.lock() {
+                *progress = Some(percentage);
+            }
+        }
+        ProgressAction::None => {}
+    }
+}
+
+/// Pure logic result for registration handling.
+#[derive(Debug, PartialEq)]
+#[allow(dead_code)] // Used in tests, will be used by registration_watcher_task in Phase 3D
+struct RegistrationAction {
+    /// Registration updates to apply.
+    registrations: Vec<(String, String, serde_json::Value)>,
+    /// Unregistrations to apply.
+    unregistrations: Vec<String>,
+    /// Response ID (if present).
+    response_id: Option<serde_json::Value>,
+}
+
+/// Extract registration action from a server-to-client request.
+/// Pure function: no side effects, deterministic output.
+#[allow(dead_code)] // Will be used by registration_watcher_task in Phase 3D
+fn extract_registration_action(msg: &serde_json::Value) -> RegistrationAction {
+    let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    let id = msg.get("id").cloned();
+    
+    let mut registrations = Vec::new();
+    let mut unregistrations = Vec::new();
+    
+    match method {
+        "client/registerCapability" => {
+            if let Some(regs) = msg
+                .pointer("/params/registrations")
+                .and_then(|v| v.as_array())
+            {
+                for reg in regs {
+                    let reg_id = reg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let reg_method = reg.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let opts = reg.get("registerOptions").cloned().unwrap_or(
+                        serde_json::Value::Object(serde_json::Map::default()),
+                    );
+                    registrations.push((reg_method, reg_id, opts));
+                }
+            }
+        }
+        "client/unregisterCapability" => {
+            if let Some(unregs) = msg
+                .pointer("/params/unregisterations")
+                .and_then(|v| v.as_array())
+            {
+                for unreg in unregs {
+                    let reg_id = unreg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    unregistrations.push(reg_id);
+                }
+            }
+        }
+        _ => {}
+    }
+    
+    RegistrationAction {
+        registrations,
+        unregistrations,
+        response_id: id,
+    }
+}
+
+/// Build a JSON-RPC response for server-to-client requests.
+/// Pure function: returns result: null response.
+#[allow(dead_code)] // Will be used by registration_watcher_task in Phase 3D
+fn build_registration_response(id: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": null
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ── Pure logic tests for progress_watcher_task ───────────────
+
+    #[test]
+    fn test_extract_progress_action_end() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "$/progress",
+            "params": {
+                "token": "indexing-token",
+                "value": {
+                    "kind": "end"
+                }
+            }
+        });
+        
+        let action = extract_progress_action(&msg);
+        assert!(matches!(action, ProgressAction::End { .. }));
+    }
+
+    #[test]
+    fn test_extract_progress_action_report_with_percentage() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "$/progress",
+            "params": {
+                "token": "indexing-token",
+                "value": {
+                    "kind": "report",
+                    "percentage": 42
+                }
+            }
+        });
+        
+        let action = extract_progress_action(&msg);
+        assert!(matches!(action, ProgressAction::Report { percentage: 42 }));
+    }
+
+    #[test]
+    fn test_extract_progress_action_report_clamps_high() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "$/progress",
+            "params": {
+                "token": "indexing-token",
+                "value": {
+                    "kind": "report",
+                    "percentage": 150
+                }
+            }
+        });
+        
+        let action = extract_progress_action(&msg);
+        assert!(matches!(action, ProgressAction::Report { percentage: 100 }));
+    }
+
+    #[test]
+    fn test_extract_progress_action_none_for_other_method() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {}
+        });
+        
+        let action = extract_progress_action(&msg);
+        assert!(matches!(action, ProgressAction::None));
+    }
+
+    #[test]
+    fn test_extract_progress_action_none_for_missing_kind() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "$/progress",
+            "params": {
+                "token": "indexing-token",
+                "value": {}
+            }
+        });
+        
+        let action = extract_progress_action(&msg);
+        assert!(matches!(action, ProgressAction::None));
+    }
+
+    #[test]
+    fn test_apply_progress_action_end() {
+        let indexing_complete = std::sync::atomic::AtomicBool::new(false);
+        let indexing_completion_source = std::sync::Mutex::new(None);
+        let indexing_duration_secs = std::sync::Mutex::new(None);
+        let indexing_progress_percent = std::sync::Mutex::new(Some(50));
+        let spawned_at = Instant::now();
+        
+        let action = ProgressAction::End { duration_secs: None };
+        
+        apply_progress_action(
+            action,
+            &indexing_complete,
+            &indexing_completion_source,
+            &indexing_duration_secs,
+            &indexing_progress_percent,
+            spawned_at,
+        );
+        
+        assert!(indexing_complete.load(Ordering::SeqCst));
+        assert_eq!(*indexing_completion_source.lock().unwrap(), Some(IndexingCompletionSource::Progress));
+        assert!(indexing_duration_secs.lock().unwrap().is_some());
+        assert_eq!(*indexing_progress_percent.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn test_apply_progress_action_end_already_complete() {
+        let indexing_complete = std::sync::atomic::AtomicBool::new(true);
+        let indexing_completion_source = std::sync::Mutex::new(Some(IndexingCompletionSource::TimeoutFallback));
+        let indexing_duration_secs = std::sync::Mutex::new(Some(100));
+        let indexing_progress_percent = std::sync::Mutex::new(None);
+        let spawned_at = Instant::now() - Duration::from_secs(200);
+        
+        let action = ProgressAction::End { duration_secs: None };
+        
+        apply_progress_action(
+            action,
+            &indexing_complete,
+            &indexing_completion_source,
+            &indexing_duration_secs,
+            &indexing_progress_percent,
+            spawned_at,
+        );
+        
+        assert!(indexing_complete.load(Ordering::SeqCst));
+        assert_eq!(*indexing_completion_source.lock().unwrap(), Some(IndexingCompletionSource::TimeoutFallback));
+        assert_eq!(*indexing_duration_secs.lock().unwrap(), Some(100));
+    }
+
+    #[test]
+    fn test_apply_progress_action_report() {
+        let indexing_complete = std::sync::atomic::AtomicBool::new(false);
+        let indexing_completion_source = std::sync::Mutex::new(None);
+        let indexing_duration_secs = std::sync::Mutex::new(None);
+        let indexing_progress_percent = std::sync::Mutex::new(None);
+        let spawned_at = Instant::now();
+        
+        let action = ProgressAction::Report { percentage: 75 };
+        
+        apply_progress_action(
+            action,
+            &indexing_complete,
+            &indexing_completion_source,
+            &indexing_duration_secs,
+            &indexing_progress_percent,
+            spawned_at,
+        );
+        
+        assert!(!indexing_complete.load(Ordering::SeqCst));
+        assert_eq!(*indexing_progress_percent.lock().unwrap(), Some(75));
+        assert!(indexing_duration_secs.lock().unwrap().is_none());
+    }
+
+    // ── Pure logic tests for registration_watcher_task ───────────────
+
+    #[test]
+    fn test_extract_registration_action_register() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "reg-1",
+                    "method": "textDocument/didChange",
+                    "registerOptions": {
+                        "documentSelector": [{ "language": "rust" }]
+                    }
+                }]
+            }
+        });
+        
+        let action = extract_registration_action(&msg);
+        assert_eq!(action.registrations.len(), 1);
+        assert_eq!(action.registrations[0].0, "textDocument/didChange");
+        assert_eq!(action.registrations[0].1, "reg-1");
+        assert_eq!(action.unregistrations.len(), 0);
+        assert!(action.response_id.is_some());
+    }
+
+    #[test]
+    fn test_extract_registration_action_unregister() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "client/unregisterCapability",
+            "params": {
+                "unregisterations": [{
+                    "id": "reg-1"
+                }]
+            }
+        });
+        
+        let action = extract_registration_action(&msg);
+        assert_eq!(action.registrations.len(), 0);
+        assert_eq!(action.unregistrations.len(), 1);
+        assert_eq!(action.unregistrations[0], "reg-1");
+    }
+
+    #[test]
+    fn test_extract_registration_action_other_method() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "workspace/configuration",
+            "params": {}
+        });
+        
+        let action = extract_registration_action(&msg);
+        assert_eq!(action.registrations.len(), 0);
+        assert_eq!(action.unregistrations.len(), 0);
+        assert!(action.response_id.is_some());
+    }
+
+    #[test]
+    fn test_build_registration_response() {
+        let id = json!(42);
+        let response = build_registration_response(&id);
+        
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 42);
+        assert_eq!(response["result"], json!(null));
+    }
 
     #[test]
     fn test_parse_definition_response_null() {
