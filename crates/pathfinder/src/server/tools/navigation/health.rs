@@ -730,55 +730,13 @@ pub(super) fn parse_uptime_to_seconds(uptime: Option<&str>) -> Option<u64> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use pathfinder_common::config::PathfinderConfig;
-    use pathfinder_common::sandbox::Sandbox;
-    use pathfinder_common::types::WorkspaceRoot;
-    use pathfinder_lsp::MockLawyer;
-    use pathfinder_search::MockScout;
+    use super::super::test_helpers::make_server_with_lawyer;
     use pathfinder_treesitter::mock::MockSurgeon;
     use std::sync::Arc;
 
     /// Extract `LspHealthResponse` from a `CallToolResult.structured_content`.
     fn unpack_health(res: rmcp::model::CallToolResult) -> crate::server::types::LspHealthResponse {
         serde_json::from_value(res.structured_content.expect("structured_content")).unwrap()
-    }
-
-    fn make_server_with_lawyer(
-        mock_surgeon: Arc<MockSurgeon>,
-        mock_lawyer: Arc<MockLawyer>,
-    ) -> (PathfinderServer, tempfile::TempDir) {
-        let ws_dir = make_temp_workspace();
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            mock_surgeon,
-            mock_lawyer,
-        );
-        (server, ws_dir)
-    }
-
-    /// Create a tempdir with standard test files so the file existence check passes.
-    fn make_temp_workspace() -> tempfile::TempDir {
-        let ws_dir = tempfile::tempdir().expect("temp dir");
-        let src_dir = ws_dir.path().join("src");
-        std::fs::create_dir_all(&src_dir).expect("create src dir");
-        std::fs::write(src_dir.join("auth.rs"), "fn login() { }").expect("create auth.rs");
-        std::fs::write(
-            src_dir.join("token.rs"),
-            "fn validate_token() -> bool { true }",
-        )
-        .expect("create token.rs");
-        std::fs::write(src_dir.join("main.rs"), "fn main() {}").expect("create main.rs");
-        std::fs::write(src_dir.join("service.rs"), "fn login() { }").expect("create service.rs");
-        std::fs::write(src_dir.join("user.rs"), "struct User { name: String }")
-            .expect("create user.rs");
-        std::fs::write(src_dir.join("auth.go"), "func login() {}").expect("create auth.go");
-        ws_dir
     }
 
     // ── PATCH-005: Per-Language Capabilities Tests ─────────────────────

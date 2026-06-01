@@ -24,6 +24,8 @@ mod health;
 mod impact;
 mod overview;
 mod references;
+#[cfg(test)]
+mod test_helpers;
 
 /// File extensions considered source code for grep fallback filtering.
 ///
@@ -499,7 +501,6 @@ impl PathfinderServer {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::*;
 
     // ── language_to_file_glob tests ─────────────────────────────────────────
 

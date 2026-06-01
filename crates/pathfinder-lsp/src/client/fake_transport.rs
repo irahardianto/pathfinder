@@ -32,7 +32,7 @@ impl FakeTransport {
         }
     }
 
-    pub fn set_dispatcher(&self, dispatcher: Arc<RequestDispatcher>) {
+    pub(super) fn set_dispatcher(&self, dispatcher: Arc<RequestDispatcher>) {
         *self.dispatcher.lock().expect("dispatcher lock") = Some(dispatcher);
     }
 

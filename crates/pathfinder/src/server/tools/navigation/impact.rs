@@ -810,64 +810,16 @@ impl PathfinderServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
     use crate::server::types::AnalyzeImpactParams;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
-    use pathfinder_common::types::{DegradedReason, SymbolScope, WorkspaceRoot};
+    use pathfinder_common::types::{DegradedReason, WorkspaceRoot};
     use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem};
     use pathfinder_lsp::{DefinitionLocation, MockLawyer};
     use pathfinder_search::MockScout;
     use pathfinder_treesitter::mock::MockSurgeon;
     use std::sync::Arc;
-    use tempfile::tempdir;
-
-    fn make_server_with_lawyer(
-        mock_surgeon: Arc<MockSurgeon>,
-        mock_lawyer: Arc<MockLawyer>,
-    ) -> (PathfinderServer, tempfile::TempDir) {
-        let ws_dir = make_temp_workspace();
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            Arc::new(MockScout::default()),
-            mock_surgeon,
-            mock_lawyer,
-        );
-        (server, ws_dir)
-    }
-
-    /// Create a tempdir with standard test files so the file existence check passes.
-    fn make_temp_workspace() -> tempfile::TempDir {
-        let ws_dir = tempdir().expect("temp dir");
-        let src_dir = ws_dir.path().join("src");
-        std::fs::create_dir_all(&src_dir).expect("create src dir");
-        std::fs::write(src_dir.join("auth.rs"), "fn login() { }").expect("create auth.rs");
-        std::fs::write(
-            src_dir.join("token.rs"),
-            "fn validate_token() -> bool { true }",
-        )
-        .expect("create token.rs");
-        std::fs::write(src_dir.join("main.rs"), "fn main() {}").expect("create main.rs");
-        std::fs::write(src_dir.join("service.rs"), "fn login() { }").expect("create service.rs");
-        std::fs::write(src_dir.join("user.rs"), "struct User { name: String }")
-            .expect("create user.rs");
-        std::fs::write(src_dir.join("auth.go"), "func login() {}").expect("create auth.go");
-        ws_dir
-    }
-
-    fn make_scope() -> SymbolScope {
-        SymbolScope {
-            content: "fn login() { }".to_owned(),
-            start_line: 9,
-            end_line: 9,
-            name_column: 0,
-            language: "rust".to_owned(),
-        }
-    }
 
     // ── analyze_impact ────────────────────────────────────────────────
 
@@ -2147,34 +2099,25 @@ mod tests {
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
 
-        // Create files
+        // Create files — login calls validate_token
         std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
         std::fs::write(
             ws_dir.path().join("src/auth.rs"),
-            "fn login() { validate_token(); }",
+            "fn login() -> bool { validate_token() }",
         )
         .unwrap();
         std::fs::write(
-            ws_dir.path().join("src/callee.rs"),
+            ws_dir.path().join("src/token.rs"),
             "fn validate_token() -> bool { true }",
         )
         .unwrap();
 
         let scout = Arc::new(MockScout::default());
+        // Search for "login" finds the definition in auth.rs (which is filtered out)
+        // and no other references, so grep fallback returns None for incoming.
         scout.set_result(Ok(pathfinder_search::SearchResult {
-            matches: vec![pathfinder_search::SearchMatch {
-                file: "src/callee.rs".to_string(),
-                line: 1,
-                column: 1,
-                content: "fn validate_token() -> bool { true }".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "sha256:abc".to_string(),
-                known: Some(false),
-            }],
-            total_matches: 1,
+            matches: vec![],
+            total_matches: 0,
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
@@ -2201,13 +2144,19 @@ mod tests {
         let val: crate::server::types::AnalyzeImpactMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        // For outgoing, grep fallback may not be used - depends on implementation
-        // Just verify degraded mode works
         assert!(val.degraded);
-        // Check that we got some result (either incoming or outgoing)
+        // When grep fallback returns no results, degraded_reason stays at default NoLsp
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        // Grep fallback only provides incoming references (who calls this symbol).
+        // Outgoing (what this symbol calls) requires call hierarchy which needs LSP.
         assert!(
-            val.incoming.is_some() || val.outgoing.is_some(),
-            "should have incoming or outgoing from grep"
+            val.outgoing.is_none(),
+            "outgoing should be None — grep fallback cannot determine what this symbol calls"
+        );
+        // No search results means no incoming either
+        assert!(
+            val.incoming.is_none(),
+            "incoming should be None when search returns no matches"
         );
     }
 }

@@ -230,14 +230,14 @@ impl MockLawyer {
     // ── references ─────────────────────────────────────────────────────────────
 
     /// Set the result to return from the next `references()` call.
-    /// Accepts String for backwards compatibility, converts to LspError::Protocol.
+    /// Accepts String for backwards compatibility, converts to `LspError::Protocol`.
     pub fn set_references_result(&self, result: Result<Vec<ReferenceLocation>, String>) {
         let lsp_result = result.map_err(LspError::Protocol);
         self.set_references_lsp_error(lsp_result);
     }
 
     /// Set the result to return from the next `references()` call.
-    /// Accepts LspError directly, allowing tests to exercise all error variants.
+    /// Accepts `LspError` directly, allowing tests to exercise all error variants.
     pub fn set_references_lsp_error(&self, result: Result<Vec<ReferenceLocation>, LspError>) {
         let mut guard = self
             .references_result
@@ -567,7 +567,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_returns_error_when_configured() {
         let mock = MockLawyer::default();
-        mock.set_goto_definition_result(Err("LSP crashed".into()));
+        mock.set_goto_definition_result(Err(LspError::Protocol("LSP crashed".to_string())));
         let result = mock.goto_definition(&workspace(), &file(), 1, 1).await;
         assert!(result.is_err());
     }

@@ -5483,13 +5483,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_process_concurrent_init_serializes_spawns() {
-        use std::sync::atomic::AtomicU32;
-
         let client = client_with_descriptors(vec!["rust"], HashMap::new());
-
-        // Track how many times start_process is entered concurrently
-        let concurrent_spawns = Arc::new(AtomicU32::new(0));
-        let max_concurrent = Arc::new(AtomicU32::new(0));
 
         // We can't easily hook into start_process, but we can verify the
         // init lock behavior by checking that processes.len() <= 1 after
