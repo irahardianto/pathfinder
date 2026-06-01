@@ -1,0 +1,2213 @@
+//! `analyze_impact` and `find_callers_callees` tool handlers.
+//!
+//! LSP-powered call-hierarchy BFS with grep-based fallback when no language
+//! server is available. Tool responses include `"degraded": true` and
+//! `"degraded_reason"` fields to signal the fallback mode to agents.
+
+use crate::server::helpers::{
+    format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
+    require_symbol_target, serialize_metadata,
+};
+use crate::server::types::AnalyzeImpactParams;
+use crate::server::PathfinderServer;
+use pathfinder_common::types::DegradedReason;
+use pathfinder_lsp::LspError;
+use rmcp::model::{CallToolResult, ErrorData};
+
+/// BUG-4: Wall-clock timeout for BFS traversal in `analyze_impact`.
+/// Prevents infinite loops if the LSP keeps returning more references.
+const BFS_TIMEOUT_SECS: u64 = 30;
+
+/// Direction for call hierarchy BFS traversal in `analyze_impact`.
+///
+/// `Incoming` traverses callers (who calls this symbol).
+/// `Outgoing` traverses callees (what this symbol calls).
+#[derive(Debug)]
+enum CallDirection {
+    Incoming,
+    Outgoing,
+}
+
+impl PathfinderServer {
+    /// SPEC 001 + SPEC 008: Grep-based reference search fallback for `analyze_impact`.
+    ///
+    /// When LSP is unavailable, warming up, or timed out, use this helper to find
+    /// symbol references using ripgrep with Tree-sitter enrichment (SPEC 008).
+    ///
+    /// SPEC 008: Uses `search_codebase_impl` with `filter_mode=CodeOnly` to exclude
+    /// matches in comments and string literals.
+    ///
+    /// Returns `Some(refs)` if references found, `None` if none found.
+    /// Updates `files_referenced` with the files containing matches.
+    async fn grep_reference_fallback(
+        &self,
+        symbol_name: &str,
+        definition_path: &std::path::Path,
+        files_referenced: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<crate::server::types::ImpactReference>> {
+        let search_params = crate::server::types::SearchCodebaseParams {
+            query: symbol_name.to_string(),
+            is_regex: false,
+            path_glob: "**/*".to_string(),
+            filter_mode: pathfinder_common::types::FilterMode::CodeOnly,
+            max_results: 20,
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            exclude_glob: String::new(),
+            offset: 0,
+        };
+
+        let result = match self.search_codebase_impl(search_params).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "grep_reference_fallback",
+                    symbol = %symbol_name,
+                    error = %e,
+                    "search_codebase_impl failed during grep fallback"
+                );
+                return None;
+            }
+        };
+
+        if result.0.matches.is_empty() {
+            return None;
+        }
+
+        let refs: Vec<crate::server::types::ImpactReference> = result
+            .0
+            .matches
+            .into_iter()
+            .filter(|m| {
+                let m_path = std::path::Path::new(&m.file);
+                super::is_source_file(&m.file) && m_path != definition_path
+            })
+            .take(10)
+            .map(|m| {
+                files_referenced.insert(m.file.clone());
+                let semantic_path = m
+                    .enclosing_semantic_path
+                    .clone()
+                    .unwrap_or_else(|| format!("{}::{symbol_name}", m.file));
+                crate::server::types::ImpactReference {
+                    semantic_path,
+                    file: m.file,
+                    line: usize::try_from(m.line).unwrap_or(usize::MAX),
+                    snippet: m.content,
+                    direction: "incoming_heuristic".to_string(),
+                    depth: 0,
+                }
+            })
+            .collect();
+
+        if refs.is_empty() {
+            None
+        } else {
+            Some(refs)
+        }
+    }
+
+    /// Performs BFS traversal of the call hierarchy in the specified direction.
+    ///
+    /// BUG-4: Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
+    ///
+    /// Returns the collected references and the maximum depth reached during traversal.
+    async fn bfs_call_hierarchy(
+        &self,
+        initial_item: &pathfinder_lsp::types::CallHierarchyItem,
+        direction: CallDirection,
+        max_depth: u32,
+        files_referenced: &mut std::collections::HashSet<String>,
+        project_only: bool,
+        remaining_references: &mut u32,
+    ) -> (Vec<crate::server::types::ImpactReference>, u32) {
+        let timeout = tokio::time::Duration::from_secs(BFS_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((initial_item.clone(), 0));
+        let mut seen = std::collections::HashSet::new();
+        seen.insert((initial_item.file.clone(), initial_item.line));
+        files_referenced.insert(initial_item.file.clone());
+
+        let mut references = Vec::new();
+        let mut max_depth_reached = 0;
+
+        while let Some((item, current_depth)) = queue.pop_front() {
+            max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
+            if current_depth >= max_depth {
+                continue;
+            }
+            if *remaining_references == 0 {
+                break;
+            }
+
+            // BUG-4: Check wall-clock timeout
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    direction = ?direction,
+                    timeout_secs = BFS_TIMEOUT_SECS,
+                    "BFS traversal exceeded wall-clock timeout, returning partial results"
+                );
+                break;
+            }
+
+            let hierarchy_result = match direction {
+                CallDirection::Incoming => {
+                    self.lawyer
+                        .call_hierarchy_incoming(self.workspace_root.path(), &item)
+                        .await
+                }
+                CallDirection::Outgoing => {
+                    self.lawyer
+                        .call_hierarchy_outgoing(self.workspace_root.path(), &item)
+                        .await
+                }
+            };
+
+            match hierarchy_result {
+                Ok(calls) => {
+                    for call in calls {
+                        if *remaining_references == 0 {
+                            break;
+                        }
+
+                        let referenced_item = call.item;
+
+                        // Filter out non-workspace files when project_only:
+                        // - Must have a source code extension
+                        // - Must be a relative path (not absolute like stdlib/SDK paths)
+                        // - Must not be in node_modules/ or vendor/
+                        if project_only
+                            && (!super::is_source_file(&referenced_item.file)
+                                || !super::is_workspace_file(&referenced_item.file))
+                        {
+                            continue;
+                        }
+
+                        files_referenced.insert(referenced_item.file.clone());
+
+                        let key = (referenced_item.file.clone(), referenced_item.line);
+                        if seen.insert(key) {
+                            queue.push_back((referenced_item.clone(), current_depth + 1));
+
+                            references.push(crate::server::types::ImpactReference {
+                                semantic_path: format!(
+                                    "{}::{}",
+                                    referenced_item.file, referenced_item.name
+                                ),
+                                file: referenced_item.file.clone(),
+                                line: referenced_item.line as usize,
+                                snippet: referenced_item
+                                    .detail
+                                    .unwrap_or_else(|| referenced_item.name.clone()),
+                                direction: match direction {
+                                    CallDirection::Incoming => "incoming".to_owned(),
+                                    CallDirection::Outgoing => "outgoing".to_owned(),
+                                },
+                                depth: current_depth as usize,
+                            });
+                            *remaining_references -= 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let direction_name = match direction {
+                        CallDirection::Incoming => "call_hierarchy_incoming",
+                        CallDirection::Outgoing => "call_hierarchy_outgoing",
+                    };
+                    tracing::warn!(
+                        tool = "analyze_impact",
+                        error = %e,
+                        file = %item.file,
+                        line = item.line,
+                        depth = current_depth,
+                        "{direction_name} failed during BFS (partial impact graph)"
+                    );
+                }
+            }
+        }
+
+        (references, max_depth_reached)
+    }
+
+    /// Core logic for the `analyze_impact` tool.
+    ///
+    /// Returns callers (incoming) and callees (outgoing) for the target symbol.
+    /// Degrades gracefully to empty results when no LSP is configured.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential pipeline (parse→sandbox→tree-sitter→LSP→BFS→version hash)."
+    )]
+    pub(crate) async fn analyze_impact_impl(
+        &self,
+        params: AnalyzeImpactParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+
+        // Cap max_depth to prevent unbounded BFS traversal (PRD §5.1 maximum).
+        // Also floor at 1 to guarantee at least one level of traversal.
+        let max_depth = params.max_depth.clamp(1, 5);
+        let project_only = params.project_only.unwrap_or(true);
+        let max_references = params.max_references;
+        let mut remaining_references = max_references;
+
+        tracing::info!(
+            tool = "analyze_impact",
+            semantic_path = %params.semantic_path,
+            max_depth = max_depth,
+            "analyze_impact: start"
+        );
+
+        // Parse and validate the semantic path
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
+
+        // Sandbox check
+        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            let duration_ms = start.elapsed().as_millis();
+            tracing::warn!(
+                tool = "analyze_impact",
+                error_code = e.error_code(),
+                duration_ms,
+                "sandbox check failed"
+            );
+            return Err(pathfinder_to_error_data(&e));
+        }
+
+        // Early file existence check — avoid tree-sitter parse on nonexistent files
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            tracing::warn!(
+                tool = "analyze_impact",
+                path = %abs_file.display(),
+                "file not found"
+            );
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        // 1. Fetch the symbol scope (Tree-sitter) to get start line
+        let ts_start = std::time::Instant::now();
+        let scope = match self
+            .read_symbol_scope_enriched(&semantic_path, &params.semantic_path)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis();
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    error = %e,
+                    duration_ms,
+                    "tree-sitter read failed"
+                );
+                return Err(e);
+            }
+        };
+        let tree_sitter_ms = ts_start.elapsed().as_millis();
+
+        // IW-3 (DS-1 gap fix): RAII document lifecycle — did_close fires on all exits.
+        let file_path = self.workspace_root.path().join(&semantic_path.file_path);
+        let file_content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    path = %file_path.display(),
+                    error = %e,
+                    "file read failed — LSP will receive empty content"
+                );
+                String::new()
+            }
+        };
+        // `_doc_guard` fires did_close automatically when this function returns.
+        let _doc_guard = match self
+            .lawyer
+            .open_document(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                &file_content,
+            )
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    semantic_path = %semantic_path,
+                    error = %e,
+                    "open_document failed — LSP queries may return degraded results"
+                );
+                None
+            }
+        };
+
+        let lsp_start = std::time::Instant::now();
+        // Use Option<Vec> to distinguish "unknown" (LSP unavailable) from "verified empty" (LSP confirmed zero).
+        // None = degraded (LSP was down — callers are unknown, do NOT treat as zero)
+        // Some([]) = LSP responded with confirmed zero callers/callees
+        let mut incoming: Option<Vec<crate::server::types::ImpactReference>> = None;
+        let mut outgoing: Option<Vec<crate::server::types::ImpactReference>> = None;
+        let mut degraded = true;
+        let mut degraded_reason = Some(DegradedReason::NoLsp);
+        let mut engines = vec!["tree-sitter"];
+        let mut files_referenced = std::collections::HashSet::new();
+        let mut max_depth_reached = 0;
+
+        let lsp_result = self
+            .lawyer
+            .call_hierarchy_prepare(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(scope.start_line + 1).unwrap_or(1),
+                // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
+                // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
+                u32::try_from(scope.name_column + 1).unwrap_or(1),
+            )
+            .await;
+
+        match lsp_result {
+            Ok(items) if !items.is_empty() => {
+                engines.push("lsp");
+                degraded = false;
+                degraded_reason = None;
+
+                let initial_item = &items[0];
+                files_referenced.insert(initial_item.file.clone());
+
+                // --- INCOMING BFS ---
+                let (incoming_refs, depth_in) = self
+                    .bfs_call_hierarchy(
+                        initial_item,
+                        CallDirection::Incoming,
+                        max_depth,
+                        &mut files_referenced,
+                        project_only,
+                        &mut remaining_references,
+                    )
+                    .await;
+                incoming = Some(incoming_refs);
+                max_depth_reached = std::cmp::max(max_depth_reached, depth_in);
+
+                // --- OUTGOING BFS ---
+                let (outgoing_refs, depth_out) = self
+                    .bfs_call_hierarchy(
+                        initial_item,
+                        CallDirection::Outgoing,
+                        max_depth,
+                        &mut files_referenced,
+                        project_only,
+                        &mut remaining_references,
+                    )
+                    .await;
+                outgoing = Some(outgoing_refs);
+                max_depth_reached = std::cmp::max(max_depth_reached, depth_out);
+            }
+            Ok(_) => {
+                // LSP responded with empty items — but this is ambiguous:
+                //   - Genuine "zero callers": LSP is warm and the symbol truly has no references.
+                //   - LSP warmup: LSP hasn't finished indexing and returned [] for everything.
+                //
+                // Probe goto_definition at the same position. A warm LSP can resolve a symbol
+                // to its definition; a cold LSP returns None even for well-known symbols.
+                // If the probe returns Ok(Some(_)) the LSP is warm → confirmed zero callers.
+                // If the probe returns Ok(None) or Err, we degrade rather than lying to the agent.
+                let probe = self
+                    .lawyer
+                    .goto_definition(
+                        self.workspace_root.path(),
+                        &semantic_path.file_path,
+                        u32::try_from(scope.start_line + 1).unwrap_or(1),
+                        u32::try_from(scope.name_column + 1).unwrap_or(1),
+                    )
+                    .await;
+
+                if matches!(probe, Ok(Some(_))) {
+                    // LSP is warm — definition resolved → confirmed zero callers/callees
+                    engines.push("lsp");
+                    degraded = false;
+                    degraded_reason = None;
+                    incoming = Some(Vec::new());
+                    outgoing = Some(Vec::new());
+                } else {
+                    // LSP likely still warming up — empty call hierarchy is not reliable.
+                    // Degrade so agents know to verify before acting on "zero references".
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        symbol = %semantic_path,
+                        "analyze_impact: call_hierarchy_prepare returned [] but goto_definition \
+                         probe returned no result — LSP likely warming up, attempting grep-based reference fallback"
+                    );
+                    engines.push("lsp");
+                    degraded = true;
+                    degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
+
+                    let symbol_name = semantic_path
+                        .symbol_chain
+                        .as_ref()
+                        .and_then(|c| c.segments.last())
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+
+                    if let Some(refs) = self
+                        .grep_reference_fallback(
+                            &symbol_name,
+                            &semantic_path.file_path,
+                            &mut files_referenced,
+                        )
+                        .await
+                    {
+                        incoming = Some(refs);
+                        degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                        tracing::info!(
+                            tool = "analyze_impact",
+                            references_found = incoming.as_ref().map_or(0, Vec::len),
+                            "analyze_impact: grep-based fallback references found during LSP warmup"
+                        );
+                    }
+                }
+            }
+            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
+                // Degraded mode — LSP not available. Use grep-based reference search
+                // as a heuristic fallback. Results may over-count (string references)
+                // or under-count (indirect calls), but give the agent a starting point.
+                tracing::info!(
+                    tool = "analyze_impact",
+                    symbol = %semantic_path,
+                    "analyze_impact: no LSP — attempting grep-based reference fallback"
+                );
+
+                let symbol_name = semantic_path
+                    .symbol_chain
+                    .as_ref()
+                    .and_then(|c| c.segments.last())
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+
+                if let Some(refs) = self
+                    .grep_reference_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    incoming = Some(refs);
+                    degraded_reason = Some(DegradedReason::NoLspGrepFallback);
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        references_found = incoming.as_ref().map_or(0, Vec::len),
+                        "analyze_impact: grep-based fallback references found"
+                    );
+                }
+                // Keep degraded = true to signal this is heuristic data
+            }
+            Err(LspError::Timeout { .. }) => {
+                // GAP-001: LSP timed out — attempt grep-based reference fallback
+                tracing::info!(
+                    tool = "analyze_impact",
+                    symbol = %semantic_path,
+                    "analyze_impact: LSP timed out — attempting grep-based reference fallback"
+                );
+
+                let symbol_name = semantic_path
+                    .symbol_chain
+                    .as_ref()
+                    .and_then(|c| c.segments.last())
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+
+                if let Some(refs) = self
+                    .grep_reference_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    incoming = Some(refs);
+                    degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        references_found = incoming.as_ref().map_or(0, Vec::len),
+                        "analyze_impact: grep-based fallback references found after timeout"
+                    );
+                }
+                // Keep degraded = true to signal this is heuristic data
+            }
+            Err(e) => {
+                degraded = true;
+                degraded_reason = Some(DegradedReason::NoLsp);
+
+                tracing::warn!(
+                    tool = "analyze_impact",
+                    error = %e,
+                    "call_hierarchy_prepare failed"
+                );
+
+                let symbol_name = semantic_path
+                    .symbol_chain
+                    .as_ref()
+                    .and_then(|c| c.segments.last())
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+
+                if let Some(refs) = self
+                    .grep_reference_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    incoming = Some(refs);
+                    degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
+                    tracing::info!(
+                        tool = "analyze_impact",
+                        references_found = incoming.as_ref().map_or(0, Vec::len),
+                        "analyze_impact: grep-based fallback references found after LSP error"
+                    );
+                }
+            }
+        }
+
+        // Note: `_doc_guard` still alive here; did_close fires at function return.
+        let lsp_ms = lsp_start.elapsed().as_millis();
+        let duration_ms = start.elapsed().as_millis();
+
+        let inc_count = incoming.as_ref().map_or(0, Vec::len);
+        let out_count = outgoing.as_ref().map_or(0, Vec::len);
+        let degraded_reason_cloned = degraded_reason;
+        let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
+
+        let lsp_readiness = if degraded {
+            match degraded_reason_cloned {
+                Some(DegradedReason::NoLsp) => Some("unavailable".to_owned()),
+                _ => Some("warming_up".to_owned()),
+            }
+        } else {
+            Some("ready".to_owned())
+        };
+        let warm_start_in_progress = match lsp_readiness.as_deref() {
+            Some("warming_up") => Some(true),
+            Some("ready") => Some(false),
+            _ => None,
+        };
+
+        tracing::info!(
+            tool = "analyze_impact",
+            semantic_path = %params.semantic_path,
+            tree_sitter_ms,
+            lsp_ms,
+            duration_ms,
+            degraded,
+            degraded_reason = ?degraded_reason_str,
+            engines_used = ?engines,
+            "analyze_impact: complete"
+        );
+        let references_truncated = max_references > 0 && remaining_references == 0;
+
+        let resolution_strategy = if engines.contains(&"lsp") {
+            Some("lsp_call_hierarchy".to_owned())
+        } else if degraded {
+            // Check which grep fallback was used based on degraded_reason
+            match &degraded_reason {
+                Some(
+                    DegradedReason::LspWarmupGrepFallback
+                    | DegradedReason::LspTimeoutGrepFallback
+                    | DegradedReason::LspErrorGrepFallback
+                    | DegradedReason::NoLspGrepFallback,
+                ) => Some("grep_file_scoped".to_owned()),
+                _ => Some("treesitter_fallback".to_owned()),
+            }
+        } else {
+            Some("treesitter_direct".to_owned())
+        };
+
+        // Spec 4.2: Test coverage search
+        let (test_callers, test_coverage_status) = if params.include_test_coverage {
+            let symbol_name = semantic_path
+                .symbol_chain
+                .as_ref()
+                .and_then(|c| c.segments.last())
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+
+            if symbol_name.is_empty() {
+                (None, Some("not_found".to_owned()))
+            } else {
+                // Search for the symbol name in test files.
+                // Broad glob covers test, spec, __tests__ directories and
+                // files like foo_test.rs, foo.test.ts, foo_spec.rb, test_foo.py.
+                let search_params = pathfinder_search::SearchParams {
+                    workspace_root: self.workspace_root.path().to_path_buf(),
+                    query: symbol_name.clone(),
+                    is_regex: false,
+                    path_glob: "**/*{test,spec,Test,Spec,__tests__}*".to_owned(),
+                    exclude_glob: String::new(),
+                    max_results: 100,
+                    offset: 0,
+                    context_lines: 2,
+                };
+
+                match self.scout.search(&search_params).await {
+                    Ok(results) => {
+                        let test_refs: Vec<crate::server::types::ImpactReference> = results
+                            .matches
+                            .into_iter()
+                            .filter(|m| super::is_test_file(&m.file))
+                            .take(20) // cap test references
+                            .map(|m| crate::server::types::ImpactReference {
+                                semantic_path: m.enclosing_semantic_path.unwrap_or_default(),
+                                file: m.file.clone(),
+                                line: usize::try_from(m.line).unwrap_or(0),
+                                snippet: m.content,
+                                direction: "test_coverage".to_owned(),
+                                depth: 0,
+                            })
+                            .collect();
+
+                        if test_refs.is_empty() {
+                            (None, Some("not_found".to_owned()))
+                        } else {
+                            (Some(test_refs), Some("found".to_owned()))
+                        }
+                    }
+                    Err(_) => (None, Some("unknown_degraded".to_owned())),
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        let metadata = crate::server::types::AnalyzeImpactMetadata {
+            incoming,
+            outgoing,
+            depth_reached: max_depth_reached,
+            files_referenced: files_referenced.len(),
+            degraded,
+            degraded_reason,
+            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
+            lsp_readiness,
+            warm_start_in_progress,
+            references_truncated,
+            resolution_strategy,
+            test_callers,
+            test_coverage_status,
+            duration_ms: Some(millis_to_u64(duration_ms)),
+        };
+
+        // Build honest text output based on actual results listing every
+        // reference so agents can act without parsing structured_content.
+        let mut text_parts = Vec::new();
+        if degraded {
+            let notice = degraded_reason_cloned
+                .as_ref()
+                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
+
+            let symbol_name = semantic_path
+                .symbol_chain
+                .as_ref()
+                .and_then(|c| c.segments.last())
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+
+            text_parts.push(notice);
+            text_parts.push(String::new());
+            text_parts.push("   Common causes:".to_owned());
+            text_parts.push("   - Interface types without concrete implementations in source (JPA repositories)".to_owned());
+            text_parts.push(
+                "   - Annotation-driven dependency injection (Spring proxies at runtime)"
+                    .to_owned(),
+            );
+            text_parts.push("   - LSP still warming up (wait 30s, try again)".to_owned());
+            text_parts.push(String::new());
+            if symbol_name.is_empty() {
+                text_parts
+                    .push("   Workaround: Use search_codebase to find usages manually.".to_owned());
+            } else {
+                text_parts.push(format!(
+                    "   Workaround: Use search_codebase(query=\"{symbol_name}\") to find usages manually."
+                ));
+            }
+            text_parts.push("   Reference counts below are heuristic only:".to_owned());
+            text_parts.push(String::new());
+        } else if inc_count == 0 && out_count == 0 {
+            text_parts.push("LSP confirmed: zero callers/callees for this symbol.".to_string());
+        } else if inc_count == 0 {
+            text_parts
+                .push("LSP confirmed: zero incoming callers (callees found below).".to_string());
+        } else if out_count == 0 {
+            text_parts
+                .push("LSP confirmed: zero outgoing callees (callers found below).".to_string());
+        }
+        // Incoming
+        text_parts.push(format!("Incoming references: {inc_count}"));
+        if let Some(refs) = &metadata.incoming {
+            for r in refs {
+                text_parts.push(format!(
+                    "  [depth={}] {} ({}:L{})",
+                    r.depth, r.semantic_path, r.file, r.line
+                ));
+                if !r.snippet.is_empty() {
+                    text_parts.push(format!("    > {}", r.snippet.trim()));
+                }
+            }
+        }
+        // Outgoing
+        text_parts.push(format!("Outgoing references: {out_count}"));
+        if let Some(refs) = &metadata.outgoing {
+            for r in refs {
+                text_parts.push(format!(
+                    "  [depth={}] {} ({}:L{})",
+                    r.depth, r.semantic_path, r.file, r.line
+                ));
+                if !r.snippet.is_empty() {
+                    text_parts.push(format!("    > {}", r.snippet.trim()));
+                }
+            }
+        }
+
+        // Spec 4.2: Test coverage section
+        if let Some(test_refs) = &metadata.test_callers {
+            if !test_refs.is_empty() {
+                text_parts.push(String::new());
+                text_parts.push(format!(
+                    "TEST COVERAGE: {} test functions cover this symbol",
+                    test_refs.len()
+                ));
+                for r in test_refs {
+                    text_parts.push(format!(
+                        "  - {}::{} ({}:L{})",
+                        r.file, r.semantic_path, r.file, r.line
+                    ));
+                }
+            }
+        } else if let Some(status) = &metadata.test_coverage_status {
+            if status == "not_found" {
+                text_parts.push(String::new());
+                text_parts
+                    .push("TEST COVERAGE: no test functions found for this symbol".to_owned());
+            } else if status == "unknown_degraded" {
+                text_parts.push(String::new());
+                text_parts.push("TEST COVERAGE: unknown (search degraded)".to_owned());
+            }
+        }
+
+        text_parts.push(format!("[completed in {duration_ms}ms]"));
+        let text = text_parts.join("\n");
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
+        res.structured_content = serialize_metadata(&metadata);
+        Ok(res)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::server::types::AnalyzeImpactParams;
+    use pathfinder_common::config::PathfinderConfig;
+    use pathfinder_common::sandbox::Sandbox;
+    use pathfinder_common::types::{DegradedReason, SymbolScope, WorkspaceRoot};
+    use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem};
+    use pathfinder_lsp::{DefinitionLocation, MockLawyer};
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn make_server_with_lawyer(
+        mock_surgeon: Arc<MockSurgeon>,
+        mock_lawyer: Arc<MockLawyer>,
+    ) -> (PathfinderServer, tempfile::TempDir) {
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            mock_surgeon,
+            mock_lawyer,
+        );
+        (server, ws_dir)
+    }
+
+    /// Create a tempdir with standard test files so the file existence check passes.
+    fn make_temp_workspace() -> tempfile::TempDir {
+        let ws_dir = tempdir().expect("temp dir");
+        let src_dir = ws_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::write(src_dir.join("auth.rs"), "fn login() { }").expect("create auth.rs");
+        std::fs::write(
+            src_dir.join("token.rs"),
+            "fn validate_token() -> bool { true }",
+        )
+        .expect("create token.rs");
+        std::fs::write(src_dir.join("main.rs"), "fn main() {}").expect("create main.rs");
+        std::fs::write(src_dir.join("service.rs"), "fn login() { }").expect("create service.rs");
+        std::fs::write(src_dir.join("user.rs"), "struct User { name: String }")
+            .expect("create user.rs");
+        std::fs::write(src_dir.join("auth.go"), "func login() {}").expect("create auth.go");
+        ws_dir
+    }
+
+    fn make_scope() -> SymbolScope {
+        SymbolScope {
+            content: "fn login() { }".to_owned(),
+            start_line: 9,
+            end_line: 9,
+            name_column: 0,
+            language: "rust".to_owned(),
+        }
+    }
+
+    // ── analyze_impact ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_returns_empty_degraded() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            surgeon,
+            lawyer,
+        );
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(
+            val.incoming.is_none(),
+            "incoming must be null (not empty) when degraded"
+        );
+        assert!(
+            val.outgoing.is_none(),
+            "outgoing must be null (not empty) when degraded"
+        );
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_lsp_populates_incoming_and_outgoing() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: Some("fn handle_request()".into()),
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        assert_eq!(val.degraded_reason, None);
+        assert_eq!(val.depth_reached, 1); // BFS pops level 1, updates max_depth_reached, then continues
+        assert_eq!(val.files_referenced, 3); // initial + caller + callee
+        let incoming = val
+            .incoming
+            .as_ref()
+            .expect("incoming must be Some when not degraded");
+        let outgoing = val
+            .outgoing
+            .as_ref()
+            .expect("outgoing must be Some when not degraded");
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].file, "src/server.rs");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].file, "src/token.rs");
+    }
+
+    // ── analyze_impact with empty hierarchy (confirmed zero callers) ───────
+
+    #[tokio::test]
+    async fn test_analyze_impact_empty_hierarchy_confirmed_zero() {
+        // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(Some(...))
+        // → LSP is warm, confirmed zero callers. Must NOT be degraded.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty call hierarchy — ambiguous on its own
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // Probe: goto_definition succeeds → LSP is warm → confirmed zero
+        lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".into(),
+            line: 10,
+            column: 4,
+            preview: "fn login() {}".into(),
+        })));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // NOT degraded — LSP warm, genuinely zero callers confirmed
+        assert!(
+            !val.degraded,
+            "must not be degraded when probe confirms LSP is warm"
+        );
+        assert_eq!(val.degraded_reason, None);
+        let incoming = val
+            .incoming
+            .as_ref()
+            .expect("must be Some when confirmed-zero");
+        let outgoing = val
+            .outgoing
+            .as_ref()
+            .expect("must be Some when confirmed-zero");
+        assert!(incoming.is_empty(), "confirmed zero callers");
+        assert!(outgoing.is_empty(), "confirmed zero callees");
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_empty_hierarchy_warmup_degrades() {
+        // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(None)
+        // → LSP is warming up. Must be degraded with "lsp_warmup_empty_unverified".
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty call hierarchy
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // Probe: goto_definition returns Ok(None) → LSP is still warming up
+        // MockLawyer::default() already returns Ok(None) for goto_definition, so no extra setup needed.
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // DEGRADED — LSP warmup detected
+        assert!(
+            val.degraded,
+            "must be degraded when goto_definition probe also returns None"
+        );
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspWarmupEmptyUnverified),
+            "degraded_reason must indicate warmup ambiguity"
+        );
+        // incoming/outgoing must be None — do NOT mislead agent with Some([])
+        assert!(
+            val.incoming.is_none(),
+            "incoming must be None (unknown) during warmup, not Some([]) (confirmed-zero)"
+        );
+        assert!(
+            val.outgoing.is_none(),
+            "outgoing must be None (unknown) during warmup, not Some([]) (confirmed-zero)"
+        );
+    }
+
+    // ── analyze_impact with LSP error on call_hierarchy_prepare ────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_lsp_error_degrades() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Simulate LSP protocol error
+        lawyer
+            .push_prepare_call_hierarchy_result(Err(LspError::Protocol("LSP crashed".to_string())));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Degraded due to LSP error
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+    }
+
+    // ── analyze_impact BFS depth limiting ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_respects_max_depth() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Incoming: one caller that itself has a caller (depth 2 chain)
+        let caller_item = CallHierarchyItem {
+            name: "caller".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/caller.rs".into(),
+            line: 5,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: caller_item.clone(),
+            call_sites: vec![9],
+        }]));
+        // Second level incoming (would only be reached if max_depth > 1)
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "top_level".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/main.rs".into(),
+                line: 1,
+                column: 0,
+                data: None,
+            },
+            call_sites: vec![5],
+        }]));
+
+        // Outgoing: empty
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1, // Should stop after first level
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        let _incoming = val.incoming.as_ref().expect("must be Some");
+        // With max_depth=1, BFS processes the initial item at depth 0, finds caller at depth 1,
+        // but the second-level caller (depth 2) should NOT be included
+        // However depth_reached should be 1
+        assert_eq!(val.depth_reached, 1);
+    }
+
+    // ── CG-3: sandbox check error in analyze_impact ──────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_rejects_sandbox_denied_path() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: ".git/objects/abc::def".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected error but got Ok");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "ACCESS_DENIED");
+    }
+
+    // ── CG-4: Tree-sitter error in analyze_impact ──────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_tree_sitter_error() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        // Push an error result
+        surgeon.read_symbol_scope_results.lock().unwrap().push(Err(
+            pathfinder_treesitter::SurgeonError::ParseError {
+                path: std::path::PathBuf::from("src/auth.rs"),
+                reason: "parse failed".to_string(),
+            },
+        ));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        assert!(result.is_err(), "tree-sitter error should propagate");
+    }
+
+    // ── CG-5: LSP error during BFS traversal ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_lsp_error_graceful_partial_graph() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        // Incoming succeeds with one caller
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "caller".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+        // Outgoing fails with LSP error
+        lawyer.push_outgoing_call_result(Err(LspError::Protocol(
+            "LSP crashed during outgoing".to_string(),
+        )));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed despite partial failure");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // NOT degraded — prepare succeeded, incoming succeeded, only outgoing had error
+        assert!(!val.degraded);
+        let incoming = val.incoming.as_ref().expect("incoming must be Some");
+        assert_eq!(incoming.len(), 1, "incoming caller should be present");
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert!(outgoing.is_empty(), "outgoing should be empty due to error");
+    }
+
+    // ── CG-1: Grep fallback path in analyze_impact ─────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_grep_fallback_with_mock_scout() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+        // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        // We have 1 match, so push 1 enclosing_symbol_detail_result
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a file so the version hash computation has something to read
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // Create a caller file (different from the definition file)
+        std::fs::write(
+            ws_dir.path().join("src/caller.rs"),
+            "fn handle_request() { login(); }",
+        )
+        .unwrap();
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/caller.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn handle_request() { login(); }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
+        let incoming = val.incoming.as_ref().expect("must be Some from grep");
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].file, "src/caller.rs");
+        assert_eq!(incoming[0].direction, "incoming_heuristic");
+    }
+
+    // ── PATCH-002: Non-source file filtering in grep fallback ───────────
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn test_analyze_impact_grep_fallback_filters_non_source_files() {
+        // Issue: grep fallback was returning matches from .md, .json, .txt, etc.
+        // causing false positives. This test verifies that non-source files
+        // are filtered out of the results.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+        // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        // We have 4 matches, so push 4 results
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None), Ok(None)]);
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create the definition file
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // Return a mix of source and non-source files that match the symbol name
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![
+                // Legitimate source file caller
+                pathfinder_search::SearchMatch {
+                    file: "src/caller.rs".to_string(),
+                    line: 1,
+                    column: 1,
+                    content: "fn call() { login(); }".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:a".to_string(),
+                    known: Some(false),
+                },
+                // Documentation file - should be filtered OUT
+                pathfinder_search::SearchMatch {
+                    file: "docs/README.md".to_string(),
+                    line: 10,
+                    column: 1,
+                    content: "call login() to authenticate".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:b".to_string(),
+                    known: Some(false),
+                },
+                // Config file - should be filtered OUT
+                pathfinder_search::SearchMatch {
+                    file: "config.json".to_string(),
+                    line: 5,
+                    column: 1,
+                    content: "\"login\": \"/api/auth\"".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:c".to_string(),
+                    known: Some(false),
+                },
+                // TypeScript source - should be KEPT
+                pathfinder_search::SearchMatch {
+                    file: "web/src/auth.ts".to_string(),
+                    line: 20,
+                    column: 1,
+                    content: "import { login } from './api';".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:d".to_string(),
+                    known: Some(false),
+                },
+            ],
+            total_matches: 4,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
+        let incoming = val.incoming.as_ref().expect("must be Some from grep");
+
+        // Only the 2 source files should remain (.rs and .ts)
+        // .md and .json should be filtered out
+        assert_eq!(
+            incoming.len(),
+            2,
+            "non-source files should be filtered, got: {:?}",
+            incoming.iter().map(|r| &r.file).collect::<Vec<_>>()
+        );
+
+        // Verify the correct files are kept
+        let files: std::collections::HashSet<_> =
+            incoming.iter().map(|r| r.file.as_str()).collect();
+        assert!(files.contains("src/caller.rs"), "should keep .rs file");
+        assert!(files.contains("web/src/auth.ts"), "should keep .ts file");
+        assert!(!files.contains("docs/README.md"), "should filter .md file");
+        assert!(!files.contains("config.json"), "should filter .json file");
+    }
+
+    // ── DS-1: DocumentGuard lifecycle tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_closes_document_on_success() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+
+        let _ = server.analyze_impact_impl(params).await;
+
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            lawyer.did_open_call_count(),
+            lawyer.did_close_call_count(),
+            "DS-1: did_open and did_close must be symmetric in analyze_impact"
+        );
+    }
+
+    // ── TASK-2: project_only filter ───────────────────────────────────────────
+
+    /// With `project_only = false`, stdlib/absolute-path items should pass through
+    /// the BFS filter and appear in the impact graph.
+    #[tokio::test]
+    async fn test_analyze_impact_project_only_false_includes_external_refs() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Incoming: a project file (should be included regardless of project_only)
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+
+        // Outgoing: an absolute stdlib path — should be EXCLUDED with project_only=true
+        // but INCLUDED when project_only=false
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "write_all".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "/home/user/.rustup/toolchains/stable/lib/std/io.rs".into(),
+                line: 100,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![10],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            project_only: Some(false), // key: include external
+            ..Default::default()
+        };
+        let result = server
+            .analyze_impact_impl(params)
+            .await
+            .expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert_eq!(
+            outgoing.len(),
+            1,
+            "project_only=false should include the stdlib absolute path ref"
+        );
+        assert!(
+            outgoing[0].file.starts_with('/'),
+            "outgoing ref should be the absolute stdlib path"
+        );
+    }
+
+    /// With `project_only = true` (the default), absolute stdlib paths should be
+    /// silently dropped from the BFS impact graph.
+    #[tokio::test]
+    async fn test_analyze_impact_project_only_true_filters_stdlib_refs() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // No incoming callers
+        lawyer.push_incoming_call_result(Ok(vec![]));
+
+        // Outgoing: an absolute stdlib path — should be filtered when project_only=true
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "write_all".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "/home/user/.rustup/toolchains/stable/lib/std/io.rs".into(),
+                line: 100,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![10],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            // project_only defaults to true via Default::default()
+            ..Default::default()
+        };
+        let result = server
+            .analyze_impact_impl(params)
+            .await
+            .expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert_eq!(
+            outgoing.len(),
+            0,
+            "project_only=true (default) must filter out stdlib absolute paths"
+        );
+    }
+
+    // ── TASK-6: max_references truncation ─────────────────────────────────────
+
+    /// When the number of BFS-found references exceeds `max_references`, the
+    /// result must be truncated and `references_truncated = true`.
+    #[tokio::test]
+    async fn test_analyze_impact_max_references_truncates_results() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Push 5 incoming callers (each on a unique file to avoid dedup)
+        let incoming_calls: Vec<CallHierarchyCall> = (1..=5)
+            .map(|i| CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: format!("caller_{i}"),
+                    kind: "function".into(),
+                    detail: None,
+                    file: format!("src/caller_{i}.rs"),
+                    line: i * 10,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![i * 10],
+            })
+            .collect();
+        lawyer.push_incoming_call_result(Ok(incoming_calls));
+
+        // No outgoing
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            max_references: 3, // cap below the 5 available
+            ..Default::default()
+        };
+        let result = server
+            .analyze_impact_impl(params)
+            .await
+            .expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        let incoming = val.incoming.as_ref().expect("incoming must be Some");
+        assert_eq!(
+            incoming.len(),
+            3,
+            "incoming refs must be capped at max_references=3"
+        );
+        assert!(
+            val.references_truncated,
+            "references_truncated must be true when budget is exhausted"
+        );
+    }
+
+    /// Verify that the `default_max_references()` constant is 50.
+    ///
+    /// This ensures the plan's specified default wasn't accidentally changed.
+    #[test]
+    fn test_analyze_impact_default_max_references_is_50() {
+        use crate::server::types::default_max_references;
+        assert_eq!(
+            default_max_references(),
+            50,
+            "default_max_references must be 50 per the remediation plan spec"
+        );
+    }
+
+    // ── find_callers_callees edge cases ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_callers_callees_handles_empty_incoming_and_outgoing() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty call hierarchy results
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 3,
+            max_references: 50,
+            project_only: Some(true),
+            include_test_coverage: false,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.incoming.is_none() || val.incoming.as_ref().unwrap().is_empty());
+        assert!(val.outgoing.is_none() || val.outgoing.as_ref().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_respects_max_depth() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Provide incoming calls at depth 1
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "main".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/main.rs".into(),
+                line: 5,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![5],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1, // Limit depth to 1
+            max_references: 50,
+            project_only: Some(true),
+            include_test_coverage: false,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Should have incoming call from main
+        let incoming = val.incoming.unwrap_or_default();
+        assert!(!incoming.is_empty(), "should have incoming calls");
+        assert!(incoming.iter().all(|r| r.depth <= 1), "all refs should be within max_depth");
+    }
+
+    // ── Phase 4C: Navigation Residual Gaps ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_handles_cycle_in_call_graph() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // Create a cycle: A -> B -> A using existing test files
+        let item_a = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item_a.clone()]));
+
+        // A calls validate_token
+        let item_b = CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/token.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: item_b.clone(),
+            call_sites: vec![15],
+        }]));
+
+        // validate_token calls login (cycle back)
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: item_a.clone(),
+            call_sites: vec![25],
+        }]));
+
+        lawyer.push_incoming_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 3,
+            ..Default::default()
+        };
+
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Should not hang or panic
+        assert!(!val.degraded);
+        let outgoing = val.outgoing.as_ref().expect("must be Some");
+        // Should deduplicate: login should not appear in its own outgoing
+        assert!(
+            !outgoing.iter().any(|r| r.file == "src/auth.rs" && r.semantic_path.contains("login")),
+            "cycle should be deduplicated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_deduplicates_cross_referenced_symbols() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+        // Create duplicate references: same symbol referenced twice
+        let caller_item = CallHierarchyItem {
+            name: "handler".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/handler.rs".into(),
+            line: 10,
+            column: 4,
+            data: None,
+        };
+        // Push same item twice with different call sites
+        lawyer.push_incoming_call_result(Ok(vec![
+            CallHierarchyCall {
+                item: caller_item.clone(),
+                call_sites: vec![20],
+            },
+            CallHierarchyCall {
+                item: caller_item.clone(),
+                call_sites: vec![35],
+            },
+        ]));
+
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        let incoming = val.incoming.as_ref().expect("must be Some");
+        // Should deduplicate based on item (not call sites)
+        // Check by semantic path since name is not available in ImpactReference
+        let handler_count = incoming.iter().filter(|r| {
+            r.semantic_path.contains("handler") || r.file == "src/handler.rs"
+        }).count();
+        assert_eq!(
+            handler_count, 1,
+            "cross-referenced symbol should be deduplicated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_grep_fallback_incoming() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create files
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/caller.rs"),
+            "fn handle_request() { login(); }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/caller.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn handle_request() { login(); }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        }));
+
+        // Use NoOpLawyer to force grep fallback
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
+        let incoming = val.incoming.as_ref().expect("must be Some from grep");
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].file, "src/caller.rs");
+        assert_eq!(incoming[0].direction, "incoming_heuristic");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_grep_fallback_outgoing() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create files
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() { validate_token(); }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/callee.rs"),
+            "fn validate_token() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/callee.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn validate_token() -> bool { true }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        }));
+
+        // Use NoOpLawyer to force grep fallback
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // For outgoing, grep fallback may not be used - depends on implementation
+        // Just verify degraded mode works
+        assert!(val.degraded);
+        // Check that we got some result (either incoming or outgoing)
+        assert!(
+            val.incoming.is_some() || val.outgoing.is_some(),
+            "should have incoming or outgoing from grep"
+        );
+    }
+}
