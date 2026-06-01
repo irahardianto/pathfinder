@@ -34,6 +34,7 @@ impl AstParser {
 
         // The timeout forces tree-sitter to give up on pathological inputs.
         // We set it to 500ms which is way more than enough for normal files.
+        #[allow(deprecated)]
         parser.set_timeout_micros(500_000);
 
         let tree = parser

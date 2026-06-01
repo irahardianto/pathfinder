@@ -189,3 +189,24 @@ async fn test_system_git_diff_fails_outside_repo() {
         "diff_name_only must fail outside a git repository"
     );
 }
+
+/// Verify that `diff_name_only` rejects targets starting with `-` to prevent
+/// argument injection. Git uses `--` to disambiguate revisions from paths,
+/// so we cannot safely use `--` here without breaking functionality.
+#[tokio::test]
+async fn test_system_git_diff_rejects_target_starting_with_dash() {
+    let repo = git_repo_with_initial_commit();
+    let root = repo.path();
+    let git = SystemGit;
+
+    let err = git
+        .diff_name_only(root, "-foo")
+        .await
+        .expect_err("should reject -foo");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("cannot start with '-'"),
+        "error should mention dash rejection, got: {err}"
+    );
+}

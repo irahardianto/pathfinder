@@ -35,7 +35,7 @@ command-group = { version = "5", features = ["with-tokio"] }
 which = "7"
 # ST-2: Manifest validation — parse TOML marker files (Cargo.toml, pyproject.toml)
 # before spawning LSP processes to fail fast on malformed manifests.
-toml = "0.8"
+toml = "1.1"
 
 # prctl(PR_SET_PDEATHSIG) — kernel-level parent-death signal for Unix.
 # Ensures the LSP child is killed even if Pathfinder is SIGKILLed (Drop
