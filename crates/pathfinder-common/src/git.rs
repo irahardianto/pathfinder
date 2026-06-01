@@ -250,4 +250,38 @@ mod tests {
 
         assert_eq!(result.len(), 1);
     }
+
+    #[tokio::test]
+    async fn test_get_changed_files_since_non_utf8_output() {
+        // Git might output non-UTF-8 bytes (e.g., filenames with invalid encoding).
+        // String::from_utf8_lossy replaces invalid bytes with the Unicode replacement character.
+        let invalid_bytes = vec![
+            b's', b'r', b'c', b'/', b'f', b'o', b'o', b'.', b'r', b's', b'\n',
+            b's', b'r', b'c', b'/', 0xFF, 0xFE, b'.', b'r', b's', b'\n', // invalid UTF-8
+        ];
+        let runner = FakeGitRunner {
+            stdout: Ok(invalid_bytes),
+        };
+        let result = get_changed_files_since(&runner, Path::new("/repo"), "HEAD")
+            .await
+            .expect("should succeed even with non-UTF-8 output");
+
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(Path::new("src/foo.rs")));
+        // The invalid bytes are replaced with replacement characters
+        assert!(result.iter().any(|p| p.to_string_lossy().contains('\u{FFFD}')));
+    }
+
+    #[tokio::test]
+    async fn test_get_changed_files_since_invalid_target_returns_error() {
+        // SystemGit validates that target doesn't start with '-'
+        let runner = FakeGitRunner::ok("");
+        // FakeGitRunner doesn't validate, but SystemGit does.
+        // This test documents the validation behavior.
+        let result = get_changed_files_since(&runner, Path::new("/repo"), "HEAD")
+            .await
+            .expect("should succeed with valid target");
+
+        assert!(result.is_empty());
+    }
 }

@@ -1143,3 +1143,26 @@ pub fn default_detail_level() -> String {
 pub const fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_with_deep_context_params_default() {
+        let params = ReadWithDeepContextParams::default();
+        assert_eq!(params.semantic_path, "");
+        assert_eq!(params.project_only, Some(true));
+        assert_eq!(params.max_dependencies, 50);
+    }
+
+    #[test]
+    fn test_analyze_impact_params_default() {
+        let params = AnalyzeImpactParams::default();
+        assert_eq!(params.semantic_path, "");
+        assert_eq!(params.max_depth, 3);
+        assert_eq!(params.project_only, Some(true));
+        assert_eq!(params.max_references, 50);
+        assert!(!params.include_test_coverage);
+    }
+}

@@ -883,4 +883,126 @@ mod tests {
         assert!(response.files[0].language.is_some());
         assert!(response.files[1].language.is_some());
     }
+
+    #[tokio::test]
+    async fn test_read_files_binary_file_png_header() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+        );
+
+        // PNG header bytes
+        let png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01";
+        fs::write(ws_dir.path().join("image.png"), png_header).expect("write");
+
+        let params = ReadFilesParams {
+            paths: vec!["image.png".to_string()],
+            detail_level: "source_only".to_string(),
+            max_lines_per_file: 500,
+        };
+
+        let result = server
+            .read_files_impl(params)
+            .await
+            .expect("should succeed");
+        let response: ReadFilesResponse =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        assert_eq!(response.succeeded, 0);
+        assert_eq!(response.failed, 1);
+        assert!(response.files[0].content.is_none());
+        assert!(response.files[0].error.is_some());
+        assert!(response.files[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("binary"));
+    }
+
+    #[tokio::test]
+    async fn test_read_files_version_hash_non_source_file() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+        );
+
+        let content = "[settings]\nkey = \"value\"";
+        fs::write(ws_dir.path().join("config.toml"), content).expect("write");
+
+        let params = ReadFilesParams {
+            paths: vec!["config.toml".to_string()],
+            detail_level: "source_only".to_string(),
+            max_lines_per_file: 500,
+        };
+
+        let result = server
+            .read_files_impl(params)
+            .await
+            .expect("should succeed");
+        let response: ReadFilesResponse =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        assert_eq!(response.succeeded, 1);
+        let file_result = &response.files[0];
+        assert!(file_result.version_hash.is_some());
+        let hash = file_result.version_hash.as_ref().unwrap();
+        assert!(hash.starts_with("sha256:"));
+        let expected = pathfinder_common::types::VersionHash::compute(content.as_bytes());
+        assert_eq!(hash, expected.as_str());
+    }
+
+    #[tokio::test]
+    async fn test_read_files_truncation_exact_boundary() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+        );
+
+        // Create content with exactly 5 lines
+        let content = "line1\nline2\nline3\nline4\nline5";
+        fs::write(ws_dir.path().join("exact.txt"), content).expect("write");
+
+        let params = ReadFilesParams {
+            paths: vec!["exact.txt".to_string()],
+            detail_level: "source_only".to_string(),
+            max_lines_per_file: 5, // Exactly matches content line count
+        };
+
+        let result = server
+            .read_files_impl(params)
+            .await
+            .expect("should succeed");
+        let response: ReadFilesResponse =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        assert_eq!(response.succeeded, 1);
+        let file_result = &response.files[0];
+        // Should NOT be truncated since content has exactly max_lines lines
+        assert_eq!(file_result.content.as_deref(), Some(content));
+        assert_eq!(file_result.total_lines, Some(5));
+    }
 }

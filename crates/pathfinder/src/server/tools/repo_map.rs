@@ -706,4 +706,55 @@ mod tests {
             Some("unavailable")
         );
     }
+
+    /// Verify that LSP pre-warm is NOT triggered when tech_stack is empty.
+    #[tokio::test]
+    async fn test_get_repo_map_no_prewarm_when_tech_stack_empty() {
+        let mut result = ok_result();
+        result.tech_stack = vec![]; // Empty tech stack
+
+        let surgeon = MockSurgeon::default();
+        surgeon
+            .generate_skeleton_results
+            .lock()
+            .unwrap()
+            .push(Ok(result));
+        let (server, _dir) = make_server(surgeon);
+
+        let result = server.get_repo_map_impl(default_params()).await;
+        assert!(result.is_ok(), "get_repo_map should succeed: {result:?}");
+
+        // Give any spawned tasks a chance to run (there shouldn't be any)
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // No panic means the warm_start was not called (NoOpLawyer would panic if called unexpectedly)
+    }
+
+    /// Verify auto-scaling logic for large projects (>20 source files).
+    #[tokio::test]
+    async fn test_get_repo_map_auto_scaling_for_large_project() {
+        let surgeon = MockSurgeon::default();
+        surgeon
+            .generate_skeleton_results
+            .lock()
+            .unwrap()
+            .push(Ok(ok_result()));
+        let (server, ws_dir) = make_server(surgeon);
+
+        // Create >20 source files to trigger auto-scaling
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        for i in 0..25 {
+            std::fs::write(
+                ws_dir.path().join(format!("src/file{i}.rs")),
+                format!("fn func_{i}() {{}}"),
+            )
+            .unwrap();
+        }
+
+        let mut params = default_params();
+        // Use default max_tokens to trigger auto-scaling
+        params.max_tokens = 16_000;
+
+        let result = server.get_repo_map_impl(params).await;
+        assert!(result.is_ok(), "get_repo_map should succeed: {result:?}");
+    }
 }

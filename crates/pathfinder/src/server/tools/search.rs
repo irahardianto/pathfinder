@@ -934,4 +934,74 @@ mod tests {
             "hint must be absent when results are present"
         );
     }
+
+    /// Verify that `next_offset` is populated when search results are truncated.
+    #[tokio::test]
+    async fn test_search_next_offset_populated_when_truncated() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create multiple files with matches to exceed max_results
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        for i in 0..5 {
+            std::fs::write(
+                ws_dir.path().join(format!("src/file{i}.rs")),
+                format!("fn findme_{i}() {{ findme(); }}\n"),
+            )
+            .unwrap();
+        }
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        // Pre-configure surgeon for enrichment calls (5 matches expected)
+        for _ in 0..5 {
+            surgeon
+                .enclosing_symbol_results
+                .lock()
+                .unwrap()
+                .push(Ok(None));
+            surgeon
+                .enclosing_symbol_detail_results
+                .lock()
+                .unwrap()
+                .push(Ok(None));
+            surgeon
+                .node_type_at_position_results
+                .lock()
+                .unwrap()
+                .push(Ok("code".to_string()));
+        }
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = SearchCodebaseParams {
+            query: "findme".to_owned(),
+            is_regex: false,
+            path_glob: "**/*.rs".to_owned(),
+            exclude_glob: String::default(),
+            offset: 0,
+            max_results: 2, // Small limit to force truncation
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            filter_mode: pathfinder_common::types::FilterMode::All,
+        };
+        let result = server.search_codebase_impl(params).await;
+        let response = result.expect("search should succeed");
+
+        // Should be truncated since we have 5 matches but max_results=2
+        assert!(response.0.truncated, "should be truncated");
+        assert!(
+            response.0.next_offset.is_some(),
+            "next_offset must be present when truncated"
+        );
+        let next_offset = response.0.next_offset.unwrap();
+        assert_eq!(
+            next_offset, 2,
+            "next_offset should be offset + returned_count"
+        );
+    }
 }
