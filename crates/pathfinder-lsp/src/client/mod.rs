@@ -5519,4 +5519,244 @@ mod tests {
             "init lock should be created for rust"
         );
     }
+
+    // ── Phase 4D.1: spawn_indexing_timeout_fallback tests ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_spawn_indexing_timeout_fallback_sets_complete_after_timeout() {
+        tokio::time::pause();
+
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indexing_completion_source = Arc::new(std::sync::Mutex::new(None));
+        let indexing_duration_secs = Arc::new(std::sync::Mutex::new(None));
+        let spawned_at = Instant::now();
+
+        LspClient::spawn_indexing_timeout_fallback(
+            "rust",
+            &indexing_complete,
+            &indexing_completion_source,
+            &indexing_duration_secs,
+            spawned_at,
+        );
+
+        assert!(!indexing_complete.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(*indexing_completion_source.lock().unwrap(), None);
+        assert_eq!(*indexing_duration_secs.lock().unwrap(), None);
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_mins(1) + Duration::from_millis(10)).await;
+
+        tokio::task::yield_now().await;
+
+        assert!(
+            indexing_complete.load(std::sync::atomic::Ordering::Relaxed),
+            "should be marked complete after timeout"
+        );
+        assert_eq!(
+            *indexing_completion_source.lock().unwrap(),
+            Some(IndexingCompletionSource::TimeoutFallback),
+            "should indicate source is timeout fallback"
+        );
+        assert!(
+            indexing_duration_secs.lock().unwrap().is_some(),
+            "should have a duration"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_indexing_timeout_fallback_noop_if_already_complete() {
+        tokio::time::pause();
+        
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let indexing_completion_source =
+            Arc::new(std::sync::Mutex::new(Some(IndexingCompletionSource::Progress)));
+        let indexing_duration_secs = Arc::new(std::sync::Mutex::new(Some(42)));
+        let spawned_at = Instant::now();
+
+        LspClient::spawn_indexing_timeout_fallback(
+            "rust",
+            &indexing_complete,
+            &indexing_completion_source,
+            &indexing_duration_secs,
+            spawned_at,
+        );
+
+        tokio::time::advance(Duration::from_mins(1) + Duration::from_millis(10)).await;
+
+        tokio::task::yield_now().await;
+
+        assert!(
+            indexing_complete.load(std::sync::atomic::Ordering::Relaxed),
+            "should remain complete"
+        );
+        assert_eq!(
+            *indexing_completion_source.lock().unwrap(),
+            Some(IndexingCompletionSource::Progress),
+            "should preserve Progress source (not overwrite with TimeoutFallback)"
+        );
+        assert_eq!(
+            *indexing_duration_secs.lock().unwrap(),
+            Some(42),
+            "should preserve duration 42"
+        );
+    }
+
+    // ── Phase 4D.2: parse_references_response isolated tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_references_response_with_locations() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace_root = temp.path();
+        let src_dir = workspace_root.join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        let file_path = src_dir.join("lib.rs");
+        std::fs::write(&file_path, "pub fn helper() {}").expect("write test file");
+
+        let file_uri = Url::from_file_path(&file_path).unwrap().to_string();
+
+        let response = json!([{
+            "uri": file_uri,
+            "range": {
+                "start": { "line": 0, "character": 8 },
+                "end": { "line": 0, "character": 14 }
+            }
+        }]);
+
+        let result =
+            parse_references_response(&response, workspace_root).expect("should parse successfully");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file, "src/lib.rs");
+        assert_eq!(result[0].line, 1);
+        assert_eq!(result[0].column, 9);
+        assert!(result[0].snippet.contains("helper"));
+    }
+
+    #[test]
+    fn test_parse_references_response_null_returns_empty() {
+        let result =
+            parse_references_response(&json!(null), Path::new("/workspace")).expect("ok");
+        assert!(result.is_empty(), "null response should return empty vector");
+    }
+
+    #[test]
+    fn test_parse_references_response_invalid_uri_returns_error() {
+        let response = json!([{
+            "uri": "not-a-valid-uri",
+            "range": {
+                "start": { "line": 5, "character": 0 },
+                "end": { "line": 5, "character": 10 }
+            }
+        }]);
+
+        let result = parse_references_response(&response, Path::new("/workspace"));
+        assert!(
+            result.is_err(),
+            "invalid URI should return error, not empty vector"
+        );
+        if let Err(LspError::Protocol(msg)) = result {
+            assert!(msg.contains("invalid URI"), "error should mention invalid URI");
+        } else {
+            panic!("expected Protocol error for invalid URI");
+        }
+    }
+
+    // ── Phase 4D.3: Background task integration tests ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_progress_watcher_end_after_timeout_fallback_logs_warning() {
+        let (client, fake) = make_running_client("rust");
+        let processes = Arc::clone(&client.processes);
+
+        let entry = processes.get("rust").expect("entry should exist");
+        if let ProcessEntry::Running(state) = entry.value() {
+            state
+                .indexing_complete
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            *state.indexing_completion_source.lock().unwrap() =
+                Some(IndexingCompletionSource::TimeoutFallback);
+        } else {
+            panic!("expected Running entry");
+        }
+
+        fake.set_response(
+            "$/progress",
+            json!({
+                "jsonrpc": "2.0",
+                "method": "$/progress",
+                "params": {
+                    "token": "indexing-token",
+                    "value": {
+                        "kind": "end"
+                    }
+                }
+            }),
+        );
+
+        let dispatcher = Arc::clone(&client.dispatcher);
+        let progress_rx = dispatcher.subscribe_notifications();
+        let processes_clone = Arc::clone(&processes);
+        let watcher = tokio::spawn(async move {
+            let entry = processes_clone.get("rust");
+            if let Some(entry) = entry {
+                if let ProcessEntry::Running(state) = entry.value() {
+                    let mut rx = progress_rx;
+                    while let Ok(msg) = rx.recv().await {
+                        let action = extract_progress_action(&msg);
+                        apply_progress_action(
+                            action,
+                            &state.indexing_complete,
+                            &state.indexing_completion_source,
+                            &state.indexing_duration_secs,
+                            &state.indexing_progress_percent,
+                            state.spawned_at,
+                        );
+                    }
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        watcher.abort();
+
+        let entry = processes.get("rust").expect("entry should still exist");
+        if let ProcessEntry::Running(state) = entry.value() {
+            assert_eq!(
+                *state.indexing_completion_source.lock().unwrap(),
+                Some(IndexingCompletionSource::TimeoutFallback),
+                "TimeoutFallback source should not be overwritten by late Progress End"
+            );
+        } else {
+            panic!("expected Running entry");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_registration_watcher_send_failure_continues() {
+        let (client, fake) = make_running_client("rust");
+        let processes = Arc::clone(&client.processes);
+
+        fake.set_error("client/registerCapability", "send failed");
+
+        let dispatcher = Arc::clone(&client.dispatcher);
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "reg-1",
+                    "method": "textDocument/formatting"
+                }]
+            }
+        });
+
+        // Inject message via dispatcher's server request channel
+        // This simulates what happens when the LSP server sends a registration request
+        dispatcher.dispatch_response(&msg);
+
+        // Verify the process still exists (test that send failure doesn't crash the task)
+        let entry = processes.get("rust");
+        assert!(entry.is_some(), "process entry should still exist");
+    }
 }

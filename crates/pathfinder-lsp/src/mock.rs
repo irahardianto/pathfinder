@@ -61,7 +61,7 @@ impl Drop for MockDocumentLease {
 // ── Fixture types ─────────────────────────────────────────────────────────────
 
 /// Configured result for `goto_definition`.
-type GotoDefinitionFixture = Arc<Mutex<Option<Result<Option<DefinitionLocation>, String>>>>;
+type GotoDefinitionFixture = Arc<Mutex<Option<Result<Option<DefinitionLocation>, LspError>>>>;
 
 /// Configured error for `did_open`. `None` = return `Ok(())`.
 type DidOpenErrorFixture = Arc<Mutex<Option<LspError>>>;
@@ -73,10 +73,10 @@ type PrepareCallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyItem>, Ls
 type CallHierarchyQueue = Arc<Mutex<Vec<Result<Vec<CallHierarchyCall>, LspError>>>>;
 
 /// Configured result for `references`.
-type ReferencesFixture = Arc<Mutex<Option<Result<Vec<ReferenceLocation>, String>>>>;
+type ReferencesFixture = Arc<Mutex<Option<Result<Vec<ReferenceLocation>, LspError>>>>;
 
 /// Configured result for `goto_implementation`.
-type GotoImplementationFixture = Arc<Mutex<Option<Result<Vec<DefinitionLocation>, String>>>>;
+type GotoImplementationFixture = Arc<Mutex<Option<Result<Vec<DefinitionLocation>, LspError>>>>;
 
 /// Configured result for `capability_status`.
 type CapabilityStatusFixture =
@@ -159,7 +159,7 @@ impl MockLawyer {
     // ── goto_definition ───────────────────────────────────────────────────────
 
     /// Set the result to return from the next `goto_definition()` call.
-    pub fn set_goto_definition_result(&self, result: Result<Option<DefinitionLocation>, String>) {
+    pub fn set_goto_definition_result(&self, result: Result<Option<DefinitionLocation>, LspError>) {
         let mut guard = self
             .goto_definition_result
             .lock()
@@ -230,7 +230,15 @@ impl MockLawyer {
     // ── references ─────────────────────────────────────────────────────────────
 
     /// Set the result to return from the next `references()` call.
+    /// Accepts String for backwards compatibility, converts to LspError::Protocol.
     pub fn set_references_result(&self, result: Result<Vec<ReferenceLocation>, String>) {
+        let lsp_result = result.map_err(LspError::Protocol);
+        self.set_references_lsp_error(lsp_result);
+    }
+
+    /// Set the result to return from the next `references()` call.
+    /// Accepts LspError directly, allowing tests to exercise all error variants.
+    pub fn set_references_lsp_error(&self, result: Result<Vec<ReferenceLocation>, LspError>) {
         let mut guard = self
             .references_result
             .lock()
@@ -259,7 +267,7 @@ impl MockLawyer {
     // ── goto_implementation ──────────────────────────────────────────────────────
 
     /// Set the result to return from the next `goto_implementation()` call.
-    pub fn set_goto_implementation_result(&self, result: Result<Vec<DefinitionLocation>, String>) {
+    pub fn set_goto_implementation_result(&self, result: Result<Vec<DefinitionLocation>, LspError>) {
         let mut guard = self
             .goto_implementation_result
             .lock()
@@ -350,7 +358,7 @@ impl Lawyer for MockLawyer {
 
         match next {
             Some(Ok(result)) => Ok(result),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            Some(Err(e)) => Err(e),
             None => Ok(None),
         }
     }
@@ -406,7 +414,7 @@ impl Lawyer for MockLawyer {
 
         match next {
             Some(Ok(result)) => Ok(result),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            Some(Err(e)) => Err(e),
             None => Ok(vec![]),
         }
     }
@@ -436,7 +444,7 @@ impl Lawyer for MockLawyer {
 
         match next {
             Some(Ok(result)) => Ok(result),
-            Some(Err(msg)) => Err(LspError::Protocol(msg)),
+            Some(Err(e)) => Err(e),
             None => Ok(vec![]),
         }
     }
