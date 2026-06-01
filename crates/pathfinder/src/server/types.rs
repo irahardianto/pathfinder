@@ -156,6 +156,9 @@ pub struct SymbolOverviewResponse {
     /// LSP readiness at the time of the call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_readiness: Option<String>,
+    /// Whether warm start is in progress (set on timeout only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_start_in_progress: Option<bool>,
 }
 
 /// Source code block for `symbol_overview`.
