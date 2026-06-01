@@ -3859,7 +3859,7 @@ mod tests {
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{SymbolScope, WorkspaceRoot};
-    use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem};
+    use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem, ReferenceLocation};
     use pathfinder_lsp::{DefinitionLocation, MockLawyer};
     use pathfinder_search::MockScout;
     use pathfinder_treesitter::mock::MockSurgeon;
@@ -7504,5 +7504,299 @@ def process():
         assert!(kw.contains(&"for"), "default must contain 'for'");
         assert!(kw.contains(&"while"), "default must contain 'while'");
         assert!(kw.contains(&"return"), "default must contain 'return'");
+    }
+
+    // ── get_definition grep fallback ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_definition_grep_fallback_when_lsp_returns_none() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // MockLawyer with no result set returns Ok(None) by default
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // Configure MockScout to return a search result for the grep fallback
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth.rs".to_owned(),
+                line: 10,
+                column: 4,
+                content: "pub fn login() -> bool {".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: Some("src/auth.rs::login".to_owned()),
+                is_definition: Some(true),
+                version_hash: "hash".to_owned(),
+                known: None,
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            lawyer,
+        );
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let call_res = result.expect("should succeed via grep fallback");
+        let val = unpack_def(call_res);
+
+        assert_eq!(val.file, "src/auth.rs");
+        assert_eq!(val.line, 10);
+        assert!(val.degraded, "should be degraded when using grep fallback");
+        assert!(
+            val.degraded_reason.is_some(),
+            "degraded_reason must be set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_definition_grep_fallback_when_no_lsp() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // NoOpLawyer returns NoLspAvailable for all methods
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+
+        // Configure MockScout to return a search result for the grep fallback
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth.rs".to_owned(),
+                line: 10,
+                column: 4,
+                content: "pub fn login() -> bool {".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: Some("src/auth.rs::login".to_owned()),
+                is_definition: Some(true),
+                version_hash: "hash".to_owned(),
+                known: None,
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            lawyer,
+        );
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let call_res = result.expect("should succeed via grep fallback");
+        let val = unpack_def(call_res);
+
+        assert_eq!(val.file, "src/auth.rs");
+        assert_eq!(val.line, 10);
+        assert!(val.degraded, "should be degraded when using grep fallback");
+    }
+
+    // ── find_callers_callees edge cases ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_callers_callees_handles_empty_incoming_and_outgoing() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty call hierarchy results
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 3,
+            max_references: 50,
+            project_only: Some(true),
+            include_test_coverage: false,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.incoming.is_none() || val.incoming.as_ref().unwrap().is_empty());
+        assert!(val.outgoing.is_none() || val.outgoing.as_ref().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_respects_max_depth() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Provide incoming calls at depth 1
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "main".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/main.rs".into(),
+                line: 5,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![5],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1, // Limit depth to 1
+            max_references: 50,
+            project_only: Some(true),
+            include_test_coverage: false,
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Should have incoming call from main
+        let incoming = val.incoming.unwrap_or_default();
+        assert!(!incoming.is_empty(), "should have incoming calls");
+        assert!(incoming.iter().all(|r| r.depth <= 1), "all refs should be within max_depth");
+    }
+
+    // ── find_all_references edge cases ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_all_references_lsp_returns_references() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_references_result(Ok(vec![
+            ReferenceLocation {
+                file: "src/auth.rs".into(),
+                line: 10,
+                column: 4,
+                snippet: "fn login() {".into(),
+            },
+            ReferenceLocation {
+                file: "src/main.rs".into(),
+                line: 20,
+                column: 8,
+                snippet: "login();".into(),
+            },
+        ]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        let refs = val.references.unwrap_or_default();
+        assert_eq!(refs.len(), 2, "should have 2 references");
+        assert!(!val.degraded, "should not be degraded when LSP works");
+    }
+
+    #[tokio::test]
+    async fn test_find_all_references_respects_max_references() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Return 5 references
+        let refs: Vec<_> = (0..5)
+            .map(|i| ReferenceLocation {
+                file: format!("src/file{i}.rs"),
+                line: (i + 1) as u32,
+                column: 1,
+                snippet: format!("// reference {i}"),
+            })
+            .collect();
+        lawyer.set_references_result(Ok(refs));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 3, // Limit to 3
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        let refs = val.references.unwrap_or_default();
+        assert!(
+            refs.len() <= 3,
+            "should respect max_results, got {}",
+            refs.len()
+        );
     }
 }
