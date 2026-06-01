@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.7.1...pathfinder-mcp-treesitter-v0.8.0) - 2026-06-01
+
+### Added
+
+- *(agent-experience)* add ActionableGuidance, is_definition enrichment, and warm_start_complete
+
+### Fixed
+
+- Complete spec improvements and bug fixes for pathfinder navigation
+
+### Other
+
+- update dependencies and improve code formatting
+
 ## [0.7.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.7.0...pathfinder-mcp-treesitter-v0.7.1) - 2026-05-10
 
 ### Fixed

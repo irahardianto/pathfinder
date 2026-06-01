@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.5.2...pathfinder-mcp-common-v0.6.0) - 2026-06-01
+
+### Added
+
+- *(pathfinder)* complete agent-experience-remediation patch (26 specs, 5 epics)
+- *(agent-experience)* add ActionableGuidance, is_definition enrichment, and warm_start_complete
+- *(pathfinder)* PATCH-003 repo_map LSP status + PATCH-002 search hint + PATCH-001 grep fallback extraction
+
+### Fixed
+
+- Complete spec improvements and bug fixes for pathfinder navigation
+
+### Other
+
+- apply cargo fmt formatting
+
 ## [0.5.2](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.5.1...pathfinder-mcp-common-v0.5.2) - 2026-05-10
 
 ### Added

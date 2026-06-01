@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/irahardianto/pathfinder/compare/v0.9.1...v0.10.0) - 2026-06-01
+
+### Added
+
+- *(pathfinder)* complete agent-experience-remediation patch (26 specs, 5 epics)
+- *(pathfinder)* add find_symbol and read_files MCP tools (specs 009, 010)
+- *(pathfinder)* add symbol_overview composite tool
+- add find_symbol and read_files tools with agent-experience spec docs
+- *(agent-experience)* add ActionableGuidance, is_definition enrichment, and warm_start_complete
+- *(pathfinder)* PATCH-003 repo_map LSP status + PATCH-002 search hint + PATCH-001 grep fallback extraction
+- *(lsp)* PATCH-004 LSP warm start tracking and improved diagnostics
+
+### Fixed
+
+- *(lsp-hardening)* resolve gaps and bugs from LSP hardening audit
+- *(lsp-hardening)* [**breaking**] address critical bugs and gaps from LSP hardening audit
+- *(search)* add line index guard to is_definition check
+- *(navigation)* paginate find_all_references correctly
+- *(tests)* resolve 4 failing tests in navigation and repo_map modules
+- Complete spec improvements and bug fixes for pathfinder navigation
+- *(pathfinder)* find_symbol/read_files type and fallback fixes
+- *(pathfinder)* search hint wording improvements
+- *(pathfinder)* derive_lsp_status should match lsp_health_impl logic
+- *(lsp)* populate indexing_progress_percent from workDoneProgress events
+- *(pathfinder-lsp)* warm_start_complete flag not set when zero languages
+
+### Other
+
+- update dependencies and improve code formatting
+- *(server)* add error format examples to semantic-path tool descriptions
+- apply cargo fmt formatting across workspace
+- *(readme)* update tool count from 10 to 13 and sync documentation
+- *(mcp)* improve tool descriptions for find_symbol, read_files, symbol_overview, find_all_references, lsp_health, find_callers_callees
+- apply cargo fmt formatting
+- *(pathfinder)* extract grep_reference_fallback helper (specs 001, 007, 008)
+- sync documentation with v0.9.1 codebase state
+- *(lsp)* add warm_start_complete flag tests and fix doctest reporting
+
 ## [0.9.1](https://github.com/irahardianto/pathfinder/compare/v0.9.0...v0.9.1) - 2026-05-10
 
 ### Added

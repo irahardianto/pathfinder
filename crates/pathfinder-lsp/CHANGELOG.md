@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.7.1...pathfinder-mcp-lsp-v0.8.0) - 2026-06-01
+
+### Added
+
+- *(pathfinder)* complete agent-experience-remediation patch (26 specs, 5 epics)
+- *(agent-experience)* add ActionableGuidance, is_definition enrichment, and warm_start_complete
+- *(lsp)* PATCH-004 LSP warm start tracking and improved diagnostics
+
+### Fixed
+
+- *(lsp-hardening)* resolve gaps and bugs from LSP hardening audit
+- *(lsp-hardening)* [**breaking**] address critical bugs and gaps from LSP hardening audit
+- *(lsp)* populate indexing_progress_percent from workDoneProgress events
+- *(pathfinder-lsp)* warm_start_complete flag not set when zero languages
+
+### Other
+
+- update dependencies and improve code formatting
+- apply cargo fmt formatting across workspace
+- *(lsp)* add warm_start_complete flag tests and fix doctest reporting
+
 ## [0.7.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.7.0...pathfinder-mcp-lsp-v0.7.1) - 2026-05-10
 
 ### Added
