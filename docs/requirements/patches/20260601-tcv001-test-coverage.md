@@ -843,99 +843,910 @@ test_request_with_killed_transport_returns_connection_lost
 
 ---
 
-### Phase 4: LSP Client Method Coverage (2-3 sessions)
+### Phase 4: Verification + Residual Gap Closure (3-4 sessions)
 
-Using the infrastructure from Phase 3, systematically cover `client/mod.rs` methods.
+Using Phase 3 infrastructure, close remaining coverage gaps in navigation tools and LSP client.
 
-**Work order (by dependency chain, bottom-up):**
+Phase 2 left `symbol_overview_impl` (0 tests) and `find_all_references_impl` (under-tested).
+Phase 3 left background task loops and `spawn_indexing_timeout_fallback` without direct tests.
 
-**4.1 Pure extraction targets (no transport needed)**
+Split into 4 progressive subphases. Each independently committable and verifiable.
 
-These can be done immediately without Phase 3 infrastructure:
+**Current state at Phase 4 start:**
 
-- `indexing_timeout_for_language()` -- already tested, verify coverage
-- `validation_status_from_parts()` -- already tested, verify coverage
-- `parse_definition_response()` -- already tested, verify coverage
-- `parse_call_hierarchy_*` -- already tested, verify coverage
+| File | Existing Tests | Known Gaps |
+|---|---|---|
+| `navigation.rs` | 103 | `symbol_overview_impl` (0 tests), `find_all_references_impl` (2 tests, missing degraded/error/pagination) |
+| `client/mod.rs` | 125 | `spawn_indexing_timeout_fallback` (0 tests), background task loops (helpers tested, loops untested), `parse_references_response` (no isolated tests) |
 
-If these still show as uncovered, the issue is that they're called inline (not via the public test-exposed versions). Check if the uncovered lines are in private helper variants.
+---
 
-**4.2 Process management (needs Phase 3 infrastructure)**
+#### Subphase 4A: `symbol_overview_impl` Coverage (1 session, HIGHEST priority)
 
-Now simplified by Phase 3's FakeTransport:
-- `ensure_process()` -- test spawn, unavailable cooldown, concurrent detection (covered in 3E)
-- `start_process()` -- test initialization handshake, error handling (covered in 3E)
-- `force_respawn()` -- test kill + restart cycle (covered in 3D)
-- `detect_concurrent_lsp()` -- test `/proc` scanning (Linux-only, covered in 3E)
+**Goal:** Cover `symbol_overview_impl` (lines 2893-3135, ~243 lines of orchestration logic).
+Zero tests exist. This is the largest single uncovered function in navigation.rs.
 
-**4.3 Document operations (covered in Phase 3C)**
+**Why first:** `symbol_overview_impl` orchestrates `analyze_impact_impl` + `find_all_references_impl`
+and contains deserialization fallback logic with `debug_assert` guards that are completely untested.
 
-- `did_open()` / `did_close()` -- covered
-- `open_document()` -- `DocumentGuard` RAII lifecycle -- covered
-- `DocumentGuard` drop sends `did_close` -- covered
+**Files to modify:**
+- `crates/pathfinder/src/server/tools/navigation.rs` -- add tests to `mod tests`
 
-**4.4 LSP request methods (covered in Phase 3D)**
+**Test infrastructure:** Same pattern as existing navigation tests. Use `make_server_with_lawyer(surgeon, lawyer)` for LSP paths, or `PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, NoOpLawyer)` for degraded paths. Deserialize `SymbolOverviewResponse` from `structured_content`.
 
-- `goto_definition()` -- covered
-- `call_hierarchy_prepare()` / `incoming()` / `outgoing()` -- covered
-- `references()` / `goto_implementation()` -- covered
-- `capability_status()` -- covered
-- `missing_languages()` -- trivially tested, verify coverage
+**4A.1 Happy path tests (3 tests)**
 
-**4.5 Lawyer trait methods (covered in Phase 3D)**
+```
+test_symbol_overview_aggregates_callers_callees_references
+test_symbol_overview_no_impact_no_references_shows_unavailable
+test_symbol_overview_with_implementations_and_references
+```
 
-The `impl Lawyer for LspClient` block delegates to the internal methods above. After covering those in Phase 3, the lawyer methods are covered automatically.
+Each test:
+1. Create `MockSurgeon` + `MockLawyer` configured for `call_hierarchy_prepare` + `call_hierarchy_incoming`/`outgoing` + `references` + `goto_implementation`
+2. Call `server.symbol_overview_impl(params).await`
+3. Deserialize `SymbolOverviewResponse` from `structured_content`
+4. Assert callers/callees/references counts, degraded=false, lsp_readiness="ready"
 
-Phase 4 is now primarily a **verification phase** to confirm coverage and fill any remaining gaps.
+Coverage targets:
+- Source extraction via `read_symbol_scope_enriched` (L2921-2930)
+- Impact aggregation + `ImpactSummary` construction (L2976-3018)
+- References aggregation (L3032-3062)
+- Text formatting: source_block + impact_block + refs_block + degraded_block (L3095-3128)
+- `SymbolOverviewResponse` construction (L3084-3093)
 
-**Completion criteria for Phase 4:**
-- All methods in `client/mod.rs` have >80% line coverage
-- DeepSource LCV should reach ~93-95%
+**4A.2 Degraded path tests (3 tests)**
+
+```
+test_symbol_overview_degraded_when_lsp_unavailable
+test_symbol_overview_degraded_on_lsp_error
+test_symbol_overview_partial_degradation_impact_fails_refs_ok
+```
+
+Pattern: Use `NoOpLawyer` for NoLspAvailable, `MockLawyer` with error for LSP error paths.
+The partial degradation test: `analyze_impact_impl` returns degraded, `find_all_references_impl` returns ok.
+
+Coverage targets:
+- `Err(_)` branch for impact_result (L3021)
+- `Err(_)` branch for refs_result (L3061)
+- Degraded flag merging: `impact_degraded || refs_degraded` (L3066)
+- Degraded reason priority: impact first, then refs (L3067-3073)
+- `lsp_readiness` based on degraded_reason variant (L3075-3082)
+- Degraded text formatting (L3117-3124)
+
+**4A.3 Validation + edge case tests (3 tests)**
+
+```
+test_symbol_overview_rejects_empty_semantic_path
+test_symbol_overview_file_not_found_returns_error
+test_symbol_overview_respects_max_callers_callees_limit
+```
+
+Coverage targets:
+- `parse_semantic_path` + `require_symbol_target` validation (L2905-2906)
+- Sandbox check (L2908-2910)
+- File existence check (L2912-2919)
+- `max_callers_callees` parameter forwarding to `analyze_impact_impl` (L2969)
+- `open_document` error path -> `None` doc_guard (L2955-2963)
+
+**Completion criteria for 4A:**
+- 9 new tests pass
+- `symbol_overview_impl` has >90% line coverage
+- All existing tests still pass
+- `cargo clippy -- -D warnings` passes
+- DeepSource LCV should reach ~90.5-91%
+
+---
+
+#### Subphase 4B: `find_all_references_impl` Full Coverage (1 session)
+
+**Goal:** Cover remaining branches in `find_all_references_impl` (lines 2540-2886).
+Currently only 2 tests (happy path + max_results). Missing: degraded paths, error paths, pagination, implementations.
+
+**Files to modify:**
+- `crates/pathfinder/src/server/tools/navigation.rs` -- extend existing test section
+
+**4B.1 Degraded path tests (3 tests)**
+
+```
+test_find_all_references_degraded_when_no_lsp
+test_find_all_references_lsp_error_degraded
+test_find_all_references_connection_lost_degraded
+```
+
+Pattern:
+- NoLsp: use `NoOpLawyer` -> expect `degraded=true`, `degraded_reason=Some(NoLsp)`
+- LSP error: `MockLawyer` with `set_references_result(Err("protocol error"))` -> degraded
+- Connection lost: `MockLawyer` with `set_references_result(Err("connection lost"))` -> degraded
+
+Coverage targets:
+- `Err(LspError::NoLspAvailable)` match arm (L2799-2833)
+- `Err(e)` generic error match arm (L2834-2884)
+- `DegradedReason` mapping for Protocol vs ConnectionLost vs Timeout (L2844-2849)
+- `lsp_readiness` and `warm_start_in_progress` for timeout vs other errors (L2852-2858)
+
+**4B.2 Pagination + implementations tests (3 tests)**
+
+```
+test_find_all_references_with_implementations_and_references
+test_find_all_references_offset_skips_implementations
+test_find_all_references_offset_past_implementations_paginates_references
+```
+
+Pattern:
+- Configure `MockLawyer` with both `set_references_result(Ok([...]))` and `set_goto_implementation_result(Ok([...]))`
+- Test pagination logic: implementations first, then references (L2687-2708)
+- Test offset past implementation count (L2688-2696)
+
+Coverage targets:
+- `implementations_result` branch: Ok vs Err (L2647-2658)
+- `all_files` chain for `files_referenced` (L2660-2665)
+- Pagination logic: offset >= impl_count vs offset < impl_count (L2687-2708)
+- Text formatting: implementations header + references header (L2727-2750)
+- Summary formatting: impl+ref, impl-only, ref-only, zero (L2763-2776)
+- Pagination note when truncated (L2752-2761)
+
+**4B.3 Edge case tests (2 tests)**
+
+```
+test_find_all_references_zero_references_zero_implementations
+test_find_all_references_rejects_sandbox_denied_path
+```
+
+Coverage targets:
+- Zero references path (L2774)
+- Sandbox check failure (L2555-2564)
+- File not found path (L2567-2578)
+
+**Completion criteria for 4B:**
+- 8 new tests pass
+- `find_all_references_impl` has >90% line coverage
+- All existing tests still pass
+- `cargo clippy -- -D warnings` passes
+- DeepSource LCV should reach ~91%
+
+---
+
+#### Subphase 4C: Navigation Residual Gaps (1 session)
+
+**Goal:** Close remaining Phase 2 gaps in `analyze_impact_impl` and callers/callees paths.
+
+**Files to modify:**
+- `crates/pathfinder/src/server/tools/navigation.rs` -- add tests to `mod tests`
+
+**4C.1 BFS cycle detection + deduplication (2 tests)**
+
+```
+test_analyze_impact_bfs_handles_cycle_in_call_graph
+test_analyze_impact_bfs_deduplicates_cross_referenced_symbols
+```
+
+Pattern:
+- Configure `MockLawyer` to return call hierarchy items that reference each other (A->B->A cycle)
+- Verify BFS terminates without infinite loop and deduplicates entries
+
+Coverage targets:
+- `seen.insert(key)` deduplication check (bfs_call_hierarchy L1917)
+- `queue.push_back` with incremented depth (L1918)
+- `remaining_references` budget decrement (L1936)
+
+**4C.2 Callers/callees grep fallback paths (2 tests)**
+
+```
+test_find_callers_callees_grep_fallback_incoming
+test_find_callers_callees_grep_fallback_outgoing
+```
+
+Pattern:
+- Use `NoOpLawyer` + `MockScout` with search results
+- Test that grep fallback provides incoming/outgoing heuristic references when LSP unavailable
+
+Coverage targets:
+- Grep fallback path in `analyze_impact_impl` for both `CallDirection::Incoming` and `CallDirection::Outgoing`
+- Direction-specific formatting (L1930-1933)
+
+**Completion criteria for 4C:**
+- 4 new tests pass
+- All existing tests still pass
+- `cargo clippy -- -D warnings` passes
+- DeepSource LCV should reach ~91-91.5%
+
+---
+
+#### Subphase 4D: LSP Client Residual Gaps (1 session)
+
+**Goal:** Cover `spawn_indexing_timeout_fallback`, `parse_references_response`, and background task
+integration paths in `client/mod.rs`.
+
+**Files to modify:**
+- `crates/pathfinder-lsp/src/client/mod.rs` -- add tests to `mod tests`
+
+**4D.1 `spawn_indexing_timeout_fallback` tests (2 tests)**
+
+```
+test_spawn_indexing_timeout_fallback_sets_complete_after_timeout
+test_spawn_indexing_timeout_fallback_noop_if_already_complete
+```
+
+Pattern:
+- Use `tokio::time::pause()` + `tokio::time::advance(timeout)` to simulate timeout
+- Create the `indexing_complete`, `indexing_completion_source`, `indexing_duration_secs` flags
+- Call the function, advance time past the timeout, assert `indexing_complete` is true
+- Second test: set `indexing_complete = true` before advancing, verify no mutation
+
+Coverage targets:
+- Branch A: timeout fires before progress End -> sets complete + source + duration (L868-876)
+- Branch B: flag already true (progress End arrived first) -> no-op (L878)
+
+**4D.2 `parse_references_response` isolated tests (3 tests)**
+
+```
+test_parse_references_response_with_locations
+test_parse_references_response_null_returns_empty
+test_parse_references_response_invalid_uri_skipped
+```
+
+These are pure functions already tested indirectly via Lawyer integration tests.
+Isolated unit tests ensure edge cases (null, invalid URI) are covered directly.
+
+Coverage targets:
+- Null response -> empty vec
+- Location with invalid URI -> skipped
+- Location with valid URI -> included
+
+**4D.3 Background task integration tests (3 tests)**
+
+```
+test_progress_watcher_end_after_timeout_fallback_logs_warning
+test_registration_watcher_send_failure_continues
+test_reader_supervisor_crash_inserts_unavailable
+```
+
+Pattern:
+- Progress watcher: create dispatcher, subscribe, inject `$/progress` End after setting `indexing_complete = true`
+- Registration watcher: create FakeTransport that fails `send()`, inject registration request, verify no panic
+- Reader supervisor: create `JoinHandle` that panics, spawn supervisor, verify `Unavailable` entry inserted
+
+Coverage targets:
+- Progress watcher Branch A1a: End arrives AFTER timeout fallback already fired (L2212-2215)
+- Registration watcher Branch A3a: `transport.send` fails (L2298-2299)
+- Reader supervisor Branch B+C3: reader panic + crash path inserting UnavailableState (L2119-2122, L2134-2136)
+
+**Completion criteria for 4D:**
+- 8 new tests pass
+- Covers `spawn_indexing_timeout_fallback`, `parse_references_response`, background task edge cases
+- All existing tests still pass
+- `cargo clippy -- -D warnings` passes
+- DeepSource LCV should reach ~91.5-92%
+
+---
+
+**Overall Phase 4 completion criteria:**
+- ~29 new tests across 4 subphases
+- `symbol_overview_impl` >90% coverage
+- `find_all_references_impl` >90% coverage
+- All navigation tool BFS/grep fallback paths covered
+- LSP client background task edge cases covered
+- DeepSource LCV should reach ~91.5-92%
 - Raise DeepSource threshold to 92%
 
 ---
 
-### Phase 5: Structural Improvement (Optional, Future)
+### Phase 5: Structural Improvement (5-7 sessions)
 
-These are not required for coverage but would prevent future regression:
+Split the two monolithic files that caused 93% of coverage gaps into focused
+sub-modules. No new tests -- purely structural refactoring that prevents future
+regression by making per-module coverage tracking feasible.
 
-**5.1 Split `client/mod.rs` into modules**
+**Post-Phase 4 file sizes:**
 
-Current: 3657 lines, 80% of coverage gap.
+| File | Current Lines | Problem |
+|---|---|---|
+| `navigation.rs` | 8975 | Monolithic, hard to navigate, coverage gaps clustered |
+| `client/mod.rs` | 5522 | 80% of historical coverage gaps, largest file in crate |
+
+**Dependency analysis (from codebase exploration):**
+
+navigation.rs -- only 1 truly shared helper: `read_symbol_scope_enriched`
+(called by 4 tool methods). All other helpers are private to their tool's call
+tree. Clean split boundaries exist.
+
+client/mod.rs -- response parsers and background tasks are free functions (easy
+to move). `impl LspClient` methods access private fields, requiring `pub(crate)`
+field visibility before extraction.
+
+**Guiding principles for all sub-phases:**
+
+1. Each sub-phase compiles and passes all tests independently
+2. Each sub-phase = one commit
+3. No public API changes -- all `pub(crate)` or internal
+4. Move tests alongside their implementations (Rust convention)
+5. Extract in dependency order: zero-dep pieces first
+
+---
+
+#### Subphase 5A: Split `navigation.rs` into directory module (8 sub-phases)
+
+Target: `crates/pathfinder/src/server/tools/navigation.rs` (8975 lines)
+
+Current structure:
+
+```
+navigation.rs
+  L1-179     Constants, shared types (CallDirection, LspResolution)
+  L184-421   Shared free fns (extract_call_candidates, keywords_for_language,
+             language_to_file_glob, definition_patterns)
+  L423-3732  impl PathfinderServer -- single large block containing:
+    L434-501    grep_reference_fallback         (PRIVATE to analyze_impact)
+    L516-670    resolve_lsp_dependencies         (PRIVATE to read_with_deep_context)
+    L673-718    resolve_candidate_via_grep       (PRIVATE to read_with_deep_context)
+    L721-800    attempt_grep_fallback            (PRIVATE to read_with_deep_context)
+    L808-862    append_outgoing_deps             (PRIVATE to read_with_deep_context)
+    L881-1224   get_definition_impl              (TOOL METHOD)
+    L1230-1264  get_def_to_call_result           (PRIVATE to get_definition)
+    L1266-1281  compute_did_you_mean             (PRIVATE to get_definition)
+    L1286-1341  enrich_did_you_mean              (PRIVATE to read_symbol_scope_enriched)
+    L1347-1374  read_symbol_scope_enriched       (SHARED: 4 tools)
+    L1382-1415  fallback_definition_grep         (PRIVATE to get_definition)
+    L1420-1473  grep_definition_in_file          (PRIVATE to get_definition)
+    L1476-1542  grep_impl_method                 (PRIVATE to get_definition)
+    L1546-1590  grep_definition_global           (PRIVATE to get_definition)
+    L1596-1633  grep_symbol_broad                (PRIVATE to get_definition)
+    L1644-1834  read_with_deep_context_impl      (TOOL METHOD)
+    L1841-1958  bfs_call_hierarchy               (PRIVATE to analyze_impact)
+    L1968-2531  analyze_impact_impl              (TOOL METHOD)
+    L2540-2886  find_all_references_impl          (TOOL METHOD)
+    L2893-3135  symbol_overview_impl              (TOOL METHOD)
+    L3144-3589  lsp_health_impl                   (TOOL METHOD)
+    L3592-3617  probe_language_readiness          (PRIVATE to lsp_health)
+    L3620-3669  find_probe_file                   (PRIVATE to lsp_health)
+    L3673-3731  find_file_by_extension_recursive  (PRIVATE to lsp_health)
+  L3735-3850  Free helper fns (ProbeAction, format_uptime,
+              compute_degraded_tools, parse_uptime_to_seconds)
+  L3852-8975  Tests module (~5120 lines, ~90+ tests)
+```
+
+Target structure:
+
+```
+crates/pathfinder/src/server/tools/navigation/
+  mod.rs            -- shared types, constants, free fns, read_symbol_scope_enriched (~500 lines)
+  health.rs         -- lsp_health_impl + probe/uptime helpers + ~25 tests (~1200 lines)
+  definition.rs     -- get_definition_impl + grep fallback chain + ~15 tests (~1100 lines)
+  deep_context.rs   -- read_with_deep_context_impl + dep resolution + ~6 tests (~650 lines)
+  impact.rs         -- analyze_impact_impl + bfs_call_hierarchy + grep_reference_fallback
+                       + ~18 tests (~1000 lines)
+  references.rs     -- find_all_references_impl + ~10 tests (~550 lines)
+  overview.rs       -- symbol_overview_impl + ~9 tests (~450 lines)
+```
+
+---
+
+**5A.1 -- Prep: Create directory module** (~15 min)
+
+Rename `navigation.rs` to `navigation/mod.rs`. Zero logic changes. Rust
+resolves `navigation` the same way whether it's a file or directory.
+
+```
+git mv navigation.rs navigation/mod.rs
+cargo test
+```
+
+Completion:
+- `cargo test` passes
+- `cargo clippy -- -D warnings` passes
+- Commit: `refactor(navigation): convert to directory module`
+
+**5A.2 -- Extract `health.rs`** (~45 min)
+
+Most independent module. Zero cross-deps on other tool methods.
+
+Items to move:
+
+| Item | Current Lines | Visibility |
+|---|---|---|
+| `lsp_health_impl` | L3144-3589 (~445 lines) | `pub(crate)` |
+| `probe_language_readiness` | L3592-3617 | `pub(super)` |
+| `find_probe_file` | L3620-3669 | `pub(super)` |
+| `find_file_by_extension_recursive` | L3673-3731 | `pub(super)` |
+| `format_uptime` | L3735-3755 | `pub(super)` free fn |
+| `ProbeAction` enum | L3761-3768 | `pub(super)` |
+| `compute_degraded_tools` | L3773-3806 | `pub(super)` free fn |
+| `parse_uptime_to_seconds` | L3808-3850 | `pub(super)` free fn |
+| ~25 health-related tests | L5239-6550 | move to `mod tests` in health.rs |
+
+Total: ~1200 lines moved.
+
+New file: `navigation/health.rs` with `impl PathfinderServer { pub(crate) async fn lsp_health_impl(...) }`
+`mod.rs`: add `mod health;` + remove moved items.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(navigation): extract lsp_health into health.rs`
+
+**5A.3 -- Extract `definition.rs`** (~45 min)
+
+`get_definition_impl` + its entire grep fallback chain. All helpers are private
+to this tool's call tree.
+
+Items to move:
+
+| Item | Current Lines | Visibility |
+|---|---|---|
+| `get_definition_impl` | L881-1224 (~343 lines) | `pub(crate)` |
+| `get_def_to_call_result` | L1230-1264 | private |
+| `compute_did_you_mean` | L1266-1281 | private |
+| `fallback_definition_grep` | L1382-1415 | private |
+| `grep_definition_in_file` | L1420-1473 | private |
+| `grep_impl_method` | L1476-1542 | private |
+| `grep_definition_global` | L1546-1590 | private |
+| `grep_symbol_broad` | L1596-1633 | private |
+| ~15 definition tests | L3931-4588 | move to definition.rs |
+
+Total: ~1100 lines moved.
+
+Uses shared free fns from mod.rs: `extract_call_candidates`,
+`keywords_for_language`, `language_to_file_glob`, `definition_patterns`.
+Calls `read_symbol_scope_enriched` (shared, stays in mod.rs).
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(navigation): extract get_definition into definition.rs`
+
+**5A.4 -- Extract `deep_context.rs`** (~30 min)
+
+`read_with_deep_context_impl` + dependency resolution helpers.
+
+Items to move:
+
+| Item | Current Lines | Visibility |
+|---|---|---|
+| `read_with_deep_context_impl` | L1644-1834 (~190 lines) | `pub(crate)` |
+| `resolve_lsp_dependencies` | L516-670 | private |
+| `resolve_candidate_via_grep` | L673-718 | private |
+| `attempt_grep_fallback` | L721-800 | private |
+| `append_outgoing_deps` | L808-862 | private |
+| ~6 deep_context tests | L4042-4160, L4701-4830 | move to deep_context.rs |
+
+Total: ~650 lines moved.
+
+Calls `read_symbol_scope_enriched` (shared, in mod.rs).
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(navigation): extract read_with_deep_context into deep_context.rs`
+
+**5A.5 -- Extract `impact.rs`** (~45 min)
+
+`analyze_impact_impl` + BFS call hierarchy traversal + grep reference fallback.
+
+Items to move:
+
+| Item | Current Lines | Visibility |
+|---|---|---|
+| `analyze_impact_impl` | L1968-2531 (~563 lines) | `pub(crate)` |
+| `bfs_call_hierarchy` | L1841-1958 | private |
+| `grep_reference_fallback` | L434-501 | private |
+| ~18 impact tests | L4158-4563, L4830-5238, L7665-7805, L8668-8892 | move to impact.rs |
+
+Total: ~1000 lines moved.
+
+Calls `read_symbol_scope_enriched` (shared, in mod.rs).
+Uses free fns: `is_source_file`, `is_workspace_file`, `is_test_file`.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(navigation): extract analyze_impact into impact.rs`
+
+**5A.6 -- Extract `references.rs`** (~30 min)
+
+`find_all_references_impl` + its tests. No private helpers -- all logic inline.
+
+Items to move:
+
+| Item | Current Lines | Visibility |
+|---|---|---|
+| `find_all_references_impl` | L2540-2886 (~346 lines) | `pub(crate)` |
+| ~10 reference tests | L7721-8159 | move to references.rs |
+
+Total: ~550 lines moved.
+
+Calls `read_symbol_scope_enriched` (shared, in mod.rs).
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(navigation): extract find_all_references into references.rs`
+
+**5A.7 -- Extract `overview.rs`** (~30 min)
+
+`symbol_overview_impl` + its tests. Cross-module calls to impact + references.
+
+Items to move:
+
+| Item | Current Lines | Visibility |
+|---|---|---|
+| `symbol_overview_impl` | L2893-3135 (~242 lines) | `pub(crate)` |
+| ~9 overview tests | L8183-8668 | move to overview.rs |
+
+Total: ~450 lines moved.
+
+Calls `analyze_impact_impl` (impact.rs) + `find_all_references_impl` (references.rs)
++ `read_symbol_scope_enriched` (mod.rs). All `pub(crate)` -- accessible across
+sub-modules within the same crate.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(navigation): extract symbol_overview into overview.rs`
+
+**5A.8 -- Clean up `mod.rs`** (~30 min)
+
+What remains in `navigation/mod.rs` after all extractions:
+
+| Item | Lines |
+|---|---|
+| Module doc comment + imports | ~30 |
+| Constants (LIVENESS_PROBE_INTERVAL_SECS, BFS_TIMEOUT_SECS, etc.) | ~25 |
+| `SOURCE_FILE_EXTENSIONS`, `is_source_file`, `is_test_file`, `is_workspace_file` | ~100 |
+| `CallDirection` enum, `LspResolution` struct | ~15 |
+| Shared free fns: `extract_call_candidates`, `keywords_for_language`, `language_to_file_glob`, `definition_patterns` | ~240 |
+| `read_symbol_scope_enriched` + `enrich_did_you_mean` (shared helpers) | ~55 |
+| `validation_status_from_parts` (if exists here) | ~85 |
+| `mod health; mod definition; mod deep_context; mod impact; mod references; mod overview;` | ~10 |
+| ~20 shared/pattern tests (grep patterns, keywords, file globs) | ~200 |
+
+Total in mod.rs: ~500 lines (was 8975).
+
+Commit: `refactor(navigation): clean up mod.rs with shared helpers and re-exports`
+
+**Phase 5A completion criteria:**
+
+- `navigation/mod.rs` ~500 lines
+- 6 focused sub-modules, each 450-1200 lines
+- Tests co-located with their implementations
+- All tests pass, `cargo clippy -- -D warnings` passes
+- No public API changes
+
+---
+
+#### Subphase 5B: Split `client/mod.rs` into sub-modules (7 sub-phases)
+
+Target: `crates/pathfinder-lsp/src/client/mod.rs` (5522 lines)
+
+Current structure:
+
+```
+client/mod.rs
+  L13-50      Module declarations + pub use re-exports
+  L47-51      Constants (DEFAULT_IDLE_TIMEOUT, MAX_BACKOFF_SECS, IDLE_CHECK_INTERVAL)
+  L56-58      ProcessLifecycle struct
+  L60-100     LanguageState struct
+  L106-112    UnavailableState struct
+  L114-118    ProcessEntry enum + to_validation_status
+  L200-284    validation_status_from_parts (free fn)
+  L287-302    InFlightGuard struct + impl
+  L323-355    DocumentGuard struct + impl
+  L365-390    LspClient struct (private fields)
+  L393-401    indexing_timeout_for_language (free fn)
+  L403-1392   impl LspClient -- private methods:
+    L413-447    new (constructor)
+    L452-459    warm_start
+    L468-530    warm_start_for_languages_and_track
+    L541-587    warm_start_for_languages
+    L595-605    touch_language
+    L616-619    shutdown
+    L630-642    open_document
+    L648-685    did_open (private)
+    L690-717    did_close (private)
+    L730-762    force_respawn
+    L769-848    ensure_process (private)
+    L856-888    spawn_indexing_timeout_fallback (private)
+    L892-1074   start_process (private)
+    L1081-1199  detect_concurrent_lsp (private)
+    L1202-1208  touch (private)
+    L1214-1280  request (private)
+    L1286-1316  notify (private)
+    L1321-1336  capabilities_for (private)
+    L1345-1391  call_hierarchy_request (private)
+  L1395-1729  impl Lawyer for LspClient -- trait methods:
+    L1397-1402  warm_start_for_languages (dispatch to self)
+    L1405-1407  touch_language (dispatch to self)
+    L1414-1422  open_document (dispatch to self)
+    L1424-1480  goto_definition
+    L1482-1539  call_hierarchy_prepare
+    L1541-1555  call_hierarchy_incoming
+    L1557-1571  call_hierarchy_outgoing
+    L1573-1627  references
+    L1629-1682  goto_implementation
+    L1684-1711  capability_status
+    L1713-1715  missing_languages
+    L1717-1719  force_respawn (dispatch to self)
+    L1721-1724  is_warm_start_complete
+    L1726-1728  warm_start_for_languages_and_track (dispatch to self)
+  L1730-2097  Response parser free fns:
+    L1730-1821  parse_definition_response
+    L1823-1887  parse_single_definition_location
+    L1889-1910  parse_definition_response_multi
+    L1913-1978  parse_call_hierarchy_prepare_response
+    L1981-2026  parse_call_hierarchy_calls_response
+    L2028-2097  parse_references_response
+  L2109-2585  Background tasks + pure functions:
+    L2109-2178  reader_supervisor_task
+    L2194-2246  progress_watcher_task
+    L2256-2335  registration_watcher_task
+    L2338-2438  idle_timeout_task
+    L2442-2453  ProgressAction enum
+    L2457-2480  extract_progress_action
+    L2484-2518  apply_progress_action
+    L2522-2529  RegistrationAction struct
+    L2533-2575  extract_registration_action
+    L2579-2585  build_registration_response
+  L2589-5522  Tests module (~2933 lines, ~125 tests)
+```
+
 Target structure:
 
 ```
 crates/pathfinder-lsp/src/client/
-  mod.rs              -- LspClient struct + public API (~500 lines)
-  lifecycle.rs        -- new(), shutdown(), warm_start() (~300 lines)
-  process.rs          -- already exists (961 lines)
-  document.rs         -- did_open/did_close/open_document/DocumentGuard (~400 lines)
-  requests.rs         -- goto_definition, call_hierarchy_*, references (~500 lines)
+  mod.rs              -- struct defs, constants, validation_status_from_parts,
+                         re-exports (~700 lines)
+  response_parsers.rs -- parse_* free fns + ~20 parser tests (~550 lines)
+  background.rs       -- background tasks + pure helpers + ~20 tests (~800 lines)
+  document.rs         -- DocumentGuard + did_open/did_close/open_document + ~12 tests (~350 lines)
+  lawyer_impl.rs      -- impl Lawyer for LspClient + ~8 tests (~500 lines)
+  lifecycle.rs        -- new, warm_start*, ensure_process, start_process,
+                         detect_concurrent_lsp, touch, request, notify,
+                         capabilities_for, spawn_indexing_timeout_fallback,
+                         indexing_timeout_for_language + ~30 tests (~600 lines)
+  process.rs          -- already exists (1009 lines)
   capabilities.rs     -- already exists (606 lines)
-  background.rs       -- reader_supervisor, progress_watcher, etc. (~600 lines)
+  fake_transport.rs   -- already exists (164 lines)
   transport.rs        -- already exists (402 lines)
   protocol.rs         -- already exists (434 lines)
   detect.rs           -- already exists (1937 lines)
 ```
 
-This makes it feasible to achieve high coverage on each module independently.
+---
 
-**5.2 Split `navigation.rs` into modules**
+**5B.1 -- Prep: Make LspClient fields `pub(crate)`** (~15 min)
 
-Current: 7508 lines.
-Target structure:
+Change all private fields of `LspClient` (L365-390) to `pub(crate)`. This enables
+`impl LspClient` blocks in sub-module files to access fields.
+
+Also widen visibility on structs that sub-modules will construct:
+- `LanguageState` fields -> `pub(crate)`
+- `ProcessEntry` fields -> `pub(crate)` (already pub via enum variants)
+- `InFlightGuard::new` -> `pub(crate)`
+- `DocumentGuard::new` -> `pub(crate)`
+
+No behavior changes. All tests pass.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(client): widen LspClient field visibility to pub(crate)`
+
+**5B.2 -- Extract `response_parsers.rs`** (~30 min)
+
+All `parse_*` free functions. Zero field access on `self`, zero deps on LspClient.
+
+Items to move:
+
+| Item | Current Lines |
+|---|---|
+| `parse_definition_response` | L1730-1821 (~91 lines) |
+| `parse_single_definition_location` | L1823-1887 (~64 lines) |
+| `parse_definition_response_multi` | L1889-1910 (~21 lines) |
+| `parse_call_hierarchy_prepare_response` | L1913-1978 (~65 lines) |
+| `parse_call_hierarchy_calls_response` | L1981-2026 (~45 lines) |
+| `parse_references_response` | L2028-2097 (~69 lines) |
+| ~20 parser tests | L2820-3093 |
+
+Total: ~550 lines moved. Pure functions, no `self` access.
+
+`mod.rs`: add `mod response_parsers;` + `use response_parsers::*;` (or explicit imports).
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(client): extract response parsers into response_parsers.rs`
+
+**5B.3 -- Extract `background.rs`** (~45 min)
+
+Background task functions + extracted pure helpers. Accesses `self.processes`,
+`self.shutdown_tx` via `pub(crate)` fields (from 5B.1).
+
+Items to move:
+
+| Item | Current Lines |
+|---|---|
+| `reader_supervisor_task` | L2109-2178 (~69 lines) |
+| `progress_watcher_task` | L2194-2246 (~52 lines) |
+| `registration_watcher_task` | L2256-2335 (~79 lines) |
+| `idle_timeout_task` | L2338-2438 (~100 lines) |
+| `ProgressAction` enum | L2442-2453 (~11 lines) |
+| `extract_progress_action` | L2457-2480 (~23 lines) |
+| `apply_progress_action` | L2484-2518 (~34 lines) |
+| `RegistrationAction` struct | L2522-2529 (~7 lines) |
+| `extract_registration_action` | L2533-2575 (~42 lines) |
+| `build_registration_response` | L2579-2585 (~6 lines) |
+| ~20 background task tests | L2676-2817, L4943-5522 |
+
+Total: ~800 lines moved.
+
+These functions take `Arc<DashMap<...>>` (processes), `Arc<broadcast::Sender>`
+(shutdown_tx), etc. as explicit parameters -- not `&self`. Make them `pub(super)`
+free functions in background.rs. If any take `&LspClient`, they access fields
+through `pub(crate)` visibility.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(client): extract background tasks into background.rs`
+
+**5B.4 -- Extract `document.rs`** (~30 min)
+
+Document operations + `DocumentGuard`. Accesses `self.processes`,
+`self.doc_versions` via `pub(crate)` fields.
+
+Items to move:
+
+| Item | Current Lines |
+|---|---|
+| `DocumentGuard` struct + both impl blocks | L323-355 (~33 lines) |
+| `did_open` (private method) | L648-685 (~37 lines) |
+| `did_close` (private method) | L690-717 (~27 lines) |
+| `open_document` from Lawyer impl | L1414-1422 (~8 lines) |
+| ~12 document tests | L4379-4559 |
+
+Total: ~350 lines moved.
+
+New file: `navigation/document.rs` with `impl LspClient { async fn did_open(...), async fn did_close(...), pub async fn open_document(...) }`.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(client): extract document operations into document.rs`
+
+**5B.5 -- Extract `lawyer_impl.rs`** (~30 min)
+
+`impl Lawyer for LspClient` trait methods. Uses response parsers (from 5B.2),
+document ops (from 5B.4).
+
+Items to move:
+
+| Item | Current Lines |
+|---|---|
+| `call_hierarchy_request` (private helper) | L1345-1391 (~46 lines) |
+| `warm_start_for_languages` (Lawyer dispatch) | L1397-1402 (~5 lines) |
+| `touch_language` (Lawyer dispatch) | L1405-1407 (~2 lines) |
+| `open_document` (Lawyer dispatch) | L1414-1422 (~8 lines) |
+| `goto_definition` | L1424-1480 (~56 lines) |
+| `call_hierarchy_prepare` | L1482-1539 (~57 lines) |
+| `call_hierarchy_incoming` | L1541-1555 (~14 lines) |
+| `call_hierarchy_outgoing` | L1557-1571 (~14 lines) |
+| `references` | L1573-1627 (~54 lines) |
+| `goto_implementation` | L1629-1682 (~53 lines) |
+| `capability_status` | L1684-1711 (~27 lines) |
+| `missing_languages` | L1713-1715 (~2 lines) |
+| `force_respawn` (Lawyer dispatch) | L1717-1719 (~2 lines) |
+| `is_warm_start_complete` | L1721-1724 (~3 lines) |
+| `warm_start_for_languages_and_track` (Lawyer dispatch) | L1726-1728 (~2 lines) |
+| ~8 lawyer trait tests | L4580-4877 |
+
+Total: ~500 lines moved.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(client): extract Lawyer trait impl into lawyer_impl.rs`
+
+**5B.6 -- Extract `lifecycle.rs`** (~30 min)
+
+Process lifecycle methods: construction, spawning, request routing, warm start.
+
+Items to move:
+
+| Item | Current Lines |
+|---|---|
+| `indexing_timeout_for_language` | L393-401 (~8 lines) |
+| `new` (constructor) | L413-447 (~34 lines) |
+| `warm_start` | L452-459 (~7 lines) |
+| `warm_start_for_languages_and_track` | L468-530 (~62 lines) |
+| `warm_start_for_languages` | L541-587 (~46 lines) |
+| `touch_language` | L595-605 (~10 lines) |
+| `shutdown` | L616-619 (~3 lines) |
+| `force_respawn` (public method) | L730-762 (~32 lines) |
+| `ensure_process` | L769-848 (~79 lines) |
+| `spawn_indexing_timeout_fallback` | L856-888 (~32 lines) |
+| `start_process` | L892-1074 (~182 lines) |
+| `detect_concurrent_lsp` | L1081-1199 (~118 lines) |
+| `touch` | L1202-1208 (~6 lines) |
+| `request` | L1214-1280 (~66 lines) |
+| `notify` | L1286-1316 (~30 lines) |
+| `capabilities_for` | L1321-1336 (~15 lines) |
+| ~30 lifecycle/state tests | L3098-3346, L3351-3651, L3940-4028 |
+
+Total: ~600 lines moved.
+
+Completion:
+- All tests pass, clippy clean
+- Commit: `refactor(client): extract lifecycle methods into lifecycle.rs`
+
+**5B.7 -- Clean up `mod.rs`** (~30 min)
+
+What remains in `client/mod.rs` after all extractions:
+
+| Item | Lines |
+|---|---|
+| Module declarations + pub use re-exports | ~50 |
+| Constants | ~5 |
+| `ProcessLifecycle` struct | ~3 |
+| `LanguageState` struct | ~40 |
+| `UnavailableState` struct | ~7 |
+| `ProcessEntry` enum + impl | ~90 |
+| `validation_status_from_parts` | ~85 |
+| `InFlightGuard` struct + impl | ~16 |
+| `LspClient` struct definition (fields only) | ~26 |
+| `mod response_parsers; mod background; mod document; mod lawyer_impl; mod lifecycle;` | ~5 |
+| ~30 remaining tests (struct validation, warm_start flags, etc.) | ~400 |
+
+Total in mod.rs: ~700 lines (was 5522).
+
+Commit: `refactor(client): clean up mod.rs with struct defs and re-exports`
+
+**Phase 5B completion criteria:**
+
+- `client/mod.rs` ~700 lines (was 5522)
+- 5 focused sub-modules: response_parsers, background, document, lawyer_impl, lifecycle
+- All 125+ tests pass, clippy clean
+- No public API changes
+
+---
+
+#### Phase 5 sub-phase summary
+
+| # | Sub-phase | Target | Lines Moved | Est. Time |
+|---|---|---|---|---|
+| 5A.1 | navigation prep | `navigation/mod.rs` rename | 0 | 15 min |
+| 5A.2 | health.rs | `lsp_health_impl` + helpers + tests | ~1200 | 45 min |
+| 5A.3 | definition.rs | `get_definition_impl` + grep chain + tests | ~1100 | 45 min |
+| 5A.4 | deep_context.rs | `read_with_deep_context_impl` + dep res + tests | ~650 | 30 min |
+| 5A.5 | impact.rs | `analyze_impact_impl` + BFS + grep fallback + tests | ~1000 | 45 min |
+| 5A.6 | references.rs | `find_all_references_impl` + tests | ~550 | 30 min |
+| 5A.7 | overview.rs | `symbol_overview_impl` + tests | ~450 | 30 min |
+| 5A.8 | nav mod.rs cleanup | shared helpers, re-exports, remaining tests | ~0 | 30 min |
+| 5B.1 | client prep | `pub(crate)` field visibility | ~0 | 15 min |
+| 5B.2 | response_parsers.rs | `parse_*` free fns + parser tests | ~550 | 30 min |
+| 5B.3 | background.rs | background tasks + pure helpers + tests | ~800 | 45 min |
+| 5B.4 | document.rs | `DocumentGuard` + did_open/close + tests | ~350 | 30 min |
+| 5B.5 | lawyer_impl.rs | `impl Lawyer for LspClient` + tests | ~500 | 30 min |
+| 5B.6 | lifecycle.rs | constructor, spawn, request routing + tests | ~600 | 30 min |
+| 5B.7 | client mod.rs cleanup | struct defs, re-exports, remaining tests | ~0 | 30 min |
+
+**Execution order and dependencies:**
 
 ```
-crates/pathfinder/src/server/tools/
-  navigation/
-    mod.rs              -- shared types, helpers (~500 lines)
-    definition.rs       -- get_definition_impl (~800 lines)
-    impact.rs           -- analyze_impact_impl, BFS (~1200 lines)
-    deep_context.rs     -- read_with_deep_context_impl (~800 lines)
-    references.rs       -- find_all_references_impl (~800 lines)
-    symbol_overview.rs  -- symbol_overview_impl (~800 lines)
-    grep_fallback.rs    -- shared grep fallback logic (~500 lines)
+5A.1 (prep) ─── 5A.2 (health) ─── 5A.3 (definition) ─── 5A.4 (deep_context)
+                                                                    │
+              5A.5 (impact) ─── 5A.6 (references) ─── 5A.7 (overview) ─── 5A.8 (cleanup)
+
+5B.1 (prep) ─── 5B.2 (parsers) ─── 5B.3 (background) ─── 5B.4 (document)
+                                                                    │
+              5B.5 (lawyer_impl) ─── 5B.6 (lifecycle) ─── 5B.7 (cleanup)
 ```
+
+5A and 5B are fully independent. Can be interleaved or done in parallel.
+
+**Coverage impact:** Zero new test lines. Coverage percentage unchanged. The
+split makes it feasible to:
+1. Track coverage per-module (DeepSource reports per-file)
+2. Prevent gap accumulation (smaller files, focused reviews)
+3. Write targeted tests easily (each file has clear responsibility)
+
+**Rust visibility rules for the split:**
+
+- Methods in sub-module `impl PathfinderServer` / `impl LspClient` blocks can
+  access `pub(crate)` methods on `self` from any file in the same crate.
+- Private methods (`fn method(&self)`) are only visible within their defining
+  module. Use `pub(super)` for helpers shared across sub-modules within
+  `navigation/` or `client/`.
+- Free functions moved to sub-modules need `pub(super)` if called from sibling
+  modules or `pub(crate)` if called from outside the parent module.
 
 ---
 
@@ -962,31 +1773,47 @@ Each phase is designed to be independently executable. Follow this protocol:
 2. Note remaining gaps in this document (update line numbers if they shifted)
 3. Commit with message: `test(TCV-001): cover <file> <region> (<N> lines)`
 
+### Completion status
+
+| Phase | Status | Commit | Notes |
+|---|---|---|---|
+| Phase 0 (threshold) | DONE | web UI | 88% floor set |
+| Phase 1 (Tier 2) | DONE | `9bcabd8` | All 6 files covered |
+| Phase 2 (navigation) | ~60% DONE | `e69da6f` | Gaps: symbol_overview (0%), find_all_references degraded/pagination, BFS cycles |
+| Phase 3 (LSP infra) | DONE | `53151cd` + `b7c81c6` + `74049dc` | Trait + FakeTransport + 125 tests |
+| Phase 4 (residual) | IN PROGRESS | -- | 4 subphases: 4A (symbol_overview), 4B (references), 4C (BFS/grep), 4D (LSP client) |
+| Phase 5 (split) | PLANNED | -- | 15 sub-phases: 5A.1-5A.8 (navigation), 5B.1-5B.7 (client) |
+
 ### Dependency graph
 
 ```
-Phase 0 (threshold) ─── independent, do first
-Phase 1 (Tier 2)   ─── independent of everything
-Phase 2 (navigation)── independent of Phase 1
-Phase 3 (infra)     ─── independent, but do before Phase 4
-Phase 4 (client)    ─── depends on Phase 3
-Phase 5 (split)     ─── depends on Phase 4
+Phase 0 (threshold) ─── DONE
+Phase 1 (Tier 2)   ─── DONE
+Phase 2 (navigation)── ~60% DONE (residual picked up in Phase 4A-4C)
+Phase 3 (infra)     ─── DONE
+Phase 4 (residual)  ─── IN PROGRESS (depends on Phase 3 for 4D only)
+Phase 5 (split)     ─── PLANNED (depends on Phase 4)
+  5A.1-5A.8: navigation.rs split (independent of 5B)
+  5B.1-5B.7: client/mod.rs split (independent of 5A)
 ```
 
-Phases 1 and 2 can be done in parallel or in any order.
-Phase 3 is the gate for Phase 4.
-Phase 5 is optional cleanup.
+Subphases 4A, 4B, 4C (navigation) are independent of Phase 3 infrastructure.
+Subphase 4D (LSP client) uses Phase 3 FakeTransport infrastructure.
 
 ### Expected coverage progression
 
-| After Phase | LCV Estimate | Threshold |
-|---|---|---|
-| Current | 88.9% | None |
-| Phase 0 | 88.9% | 88% |
-| Phase 1 | ~89.5% | 88% |
-| Phase 2 | ~90.5% | 90% |
-| Phase 3 | ~91.0% | 90% |
-| Phase 4 | ~93-95% | 92% |
+| After Phase | LCV Estimate | Threshold | Actual |
+|---|---|---|---|
+| Baseline | 88.9% | None | 88.9% |
+| Phase 0 | 88.9% | 88% | -- |
+| Phase 1 | ~89.5% | 88% | -- |
+| Phase 2 | ~90.5% | 90% | -- |
+| Phase 3 | ~91.0% | 90% | -- |
+| Phase 4A | ~91.0% | 90% | -- |
+| Phase 4B | ~91.5% | 90% | -- |
+| Phase 4C | ~91.5% | 90% | -- |
+| Phase 4D | ~92% | 92% | -- |
+| Phase 5 | ~92% | 92% | -- (structural only, no coverage change) |
 
 ---
 
@@ -1018,15 +1845,37 @@ Raise to 92% after Phase 4.
 
 ### Test file locations
 
-| Source File | Test Location | Test Count |
-|---|---|---|
-| `client/mod.rs` | Inline `mod tests` | 61 |
-| `client/detect.rs` | Inline `mod tests` | 58 |
-| `client/process.rs` | Inline `mod tests` | 20 |
-| `client/transport.rs` | Inline `mod tests` | 17 |
-| `navigation.rs` | Inline `mod tests` | 97 |
-| `read_files.rs` | Inline `mod tests` | 14 |
-| `repo_map.rs` | Inline `mod tests` | 9 |
-| `search.rs` | Inline `mod tests` | 10 |
-| `git.rs` | Inline `mod tests` + `tests/git_integration.rs` | 6+5 |
-| `parser.rs` | Inline `mod tests` | 11 |
+**Pre-Phase 5 (current):**
+
+| Source File | Test Location | Test Count (baseline) | Test Count (current) |
+|---|---|---|---|
+| `client/mod.rs` | Inline `mod tests` | 61 | 125 |
+| `client/detect.rs` | Inline `mod tests` | 58 | 58 |
+| `client/process.rs` | Inline `mod tests` | 20 | 20 |
+| `client/transport.rs` | Inline `mod tests` | 17 | 17 |
+| `client/fake_transport.rs` | Inline (test-only module) | 0 | -- (used by mod.rs tests) |
+| `navigation.rs` | Inline `mod tests` | 97 | 103 |
+| `read_files.rs` | Inline `mod tests` | 14 | 17 |
+| `repo_map.rs` | Inline `mod tests` | 9 | 10 |
+| `search.rs` | Inline `mod tests` | 10 | 9+ |
+| `types.rs` | Inline `mod tests` | 0 | 2 |
+| `git.rs` | Inline `mod tests` + `tests/git_integration.rs` | 6+5 | 8+5 |
+| `parser.rs` | Inline `mod tests` | 11 | 11 |
+
+**Post-Phase 5 (target):**
+
+| Source File | Test Location | Est. Lines | Notes |
+|---|---|---|---|
+| `client/mod.rs` | Inline `mod tests` | ~700 | Struct defs, re-exports, ~30 remaining tests |
+| `client/response_parsers.rs` | Inline `mod tests` | ~550 | ~20 parser tests |
+| `client/background.rs` | Inline `mod tests` | ~800 | ~20 background task tests |
+| `client/document.rs` | Inline `mod tests` | ~350 | ~12 document tests |
+| `client/lawyer_impl.rs` | Inline `mod tests` | ~500 | ~8 lawyer trait tests |
+| `client/lifecycle.rs` | Inline `mod tests` | ~600 | ~30 lifecycle/state tests |
+| `navigation/mod.rs` | Inline `mod tests` | ~500 | Shared helpers, ~20 pattern tests |
+| `navigation/health.rs` | Inline `mod tests` | ~1200 | ~25 health tests |
+| `navigation/definition.rs` | Inline `mod tests` | ~1100 | ~15 definition tests |
+| `navigation/deep_context.rs` | Inline `mod tests` | ~650 | ~6 deep context tests |
+| `navigation/impact.rs` | Inline `mod tests` | ~1000 | ~18 impact tests |
+| `navigation/references.rs` | Inline `mod tests` | ~550 | ~10 reference tests |
+| `navigation/overview.rs` | Inline `mod tests` | ~450 | ~9 overview tests |
