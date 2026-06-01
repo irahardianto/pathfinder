@@ -104,21 +104,28 @@ impl LspTransport for FakeTransport {
                 }
             };
 
-            if let Some(mut response) = response {
-                if let Some(obj) = response.as_object_mut() {
-                    obj.insert("id".to_owned(), id.clone());
-                }
+            let Some(mut response) = response else {
+                // Fail fast: no response configured for this method.
+                // Without this, the caller's oneshot receiver never fires
+                // and the request hangs until timeout.
+                return Err(LspError::Protocol(format!(
+                    "FakeTransport: no response configured for method '{method}'"
+                )));
+            };
 
-                if let Some(ref dispatcher) = *self.dispatcher.lock().expect("dispatcher lock") {
-                    dispatcher.dispatch_response(&response);
-                }
+            if let Some(obj) = response.as_object_mut() {
+                obj.insert("id".to_owned(), id.clone());
+            }
 
-                if response.get("error").is_some() {
-                    let msg = response["error"]["message"]
-                        .as_str()
-                        .unwrap_or("fake error");
-                    return Err(LspError::Protocol(msg.to_owned()));
-                }
+            if let Some(ref dispatcher) = *self.dispatcher.lock().expect("dispatcher lock") {
+                dispatcher.dispatch_response(&response);
+            }
+
+            if response.get("error").is_some() {
+                let msg = response["error"]["message"]
+                    .as_str()
+                    .unwrap_or("fake error");
+                return Err(LspError::Protocol(msg.to_owned()));
             }
             Ok(())
         } else {

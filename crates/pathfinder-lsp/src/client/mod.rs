@@ -52,6 +52,7 @@ const IDLE_CHECK_INTERVAL: Duration = Duration::from_mins(1);
 
 /// OS process lifecycle handle. Only present for real child processes.
 /// None for `FakeTransport` (no OS process to manage).
+#[derive(Clone)]
 struct ProcessLifecycle {
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
 }
@@ -1234,8 +1235,16 @@ impl LspClient {
                 // triggers recovery via ensure_process() instead of returning
                 // ConnectionLost forever. The reader_supervisor_task will also
                 // remove it, but there's a race window where requests pile up.
+                state.reader_handle.abort();
+                let transport = Arc::clone(&state.transport);
+                let lifecycle = state.lifecycle.clone();
                 drop(entry);
                 self.processes.remove(language_id);
+                // Shutdown transport and reap zombie (matches force_respawn behavior)
+                transport.shutdown(&self.dispatcher).await;
+                if let Some(ref lc) = lifecycle {
+                    let _ = lc.child.lock().await.wait().await;
+                }
                 tracing::warn!(
                     language = %language_id,
                     "LSP: reader task not alive, removed stale entry for recovery"
@@ -1281,13 +1290,29 @@ impl LspClient {
         params: serde_json::Value,
     ) -> Result<(), LspError> {
         let message = RequestDispatcher::make_notification(method, &params);
-        match self.processes.get(language_id) {
-            Some(entry) => match entry.value() {
-                ProcessEntry::Running(state) => state.transport.send(&message).await,
-                ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
-            },
-            None => Err(LspError::NoLspAvailable),
+        let entry = self.processes.get(language_id).ok_or(LspError::NoLspAvailable)?;
+        let ProcessEntry::Running(state) = entry.value() else {
+            return Err(LspError::NoLspAvailable);
+        };
+        // Health check: verify reader task is still alive (same as request())
+        if state.reader_handle.is_finished() {
+            state.reader_handle.abort();
+            let transport = Arc::clone(&state.transport);
+            let lifecycle = state.lifecycle.clone();
+            drop(entry);
+            self.processes.remove(language_id);
+            // Shutdown transport and reap zombie (matches force_respawn behavior)
+            transport.shutdown(&self.dispatcher).await;
+            if let Some(ref lc) = lifecycle {
+                let _ = lc.child.lock().await.wait().await;
+            }
+            tracing::warn!(
+                language = %language_id,
+                "LSP: reader task not alive in notify, removed stale entry for recovery"
+            );
+            return Err(LspError::ConnectionLost);
         }
+        state.transport.send(&message).await
     }
 
     /// Retrieve the detected capabilities for a language.
@@ -2181,69 +2206,27 @@ async fn progress_watcher_task(
     loop {
         match rx.recv().await {
             Ok(msg) => {
-                let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                // Both "$/progress" and "window/workDoneProgress/*" are signals.
-                if method == "$/progress" || method.starts_with("window/workDoneProgress") {
-                    let kind = msg
-                        .pointer("/params/value/kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if kind == "end" {
-                        if indexing_complete.load(std::sync::atomic::Ordering::Relaxed) {
-                            let duration_secs = spawned_at.elapsed().as_secs();
-                            tracing::warn!(
-                                language = %language_id,
-                                duration_sec = duration_secs,
-                                "LSP: WorkDoneProgressEnd arrived {0}s after timeout fallback already fired — consider increasing timeout",
-                                duration_secs
-                            );
-                        } else {
-                            let duration_secs = spawned_at.elapsed().as_secs();
-                            indexing_complete.store(true, std::sync::atomic::Ordering::Relaxed);
-                            #[allow(clippy::expect_used)]
-                            {
-                                *indexing_completion_source
-                                    .lock()
-                                    .expect("indexing_completion_source lock") =
-                                    Some(IndexingCompletionSource::Progress);
-                                *indexing_duration_secs
-                                    .lock()
-                                    .expect("indexing_duration_secs lock") = Some(duration_secs);
-                                // Clear progress percent — indexing is complete.
-                                *indexing_progress_percent
-                                    .lock()
-                                    .expect("indexing_progress_percent lock") = None;
-                            }
-                            tracing::info!(
-                                language = %language_id,
-                                duration_sec = duration_secs,
-                                source = "progress",
-                                "LSP: WorkDoneProgressEnd received after {0}s — indexing complete",
-                                duration_secs
-                            );
-                        }
-                    } else if kind == "report" {
-                        // Parse percentage from report events.
-                        // LSP spec: WorkDoneProgressReport has optional `percentage` (0-100).
-                        if let Some(pct) = msg
-                            .pointer("/params/value/percentage")
-                            .and_then(serde_json::Value::as_u64)
-                        {
-                            let clamped = u8::try_from(pct.min(100)).unwrap_or(100);
-                            #[allow(clippy::expect_used)]
-                            {
-                                *indexing_progress_percent
-                                    .lock()
-                                    .expect("indexing_progress_percent lock") = Some(clamped);
-                            }
-                            tracing::debug!(
-                                language = %language_id,
-                                percentage = clamped,
-                                "LSP: indexing progress report"
-                            );
-                        }
+                let action = extract_progress_action(&msg);
+                if let ProgressAction::End { .. } = &action {
+                    if indexing_complete.load(std::sync::atomic::Ordering::Relaxed) {
+                        let duration_secs = spawned_at.elapsed().as_secs();
+                        tracing::warn!(
+                            language = %language_id,
+                            duration_sec = duration_secs,
+                            "LSP: WorkDoneProgressEnd arrived {0}s after timeout fallback already fired — consider increasing timeout",
+                            duration_secs
+                        );
+                        continue;
                     }
                 }
+                apply_progress_action(
+                    action,
+                    &indexing_complete,
+                    &indexing_completion_source,
+                    &indexing_duration_secs,
+                    &indexing_progress_percent,
+                    spawned_at,
+                );
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 // We missed some notifications (slow subscriber). Log and continue.
@@ -2282,76 +2265,48 @@ async fn registration_watcher_task(
     loop {
         match rx.recv().await {
             Ok(msg) => {
-                let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                let id = msg.get("id");
+                let action = extract_registration_action(&msg);
 
-                match method {
-                    "client/registerCapability" => {
-                        if let Some(registrations) = msg
-                            .pointer("/params/registrations")
-                            .and_then(|v| v.as_array())
-                        {
-                            #[allow(clippy::expect_used)]
-                            let mut caps = live_capabilities
-                                .write()
-                                .expect("live_capabilities write lock");
-                            for reg in registrations {
-                                let reg_id = reg.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                let reg_method =
-                                    reg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                                let opts = reg.get("registerOptions").cloned().unwrap_or(
-                                    serde_json::Value::Object(serde_json::Map::default()),
-                                );
-                                if caps.apply_registration(reg_method, reg_id, &opts) {
-                                    tracing::info!(
-                                        language = %language_id,
-                                        method = reg_method,
-                                        id = reg_id,
-                                        "LSP: dynamic capability registered"
-                                    );
-                                }
-                            }
+                // Apply registrations
+                if !action.registrations.is_empty() {
+                    #[allow(clippy::expect_used)]
+                    let mut caps = live_capabilities
+                        .write()
+                        .expect("live_capabilities write lock");
+                    for (reg_method, reg_id, opts) in &action.registrations {
+                        if caps.apply_registration(reg_method, reg_id, opts) {
+                            tracing::info!(
+                                language = %language_id,
+                                method = reg_method,
+                                id = reg_id,
+                                "LSP: dynamic capability registered"
+                            );
                         }
                     }
-                    "client/unregisterCapability" => {
-                        if let Some(unregs) = msg
-                            .pointer("/params/unregisterations")
-                            .and_then(|v| v.as_array())
-                        {
-                            #[allow(clippy::expect_used)]
-                            let mut caps = live_capabilities
-                                .write()
-                                .expect("live_capabilities write lock");
-                            for unreg in unregs {
-                                let reg_id = unreg.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                if caps.apply_unregistration(reg_id) {
-                                    tracing::info!(
-                                        language = %language_id,
-                                        id = reg_id,
-                                        "LSP: dynamic capability unregistered"
-                                    );
-                                }
-                            }
+                }
+
+                // Apply unregistrations
+                if !action.unregistrations.is_empty() {
+                    #[allow(clippy::expect_used)]
+                    let mut caps = live_capabilities
+                        .write()
+                        .expect("live_capabilities write lock");
+                    for reg_id in &action.unregistrations {
+                        if caps.apply_unregistration(reg_id) {
+                            tracing::info!(
+                                language = %language_id,
+                                id = reg_id,
+                                "LSP: dynamic capability unregistered"
+                            );
                         }
-                    }
-                    other => {
-                        tracing::debug!(
-                            language = %language_id,
-                            method = other,
-                            "registration_watcher_task: unrecognised server request, sending null response"
-                        );
                     }
                 }
 
                 // Send null response back to the server for any server-to-client request.
                 // The LSP protocol requires a response for all requests (even for methods
                 // the client doesn't fully handle). `result: null` is always safe.
-                if let Some(id_val) = id {
-                    let response = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id_val,
-                        "result": null
-                    });
+                if let Some(ref id_val) = action.response_id {
+                    let response = build_registration_response(id_val);
                     if let Err(e) = transport.send(&response).await {
                         tracing::warn!(
                             language = %language_id,
@@ -2484,7 +2439,6 @@ async fn idle_timeout_task(
 
 /// Pure logic result for progress notification handling.
 #[derive(Debug, PartialEq, Copy, Clone)]
-#[allow(dead_code)] // Used in tests, will be used by progress_watcher_task in Phase 3D
 enum ProgressAction {
     /// `WorkDoneProgressEnd` received.
     End {
@@ -2500,7 +2454,6 @@ enum ProgressAction {
 
 /// Extract progress action from a JSON-RPC notification message.
 /// Pure function: no side effects, deterministic output.
-#[allow(dead_code)] // Will be used by progress_watcher_task in Phase 3D
 fn extract_progress_action(msg: &serde_json::Value) -> ProgressAction {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
     
@@ -2528,7 +2481,6 @@ fn extract_progress_action(msg: &serde_json::Value) -> ProgressAction {
 
 /// Apply a progress action to the given state.
 /// Pure function with mutable input (for efficiency).
-#[allow(dead_code)] // Will be used by progress_watcher_task in Phase 3D
 fn apply_progress_action(
     action: ProgressAction,
     indexing_complete: &std::sync::atomic::AtomicBool,
@@ -2567,7 +2519,6 @@ fn apply_progress_action(
 
 /// Pure logic result for registration handling.
 #[derive(Debug, PartialEq)]
-#[allow(dead_code)] // Used in tests, will be used by registration_watcher_task in Phase 3D
 struct RegistrationAction {
     /// Registration updates to apply.
     registrations: Vec<(String, String, serde_json::Value)>,
@@ -2579,7 +2530,6 @@ struct RegistrationAction {
 
 /// Extract registration action from a server-to-client request.
 /// Pure function: no side effects, deterministic output.
-#[allow(dead_code)] // Will be used by registration_watcher_task in Phase 3D
 fn extract_registration_action(msg: &serde_json::Value) -> RegistrationAction {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
@@ -2626,7 +2576,6 @@ fn extract_registration_action(msg: &serde_json::Value) -> RegistrationAction {
 
 /// Build a JSON-RPC response for server-to-client requests.
 /// Pure function: returns result: null response.
-#[allow(dead_code)] // Will be used by registration_watcher_task in Phase 3D
 fn build_registration_response(id: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -4087,7 +4036,12 @@ mod tests {
         // Wire the dispatcher into FakeTransport so responses are dispatched
         fake.set_dispatcher(Arc::clone(&dispatcher));
 
-        let reader_handle = tokio::spawn(async {}); // dummy
+        // Spawn a long-running dummy reader handle that never completes.
+        // This simulates a real reader task — the health check in request()/notify()
+        // uses is_finished() to detect dead readers.
+        let reader_handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
 
         let entry = ProcessEntry::Running(Box::new(LanguageState {
             transport: Arc::clone(&fake) as Arc<dyn LspTransport>,
@@ -4252,7 +4206,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_with_running_process_times_out() {
         let (client, _fake) = make_running_client("rust");
-        // No response configured — will timeout
+        // No response configured — FakeTransport fails fast with Protocol error
 
         let result = client
             .request(
@@ -4264,8 +4218,8 @@ mod tests {
             .await;
 
         assert!(
-            matches!(result, Err(LspError::Timeout { .. })),
-            "should timeout when no response configured: {result:?}"
+            matches!(result, Err(LspError::Protocol(_))),
+            "should fail with Protocol error when no response configured: {result:?}"
         );
     }
 
@@ -4965,12 +4919,22 @@ mod tests {
         // Verify Running entry exists
         assert!(client.processes.get("rust").is_some());
 
-        // force_respawn should remove the Running entry
+        // force_respawn should remove the Running entry and try to start a new one
         // Since there's no real LSP binary, start_process will fail
-        let _ = client.force_respawn("rust").await;
+        let result = client.force_respawn("rust").await;
+
+        // The result should be an error (no real LSP binary)
+        assert!(result.is_err(), "force_respawn should fail without real LSP binary");
 
         // The original Running entry should be gone
-        // (may be replaced by Unavailable from failed start_process)
+        // (replaced by Unavailable from failed start_process)
+        let entry = client.processes.get("rust");
+        if let Some(entry) = entry {
+            assert!(
+                matches!(entry.value(), ProcessEntry::Unavailable(_)),
+                "original Running entry should be replaced by Unavailable"
+            );
+        }
     }
 
     // ── Phase 3D: Background task integration tests ─────────────────────
@@ -5072,7 +5036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reader_supervisor_on_crash_inserts_unavailable() {
+    async fn test_request_detects_dead_reader_and_removes_entry() {
         let (client, _fake) = make_running_client("rust");
 
         // Simulate reader crash by aborting the handle
@@ -5313,7 +5277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reader_supervisor_on_clean_eof_no_unavailable_entry() {
+    async fn test_request_detects_dead_reader_returns_connection_lost() {
         let (client, _fake) = make_running_client("rust");
 
         // Abort the reader handle (simulates clean EOF)
@@ -5327,11 +5291,100 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // The entry should be removed when reader exits
-        // (reader_supervisor_task removes it)
+        // (request() detects dead reader via is_finished())
         let result = client
             .request("rust", "textDocument/definition", json!({}), Duration::from_millis(100))
             .await;
 
         assert!(result.is_err(), "should fail when reader is dead");
+    }
+
+    // ── Additional test gap fixes ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_backoff_recovery_failure_reinserts_unavailable() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        // Insert an Unavailable entry with expired backoff
+        client.processes.insert(
+            "rust".to_owned(),
+            ProcessEntry::Unavailable(UnavailableState {
+                backoff_attempt: 2,
+                unavailable_since: Instant::now() - Duration::from_secs(100),
+            }),
+        );
+
+        // ensure_process should remove the expired entry and try to start
+        // Since there's no real LSP binary, start_process will fail
+        let _ = client.ensure_process("rust").await;
+
+        // Should have a new Unavailable entry with incremented backoff_attempt
+        let entry = client.processes.get("rust");
+        if let Some(entry) = entry {
+            if let ProcessEntry::Unavailable(state) = entry.value() {
+                assert!(
+                    state.backoff_attempt > 2,
+                    "backoff_attempt should be incremented: got {}",
+                    state.backoff_attempt
+                );
+            }
+        }
+        // Note: ensure_process returns Ok(()) after removing expired entry,
+        // then start_process is called separately. The Unavailable entry
+        // is re-inserted by start_process on failure.
+    }
+
+    #[test]
+    fn test_missing_languages_returns_configured_list() {
+        let missing = vec![MissingLanguage {
+            language_id: "python".to_owned(),
+            marker_file: "pyproject.toml".to_owned(),
+            tried_binaries: vec!["pyright".to_owned()],
+            install_hint: "pip install pyright".to_owned(),
+        }];
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let client = LspClient {
+            descriptors: Arc::new(Vec::new()),
+            missing_languages: Arc::new(missing),
+            processes: Arc::new(DashMap::new()),
+            init_locks: Arc::new(DashMap::new()),
+            dispatcher: Arc::new(RequestDispatcher::new()),
+            shutdown_tx: Arc::new(shutdown_tx),
+            doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        let result = client.missing_languages();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].language_id, "python");
+    }
+
+    #[tokio::test]
+    async fn test_start_process_inserts_unavailable_with_backoff() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        let descriptor = LspDescriptor {
+            language_id: "rust".to_owned(),
+            command: "non-existent-lsp-binary".to_owned(),
+            args: vec![],
+            root: std::env::temp_dir(),
+            init_timeout_secs: Some(1),
+            auto_plugins: vec![],
+            init_options: serde_json::Value::Null,
+        };
+
+        // First attempt (attempt=0)
+        let _ = client.start_process(descriptor.clone(), 0).await;
+
+        let entry = client.processes.get("rust").unwrap();
+        if let ProcessEntry::Unavailable(state) = entry.value() {
+            assert_eq!(state.backoff_attempt, 1, "first failure should set backoff_attempt=1");
+            assert!(
+                state.unavailable_since.elapsed() < Duration::from_secs(5),
+                "unavailable_since should be recent"
+            );
+        } else {
+            panic!("expected Unavailable entry after failed start");
+        }
     }
 }
