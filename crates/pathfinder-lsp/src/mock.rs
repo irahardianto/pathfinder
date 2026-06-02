@@ -63,6 +63,9 @@ impl Drop for MockDocumentLease {
 /// Configured result for `goto_definition`.
 type GotoDefinitionFixture = Arc<Mutex<Option<Result<Option<DefinitionLocation>, LspError>>>>;
 
+/// Queue of results for `goto_definition` (sequential multi-call).
+type GotoDefinitionQueue = Arc<Mutex<Vec<Result<Option<DefinitionLocation>, LspError>>>>;
+
 /// Configured error for `did_open`. `None` = return `Ok(())`.
 type DidOpenErrorFixture = Arc<Mutex<Option<LspError>>>;
 
@@ -91,6 +94,9 @@ pub struct MockLawyer {
     // ── goto_definition ───────────────────────────────────────────────────────
     /// Configured result for `goto_definition`. `None` = return `Ok(None)`.
     goto_definition_result: GotoDefinitionFixture,
+    /// Queue of results for successive `goto_definition` calls.
+    /// Checked first (pop front); falls back to `goto_definition_result`.
+    pub goto_definition_results: GotoDefinitionQueue,
     /// All calls made to `goto_definition` in order.
     goto_definition_calls: Arc<Mutex<Vec<(String, u32, u32)>>>,
 
@@ -165,6 +171,16 @@ impl MockLawyer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(result);
+    }
+
+    /// Push a result to the `goto_definition` queue. Multiple pushes create a
+    /// FIFO queue — each `goto_definition()` call pops the front.
+    /// Queue is checked before `goto_definition_result`.
+    pub fn push_goto_definition_result(&self, result: Result<Option<DefinitionLocation>, LspError>) {
+        self.goto_definition_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(result);
     }
 
     /// Returns how many times `goto_definition()` was called.
@@ -346,6 +362,12 @@ impl Lawyer for MockLawyer {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.push((file_path.to_string_lossy().into_owned(), line, column));
+        }
+
+        // Priority: queue (sequential) > single-set > default None
+        let from_queue = Self::pop_queued_result(&self.goto_definition_results);
+        if let Some(result) = from_queue {
+            return result;
         }
 
         let next = {
