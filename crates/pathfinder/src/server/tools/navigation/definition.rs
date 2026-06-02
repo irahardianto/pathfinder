@@ -495,9 +495,15 @@ impl PathfinderServer {
             let parent_name = symbol_chain.segments[symbol_chain.segments.len() - 2]
                 .name
                 .clone();
-            let ext = expected_file.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let ext = expected_file
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
             let path_glob = format!("**/*.{ext}");
-            if let Some(result) = self.grep_impl_method(&parent_name, &symbol_name, &path_glob).await {
+            if let Some(result) = self
+                .grep_impl_method(&parent_name, &symbol_name, &path_glob)
+                .await
+            {
                 return Some(result);
             }
         }
@@ -610,11 +616,17 @@ impl PathfinderServer {
                     .unwrap_or("");
                 let method_escaped = regex::escape(method_name);
                 let method_pattern = match ext {
-                    "rs" => format!(r"(?:(?:pub|crate)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\b"),
-                    "ts" | "js" | "tsx" | "jsx" => format!(r"(?:(?:export\s+(?:default\s*)?)?(?:async\s+)?)?(?:function\s+{method_escaped}\b|{method_escaped}\s*[=:])"),
+                    "rs" => format!(
+                        r"(?:(?:pub|crate)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\b"
+                    ),
+                    "ts" | "js" | "tsx" | "jsx" => format!(
+                        r"(?:(?:export\s+(?:default\s*)?)?(?:async\s+)?)?(?:function\s+{method_escaped}\b|{method_escaped}\s*[=:])"
+                    ),
                     "py" => format!(r"(?:async\s+)?def\s+{method_escaped}\b"),
                     "go" => format!(r"func\s+(?:\([^)]*\)\s+)?{method_escaped}\b"),
-                    "java" => format!(r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{method_escaped}\s*\("),
+                    "java" => format!(
+                        r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{method_escaped}\s*\("
+                    ),
                     _ => format!(r"\b{method_escaped}\b"),
                 };
                 let file_search = self
@@ -779,8 +791,8 @@ impl PathfinderServer {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
+    use super::*;
     use crate::server::types::GetDefinitionParams;
     use crate::server::PathfinderServer;
     use pathfinder_common::config::PathfinderConfig;
@@ -922,7 +934,8 @@ mod tests {
 
         let lawyer = Arc::new(MockLawyer::default());
         // Simulate an LSP protocol error (not NoLspAvailable, not None)
-        lawyer.set_goto_definition_result(Err(LspError::Protocol("LSP protocol error".to_string())));
+        lawyer
+            .set_goto_definition_result(Err(LspError::Protocol("LSP protocol error".to_string())));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
         let params = GetDefinitionParams {
@@ -990,7 +1003,8 @@ mod tests {
 
         // Lawyer returns a generic LSP error (not NoLspAvailable)
         let lawyer = Arc::new(MockLawyer::default());
-        lawyer.set_goto_definition_result(Err(LspError::Protocol("protocol violation".to_string())));
+        lawyer
+            .set_goto_definition_result(Err(LspError::Protocol("protocol violation".to_string())));
 
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
@@ -1389,14 +1403,8 @@ mod tests {
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            lawyer,
-        );
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
         let params = GetDefinitionParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -1408,10 +1416,7 @@ mod tests {
         assert_eq!(val.file, "src/auth.rs");
         assert_eq!(val.line, 10);
         assert!(val.degraded, "should be degraded when using grep fallback");
-        assert!(
-            val.degraded_reason.is_some(),
-            "degraded_reason must be set"
-        );
+        assert!(val.degraded_reason.is_some(), "degraded_reason must be set");
     }
 
     #[tokio::test]
@@ -1451,14 +1456,8 @@ mod tests {
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            lawyer,
-        );
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
         let params = GetDefinitionParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -1521,7 +1520,8 @@ mod tests {
             timeout_ms: 10000,
         }));
 
-        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
         let params = GetDefinitionParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -1762,7 +1762,9 @@ mod tests {
                 );
             }
             Err(err) => {
-                let code = err.data.as_ref()
+                let code = err
+                    .data
+                    .as_ref()
                     .and_then(|d| d.get("error"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");

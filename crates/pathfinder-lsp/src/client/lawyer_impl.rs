@@ -293,13 +293,17 @@ impl Lawyer for LspClient {
             "textDocument/implementation complete"
         );
 
-        Ok(crate::client::response_parsers::parse_definition_response_multi(
-            &response,
-            workspace_root,
-        ))
+        Ok(
+            crate::client::response_parsers::parse_definition_response_multi(
+                &response,
+                workspace_root,
+            ),
+        )
     }
 
-    async fn capability_status(&self) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
+    async fn capability_status(
+        &self,
+    ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus> {
         let mut status = std::collections::HashMap::new();
         for desc in self.descriptors.iter() {
             let lang_status = self.processes.get(&desc.language_id).map_or_else(
@@ -348,8 +352,8 @@ impl Lawyer for LspClient {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::client::tests::make_running_client;
     use crate::client::fake_transport::FakeTransport;
+    use crate::client::tests::make_running_client;
     use std::sync::Arc;
 
     fn make_running_client_with_caps(language_id: &str) -> (LspClient, Arc<FakeTransport>) {
@@ -357,7 +361,10 @@ mod tests {
 
         if let Some(entry) = client.processes.get(language_id) {
             if let crate::client::ProcessEntry::Running(state) = entry.value() {
-                let mut caps = state.live_capabilities.write().expect("live_capabilities lock");
+                let mut caps = state
+                    .live_capabilities
+                    .write()
+                    .expect("live_capabilities lock");
                 caps.call_hierarchy_provider = true;
                 caps.definition_provider = true;
             }
@@ -414,7 +421,10 @@ mod tests {
             .await;
 
         assert!(result.is_ok(), "goto_definition should succeed: {result:?}");
-        assert!(result.unwrap().is_none(), "null response should return None");
+        assert!(
+            result.unwrap().is_none(),
+            "null response should return None"
+        );
     }
 
     #[tokio::test]
@@ -478,7 +488,10 @@ mod tests {
             .call_hierarchy_prepare(workspace, Path::new("src/main.rs"), 1, 3)
             .await;
 
-        assert!(result.is_ok(), "call_hierarchy_prepare should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "call_hierarchy_prepare should succeed: {result:?}"
+        );
         let items = result.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "main");
@@ -530,7 +543,10 @@ mod tests {
 
         let result = client.call_hierarchy_incoming(workspace, &item).await;
 
-        assert!(result.is_ok(), "call_hierarchy_incoming should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "call_hierarchy_incoming should succeed: {result:?}"
+        );
         let calls = result.unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].item.name, "caller");
@@ -582,7 +598,10 @@ mod tests {
 
         let result = client.call_hierarchy_outgoing(workspace, &item).await;
 
-        assert!(result.is_ok(), "call_hierarchy_outgoing should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "call_hierarchy_outgoing should succeed: {result:?}"
+        );
         let calls = result.unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].item.name, "callee");
@@ -660,7 +679,10 @@ mod tests {
             .goto_implementation(workspace, Path::new("src/main.rs"), 10, 5)
             .await;
 
-        assert!(result.is_ok(), "goto_implementation should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "goto_implementation should succeed: {result:?}"
+        );
         let locs = result.unwrap();
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0].line, 6);

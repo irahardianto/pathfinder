@@ -157,7 +157,9 @@ mod tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].0, "textDocument/didOpen");
 
-        let file_uri = Url::from_file_path(workspace.join(file_path)).unwrap().to_string();
+        let file_uri = Url::from_file_path(workspace.join(file_path))
+            .unwrap()
+            .to_string();
         assert!(
             client.doc_versions.contains_key(&file_uri),
             "doc_versions should contain the opened file"
@@ -171,7 +173,10 @@ mod tests {
         let workspace = Path::new("/workspace");
         let file_path = Path::new("src/main.rs");
 
-        client.did_open(workspace, file_path, "fn main() {}").await.unwrap();
+        client
+            .did_open(workspace, file_path, "fn main() {}")
+            .await
+            .unwrap();
         fake.take_notifications();
 
         let result = client.did_close(workspace, file_path).await;
@@ -181,7 +186,9 @@ mod tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].0, "textDocument/didClose");
 
-        let file_uri = Url::from_file_path(workspace.join(file_path)).unwrap().to_string();
+        let file_uri = Url::from_file_path(workspace.join(file_path))
+            .unwrap()
+            .to_string();
         assert!(
             !client.doc_versions.contains_key(&file_uri),
             "doc_versions should not contain the closed file"
@@ -195,7 +202,9 @@ mod tests {
         let workspace = Path::new("/workspace");
         let file_path = Path::new("src/main.rs");
 
-        let guard = client.open_document(workspace, file_path, "fn main() {}").await;
+        let guard = client
+            .open_document(workspace, file_path, "fn main() {}")
+            .await;
         assert!(guard.is_ok(), "open_document should return guard");
     }
 
@@ -207,7 +216,10 @@ mod tests {
         let file_path = Path::new("src/main.rs");
 
         {
-            let _guard = client.open_document(workspace, file_path, "fn main() {}").await.unwrap();
+            let _guard = client
+                .open_document(workspace, file_path, "fn main() {}")
+                .await
+                .unwrap();
             fake.take_notifications();
         }
 
@@ -215,7 +227,9 @@ mod tests {
 
         let notifications = fake.take_notifications();
         assert!(
-            notifications.iter().any(|(m, _)| m == "textDocument/didClose"),
+            notifications
+                .iter()
+                .any(|(m, _)| m == "textDocument/didClose"),
             "DocumentGuard drop should send did_close: {notifications:?}"
         );
     }
@@ -241,15 +255,23 @@ mod tests {
         let workspace = Path::new("/workspace");
         let file_path = Path::new("src/main.rs");
 
-        client.did_open(workspace, file_path, "fn main() {}").await.unwrap();
+        client
+            .did_open(workspace, file_path, "fn main() {}")
+            .await
+            .unwrap();
         fake.take_notifications();
 
         fake.kill();
 
         let result = client.did_close(workspace, file_path).await;
-        assert!(result.is_err(), "did_close should fail when transport is dead");
+        assert!(
+            result.is_err(),
+            "did_close should fail when transport is dead"
+        );
 
-        let file_uri = Url::from_file_path(workspace.join(file_path)).unwrap().to_string();
+        let file_uri = Url::from_file_path(workspace.join(file_path))
+            .unwrap()
+            .to_string();
         assert!(
             !client.doc_versions.contains_key(&file_uri),
             "doc_versions should be removed even if notify fails"
@@ -263,9 +285,14 @@ mod tests {
         let workspace = Path::new("/workspace");
         let file_path = Path::new("src/lib.rs");
 
-        client.did_open(workspace, file_path, "pub fn hello() {}").await.unwrap();
+        client
+            .did_open(workspace, file_path, "pub fn hello() {}")
+            .await
+            .unwrap();
 
-        let file_uri = Url::from_file_path(workspace.join(file_path)).unwrap().to_string();
+        let file_uri = Url::from_file_path(workspace.join(file_path))
+            .unwrap()
+            .to_string();
         let version = client.doc_versions.get(&file_uri).unwrap();
         assert_eq!(
             version.load(Ordering::Relaxed),
@@ -281,9 +308,14 @@ mod tests {
         let workspace = Path::new("/workspace");
         let file_path = Path::new("src/lib.rs");
 
-        client.did_open(workspace, file_path, "pub fn hello() {}").await.unwrap();
+        client
+            .did_open(workspace, file_path, "pub fn hello() {}")
+            .await
+            .unwrap();
 
-        let file_uri = Url::from_file_path(workspace.join(file_path)).unwrap().to_string();
+        let file_uri = Url::from_file_path(workspace.join(file_path))
+            .unwrap()
+            .to_string();
         assert!(client.doc_versions.contains_key(&file_uri));
 
         client.did_close(workspace, file_path).await.unwrap();
@@ -299,14 +331,24 @@ mod tests {
 
         client.did_open(workspace, file_path, "v1").await.unwrap();
 
-        let file_uri = Url::from_file_path(workspace.join(file_path)).unwrap().to_string();
-        let v1 = client.doc_versions.get(&file_uri).unwrap().load(Ordering::Relaxed);
+        let file_uri = Url::from_file_path(workspace.join(file_path))
+            .unwrap()
+            .to_string();
+        let v1 = client
+            .doc_versions
+            .get(&file_uri)
+            .unwrap()
+            .load(Ordering::Relaxed);
         assert_eq!(v1, 1);
 
         client.did_close(workspace, file_path).await.unwrap();
         client.did_open(workspace, file_path, "v2").await.unwrap();
 
-        let v2 = client.doc_versions.get(&file_uri).unwrap().load(Ordering::Relaxed);
+        let v2 = client
+            .doc_versions
+            .get(&file_uri)
+            .unwrap()
+            .load(Ordering::Relaxed);
         assert_eq!(v2, 1, "version should reset to 1 on re-open");
     }
 

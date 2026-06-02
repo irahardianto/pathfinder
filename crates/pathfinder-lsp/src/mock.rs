@@ -176,7 +176,10 @@ impl MockLawyer {
     /// Push a result to the `goto_definition` queue. Multiple pushes create a
     /// FIFO queue — each `goto_definition()` call pops the front.
     /// Queue is checked before `goto_definition_result`.
-    pub fn push_goto_definition_result(&self, result: Result<Option<DefinitionLocation>, LspError>) {
+    pub fn push_goto_definition_result(
+        &self,
+        result: Result<Option<DefinitionLocation>, LspError>,
+    ) {
         self.goto_definition_results
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -283,7 +286,10 @@ impl MockLawyer {
     // ── goto_implementation ──────────────────────────────────────────────────────
 
     /// Set the result to return from the next `goto_implementation()` call.
-    pub fn set_goto_implementation_result(&self, result: Result<Vec<DefinitionLocation>, LspError>) {
+    pub fn set_goto_implementation_result(
+        &self,
+        result: Result<Vec<DefinitionLocation>, LspError>,
+    ) {
         let mut guard = self
             .goto_implementation_result
             .lock()

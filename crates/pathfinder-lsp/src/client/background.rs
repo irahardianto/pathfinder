@@ -294,35 +294,33 @@ pub async fn idle_timeout_task(
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum ProgressAction {
-    End {
-        duration_secs: Option<u64>,
-    },
-    Report {
-        percentage: u8,
-    },
+    End { duration_secs: Option<u64> },
+    Report { percentage: u8 },
     None,
 }
 
 pub fn extract_progress_action(msg: &serde_json::Value) -> ProgressAction {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-    
+
     if method != "$/progress" && !method.starts_with("window/workDoneProgress") {
         return ProgressAction::None;
     }
-    
-    let kind = msg
-        .pointer("/params/value/kind")
-        .and_then(|v| v.as_str());
-    
+
+    let kind = msg.pointer("/params/value/kind").and_then(|v| v.as_str());
+
     match kind {
-        Some("end") => ProgressAction::End { duration_secs: None },
+        Some("end") => ProgressAction::End {
+            duration_secs: None,
+        },
         Some("report") => {
             let percentage = msg
                 .pointer("/params/value/percentage")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             let clamped = u8::try_from(percentage.min(100)).unwrap_or(100);
-            ProgressAction::Report { percentage: clamped }
+            ProgressAction::Report {
+                percentage: clamped,
+            }
         }
         _ => ProgressAction::None,
     }
@@ -337,16 +335,16 @@ pub fn apply_progress_action(
     spawned_at: Instant,
 ) {
     use std::sync::atomic::Ordering;
-    
+
     match action {
         ProgressAction::End { .. } => {
             let was_already_complete = indexing_complete.swap(true, Ordering::SeqCst);
             if was_already_complete {
                 return;
             }
-            
+
             let duration = spawned_at.elapsed().as_secs();
-            
+
             if let Ok(mut source) = indexing_completion_source.lock() {
                 *source = Some(IndexingCompletionSource::Progress);
             }
@@ -376,10 +374,10 @@ pub struct RegistrationAction {
 pub fn extract_registration_action(msg: &serde_json::Value) -> RegistrationAction {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
-    
+
     let mut registrations = Vec::new();
     let mut unregistrations = Vec::new();
-    
+
     match method {
         "client/registerCapability" => {
             if let Some(regs) = msg
@@ -387,11 +385,20 @@ pub fn extract_registration_action(msg: &serde_json::Value) -> RegistrationActio
                 .and_then(|v| v.as_array())
             {
                 for reg in regs {
-                    let reg_id = reg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let reg_method = reg.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let opts = reg.get("registerOptions").cloned().unwrap_or(
-                        serde_json::Value::Object(serde_json::Map::default()),
-                    );
+                    let reg_id = reg
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let reg_method = reg
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let opts = reg
+                        .get("registerOptions")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
                     registrations.push((reg_method, reg_id, opts));
                 }
             }
@@ -402,14 +409,18 @@ pub fn extract_registration_action(msg: &serde_json::Value) -> RegistrationActio
                 .and_then(|v| v.as_array())
             {
                 for unreg in unregs {
-                    let reg_id = unreg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let reg_id = unreg
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     unregistrations.push(reg_id);
                 }
             }
         }
         _ => {}
     }
-    
+
     RegistrationAction {
         registrations,
         unregistrations,
@@ -444,7 +455,7 @@ mod tests {
                 }
             }
         });
-        
+
         let action = extract_progress_action(&msg);
         assert!(matches!(action, ProgressAction::End { .. }));
     }
@@ -462,7 +473,7 @@ mod tests {
                 }
             }
         });
-        
+
         let action = extract_progress_action(&msg);
         assert!(matches!(action, ProgressAction::Report { percentage: 42 }));
     }
@@ -480,7 +491,7 @@ mod tests {
                 }
             }
         });
-        
+
         let action = extract_progress_action(&msg);
         assert!(matches!(action, ProgressAction::Report { percentage: 100 }));
     }
@@ -492,7 +503,7 @@ mod tests {
             "method": "textDocument/publishDiagnostics",
             "params": {}
         });
-        
+
         let action = extract_progress_action(&msg);
         assert!(matches!(action, ProgressAction::None));
     }
@@ -507,7 +518,7 @@ mod tests {
                 "value": {}
             }
         });
-        
+
         let action = extract_progress_action(&msg);
         assert!(matches!(action, ProgressAction::None));
     }
@@ -519,9 +530,11 @@ mod tests {
         let indexing_duration_secs = std::sync::Mutex::new(None);
         let indexing_progress_percent = std::sync::Mutex::new(Some(50));
         let spawned_at = Instant::now();
-        
-        let action = ProgressAction::End { duration_secs: None };
-        
+
+        let action = ProgressAction::End {
+            duration_secs: None,
+        };
+
         apply_progress_action(
             action,
             &indexing_complete,
@@ -530,9 +543,12 @@ mod tests {
             &indexing_progress_percent,
             spawned_at,
         );
-        
+
         assert!(indexing_complete.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(*indexing_completion_source.lock().unwrap(), Some(IndexingCompletionSource::Progress));
+        assert_eq!(
+            *indexing_completion_source.lock().unwrap(),
+            Some(IndexingCompletionSource::Progress)
+        );
         assert!(indexing_duration_secs.lock().unwrap().is_some());
         assert_eq!(*indexing_progress_percent.lock().unwrap(), None);
     }
@@ -540,13 +556,16 @@ mod tests {
     #[test]
     fn test_apply_progress_action_end_already_complete() {
         let indexing_complete = std::sync::atomic::AtomicBool::new(true);
-        let indexing_completion_source = std::sync::Mutex::new(Some(IndexingCompletionSource::TimeoutFallback));
+        let indexing_completion_source =
+            std::sync::Mutex::new(Some(IndexingCompletionSource::TimeoutFallback));
         let indexing_duration_secs = std::sync::Mutex::new(Some(100));
         let indexing_progress_percent = std::sync::Mutex::new(None);
         let spawned_at = Instant::now() - Duration::from_secs(200);
-        
-        let action = ProgressAction::End { duration_secs: None };
-        
+
+        let action = ProgressAction::End {
+            duration_secs: None,
+        };
+
         apply_progress_action(
             action,
             &indexing_complete,
@@ -555,9 +574,12 @@ mod tests {
             &indexing_progress_percent,
             spawned_at,
         );
-        
+
         assert!(indexing_complete.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(*indexing_completion_source.lock().unwrap(), Some(IndexingCompletionSource::TimeoutFallback));
+        assert_eq!(
+            *indexing_completion_source.lock().unwrap(),
+            Some(IndexingCompletionSource::TimeoutFallback)
+        );
         assert_eq!(*indexing_duration_secs.lock().unwrap(), Some(100));
     }
 
@@ -568,9 +590,9 @@ mod tests {
         let indexing_duration_secs = std::sync::Mutex::new(None);
         let indexing_progress_percent = std::sync::Mutex::new(None);
         let spawned_at = Instant::now();
-        
+
         let action = ProgressAction::Report { percentage: 75 };
-        
+
         apply_progress_action(
             action,
             &indexing_complete,
@@ -579,7 +601,7 @@ mod tests {
             &indexing_progress_percent,
             spawned_at,
         );
-        
+
         assert!(!indexing_complete.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(*indexing_progress_percent.lock().unwrap(), Some(75));
         assert!(indexing_duration_secs.lock().unwrap().is_none());
@@ -601,7 +623,7 @@ mod tests {
                 }]
             }
         });
-        
+
         let action = extract_registration_action(&msg);
         assert_eq!(action.registrations.len(), 1);
         assert_eq!(action.registrations[0].0, "textDocument/didChange");
@@ -622,7 +644,7 @@ mod tests {
                 }]
             }
         });
-        
+
         let action = extract_registration_action(&msg);
         assert_eq!(action.registrations.len(), 0);
         assert_eq!(action.unregistrations.len(), 1);
@@ -637,7 +659,7 @@ mod tests {
             "method": "workspace/configuration",
             "params": {}
         });
-        
+
         let action = extract_registration_action(&msg);
         assert_eq!(action.registrations.len(), 0);
         assert_eq!(action.unregistrations.len(), 0);
@@ -648,7 +670,7 @@ mod tests {
     fn test_build_registration_response() {
         let id = json!(42);
         let response = build_registration_response(&id);
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 42);
         assert_eq!(response["result"], json!(null));

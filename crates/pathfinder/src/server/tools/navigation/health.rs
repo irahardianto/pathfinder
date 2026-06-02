@@ -30,12 +30,10 @@ impl PathfinderServer {
             let lang = match &params.language {
                 Some(l) => l.clone(),
                 None => {
-                    return Err(pathfinder_to_error_data(
-                        &PathfinderError::IoError {
-                            message: "lsp_health action='restart' requires 'language' to be set"
-                                .to_owned(),
-                        },
-                    ));
+                    return Err(pathfinder_to_error_data(&PathfinderError::IoError {
+                        message: "lsp_health action='restart' requires 'language' to be set"
+                            .to_owned(),
+                    }));
                 }
             };
             tracing::info!(language = %lang, "lsp_health: restart requested by agent");
@@ -729,8 +727,8 @@ pub(super) fn parse_uptime_to_seconds(uptime: Option<&str>) -> Option<u64> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::make_server_with_lawyer;
+    use super::*;
     use pathfinder_treesitter::mock::MockSurgeon;
     use std::sync::Arc;
 

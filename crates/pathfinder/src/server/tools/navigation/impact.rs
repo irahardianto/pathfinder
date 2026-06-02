@@ -459,8 +459,7 @@ impl PathfinderServer {
                     degraded = true;
                     degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
 
-                    let symbol_name = super::last_symbol_name(&semantic_path)
-                        .unwrap_or_default();
+                    let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
                     if let Some(refs) = self
                         .grep_reference_fallback(
@@ -490,8 +489,7 @@ impl PathfinderServer {
                     "analyze_impact: no LSP — attempting grep-based reference fallback"
                 );
 
-                let symbol_name = super::last_symbol_name(&semantic_path)
-                    .unwrap_or_default();
+                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -519,8 +517,7 @@ impl PathfinderServer {
                     "analyze_impact: LSP timed out — attempting grep-based reference fallback"
                 );
 
-                let symbol_name = super::last_symbol_name(&semantic_path)
-                    .unwrap_or_default();
+                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -550,8 +547,7 @@ impl PathfinderServer {
                     "call_hierarchy_prepare failed"
                 );
 
-                let symbol_name = super::last_symbol_name(&semantic_path)
-                    .unwrap_or_default();
+                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -634,8 +630,7 @@ impl PathfinderServer {
 
         // Spec 4.2: Test coverage search
         let (test_callers, test_coverage_status) = if params.include_test_coverage {
-            let symbol_name = super::last_symbol_name(&semantic_path)
-                .unwrap_or_default();
+            let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
             if symbol_name.is_empty() {
                 (None, Some("not_found".to_owned()))
@@ -664,7 +659,9 @@ impl PathfinderServer {
                             .map(|m| {
                                 let fallback_path = format!("{}:{}", m.file, m.line);
                                 crate::server::types::ImpactReference {
-                                    semantic_path: m.enclosing_semantic_path.unwrap_or(fallback_path),
+                                    semantic_path: m
+                                        .enclosing_semantic_path
+                                        .unwrap_or(fallback_path),
                                     file: m.file.clone(),
                                     line: usize::try_from(m.line).unwrap_or(0),
                                     snippet: m.content,
@@ -719,8 +716,7 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
 
-            let symbol_name = super::last_symbol_name(&semantic_path)
-                .unwrap_or_default();
+            let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
             text_parts.push(notice);
             text_parts.push(String::new());
@@ -815,8 +811,8 @@ impl PathfinderServer {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
+    use super::*;
     use crate::server::types::AnalyzeImpactParams;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
@@ -1867,9 +1863,15 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Should have incoming call from main
-        let incoming = val.incoming.as_ref().expect("incoming must be Some when not degraded");
+        let incoming = val
+            .incoming
+            .as_ref()
+            .expect("incoming must be Some when not degraded");
         assert!(!incoming.is_empty(), "should have incoming calls");
-        assert!(incoming.iter().all(|r| r.depth <= 1), "all refs should be within max_depth");
+        assert!(
+            incoming.iter().all(|r| r.depth <= 1),
+            "all refs should be within max_depth"
+        );
     }
 
     // ── Phase 4C: Navigation Residual Gaps ───────────────────────────────
@@ -1938,7 +1940,9 @@ mod tests {
         let outgoing = val.outgoing.as_ref().expect("must be Some");
         // Should deduplicate: login should not appear in its own outgoing
         assert!(
-            !outgoing.iter().any(|r| r.file == "src/auth.rs" && r.semantic_path.contains("login")),
+            !outgoing
+                .iter()
+                .any(|r| r.file == "src/auth.rs" && r.semantic_path.contains("login")),
             "cycle should be deduplicated"
         );
     }
@@ -2006,9 +2010,10 @@ mod tests {
         let incoming = val.incoming.as_ref().expect("must be Some");
         // Should deduplicate based on item (not call sites)
         // Check by semantic path since name is not available in ImpactReference
-        let handler_count = incoming.iter().filter(|r| {
-            r.semantic_path.contains("handler") || r.file == "src/handler.rs"
-        }).count();
+        let handler_count = incoming
+            .iter()
+            .filter(|r| r.semantic_path.contains("handler") || r.file == "src/handler.rs")
+            .count();
         assert_eq!(
             handler_count, 1,
             "cross-referenced symbol should be deduplicated"
@@ -2206,9 +2211,7 @@ mod tests {
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
 
         // Incoming: first call fails (error for initial item), second succeeds
-        lawyer.push_incoming_call_result(Err(LspError::Protocol(
-            "transient error".to_string(),
-        )));
+        lawyer.push_incoming_call_result(Err(LspError::Protocol("transient error".to_string())));
         // Outgoing succeeds with one callee
         lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
             item: CallHierarchyItem {
@@ -2359,7 +2362,8 @@ mod tests {
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -2373,7 +2377,10 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Verify test coverage results
-        assert!(val.test_callers.is_some(), "test_callers should be populated");
+        assert!(
+            val.test_callers.is_some(),
+            "test_callers should be populated"
+        );
         let test_refs = val.test_callers.as_ref().unwrap();
         assert_eq!(test_refs.len(), 1);
         assert_eq!(test_refs[0].file, "src/auth_test.rs");
@@ -2419,7 +2426,8 @@ mod tests {
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
         let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -2432,7 +2440,10 @@ mod tests {
         let val: crate::server::types::AnalyzeImpactMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        assert!(val.test_callers.is_none(), "test_callers should be None when not found");
+        assert!(
+            val.test_callers.is_none(),
+            "test_callers should be None when not found"
+        );
         assert_eq!(val.test_coverage_status, Some("not_found".to_owned()));
     }
 }

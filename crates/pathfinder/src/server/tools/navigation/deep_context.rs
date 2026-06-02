@@ -14,8 +14,10 @@ use pathfinder_common::types::DegradedReason;
 use pathfinder_lsp::LspError;
 use rmcp::model::{CallToolResult, ErrorData};
 
-use super::{extract_call_candidates, is_source_file, is_workspace_file, language_to_file_glob,
-            LspResolution};
+use super::{
+    extract_call_candidates, is_source_file, is_workspace_file, language_to_file_glob,
+    LspResolution,
+};
 
 impl PathfinderServer {
     /// Resolve LSP call-hierarchy dependencies for a symbol.
@@ -321,7 +323,11 @@ impl PathfinderServer {
             dependencies.len()
         );
 
-        (true, Some(DegradedReason::GrepFallbackDependencies), truncated)
+        (
+            true,
+            Some(DegradedReason::GrepFallbackDependencies),
+            truncated,
+        )
     }
 
     /// Fetch outgoing call-hierarchy items and append them as dependencies.
@@ -609,9 +615,9 @@ impl PathfinderServer {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use crate::server::PathfinderServer;
-    use crate::server::types::ReadWithDeepContextParams;
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
+    use crate::server::types::ReadWithDeepContextParams;
+    use crate::server::PathfinderServer;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{DegradedReason, WorkspaceRoot};
@@ -626,11 +632,11 @@ mod tests {
     #[tokio::test]
     async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
         let ws_dir = make_temp_workspace();
@@ -762,7 +768,9 @@ mod tests {
         // Prepare succeeds
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
         // But outgoing call fails
-        lawyer.push_outgoing_call_result(Err(pathfinder_lsp::LspError::Protocol("outgoing failed".to_string())));
+        lawyer.push_outgoing_call_result(Err(pathfinder_lsp::LspError::Protocol(
+            "outgoing failed".to_string(),
+        )));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -777,7 +785,10 @@ mod tests {
 
         // Degraded because outgoing call failed
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
         assert!(val.dependencies.is_empty());
     }
 
@@ -830,11 +841,11 @@ mod tests {
         // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(None)
         // → LSP is warming up. Falls through to grep fallback (PATCH-005).
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
         // Empty call hierarchy
@@ -1119,7 +1130,10 @@ mod tests {
         assert_eq!(val.dependencies.len(), 1);
         // Signature should be the name since detail is None
         assert_eq!(val.dependencies[0].signature, "validate_token");
-        assert_eq!(val.dependencies[0].semantic_path, "src/token.rs::validate_token");
+        assert_eq!(
+            val.dependencies[0].semantic_path,
+            "src/token.rs::validate_token"
+        );
     }
 
     // ── Warmup retry success ────────────────────────────────────────

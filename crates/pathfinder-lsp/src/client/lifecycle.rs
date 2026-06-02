@@ -690,7 +690,10 @@ impl super::LspClient {
         params: serde_json::Value,
     ) -> Result<(), LspError> {
         let message = RequestDispatcher::make_notification(method, &params);
-        let entry = self.processes.get(language_id).ok_or(LspError::NoLspAvailable)?;
+        let entry = self
+            .processes
+            .get(language_id)
+            .ok_or(LspError::NoLspAvailable)?;
         let ProcessEntry::Running(state) = entry.value() else {
             return Err(LspError::NoLspAvailable);
         };
@@ -1043,7 +1046,10 @@ mod tests {
 
         if let Some(entry) = client.processes.get("rust") {
             if let ProcessEntry::Running(state) = entry.value() {
-                let mut live_caps = state.live_capabilities.write().expect("live_capabilities lock");
+                let mut live_caps = state
+                    .live_capabilities
+                    .write()
+                    .expect("live_capabilities lock");
                 *live_caps = caps;
             }
         }
@@ -1051,8 +1057,14 @@ mod tests {
         let result = client.capabilities_for("rust");
         assert!(result.is_ok(), "should return capabilities: {result:?}");
         let caps = result.unwrap();
-        assert!(caps.definition_provider, "definition_provider should be true");
-        assert!(caps.call_hierarchy_provider, "call_hierarchy_provider should be true");
+        assert!(
+            caps.definition_provider,
+            "definition_provider should be true"
+        );
+        assert!(
+            caps.call_hierarchy_provider,
+            "call_hierarchy_provider should be true"
+        );
     }
 
     #[tokio::test]
@@ -1138,7 +1150,10 @@ mod tests {
     async fn test_request_in_flight_guard_on_running_process() {
         let (client, fake) = make_running_client("rust");
 
-        fake.set_response("textDocument/definition", serde_json::json!({"uri": "file:///test.rs"}));
+        fake.set_response(
+            "textDocument/definition",
+            serde_json::json!({"uri": "file:///test.rs"}),
+        );
 
         let entry = client.processes.get("rust").unwrap();
         let in_flight = if let ProcessEntry::Running(state) = entry.value() {
@@ -1220,7 +1235,10 @@ mod tests {
 
         let result = client.force_respawn("rust").await;
 
-        assert!(result.is_err(), "force_respawn should fail without real LSP binary");
+        assert!(
+            result.is_err(),
+            "force_respawn should fail without real LSP binary"
+        );
 
         let entry = client.processes.get("rust");
         if let Some(entry) = entry {
@@ -1249,7 +1267,10 @@ mod tests {
         assert!(result.is_err(), "should fail with non-existent binary");
 
         let entry = client.processes.get("rust");
-        assert!(entry.is_some(), "should insert Unavailable entry on failure");
+        assert!(
+            entry.is_some(),
+            "should insert Unavailable entry on failure"
+        );
         assert!(
             matches!(entry.unwrap().value(), ProcessEntry::Unavailable(_)),
             "entry should be Unavailable"
@@ -1279,9 +1300,9 @@ mod tests {
 
         if let Some(entry) = client.processes.get("rust") {
             if let ProcessEntry::Running(state) = entry.value() {
-                state.transport.set_last_used(
-                    Instant::now() - Duration::from_secs(20 * 60),
-                );
+                state
+                    .transport
+                    .set_last_used(Instant::now() - Duration::from_secs(20 * 60));
             }
         }
 
@@ -1302,9 +1323,9 @@ mod tests {
 
         if let Some(entry) = client.processes.get("rust") {
             if let ProcessEntry::Running(state) = entry.value() {
-                state.transport.set_last_used(
-                    Instant::now() - Duration::from_secs(20 * 60),
-                );
+                state
+                    .transport
+                    .set_last_used(Instant::now() - Duration::from_secs(20 * 60));
                 state.transport.in_flight().store(1, Ordering::Relaxed);
             }
         }
@@ -1335,16 +1356,11 @@ mod tests {
     fn test_detect_concurrent_lsp_returns_false_for_build_artifact() {
         let client = client_no_languages();
 
-        let result = client.detect_concurrent_lsp(
-            "rust",
-            "/home/user/project/target/debug/build/my-lsp",
-        );
+        let result =
+            client.detect_concurrent_lsp("rust", "/home/user/project/target/debug/build/my-lsp");
         assert!(!result, "should return false for build artifact paths");
 
-        let result = client.detect_concurrent_lsp(
-            "rust",
-            "/home/user/.cargo/bin/rust-analyzer",
-        );
+        let result = client.detect_concurrent_lsp("rust", "/home/user/.cargo/bin/rust-analyzer");
         assert!(!result, "should return false for .cargo paths");
     }
 
@@ -1379,10 +1395,7 @@ mod tests {
         }
 
         let count = client.processes.iter().count();
-        assert!(
-            count <= 1,
-            "should have at most one entry, got {count}"
-        );
+        assert!(count <= 1, "should have at most one entry, got {count}");
     }
 
     #[tokio::test]
@@ -1419,7 +1432,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         let result = client
-            .request("rust", "textDocument/definition", json!({}), Duration::from_millis(100))
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_millis(100),
+            )
             .await;
 
         assert!(result.is_err(), "should fail when reader is dead");
@@ -1495,7 +1513,10 @@ mod tests {
 
         let entry = client.processes.get("rust").unwrap();
         if let ProcessEntry::Unavailable(state) = entry.value() {
-            assert_eq!(state.backoff_attempt, 1, "first failure should set backoff_attempt=1");
+            assert_eq!(
+                state.backoff_attempt, 1,
+                "first failure should set backoff_attempt=1"
+            );
             assert!(
                 state.unavailable_since.elapsed() < Duration::from_secs(5),
                 "unavailable_since should be recent"
@@ -1549,10 +1570,11 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_indexing_timeout_fallback_noop_if_already_complete() {
         tokio::time::pause();
-        
+
         let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let indexing_completion_source =
-            Arc::new(std::sync::Mutex::new(Some(IndexingCompletionSource::Progress)));
+        let indexing_completion_source = Arc::new(std::sync::Mutex::new(Some(
+            IndexingCompletionSource::Progress,
+        )));
         let indexing_duration_secs = Arc::new(std::sync::Mutex::new(Some(42)));
         let spawned_at = Instant::now();
 

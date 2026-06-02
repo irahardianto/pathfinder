@@ -920,11 +920,7 @@ mod tests {
         assert_eq!(response.failed, 1);
         assert!(response.files[0].content.is_none());
         assert!(response.files[0].error.is_some());
-        assert!(response.files[0]
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("binary"));
+        assert!(response.files[0].error.as_ref().unwrap().contains("binary"));
     }
 
     #[tokio::test]

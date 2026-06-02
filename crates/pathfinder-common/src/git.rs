@@ -256,8 +256,8 @@ mod tests {
         // Git might output non-UTF-8 bytes (e.g., filenames with invalid encoding).
         // String::from_utf8_lossy replaces invalid bytes with the Unicode replacement character.
         let invalid_bytes = vec![
-            b's', b'r', b'c', b'/', b'f', b'o', b'o', b'.', b'r', b's', b'\n',
-            b's', b'r', b'c', b'/', 0xFF, 0xFE, b'.', b'r', b's', b'\n', // invalid UTF-8
+            b's', b'r', b'c', b'/', b'f', b'o', b'o', b'.', b'r', b's', b'\n', b's', b'r', b'c',
+            b'/', 0xFF, 0xFE, b'.', b'r', b's', b'\n', // invalid UTF-8
         ];
         let runner = FakeGitRunner {
             stdout: Ok(invalid_bytes),
@@ -269,7 +269,9 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(result.contains(Path::new("src/foo.rs")));
         // The invalid bytes are replaced with replacement characters
-        assert!(result.iter().any(|p| p.to_string_lossy().contains('\u{FFFD}')));
+        assert!(result
+            .iter()
+            .any(|p| p.to_string_lossy().contains('\u{FFFD}')));
     }
 
     #[tokio::test]

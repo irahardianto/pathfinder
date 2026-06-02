@@ -4,8 +4,8 @@
 //! Orchestrates `read_symbol_scope` + `analyze_impact` + `find_all_references`.
 
 use crate::server::helpers::{
-    format_degraded_notice, parse_semantic_path, pathfinder_to_error_data,
-    require_symbol_target, serialize_metadata,
+    format_degraded_notice, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
+    serialize_metadata,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
@@ -168,10 +168,11 @@ impl PathfinderServer {
 
         let refs_result = self.find_all_references_impl(refs_params).await;
 
-        let (references, refs_degraded, refs_reason, files_referenced, _refs_warm_start) = match refs_result {
-            Ok(result) => {
-                let raw = result.structured_content.unwrap_or_default();
-                let meta: crate::server::types::FindAllReferencesMetadata =
+        let (references, refs_degraded, refs_reason, files_referenced, _refs_warm_start) =
+            match refs_result {
+                Ok(result) => {
+                    let raw = result.structured_content.unwrap_or_default();
+                    let meta: crate::server::types::FindAllReferencesMetadata =
                     serde_json::from_value(raw).unwrap_or_else(|e| {
                         debug_assert!(false, "find_all_references metadata deserialization failed: {e}");
                         tracing::warn!(
@@ -185,34 +186,40 @@ impl PathfinderServer {
                             ..Default::default()
                         }
                     });
-                let refs = meta.references.map(|refs| {
-                    refs.into_iter()
-                        .map(|r| crate::server::types::SymbolOverviewReference {
-                            file: r.file,
-                            line: r.line,
-                            column: r.column,
-                            snippet: r.snippet,
-                        })
-                        .collect()
-                });
-                let warm_start_in_progress = meta.warm_start_in_progress;
-                (
-                    refs,
-                    meta.degraded,
-                    meta.degraded_reason,
-                    meta.files_referenced,
-                    warm_start_in_progress,
-                )
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tool = "symbol_overview",
-                    error = %e,
-                    "find_all_references_impl failed — references will be unavailable"
-                );
-                (None, true, Some(DegradedReason::LspErrorGrepFallback), 0, None)
-            }
-        };
+                    let refs = meta.references.map(|refs| {
+                        refs.into_iter()
+                            .map(|r| crate::server::types::SymbolOverviewReference {
+                                file: r.file,
+                                line: r.line,
+                                column: r.column,
+                                snippet: r.snippet,
+                            })
+                            .collect()
+                    });
+                    let warm_start_in_progress = meta.warm_start_in_progress;
+                    (
+                        refs,
+                        meta.degraded,
+                        meta.degraded_reason,
+                        meta.files_referenced,
+                        warm_start_in_progress,
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tool = "symbol_overview",
+                        error = %e,
+                        "find_all_references_impl failed — references will be unavailable"
+                    );
+                    (
+                        None,
+                        true,
+                        Some(DegradedReason::LspErrorGrepFallback),
+                        0,
+                        None,
+                    )
+                }
+            };
 
         let duration_ms = start.elapsed().as_millis();
 
@@ -225,7 +232,7 @@ impl PathfinderServer {
                 r,
                 Some(
                     DegradedReason::LspWarmupEmptyUnverified
-                    | DegradedReason::LspWarmupGrepFallback
+                        | DegradedReason::LspWarmupGrepFallback
                 )
             )
         };
@@ -322,8 +329,8 @@ impl PathfinderServer {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
+    use super::*;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{DegradedReason, WorkspaceRoot};
@@ -338,11 +345,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_aggregates_callers_callees_references() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -445,11 +452,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_no_impact_no_references_shows_unavailable() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -507,11 +514,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_with_references_only() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -555,11 +562,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_degraded_when_lsp_unavailable() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         // Use NoOpLawyer to simulate LSP unavailable
         let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
@@ -603,11 +610,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_lsp_error_references_degraded() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -644,7 +651,10 @@ mod tests {
 
         // Verify degraded on LSP error in find_all_references_impl
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspTimeoutGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspTimeoutGrepFallback)
+        );
         // Timeout maps to "unavailable", not "warming_up" — timeout != warmup.
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert_eq!(val.warm_start_in_progress, None);
@@ -657,11 +667,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_bfs_error_logs_warning_continues_with_empty_results() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -709,11 +719,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_partial_degradation_treesitter_fails_refs_ok() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -742,7 +752,10 @@ mod tests {
         // Verify degraded (impact failed due to LSP not providing items)
         assert!(val.degraded);
         // Degraded reason is LspWarmupEmptyUnverified (prepare returned empty, goto_definition returned None)
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspWarmupEmptyUnverified));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspWarmupEmptyUnverified)
+        );
 
         // Impact unavailable due to degradation
         assert!(val.impact.is_none());
@@ -808,11 +821,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_respects_max_callers_callees_limit() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -882,19 +895,18 @@ mod tests {
         // Note: analyze_impact_impl returns Ok(degraded) on LSP errors, not Err.
         // The Err(_) branch in symbol_overview_impl is for unexpected failures.
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
         // Make call_hierarchy_prepare fail → analyze_impact_impl returns Ok(degraded)
         // with grep fallback (which also fails since no scout results configured)
-        lawyer.push_prepare_call_hierarchy_result(Err(LspError::Protocol(
-            "LSP crashed".to_string(),
-        )));
+        lawyer
+            .push_prepare_call_hierarchy_result(Err(LspError::Protocol("LSP crashed".to_string())));
 
         // References succeed
         lawyer.set_references_result(Ok(vec![ReferenceLocation {
@@ -937,18 +949,17 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_both_degraded() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 
         // Make call_hierarchy_prepare fail → impact degraded
-        lawyer.push_prepare_call_hierarchy_result(Err(LspError::Protocol(
-            "LSP crashed".to_string(),
-        )));
+        lawyer
+            .push_prepare_call_hierarchy_result(Err(LspError::Protocol("LSP crashed".to_string())));
 
         // Make references fail → references degraded
         lawyer.set_references_lsp_error(Err(LspError::ConnectionLost));
@@ -984,11 +995,11 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_overview_respects_max_references() {
         let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
 
         let lawyer = Arc::new(MockLawyer::default());
 

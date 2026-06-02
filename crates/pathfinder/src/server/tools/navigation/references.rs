@@ -392,8 +392,8 @@ impl PathfinderServer {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
+    use super::*;
     use crate::server::PathfinderServer;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
@@ -543,8 +543,7 @@ mod tests {
 
         let lawyer = Arc::new(MockLawyer::default());
         // Simulate LSP protocol error
-        lawyer
-            .set_references_result(Err("protocol error".to_string()));
+        lawyer.set_references_result(Err("protocol error".to_string()));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -631,14 +630,12 @@ mod tests {
         ]));
 
         // Configure implementations
-        lawyer.set_goto_implementation_result(Ok(vec![
-            DefinitionLocation {
-                file: "src/auth_impl.rs".into(),
-                line: 15,
-                column: 4,
-                preview: "impl LoginService for AuthService {".into(),
-            },
-        ]));
+        lawyer.set_goto_implementation_result(Ok(vec![DefinitionLocation {
+            file: "src/auth_impl.rs".into(),
+            line: 15,
+            column: 4,
+            preview: "impl LoginService for AuthService {".into(),
+        }]));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -745,14 +742,12 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
 
         // 1 implementation
-        lawyer.set_goto_implementation_result(Ok(vec![
-            DefinitionLocation {
-                file: "src/auth_impl.rs".into(),
-                line: 10,
-                column: 4,
-                preview: "impl".into(),
-            },
-        ]));
+        lawyer.set_goto_implementation_result(Ok(vec![DefinitionLocation {
+            file: "src/auth_impl.rs".into(),
+            line: 10,
+            column: 4,
+            preview: "impl".into(),
+        }]));
 
         // 5 references
         lawyer.set_references_result(Ok(vec![
@@ -863,7 +858,10 @@ mod tests {
             offset: 0,
         };
         let result = server.find_all_references_impl(params).await;
-        assert!(result.is_err(), "should return error for sandbox denied path");
+        assert!(
+            result.is_err(),
+            "should return error for sandbox denied path"
+        );
     }
 
     // ── goto_implementation Err while references succeeds ────────────
@@ -986,10 +984,17 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         let refs = val.references.unwrap_or_default();
-        assert!(refs.is_empty(), "should return empty when offset past total, got {}", refs.len());
+        assert!(
+            refs.is_empty(),
+            "should return empty when offset past total, got {}",
+            refs.len()
+        );
         assert_eq!(val.total_references, Some(6));
         // When offset is past total, truncated is false (nothing more to show)
-        assert!(!val.truncated, "should NOT be truncated when offset past total");
+        assert!(
+            !val.truncated,
+            "should NOT be truncated when offset past total"
+        );
     }
 
     // ── Truncation boundary ─────────────────────────────────────────

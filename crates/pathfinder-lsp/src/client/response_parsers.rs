@@ -657,8 +657,8 @@ mod tests {
             }
         }]);
 
-        let result =
-            parse_references_response(&response, workspace_root).expect("should parse successfully");
+        let result = parse_references_response(&response, workspace_root)
+            .expect("should parse successfully");
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].file, "src/lib.rs");
@@ -669,9 +669,11 @@ mod tests {
 
     #[test]
     fn test_parse_references_response_null_returns_empty() {
-        let result =
-            parse_references_response(&json!(null), Path::new("/workspace")).expect("ok");
-        assert!(result.is_empty(), "null response should return empty vector");
+        let result = parse_references_response(&json!(null), Path::new("/workspace")).expect("ok");
+        assert!(
+            result.is_empty(),
+            "null response should return empty vector"
+        );
     }
 
     #[test]
@@ -690,7 +692,10 @@ mod tests {
             "invalid URI should return error, not empty vector"
         );
         if let Err(LspError::Protocol(msg)) = result {
-            assert!(msg.contains("invalid URI"), "error should mention invalid URI");
+            assert!(
+                msg.contains("invalid URI"),
+                "error should mention invalid URI"
+            );
         } else {
             panic!("expected Protocol error for invalid URI");
         }

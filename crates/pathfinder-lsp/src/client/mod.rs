@@ -29,6 +29,7 @@ pub use detect::{
     detect_languages, language_id_for_extension, DetectionResult, LanguageLsp, MissingLanguage,
 };
 
+use crate::types::IndexingCompletionSource;
 use dashmap::DashMap;
 use detect::LanguageLsp as LspDescriptor;
 use process::LspTransport;
@@ -37,7 +38,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
-use crate::types::IndexingCompletionSource;
 
 #[derive(Clone)]
 pub(crate) struct ProcessLifecycle {
@@ -908,5 +908,4 @@ mod tests {
         // All guards should be dropped
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
-
 }
