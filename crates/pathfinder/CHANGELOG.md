@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/irahardianto/pathfinder/compare/v0.10.0...v0.11.0) - 2026-06-02
+
+### Added
+
+- *(overview)* add warm_start_in_progress field to SymbolOverviewResponse
+
+### Fixed
+
+- *(clippy)* resolve all 38 lint errors blocking CI
+- *(navigation)* address Phase 5B audit findings across all navigation tools
+- *(navigation)* address Phase 5A audit findings
+- *(git)* harden diff_name_only against argument injection
+- *(lsp)* address implementation and test gaps from Phase 3 review
+
+### Other
+
+- apply cargo fmt across entire workspace
+- *(navigation)* split monolithic 9031-line file into focused sub-modules
+- *(TCV-001)* cover LSP client residual gaps (Phase 4D)
+- *(TCV-001)* cover navigation tool grep-fallback and BFS paths (Phase 2)
+- *(TCV-001)* cover Tier 2 quick-win files (Phase 1)
+- *(infra)* enhance MockScout and MockLawyer for multi-call scenarios
+- *(lsp-client)* split monolithic mod.rs into focused sub-modules
+- *(TCV-001)* cover reader_supervisor_task and init lock serialization
+- *(TCV-001)* build FakeTransport and cover LSP client operations (Phase 3B-3E)
+- *(lsp)* extract LspTransport trait for testable I/O boundary (Phase 3A)
+
 ## [0.10.0](https://github.com/irahardianto/pathfinder/compare/v0.9.1...v0.10.0) - 2026-06-01
 
 ### Added
