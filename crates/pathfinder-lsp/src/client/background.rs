@@ -560,7 +560,9 @@ mod tests {
             std::sync::Mutex::new(Some(IndexingCompletionSource::TimeoutFallback));
         let indexing_duration_secs = std::sync::Mutex::new(Some(100));
         let indexing_progress_percent = std::sync::Mutex::new(None);
-        let spawned_at = Instant::now() - Duration::from_secs(200);
+        let spawned_at = Instant::now()
+            .checked_sub(Duration::from_secs(200))
+            .unwrap();
 
         let action = ProgressAction::End {
             duration_secs: None,

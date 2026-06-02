@@ -1039,9 +1039,11 @@ mod tests {
     async fn test_capabilities_for_running_process_returns_caps() {
         let (client, fake) = make_running_client("rust");
 
-        let mut caps = crate::client::DetectedCapabilities::default();
-        caps.definition_provider = true;
-        caps.call_hierarchy_provider = true;
+        let caps = crate::client::DetectedCapabilities {
+            definition_provider: true,
+            call_hierarchy_provider: true,
+            ..Default::default()
+        };
         fake.with_capabilities(caps.clone());
 
         if let Some(entry) = client.processes.get("rust") {
@@ -1302,7 +1304,7 @@ mod tests {
             if let ProcessEntry::Running(state) = entry.value() {
                 state
                     .transport
-                    .set_last_used(Instant::now() - Duration::from_secs(20 * 60));
+                    .set_last_used(Instant::now().checked_sub(Duration::from_mins(20)).unwrap());
             }
         }
 
@@ -1311,7 +1313,7 @@ mod tests {
         let entry = client.processes.get("rust").unwrap();
         if let ProcessEntry::Running(state) = entry.value() {
             assert!(
-                state.transport.last_used().elapsed() > Duration::from_secs(15 * 60),
+                state.transport.last_used().elapsed() > Duration::from_mins(15),
                 "last_used should be in the past"
             );
         }
@@ -1325,7 +1327,7 @@ mod tests {
             if let ProcessEntry::Running(state) = entry.value() {
                 state
                     .transport
-                    .set_last_used(Instant::now() - Duration::from_secs(20 * 60));
+                    .set_last_used(Instant::now().checked_sub(Duration::from_mins(20)).unwrap());
                 state.transport.in_flight().store(1, Ordering::Relaxed);
             }
         }
@@ -1374,8 +1376,7 @@ mod tests {
         let rust_status = &status["rust"];
         assert!(
             rust_status.navigation_ready == Some(true) || rust_status.indexing_complete.is_some(),
-            "should have navigation_ready or indexing_complete: {:?}",
-            rust_status
+            "should have navigation_ready or indexing_complete: {rust_status:?}"
         );
     }
 
@@ -1451,7 +1452,9 @@ mod tests {
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
                 backoff_attempt: 2,
-                unavailable_since: Instant::now() - Duration::from_secs(100),
+                unavailable_since: Instant::now()
+                    .checked_sub(Duration::from_secs(100))
+                    .unwrap(),
             }),
         );
 

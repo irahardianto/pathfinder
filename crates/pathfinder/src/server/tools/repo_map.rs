@@ -707,7 +707,7 @@ mod tests {
         );
     }
 
-    /// Verify that LSP pre-warm is NOT triggered when tech_stack is empty.
+    /// Verify that LSP pre-warm is NOT triggered when `tech_stack` is empty.
     #[tokio::test]
     async fn test_get_repo_map_no_prewarm_when_tech_stack_empty() {
         let mut result = ok_result();

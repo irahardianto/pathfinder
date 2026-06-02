@@ -1774,6 +1774,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn test_get_definition_grep_impl_method_strategy() {
         // Tests Strategy 2: grep_impl_method. When a 2-segment symbol like
         // Sandbox.check is looked up and Strategy 1 (file-scoped) returns empty,

@@ -1,3 +1,15 @@
+//! Fake LSP transport for testing.
+//!
+//! This is a test helper that allows configuring mock responses and
+//! capturing notifications sent to the LSP server.
+
+#![allow(
+    clippy::expect_used,
+    clippy::unchecked_time_subtraction,
+    clippy::unwrap_or_default,
+    dead_code
+)]
+
 use super::capabilities::DetectedCapabilities;
 use super::process::LspTransport;
 use super::protocol::RequestDispatcher;

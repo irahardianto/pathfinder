@@ -1070,7 +1070,7 @@ mod tests {
         );
         // The grep fallback should have resolved "validate_token" from the scope body.
         assert!(
-            val.dependencies.len() >= 1,
+            !val.dependencies.is_empty(),
             "expected at least 1 resolved dependency, got {}",
             val.dependencies.len()
         );

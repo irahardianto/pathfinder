@@ -4,6 +4,7 @@
 //! test infrastructure used across all navigation tool test modules.
 
 #![cfg(test)]
+#![allow(clippy::expect_used)]
 
 use crate::server::PathfinderServer;
 use pathfinder_common::config::PathfinderConfig;

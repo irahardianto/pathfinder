@@ -462,7 +462,7 @@ mod tests {
         let refs: Vec<_> = (0..5)
             .map(|i| ReferenceLocation {
                 file: format!("src/file{i}.rs"),
-                line: (i + 1) as u32,
+                line: u32::try_from(i + 1).unwrap(),
                 column: 1,
                 snippet: format!("// reference {i}"),
             })

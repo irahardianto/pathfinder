@@ -774,7 +774,7 @@ mod tests {
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         let params = crate::server::types::SymbolOverviewParams {
-            semantic_path: "".to_owned(),
+            semantic_path: String::new(),
             project_only: Some(true),
             max_callers_callees: 50,
             max_references: 50,
@@ -848,11 +848,11 @@ mod tests {
                     kind: "function".into(),
                     detail: Some(format!("fn caller{i}()")),
                     file: format!("src/caller{i}.rs"),
-                    line: (i + 1) as u32,
+                    line: u32::try_from(i + 1).unwrap(),
                     column: 4,
                     data: None,
                 },
-                call_sites: vec![(i + 10) as u32],
+                call_sites: vec![u32::try_from(i + 10).unwrap()],
             })
             .collect();
         lawyer.push_incoming_call_result(Ok(incoming));
@@ -1007,7 +1007,7 @@ mod tests {
         let refs: Vec<_> = (0..5)
             .map(|i| ReferenceLocation {
                 file: format!("src/file{i}.rs"),
-                line: (i + 1) as u32,
+                line: u32::try_from(i + 1).unwrap(),
                 column: 1,
                 snippet: format!("// ref {i}"),
             })
