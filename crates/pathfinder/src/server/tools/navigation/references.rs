@@ -138,7 +138,14 @@ impl PathfinderServer {
                                 snippet: def.preview,
                             })
                             .collect(),
-                        Err(_) => vec![],
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = "find_all_references",
+                                error = %e,
+                                "goto_implementation failed — returning references only"
+                            );
+                            vec![]
+                        }
                     };
 
                 let all_files = locations
@@ -158,10 +165,21 @@ impl PathfinderServer {
                     })
                     .collect();
 
+                // Dedup references that also appear in implementations by (file, line, column).
+                let impl_keys: std::collections::HashSet<(String, u32, u32)> = implementations
+                    .iter()
+                    .map(|i| (i.file.clone(), i.line, i.column))
+                    .collect();
+                let references: Vec<crate::server::types::ReferenceLocation> = references
+                    .into_iter()
+                    .filter(|r| !impl_keys.contains(&(r.file.clone(), r.line, r.column)))
+                    .collect();
+
                 // Spec 4.4: Apply pagination to each list separately
                 let total_references = references.len() + implementations.len();
                 let offset = usize::try_from(params.offset).unwrap_or(0);
-                let max_results = usize::try_from(params.max_results).unwrap_or(50);
+                // Item 4: Guard against max_results=0 which causes infinite pagination loops.
+                let max_results = usize::try_from(params.max_results).unwrap_or(50).max(1);
                 let truncated = total_references > offset.saturating_add(max_results);
 
                 // Paginate implementations first, then references (matches display order)
@@ -191,11 +209,6 @@ impl PathfinderServer {
                     (impl_slice, ref_slice)
                 };
 
-                let paginated_len = paginated_impls.len() + paginated_refs.len();
-                let mut paginated = Vec::with_capacity(paginated_len);
-                paginated.extend(paginated_impls.clone());
-                paginated.extend(paginated_refs.clone());
-
                 tracing::info!(
                     tool = "find_all_references",
                     references_count = ref_count,
@@ -208,6 +221,7 @@ impl PathfinderServer {
                     "find_all_references: complete"
                 );
 
+                // Build text output before moving vectors into paginated
                 let implementations_text = if paginated_impls.is_empty() {
                     String::new()
                 } else {
@@ -232,6 +246,11 @@ impl PathfinderServer {
                         .collect();
                     format!("{}{}", header, items.join("\n"))
                 };
+
+                let paginated_len = paginated_impls.len() + paginated_refs.len();
+                let mut paginated = Vec::with_capacity(paginated_len);
+                paginated.extend(paginated_impls);
+                paginated.extend(paginated_refs);
 
                 let pagination_note = if truncated {
                     format!(
@@ -463,9 +482,10 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         let refs = val.references.unwrap_or_default();
-        assert!(
-            refs.len() <= 3,
-            "should respect max_results, got {}",
+        assert_eq!(
+            refs.len(),
+            3,
+            "should return exactly max_results=3 references, got {}",
             refs.len()
         );
     }
@@ -844,5 +864,267 @@ mod tests {
         };
         let result = server.find_all_references_impl(params).await;
         assert!(result.is_err(), "should return error for sandbox denied path");
+    }
+
+    // ── goto_implementation Err while references succeeds ────────────
+
+    #[tokio::test]
+    async fn test_find_all_references_implementation_error_references_ok() {
+        // When goto_implementation returns Err but references succeeds,
+        // implementations should be empty vec and references should be present.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // References succeed
+        lawyer.set_references_result(Ok(vec![ReferenceLocation {
+            file: "src/main.rs".into(),
+            line: 10,
+            column: 8,
+            snippet: "login();".into(),
+        }]));
+
+        // Implementation fails
+        lawyer.set_goto_implementation_result(Err(LspError::Protocol(
+            "implementation error".to_string(),
+        )));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        // Total = 0 implementations + 1 reference = 1
+        assert_eq!(val.total_references, Some(1));
+        let refs = val.references.unwrap_or_default();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].file, "src/main.rs");
+    }
+
+    // ── Large offset past total results ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_all_references_large_offset_returns_empty() {
+        // offset=100 with only 6 items total should return empty results.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // 3 references
+        lawyer.set_references_result(Ok(vec![
+            ReferenceLocation {
+                file: "src/main.rs".into(),
+                line: 10,
+                column: 8,
+                snippet: "login1();".into(),
+            },
+            ReferenceLocation {
+                file: "src/tests.rs".into(),
+                line: 5,
+                column: 4,
+                snippet: "login2();".into(),
+            },
+            ReferenceLocation {
+                file: "src/app.rs".into(),
+                line: 15,
+                column: 8,
+                snippet: "login3();".into(),
+            },
+        ]));
+
+        // 3 implementations
+        lawyer.set_goto_implementation_result(Ok(vec![
+            DefinitionLocation {
+                file: "src/impl1.rs".into(),
+                line: 10,
+                column: 4,
+                preview: "impl1".into(),
+            },
+            DefinitionLocation {
+                file: "src/impl2.rs".into(),
+                line: 20,
+                column: 4,
+                preview: "impl2".into(),
+            },
+            DefinitionLocation {
+                file: "src/impl3.rs".into(),
+                line: 30,
+                column: 4,
+                preview: "impl3".into(),
+            },
+        ]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // offset=100 is way past the 6 total items
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 100,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        let refs = val.references.unwrap_or_default();
+        assert!(refs.is_empty(), "should return empty when offset past total, got {}", refs.len());
+        assert_eq!(val.total_references, Some(6));
+        // When offset is past total, truncated is false (nothing more to show)
+        assert!(!val.truncated, "should NOT be truncated when offset past total");
+    }
+
+    // ── Truncation boundary ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_all_references_truncation_boundary() {
+        // Exactly offset + max_results results → truncated should be false.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // 2 implementations
+        lawyer.set_goto_implementation_result(Ok(vec![
+            DefinitionLocation {
+                file: "src/impl1.rs".into(),
+                line: 10,
+                column: 4,
+                preview: "impl1".into(),
+            },
+            DefinitionLocation {
+                file: "src/impl2.rs".into(),
+                line: 20,
+                column: 4,
+                preview: "impl2".into(),
+            },
+        ]));
+
+        // 3 references
+        lawyer.set_references_result(Ok(vec![
+            ReferenceLocation {
+                file: "src/ref1.rs".into(),
+                line: 10,
+                column: 8,
+                snippet: "ref1".into(),
+            },
+            ReferenceLocation {
+                file: "src/ref2.rs".into(),
+                line: 20,
+                column: 8,
+                snippet: "ref2".into(),
+            },
+            ReferenceLocation {
+                file: "src/ref3.rs".into(),
+                line: 30,
+                column: 8,
+                snippet: "ref3".into(),
+            },
+        ]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Total = 5, offset=0, max_results=5 → exactly fits → NOT truncated
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 5,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert_eq!(val.total_references, Some(5));
+        let refs = val.references.unwrap_or_default();
+        assert_eq!(refs.len(), 5, "should return all 5 items");
+        assert!(
+            !val.truncated,
+            "should NOT be truncated when exactly at boundary"
+        );
+    }
+
+    // ── Dedup between implementations and references ─────────────────
+
+    #[tokio::test]
+    async fn test_find_all_references_deduplicates_impl_and_refs() {
+        // When a trait impl also appears in references, it should not appear twice.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // Implementation returns a location at file:line
+        lawyer.set_goto_implementation_result(Ok(vec![DefinitionLocation {
+            file: "src/auth_impl.rs".into(),
+            line: 15,
+            column: 4,
+            preview: "impl LoginService for AuthService {".into(),
+        }]));
+
+        // References also includes the same file:line
+        lawyer.set_references_result(Ok(vec![
+            ReferenceLocation {
+                file: "src/auth_impl.rs".into(),
+                line: 15, // Same as implementation
+                column: 4,
+                snippet: "impl LoginService for AuthService {".into(),
+            },
+            ReferenceLocation {
+                file: "src/main.rs".into(),
+                line: 10,
+                column: 8,
+                snippet: "login();".into(),
+            },
+        ]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Should have 2 total (1 impl + 1 unique ref), not 3
+        assert_eq!(
+            val.total_references,
+            Some(2),
+            "duplicate (file,line) should be deduped"
+        );
+        let refs = val.references.unwrap_or_default();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].file, "src/auth_impl.rs"); // implementation
+        assert_eq!(refs[1].file, "src/main.rs"); // unique reference
     }
 }

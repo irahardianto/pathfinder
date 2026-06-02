@@ -8,7 +8,7 @@ use crate::server::helpers::{pathfinder_to_error_data, serialize_metadata};
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
 
-/// GAP-002: Re-probe interval for "ready" languages to check liveness.
+/// Re-probe interval for "ready" languages to check liveness.
 /// Re-probes every 2 minutes to detect LSPs that became non-responsive after
 /// initial readiness (e.g., stuck indexing, memory pressure, internal deadlock).
 const LIVENESS_PROBE_INTERVAL_SECS: u64 = 120;
@@ -211,7 +211,7 @@ impl PathfinderServer {
             }
         }
 
-        // GAP-002: LIVENESS PROBE for "ready" languages
+        // LIVENESS PROBE for "ready" languages
         // Verify that languages that were "ready" at initialization are still responsive.
         // This catches LSPs that become non-responsive after initial readiness
         // (e.g., stuck indexing, memory pressure, internal deadlock).
@@ -950,7 +950,7 @@ mod tests {
         // status is immediately "ready" without waiting for indexing.
         // This is the fix for LSP-HEALTH-001: LSPs that support definitionProvider
         // should be usable immediately, without waiting for WorkDoneProgressEnd.
-        // GAP-002: Liveness probe also runs for "ready" languages to verify
+        // Liveness probe also runs for "ready" languages to verify
         // the LSP is still responsive.
         assert_eq!(val.status, "ready");
         assert_eq!(val.languages.len(), 1);
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(rust_health.uptime, Some("30s".to_string()));
         // indexing_status is still "in_progress" because we never saw WorkDoneProgressEnd
         assert_eq!(rust_health.indexing_status, Some("in_progress".to_string()));
-        // GAP-002: With liveness probe, probe_verified should be true since
+        // With liveness probe, probe_verified should be true since
         // the probe ran and succeeded (LSP is responsive)
         assert!(rust_health.probe_verified);
     }
@@ -1009,7 +1009,7 @@ mod tests {
         let call_res = result.expect("should succeed");
         let val = unpack_health(call_res);
 
-        // GAP-002: With liveness probe, when the LSP was "ready" but becomes
+        // With liveness probe, when the LSP was "ready" but becomes
         // non-responsive, the status should be downgraded to "degraded".
         // This is the key improvement: detecting LSPs that die after initialization.
         assert_eq!(val.status, "degraded");
@@ -1843,7 +1843,7 @@ mod tests {
         );
     }
 
-    // ── GAP-002: Liveness Probe Tests ────────────────────────────────────
+    // ── Liveness Probe Tests ────────────────────────────────────
 
     #[tokio::test]
     async fn test_lsp_health_liveness_probe_downgrades_dead_lsp() {

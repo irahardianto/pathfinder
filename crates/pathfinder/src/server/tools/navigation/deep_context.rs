@@ -131,7 +131,7 @@ impl PathfinderServer {
                                 semantic_path = %semantic_path,
                                 "read_with_deep_context: retry also returned empty — attempting grep fallback (PATCH-005)"
                             );
-                            (degraded, degraded_reason) = self
+                            (degraded, degraded_reason, dependencies_truncated) = self
                                 .attempt_grep_fallback(
                                     semantic_path,
                                     &mut dependencies,
@@ -150,7 +150,7 @@ impl PathfinderServer {
                     semantic_path = %semantic_path,
                     "read_with_deep_context: NoLspAvailable — attempting grep fallback (PATCH-005)"
                 );
-                (degraded, degraded_reason) = self
+                (degraded, degraded_reason, dependencies_truncated) = self
                     .attempt_grep_fallback(
                         semantic_path,
                         &mut dependencies,
@@ -166,7 +166,7 @@ impl PathfinderServer {
                     error = %e,
                     "call_hierarchy_prepare failed — attempting grep fallback (PATCH-005)"
                 );
-                (degraded, degraded_reason) = self
+                (degraded, degraded_reason, dependencies_truncated) = self
                     .attempt_grep_fallback(
                         semantic_path,
                         &mut dependencies,
@@ -243,7 +243,7 @@ impl PathfinderServer {
         engines: &mut Vec<&'static str>,
         project_only: bool,
         max_dependencies: u32,
-    ) -> (bool, Option<DegradedReason>) {
+    ) -> (bool, Option<DegradedReason>, bool) {
         let scope_result = {
             let Ok(s) = self
                 .surgeon
@@ -255,7 +255,7 @@ impl PathfinderServer {
                     semantic_path = %semantic_path,
                     "PATCH-005: failed to read symbol scope for grep fallback"
                 );
-                return (true, Some(DegradedReason::GrepFallbackDependencies));
+                return (true, Some(DegradedReason::GrepFallbackDependencies), false);
             };
             s
         };
@@ -269,7 +269,7 @@ impl PathfinderServer {
                 semantic_path = %semantic_path,
                 "PATCH-005: grep fallback found no call candidates"
             );
-            return (true, Some(DegradedReason::GrepFallbackDependencies));
+            return (true, Some(DegradedReason::GrepFallbackDependencies), false);
         }
 
         tracing::info!(
@@ -281,9 +281,11 @@ impl PathfinderServer {
         );
 
         let max_deps = max_dependencies as usize;
+        let mut truncated = false;
 
         for candidate in candidates {
             if dependencies.len() >= max_deps {
+                truncated = true;
                 break;
             }
 
@@ -296,6 +298,11 @@ impl PathfinderServer {
                 }
 
                 let dep_path = format!("{file}::{candidate}");
+                // Item 1: Dedup by semantic_path to avoid duplicates when
+                // multiple candidates resolve to the same definition.
+                if dependencies.iter().any(|d| d.semantic_path == dep_path) {
+                    continue;
+                }
                 dependencies.push(crate::server::types::DeepContextDependency {
                     semantic_path: dep_path,
                     signature,
@@ -314,7 +321,7 @@ impl PathfinderServer {
             dependencies.len()
         );
 
-        (true, Some(DegradedReason::GrepFallbackDependencies))
+        (true, Some(DegradedReason::GrepFallbackDependencies), truncated)
     }
 
     /// Fetch outgoing call-hierarchy items and append them as dependencies.
@@ -358,6 +365,11 @@ impl PathfinderServer {
 
                     let signature = callee.detail.clone().unwrap_or_else(|| callee.name.clone());
                     let sp = format!("{}::{}", callee.file, callee.name);
+                    // Dedup by semantic_path to avoid duplicates from LSP returning
+                    // the same callee multiple times.
+                    if dependencies.iter().any(|d| d.semantic_path == sp) {
+                        continue;
+                    }
                     dependencies.push(crate::server::types::DeepContextDependency {
                         semantic_path: sp,
                         signature,
@@ -374,6 +386,11 @@ impl PathfinderServer {
                     error = %e,
                     "call_hierarchy_outgoing failed"
                 );
+                // Item 3: Set specific reason instead of keeping stale default.
+                // The prepare call succeeded but outgoing deps failed —
+                // this is a partial LSP failure, not a complete absence.
+                *degraded = true;
+                *degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
             }
         }
         truncated
@@ -514,8 +531,11 @@ impl PathfinderServer {
         let dep_count = dependencies.len();
         let lsp_readiness = if degraded {
             match degraded_reason {
-                Some(DegradedReason::NoLsp) => Some("unavailable".to_owned()),
-                _ => Some("warming_up".to_owned()),
+                Some(
+                    DegradedReason::LspWarmupEmptyUnverified
+                    | DegradedReason::LspWarmupGrepFallback,
+                ) => Some("warming_up".to_owned()),
+                _ => Some("unavailable".to_owned()),
             }
         } else {
             Some("ready".to_owned())
@@ -528,7 +548,12 @@ impl PathfinderServer {
         let resolution_strategy = if engines.contains(&"lsp") {
             Some("lsp_call_hierarchy".to_owned())
         } else if degraded {
-            Some("treesitter_fallback".to_owned())
+            // Distinguish: LSP was never available vs LSP failed vs grep fallback.
+            match degraded_reason {
+                Some(DegradedReason::NoLsp) => Some("treesitter_direct".to_owned()),
+                Some(DegradedReason::GrepFallbackDependencies) => Some("grep_fallback".to_owned()),
+                _ => Some("treesitter_fallback".to_owned()),
+            }
         } else {
             Some("treesitter_direct".to_owned())
         };
@@ -752,7 +777,7 @@ mod tests {
 
         // Degraded because outgoing call failed
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
         assert!(val.dependencies.is_empty());
     }
 
@@ -955,6 +980,356 @@ mod tests {
             default_max_dependencies(),
             50,
             "default_max_dependencies must be 50 per the implementation"
+        );
+    }
+
+    // ── attempt_grep_fallback with resolved candidates ───────────────
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_grep_fallback_resolves_candidates() {
+        // PATCH-005: When LSP is unavailable, grep fallback extracts call candidates
+        // from the symbol body and resolves each via search.
+        let surgeon = Arc::new(MockSurgeon::new());
+        // First call: read_symbol_scope_enriched (for the main function)
+        // Second call: read_symbol_scope (for grep fallback candidate extraction)
+        // Use scope content that contains a function call to exercise candidate extraction.
+        let mut scope = make_scope();
+        scope.content = "fn login() -> bool { validate_token() }".to_string();
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .extend([Ok(scope.clone()), Ok(scope)]);
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { validate_token() }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // First search: resolve "validate_token" candidate
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/token.rs".to_string(),
+                line: 5,
+                column: 1,
+                content: "fn validate_token() -> bool { true }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::GrepFallbackDependencies)
+        );
+        // The grep fallback should have resolved "validate_token" from the scope body.
+        assert!(
+            val.dependencies.len() >= 1,
+            "expected at least 1 resolved dependency, got {}",
+            val.dependencies.len()
+        );
+    }
+
+    // ── detail: None fallback ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_detail_none_falls_back_to_name() {
+        // When callee.detail is None, the signature should fall back to callee.name.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        // Outgoing call with detail=None
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: None, // No detail — should fall back to name
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        assert_eq!(val.dependencies.len(), 1);
+        // Signature should be the name since detail is None
+        assert_eq!(val.dependencies[0].signature, "validate_token");
+        assert_eq!(val.dependencies[0].semantic_path, "src/token.rs::validate_token");
+    }
+
+    // ── Warmup retry success ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_warmup_retry_success() {
+        // LSP returns Ok([]) first (warmup), then Ok(items) on retry.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+
+        // First call: empty (warmup)
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
+        // goto_definition probe: Ok(None) — confirms LSP warming up
+        // (default MockLawyer returns Ok(None))
+        // Retry call: succeeds with items
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        // Outgoing deps for retry
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed on retry");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded, "should NOT be degraded on retry success");
+        assert_eq!(val.dependencies.len(), 1);
+        assert_eq!(
+            val.dependencies[0].semantic_path,
+            "src/token.rs::validate_token"
+        );
+    }
+
+    // ── project_only filtering in append_outgoing_deps ──────────────
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_filters_non_workspace_deps() {
+        // When project_only=true, callees from non-workspace files should be filtered.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        // Outgoing: one workspace dep + one non-workspace (absolute path = stdlib)
+        lawyer.push_outgoing_call_result(Ok(vec![
+            CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: "validate_token".into(),
+                    kind: "function".into(),
+                    detail: Some("fn validate_token()".into()),
+                    file: "src/token.rs".into(),
+                    line: 15,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![9],
+            },
+            CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: "println".into(),
+                    kind: "function".into(),
+                    detail: Some("macro println".into()),
+                    file: "/rust/library/std/src/io/stdio.rs".into(), // absolute = non-workspace
+                    line: 100,
+                    column: 1,
+                    data: None,
+                },
+                call_sites: vec![9],
+            },
+        ]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            project_only: Some(true),
+            ..Default::default()
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        // Only the workspace dep should be included
+        assert_eq!(val.dependencies.len(), 1);
+        assert_eq!(
+            val.dependencies[0].semantic_path,
+            "src/token.rs::validate_token"
+        );
+    }
+
+    // ── Dedup in append_outgoing_deps ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_with_deep_context_deduplicates_deps() {
+        // When LSP returns the same callee multiple times, dedup should prevent duplicates.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        // Outgoing: same callee returned twice (simulates LSP duplicate)
+        lawyer.push_outgoing_call_result(Ok(vec![
+            CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: "validate_token".into(),
+                    kind: "function".into(),
+                    detail: Some("fn validate_token()".into()),
+                    file: "src/token.rs".into(),
+                    line: 15,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![9],
+            },
+            CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: "validate_token".into(),
+                    kind: "function".into(),
+                    detail: Some("fn validate_token()".into()),
+                    file: "src/token.rs".into(),
+                    line: 15,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![10],
+            },
+        ]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = ReadWithDeepContextParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
+        };
+        let result = server.read_with_deep_context_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::ReadWithDeepContextMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        // Dedup should prevent the duplicate
+        assert_eq!(
+            val.dependencies.len(),
+            1,
+            "duplicate callees should be deduped, got {}",
+            val.dependencies.len()
         );
     }
 }

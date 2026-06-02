@@ -211,6 +211,10 @@ impl PathfinderServer {
                     }));
                 }
 
+                // Re-capture duration after the 3s sleep + retry attempt
+                // so downstream logs reflect the full elapsed time.
+                let duration_ms = start.elapsed().as_millis();
+
                 tracing::info!(
                     tool = "get_definition",
                     semantic_path = %params.semantic_path,
@@ -221,8 +225,14 @@ impl PathfinderServer {
                 );
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    def.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                    if !matches!(
+                        def.degraded_reason,
+                        Some(DegradedReason::GrepFallbackImplScoped)
+                    ) {
+                        def.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                    }
                     def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
+                    let duration_ms = def.duration_ms.unwrap_or(0);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -271,8 +281,14 @@ impl PathfinderServer {
                 );
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    def.degraded_reason = Some(DegradedReason::NoLspGrepFallback);
+                    if !matches!(
+                        def.degraded_reason,
+                        Some(DegradedReason::GrepFallbackImplScoped)
+                    ) {
+                        def.degraded_reason = Some(DegradedReason::NoLspGrepFallback);
+                    }
                     def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
+                    let duration_ms = def.duration_ms.unwrap_or(0);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -287,6 +303,7 @@ impl PathfinderServer {
                 }
 
                 // No grep match either — return the original LSP error
+                let duration_ms = start.elapsed().as_millis();
                 tracing::info!(
                     tool = "get_definition",
                     duration_ms,
@@ -300,7 +317,7 @@ impl PathfinderServer {
                 }))
             }
             Err(LspError::Timeout { .. }) => {
-                // GAP-001: LSP timed out — attempt grep-based fallback
+                // LSP timed out — attempt grep-based fallback
                 tracing::info!(
                     tool = "get_definition",
                     semantic_path = %params.semantic_path,
@@ -308,8 +325,14 @@ impl PathfinderServer {
                 );
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    def.degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                    if !matches!(
+                        def.degraded_reason,
+                        Some(DegradedReason::GrepFallbackImplScoped)
+                    ) {
+                        def.degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                    }
                     def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
+                    let duration_ms = def.duration_ms.unwrap_or(0);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -333,7 +356,7 @@ impl PathfinderServer {
                 }))
             }
             Err(e) => {
-                // GAP-C2: Generic LSP error — attempt grep fallback before giving up.
+                // Generic LSP error — attempt grep fallback before giving up.
                 // Covers connection resets, protocol errors, and any other LspError variants
                 // not handled by the specific arms above. This prevents agent stalls when
                 // an unexpected LSP failure occurs mid-session.
@@ -348,9 +371,18 @@ impl PathfinderServer {
                 );
 
                 if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
+                    // Preserve strategy-specific reasons (e.g., GrepFallbackImplScoped)
+                    // but override the generic GrepFallbackFileScoped with the
+                    // context-specific reason from the LSP error path.
+                    if !matches!(
+                        def.degraded_reason,
+                        Some(DegradedReason::GrepFallbackImplScoped)
+                    ) {
+                        def.degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
+                    }
                     def.degraded = true;
-                    def.degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
                     def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
+                    let duration_ms = def.duration_ms.unwrap_or(0);
                     tracing::info!(
                         tool = "get_definition",
                         file = %def.file,
@@ -364,6 +396,7 @@ impl PathfinderServer {
                     return Ok(Self::get_def_to_call_result(&def));
                 }
 
+                let duration_ms = start.elapsed().as_millis();
                 tracing::warn!(
                     tool = "get_definition",
                     error = %e,
@@ -439,7 +472,8 @@ impl PathfinderServer {
     /// Uses a multi-strategy approach:
     /// 1. Search the expected file first (if known from the semantic path)
     /// 2. Search for struct-qualified patterns (e.g., `impl Struct` + `fn method`)
-    /// 3. Fall back to a global search with scoring by file proximity
+    /// 3. Fall back to a global search (excludes test/mock files, returns first match)
+    /// 4. Broad symbol search as last resort
     async fn fallback_definition_grep(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
@@ -461,12 +495,14 @@ impl PathfinderServer {
             let parent_name = symbol_chain.segments[symbol_chain.segments.len() - 2]
                 .name
                 .clone();
-            if let Some(result) = self.grep_impl_method(&parent_name, &symbol_name).await {
+            let ext = expected_file.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let path_glob = format!("**/*.{ext}");
+            if let Some(result) = self.grep_impl_method(&parent_name, &symbol_name, &path_glob).await {
                 return Some(result);
             }
         }
 
-        // Strategy 3: Global search with file-proximity scoring
+        // Strategy 3: Global search (excludes test/mock files, returns first match)
         if let Some(result) = self.grep_definition_global(symbol_name.clone()).await {
             return Some(result);
         }
@@ -528,6 +564,13 @@ impl PathfinderServer {
                         resolution_strategy: Some("grep_file".to_owned()),
                     });
                 }
+            } else if let Err(e) = search_result {
+                tracing::warn!(
+                    tool = "get_definition",
+                    strategy = "grep_definition_in_file",
+                    error = %e,
+                    "scout.search failed during grep fallback"
+                );
             }
         }
         None
@@ -538,6 +581,7 @@ impl PathfinderServer {
         &self,
         parent_name: &str,
         method_name: &str,
+        path_glob: &str,
     ) -> Option<GetDefinitionResponse> {
         // First find files containing the impl block
         let parent_escaped = regex::escape(parent_name);
@@ -549,7 +593,7 @@ impl PathfinderServer {
                 query: impl_pattern,
                 is_regex: true,
                 max_results: 10,
-                path_glob: "**/*.rs".to_owned(),
+                path_glob: path_glob.to_owned(),
                 exclude_glob: String::default(),
                 context_lines: 0,
                 offset: 0,
@@ -558,11 +602,21 @@ impl PathfinderServer {
 
         if let Ok(result) = search_result {
             for m in &result.matches {
-                // Now search within this specific file for the method
+                // Now search within this specific file for the method.
+                // Use language-aware patterns based on file extension.
+                let ext = std::path::Path::new(&m.file)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
                 let method_escaped = regex::escape(method_name);
-                let method_pattern = format!(
-                    r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\b"
-                );
+                let method_pattern = match ext {
+                    "rs" => format!(r"(?:(?:pub|crate)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\b"),
+                    "ts" | "js" | "tsx" | "jsx" => format!(r"(?:(?:export\s+(?:default\s*)?)?(?:async\s+)?)?(?:function\s+{method_escaped}\b|{method_escaped}\s*[=:])"),
+                    "py" => format!(r"(?:async\s+)?def\s+{method_escaped}\b"),
+                    "go" => format!(r"func\s+(?:\([^)]*\)\s+)?{method_escaped}\b"),
+                    "java" => format!(r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{method_escaped}\s*\("),
+                    _ => format!(r"\b{method_escaped}\b"),
+                };
                 let file_search = self
                     .scout
                     .search(&pathfinder_search::SearchParams {
@@ -596,8 +650,22 @@ impl PathfinderServer {
                             resolution_strategy: Some("grep_impl".to_owned()),
                         });
                     }
+                } else if let Err(e) = file_search {
+                    tracing::warn!(
+                        tool = "get_definition",
+                        strategy = "grep_impl_method",
+                        error = %e,
+                        "scout.search failed during impl-method grep fallback"
+                    );
                 }
             }
+        } else if let Err(e) = search_result {
+            tracing::warn!(
+                tool = "get_definition",
+                strategy = "grep_impl_block",
+                error = %e,
+                "scout.search failed during impl-block grep fallback"
+            );
         }
         None
     }
@@ -646,6 +714,13 @@ impl PathfinderServer {
                     resolution_strategy: Some("grep_global".to_owned()),
                 });
             }
+        } else if let Err(e) = search_result {
+            tracing::warn!(
+                tool = "get_definition",
+                strategy = "grep_definition_global",
+                error = %e,
+                "scout.search failed during global grep fallback"
+            );
         }
         None
     }
@@ -668,7 +743,7 @@ impl PathfinderServer {
                 path_glob: "**/*".to_owned(),
                 exclude_glob: "**/{test,tests,mock}*/**".to_owned(),
                 offset: 0,
-                context_lines: 1,
+                context_lines: 0,
             })
             .await;
 
@@ -689,6 +764,13 @@ impl PathfinderServer {
                     resolution_strategy: Some("grep_broad".to_owned()),
                 });
             }
+        } else if let Err(e) = search_result {
+            tracing::warn!(
+                tool = "get_definition",
+                strategy = "grep_symbol_broad",
+                error = %e,
+                "scout.search failed during broad grep fallback"
+            );
         }
         None
     }
@@ -860,7 +942,7 @@ mod tests {
         assert_eq!(code, "LSP_ERROR");
     }
 
-    // ── GAP-C2: catch-all Err(e) grep fallback ───────────────────────────────
+    // ── catch-all Err(e) grep fallback ───────────────────────────────
 
     #[tokio::test]
     async fn test_get_definition_generic_lsp_error_falls_back_to_grep() {
@@ -1388,5 +1470,438 @@ mod tests {
         assert_eq!(val.file, "src/auth.rs");
         assert_eq!(val.line, 10);
         assert!(val.degraded, "should be degraded when using grep fallback");
+    }
+
+    // ── LspError::Timeout branch ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_definition_lsp_timeout_falls_back_to_grep() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "pub fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "pub fn login() -> bool { true }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        }));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_goto_definition_result(Err(LspError::Timeout {
+            operation: "goto_definition".to_string(),
+            timeout_ms: 10000,
+        }));
+
+        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Ok(res) = result else {
+            panic!("expected Ok with grep fallback after timeout, got Err");
+        };
+        let val = unpack_def(res);
+        assert!(val.degraded, "should be degraded");
+        assert_eq!(val.file, "src/auth.rs");
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspTimeoutGrepFallback),
+            "degraded_reason should be LspTimeoutGrepFallback: {:?}",
+            val.degraded_reason
+        );
+    }
+
+    // ── Multi-file grep fallback chain (strategies 2-4) ─────────────
+
+    #[tokio::test]
+    async fn test_get_definition_multi_strategy_fallback() {
+        // Tests that when Strategy 1 (file-scoped) returns empty,
+        // the chain falls through to Strategy 3 (global) via set_results().
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/other.rs"),
+            "pub fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // Strategy 1 (grep_definition_in_file): empty
+        // Strategy 3 (grep_definition_global): finds match
+        scout.set_results(vec![
+            // Strategy 1 returns empty (file-scoped search)
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![],
+                total_matches: 0,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+            // Strategy 3 returns match (global search)
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![pathfinder_search::SearchMatch {
+                    file: "src/other.rs".to_string(),
+                    line: 1,
+                    column: 1,
+                    content: "pub fn login() -> bool { true }".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:abc".to_string(),
+                    known: Some(false),
+                }],
+                total_matches: 1,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+        ]);
+
+        // NoOpLawyer to force grep fallback path
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Ok(res) = result else {
+            panic!("expected Ok with multi-strategy grep fallback, got Err");
+        };
+        let val = unpack_def(res);
+        assert!(val.degraded, "should be degraded");
+        assert_eq!(val.file, "src/other.rs");
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::NoLspGrepFallback),
+            "degraded_reason: {:?}",
+            val.degraded_reason
+        );
+    }
+
+    // ── Warmup retry success path ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_definition_warmup_retry_success() {
+        // LSP returns Ok(None) first (warmup), then Ok(Some(def)) on retry.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // First call (via queue): Ok(None) — simulates warmup
+        lawyer.push_goto_definition_result(Ok(None));
+        // Second call (via set, consumed after queue is empty): Ok(Some(def)) for retry
+        lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".into(),
+            line: 42,
+            column: 5,
+            preview: "pub fn login() -> bool {".into(),
+        })));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+        let params = GetDefinitionParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let call_res = result.expect("should succeed on retry");
+        let val = unpack_def(call_res);
+
+        assert_eq!(val.file, "src/auth.rs");
+        assert_eq!(val.line, 42);
+        assert!(!val.degraded, "should NOT be degraded on retry success");
+        assert_eq!(
+            val.resolution_strategy,
+            Some("lsp_retry".to_owned()),
+            "should indicate retry strategy"
+        );
+        assert_eq!(
+            val.lsp_readiness,
+            Some("warming_up".to_owned()),
+            "should indicate warming_up"
+        );
+        assert_eq!(
+            val.warm_start_in_progress,
+            Some(true),
+            "should indicate warm_start_in_progress"
+        );
+    }
+
+    // ── grep fallback with 2-segment symbol path ───────────────────────────
+
+    #[tokio::test]
+    async fn test_get_definition_grep_fallback_with_two_segment_symbol() {
+        // Tests that the grep fallback finds a definition when using a 2-segment
+        // symbol path (e.g., MyStruct.my_method). Strategy 1 (file-scoped) finds
+        // the match on the first pattern; subsequent patterns and strategies
+        // consume empty results from the default MockScout.
+        let surgeon = Arc::new(MockSurgeon::new());
+
+        let mut scope = make_scope();
+        scope.content = "pub fn my_method(&self) { ... }".to_string();
+        surgeon.read_symbol_scope_results.lock().unwrap().clear();
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(scope));
+
+        let scout = Arc::new(MockScout::default());
+        // set_result: first search returns the match, all subsequent return empty.
+        // Strategy 1 (grep_definition_in_file) finds the match on pattern 1.
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/mystruct.rs".to_string(),
+                line: 10,
+                column: 4,
+                content: "pub fn my_method(&self) {}".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:def".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::write(
+            ws_dir.path().join("src/mystruct.rs"),
+            "impl MyStruct { pub fn my_method(&self) {} }",
+        )
+        .unwrap();
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/mystruct.rs::MyStruct.my_method".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        match &result {
+            Ok(res) => {
+                let val = unpack_def(res.clone());
+                assert!(val.degraded, "should be degraded");
+                assert_eq!(val.file, "src/mystruct.rs");
+                assert_eq!(val.line, 10);
+                assert!(
+                    val.degraded_reason.is_some(),
+                    "degraded_reason should be set"
+                );
+                // With 2-segment symbol and file-scoped match, reason is GrepFallbackFileScoped
+                assert_eq!(
+                    val.degraded_reason,
+                    Some(DegradedReason::NoLspGrepFallback),
+                    "degraded_reason: {:?}",
+                    val.degraded_reason
+                );
+            }
+            Err(err) => {
+                let code = err.data.as_ref()
+                    .and_then(|d| d.get("error"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                panic!("expected Ok with grep fallback, got Err({code}): {err:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_definition_grep_impl_method_strategy() {
+        // Tests Strategy 2: grep_impl_method. When a 2-segment symbol like
+        // Sandbox.check is looked up and Strategy 1 (file-scoped) returns empty,
+        // the fallback searches for the impl block, then for the method within it.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/sandbox.rs"),
+            "impl Sandbox {\n    pub fn check(&self) -> bool { true }\n}",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // Queue results for the sequential scout.search calls.
+        // definition_patterns("rs", "check") produces 4 patterns, each consuming one result.
+        // Then grep_impl_method needs 2 more (impl block + method search).
+        scout.set_results(vec![
+            // Strategy 1 pattern 1: fn\s+check\b — empty (no fn in sandbox.rs matches)
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![],
+                total_matches: 0,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+            // Strategy 1 pattern 2: struct|enum|trait|type|mod\s+check\b — empty
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![],
+                total_matches: 0,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+            // Strategy 1 pattern 3: const|static\s+check\b — empty
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![],
+                total_matches: 0,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+            // Strategy 1 pattern 4: \bcheck\b — empty
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![],
+                total_matches: 0,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+            // Strategy 2 step 1: impl block search finds src/sandbox.rs
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![pathfinder_search::SearchMatch {
+                    file: "src/sandbox.rs".to_string(),
+                    line: 1,
+                    column: 1,
+                    content: "impl Sandbox {".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:abc".to_string(),
+                    known: Some(false),
+                }],
+                total_matches: 1,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+            // Strategy 2 step 2: method search finds fn check in src/sandbox.rs
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![pathfinder_search::SearchMatch {
+                    file: "src/sandbox.rs".to_string(),
+                    line: 2,
+                    column: 4,
+                    content: "pub fn check(&self) -> bool { true }".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:def".to_string(),
+                    known: Some(false),
+                }],
+                total_matches: 1,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+            }),
+        ]);
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = GetDefinitionParams {
+            semantic_path: "src/sandbox.rs::Sandbox.check".to_owned(),
+        };
+        let result = server.get_definition_impl(params).await;
+        let Ok(res) = result else {
+            panic!("expected Ok with grep_impl_method fallback, got Err");
+        };
+        let val = unpack_def(res);
+        assert!(val.degraded, "should be degraded");
+        assert_eq!(val.file, "src/sandbox.rs");
+        assert_eq!(val.line, 2);
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::GrepFallbackImplScoped),
+            "degraded_reason should be GrepFallbackImplScoped, got {:?}",
+            val.degraded_reason
+        );
+        assert_eq!(
+            val.resolution_strategy,
+            Some("grep_impl".to_owned()),
+            "resolution_strategy should be grep_impl"
+        );
     }
 }

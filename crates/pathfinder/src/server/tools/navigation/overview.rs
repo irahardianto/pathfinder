@@ -108,9 +108,14 @@ impl PathfinderServer {
                         debug_assert!(false, "analyze_impact metadata deserialization failed: {e}");
                         tracing::warn!(
                             error = %e,
-                            "symbol_overview: analyze_impact metadata deserialization failed — using default"
+                            "symbol_overview: analyze_impact metadata deserialization failed — using degraded default"
                         );
-                        crate::server::types::AnalyzeImpactMetadata::default()
+                        // Item 11: Use degraded=true to avoid hiding the bug from consumers.
+                        crate::server::types::AnalyzeImpactMetadata {
+                            degraded: true,
+                            degraded_reason: Some(DegradedReason::LspErrorGrepFallback),
+                            ..Default::default()
+                        }
                     });
                 let summary = if meta.incoming.is_none() && meta.outgoing.is_none() {
                     None
@@ -145,18 +150,25 @@ impl PathfinderServer {
                 };
                 (summary, meta.degraded, meta.degraded_reason)
             }
-            Err(_) => (None, true, Some(DegradedReason::LspErrorGrepFallback)),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "symbol_overview",
+                    error = %e,
+                    "analyze_impact_impl failed — impact will be unavailable"
+                );
+                (None, true, Some(DegradedReason::LspErrorGrepFallback))
+            }
         };
 
         let refs_params = crate::server::types::FindAllReferencesParams {
             semantic_path: params.semantic_path.clone(),
-            max_results: 50,
+            max_results: params.max_references,
             offset: 0,
         };
 
         let refs_result = self.find_all_references_impl(refs_params).await;
 
-        let (references, refs_degraded, refs_reason, files_referenced, warm_start_in_progress) = match refs_result {
+        let (references, refs_degraded, refs_reason, files_referenced, _refs_warm_start) = match refs_result {
             Ok(result) => {
                 let raw = result.structured_content.unwrap_or_default();
                 let meta: crate::server::types::FindAllReferencesMetadata =
@@ -164,9 +176,14 @@ impl PathfinderServer {
                         debug_assert!(false, "find_all_references metadata deserialization failed: {e}");
                         tracing::warn!(
                             error = %e,
-                            "symbol_overview: find_all_references metadata deserialization failed — using default"
+                            "symbol_overview: find_all_references metadata deserialization failed — using degraded default"
                         );
-                        crate::server::types::FindAllReferencesMetadata::default()
+                        // Item 11: Use degraded=true to avoid hiding the bug from consumers.
+                        crate::server::types::FindAllReferencesMetadata {
+                            degraded: true,
+                            degraded_reason: Some(DegradedReason::LspErrorGrepFallback),
+                            ..Default::default()
+                        }
                     });
                 let refs = meta.references.map(|refs| {
                     refs.into_iter()
@@ -187,13 +204,38 @@ impl PathfinderServer {
                     warm_start_in_progress,
                 )
             }
-            Err(_) => (None, true, Some(DegradedReason::LspErrorGrepFallback), 0, None),
+            Err(e) => {
+                tracing::warn!(
+                    tool = "symbol_overview",
+                    error = %e,
+                    "find_all_references_impl failed — references will be unavailable"
+                );
+                (None, true, Some(DegradedReason::LspErrorGrepFallback), 0, None)
+            }
         };
 
         let duration_ms = start.elapsed().as_millis();
 
         let degraded = impact_degraded || refs_degraded;
-        let degraded_reason = if impact_degraded {
+        // Item 12: Prefer warming_up reason when any sub-tool reports it.
+        // This gives agents a more accurate signal — if any sub-tool thinks
+        // the LSP is warming up, the composite should reflect that.
+        let is_warming = |r: &Option<DegradedReason>| {
+            matches!(
+                r,
+                Some(
+                    DegradedReason::LspWarmupEmptyUnverified
+                    | DegradedReason::LspWarmupGrepFallback
+                )
+            )
+        };
+        let degraded_reason = if is_warming(&impact_reason) || is_warming(&refs_reason) {
+            if is_warming(&impact_reason) {
+                impact_reason
+            } else {
+                refs_reason
+            }
+        } else if impact_degraded {
             impact_reason
         } else if refs_degraded {
             refs_reason
@@ -203,11 +245,23 @@ impl PathfinderServer {
 
         let lsp_readiness = if degraded {
             match degraded_reason {
-                Some(DegradedReason::NoLsp) => Some("unavailable".to_owned()),
-                _ => Some("warming_up".to_owned()),
+                Some(
+                    DegradedReason::LspWarmupEmptyUnverified
+                    | DegradedReason::LspWarmupGrepFallback,
+                ) => Some("warming_up".to_owned()),
+                _ => Some("unavailable".to_owned()),
             }
         } else {
             Some("ready".to_owned())
+        };
+
+        // Item 10: Derive warm_start_in_progress from composite lsp_readiness
+        // instead of copying from refs metadata (which can contradict the
+        // composite readiness signal).
+        let warm_start_in_progress = match lsp_readiness.as_deref() {
+            Some("warming_up") => Some(true),
+            Some("ready") => Some(false),
+            _ => None,
         };
 
         let response = crate::server::types::SymbolOverviewResponse {
@@ -591,8 +645,9 @@ mod tests {
         // Verify degraded on LSP error in find_all_references_impl
         assert!(val.degraded);
         assert_eq!(val.degraded_reason, Some(DegradedReason::LspTimeoutGrepFallback));
-        assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
-        assert_eq!(val.warm_start_in_progress, Some(true));
+        // Timeout maps to "unavailable", not "warming_up" — timeout != warmup.
+        assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
+        assert_eq!(val.warm_start_in_progress, None);
 
         // References unavailable due to degradation
         assert!(val.references.is_none());
@@ -796,7 +851,7 @@ mod tests {
         let params = crate::server::types::SymbolOverviewParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             project_only: Some(true),
-            max_callers_callees: 3, // Limit to 3
+            max_callers_callees: 6, // Budget split: incoming gets 6/2=3
             max_references: 50,
         };
 
@@ -810,10 +865,166 @@ mod tests {
         let impact = val.impact.as_ref().unwrap();
         assert!(impact.incoming.is_some());
         let incoming = impact.incoming.as_ref().unwrap();
-        assert!(
-            incoming.len() <= 3,
-            "should respect max_callers_callees limit, got {}",
+        assert_eq!(
+            incoming.len(),
+            3,
+            "should return exactly max_callers_callees/2=3, got {}",
             incoming.len()
+        );
+    }
+
+    // ── impact_result returning Err(_) ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_symbol_overview_impact_err_sets_degraded() {
+        // When analyze_impact_impl returns Ok with degraded=true (LSP error),
+        // the overview should propagate the degraded state.
+        // Note: analyze_impact_impl returns Ok(degraded) on LSP errors, not Err.
+        // The Err(_) branch in symbol_overview_impl is for unexpected failures.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // Make call_hierarchy_prepare fail → analyze_impact_impl returns Ok(degraded)
+        // with grep fallback (which also fails since no scout results configured)
+        lawyer.push_prepare_call_hierarchy_result(Err(LspError::Protocol(
+            "LSP crashed".to_string(),
+        )));
+
+        // References succeed
+        lawyer.set_references_result(Ok(vec![ReferenceLocation {
+            file: "src/main.rs".into(),
+            line: 10,
+            column: 8,
+            snippet: "login();".into(),
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::SymbolOverviewParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            project_only: Some(true),
+            max_callers_callees: 50,
+            max_references: 50,
+        };
+
+        let result = server.symbol_overview_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::SymbolOverviewResponse =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Verify degraded due to impact error
+        assert!(val.degraded);
+        // analyze_impact_impl returns degraded_reason=NoLsp when LSP error occurs
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
+
+        // Impact is None because analyze_impact returns degraded metadata with None incoming/outgoing
+        assert!(val.impact.is_none());
+
+        // References still available (partial degradation)
+        assert!(val.references.is_some());
+        assert_eq!(val.references.as_ref().unwrap().len(), 1);
+    }
+
+    // ── Both impact AND references degraded ─────────────────────────
+
+    #[tokio::test]
+    async fn test_symbol_overview_both_degraded() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // Make call_hierarchy_prepare fail → impact degraded
+        lawyer.push_prepare_call_hierarchy_result(Err(LspError::Protocol(
+            "LSP crashed".to_string(),
+        )));
+
+        // Make references fail → references degraded
+        lawyer.set_references_lsp_error(Err(LspError::ConnectionLost));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::SymbolOverviewParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            project_only: Some(true),
+            max_callers_callees: 50,
+            max_references: 50,
+        };
+
+        let result = server.symbol_overview_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::SymbolOverviewResponse =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Both degraded
+        assert!(val.degraded);
+        // Impact error takes priority in degraded_reason
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
+
+        // Both unavailable
+        assert!(val.impact.is_none());
+        assert!(val.references.is_none());
+        assert_eq!(val.files_referenced, 0);
+    }
+
+    // ── max_references is respected ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_symbol_overview_respects_max_references() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .extend([Ok(make_scope()), Ok(make_scope()), Ok(make_scope())]);
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        // Configure 5 references
+        let refs: Vec<_> = (0..5)
+            .map(|i| ReferenceLocation {
+                file: format!("src/file{i}.rs"),
+                line: (i + 1) as u32,
+                column: 1,
+                snippet: format!("// ref {i}"),
+            })
+            .collect();
+        lawyer.set_references_result(Ok(refs));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::SymbolOverviewParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            project_only: Some(true),
+            max_callers_callees: 50,
+            max_references: 3, // Limit to 3
+        };
+
+        let result = server.symbol_overview_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::SymbolOverviewResponse =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Verify max_references is respected
+        assert!(val.references.is_some());
+        let refs = val.references.as_ref().unwrap();
+        assert_eq!(
+            refs.len(),
+            3,
+            "should respect max_references=3, got {}",
+            refs.len()
         );
     }
 }

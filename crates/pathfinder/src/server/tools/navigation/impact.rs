@@ -14,7 +14,7 @@ use pathfinder_common::types::DegradedReason;
 use pathfinder_lsp::LspError;
 use rmcp::model::{CallToolResult, ErrorData};
 
-/// BUG-4: Wall-clock timeout for BFS traversal in `analyze_impact`.
+/// Wall-clock timeout for BFS traversal in `analyze_impact`.
 /// Prevents infinite loops if the LSP keeps returning more references.
 const BFS_TIMEOUT_SECS: u64 = 30;
 
@@ -110,9 +110,10 @@ impl PathfinderServer {
 
     /// Performs BFS traversal of the call hierarchy in the specified direction.
     ///
-    /// BUG-4: Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
+    /// Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
     ///
     /// Returns the collected references and the maximum depth reached during traversal.
+    #[allow(clippy::too_many_lines)]
     async fn bfs_call_hierarchy(
         &self,
         initial_item: &pathfinder_lsp::types::CallHierarchyItem,
@@ -128,7 +129,11 @@ impl PathfinderServer {
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((initial_item.clone(), 0));
         let mut seen = std::collections::HashSet::new();
-        seen.insert((initial_item.file.clone(), initial_item.line));
+        seen.insert((
+            initial_item.file.clone(),
+            initial_item.line,
+            initial_item.name.clone(),
+        ));
         files_referenced.insert(initial_item.file.clone());
 
         let mut references = Vec::new();
@@ -143,7 +148,7 @@ impl PathfinderServer {
                 break;
             }
 
-            // BUG-4: Check wall-clock timeout
+            // Check wall-clock timeout
             if tokio::time::Instant::now() >= deadline {
                 tracing::warn!(
                     direction = ?direction,
@@ -188,7 +193,11 @@ impl PathfinderServer {
 
                         files_referenced.insert(referenced_item.file.clone());
 
-                        let key = (referenced_item.file.clone(), referenced_item.line);
+                        let key = (
+                            referenced_item.file.clone(),
+                            referenced_item.line,
+                            referenced_item.name.clone(),
+                        );
                         if seen.insert(key) {
                             queue.push_back((referenced_item.clone(), current_depth + 1));
 
@@ -250,8 +259,12 @@ impl PathfinderServer {
         // Also floor at 1 to guarantee at least one level of traversal.
         let max_depth = params.max_depth.clamp(1, 5);
         let project_only = params.project_only.unwrap_or(true);
-        let max_references = params.max_references;
-        let mut remaining_references = max_references;
+        // Clamp max_references to minimum 1 to prevent silently empty results.
+        let max_references = params.max_references.max(1);
+        // Split budget between incoming and outgoing. Give any odd slot to incoming.
+        let half = max_references / 2;
+        let mut remaining_incoming = half + max_references % 2;
+        let mut remaining_outgoing = half;
 
         tracing::info!(
             tool = "analyze_impact",
@@ -387,7 +400,7 @@ impl PathfinderServer {
                         max_depth,
                         &mut files_referenced,
                         project_only,
-                        &mut remaining_references,
+                        &mut remaining_incoming,
                     )
                     .await;
                 incoming = Some(incoming_refs);
@@ -401,7 +414,7 @@ impl PathfinderServer {
                         max_depth,
                         &mut files_referenced,
                         project_only,
-                        &mut remaining_references,
+                        &mut remaining_outgoing,
                     )
                     .await;
                 outgoing = Some(outgoing_refs);
@@ -446,11 +459,7 @@ impl PathfinderServer {
                     degraded = true;
                     degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
 
-                    let symbol_name = semantic_path
-                        .symbol_chain
-                        .as_ref()
-                        .and_then(|c| c.segments.last())
-                        .map(|s| s.name.clone())
+                    let symbol_name = super::last_symbol_name(&semantic_path)
                         .unwrap_or_default();
 
                     if let Some(refs) = self
@@ -481,11 +490,7 @@ impl PathfinderServer {
                     "analyze_impact: no LSP — attempting grep-based reference fallback"
                 );
 
-                let symbol_name = semantic_path
-                    .symbol_chain
-                    .as_ref()
-                    .and_then(|c| c.segments.last())
-                    .map(|s| s.name.clone())
+                let symbol_name = super::last_symbol_name(&semantic_path)
                     .unwrap_or_default();
 
                 if let Some(refs) = self
@@ -507,18 +512,14 @@ impl PathfinderServer {
                 // Keep degraded = true to signal this is heuristic data
             }
             Err(LspError::Timeout { .. }) => {
-                // GAP-001: LSP timed out — attempt grep-based reference fallback
+                // LSP timed out — attempt grep-based reference fallback
                 tracing::info!(
                     tool = "analyze_impact",
                     symbol = %semantic_path,
                     "analyze_impact: LSP timed out — attempting grep-based reference fallback"
                 );
 
-                let symbol_name = semantic_path
-                    .symbol_chain
-                    .as_ref()
-                    .and_then(|c| c.segments.last())
-                    .map(|s| s.name.clone())
+                let symbol_name = super::last_symbol_name(&semantic_path)
                     .unwrap_or_default();
 
                 if let Some(refs) = self
@@ -549,11 +550,7 @@ impl PathfinderServer {
                     "call_hierarchy_prepare failed"
                 );
 
-                let symbol_name = semantic_path
-                    .symbol_chain
-                    .as_ref()
-                    .and_then(|c| c.segments.last())
-                    .map(|s| s.name.clone())
+                let symbol_name = super::last_symbol_name(&semantic_path)
                     .unwrap_or_default();
 
                 if let Some(refs) = self
@@ -586,8 +583,11 @@ impl PathfinderServer {
 
         let lsp_readiness = if degraded {
             match degraded_reason_cloned {
-                Some(DegradedReason::NoLsp) => Some("unavailable".to_owned()),
-                _ => Some("warming_up".to_owned()),
+                Some(
+                    DegradedReason::LspWarmupEmptyUnverified
+                    | DegradedReason::LspWarmupGrepFallback,
+                ) => Some("warming_up".to_owned()),
+                _ => Some("unavailable".to_owned()),
             }
         } else {
             Some("ready".to_owned())
@@ -609,7 +609,11 @@ impl PathfinderServer {
             engines_used = ?engines,
             "analyze_impact: complete"
         );
-        let references_truncated = max_references > 0 && remaining_references == 0;
+        // Item 2: Report truncation only when the total budget was actually exhausted,
+        // not when a single direction hits its cap. Check total returned vs total budget.
+        let total_returned = inc_count + out_count;
+        let max_refs_usize = usize::try_from(max_references).unwrap_or(usize::MAX);
+        let references_truncated = max_references > 0 && total_returned >= max_refs_usize;
 
         let resolution_strategy = if engines.contains(&"lsp") {
             Some("lsp_call_hierarchy".to_owned())
@@ -630,11 +634,7 @@ impl PathfinderServer {
 
         // Spec 4.2: Test coverage search
         let (test_callers, test_coverage_status) = if params.include_test_coverage {
-            let symbol_name = semantic_path
-                .symbol_chain
-                .as_ref()
-                .and_then(|c| c.segments.last())
-                .map(|s| s.name.clone())
+            let symbol_name = super::last_symbol_name(&semantic_path)
                 .unwrap_or_default();
 
             if symbol_name.is_empty() {
@@ -661,13 +661,16 @@ impl PathfinderServer {
                             .into_iter()
                             .filter(|m| super::is_test_file(&m.file))
                             .take(20) // cap test references
-                            .map(|m| crate::server::types::ImpactReference {
-                                semantic_path: m.enclosing_semantic_path.unwrap_or_default(),
-                                file: m.file.clone(),
-                                line: usize::try_from(m.line).unwrap_or(0),
-                                snippet: m.content,
-                                direction: "test_coverage".to_owned(),
-                                depth: 0,
+                            .map(|m| {
+                                let fallback_path = format!("{}:{}", m.file, m.line);
+                                crate::server::types::ImpactReference {
+                                    semantic_path: m.enclosing_semantic_path.unwrap_or(fallback_path),
+                                    file: m.file.clone(),
+                                    line: usize::try_from(m.line).unwrap_or(0),
+                                    snippet: m.content,
+                                    direction: "test_coverage".to_owned(),
+                                    depth: 0,
+                                }
                             })
                             .collect();
 
@@ -677,7 +680,14 @@ impl PathfinderServer {
                             (Some(test_refs), Some("found".to_owned()))
                         }
                     }
-                    Err(_) => (None, Some("unknown_degraded".to_owned())),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = "analyze_impact",
+                            error = %e,
+                            "test coverage search failed"
+                        );
+                        (None, Some("unknown_degraded".to_owned()))
+                    }
                 }
             }
         } else {
@@ -709,11 +719,7 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
 
-            let symbol_name = semantic_path
-                .symbol_chain
-                .as_ref()
-                .and_then(|c| c.segments.last())
-                .map(|s| s.name.clone())
+            let symbol_name = super::last_symbol_name(&semantic_path)
                 .unwrap_or_default();
 
             text_parts.push(notice);
@@ -1722,15 +1728,29 @@ mod tests {
             .collect();
         lawyer.push_incoming_call_result(Ok(incoming_calls));
 
-        // No outgoing
-        lawyer.push_outgoing_call_result(Ok(vec![]));
+        // Push 3 outgoing callees to also exhaust outgoing budget
+        let outgoing_calls: Vec<CallHierarchyCall> = (1..=3)
+            .map(|i| CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: format!("callee_{i}"),
+                    kind: "function".into(),
+                    detail: None,
+                    file: format!("src/callee_{i}.rs"),
+                    line: i * 10,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![i * 10],
+            })
+            .collect();
+        lawyer.push_outgoing_call_result(Ok(outgoing_calls));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         let params = AnalyzeImpactParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
-            max_references: 3, // cap below the 5 available
+            max_references: 2, // Budget split: incoming gets 1, outgoing gets 1. Total budget=2.
             ..Default::default()
         };
         let result = server
@@ -1743,12 +1763,12 @@ mod tests {
         let incoming = val.incoming.as_ref().expect("incoming must be Some");
         assert_eq!(
             incoming.len(),
-            3,
-            "incoming refs must be capped at max_references=3"
+            1,
+            "incoming refs must be capped at max_references/2=1"
         );
         assert!(
             val.references_truncated,
-            "references_truncated must be true when budget is exhausted"
+            "references_truncated must be true when total budget is exhausted"
         );
     }
 
@@ -1768,7 +1788,7 @@ mod tests {
     // ── find_callers_callees edge cases ─────────────────────────────────
 
     #[tokio::test]
-    async fn test_find_callers_callees_handles_empty_incoming_and_outgoing() {
+    async fn test_analyze_impact_handles_empty_incoming_and_outgoing() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1799,7 +1819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_callers_callees_respects_max_depth() {
+    async fn test_analyze_impact_respects_max_depth() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1847,7 +1867,7 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Should have incoming call from main
-        let incoming = val.incoming.unwrap_or_default();
+        let incoming = val.incoming.as_ref().expect("incoming must be Some when not degraded");
         assert!(!incoming.is_empty(), "should have incoming calls");
         assert!(incoming.iter().all(|r| r.depth <= 1), "all refs should be within max_depth");
     }
@@ -1996,7 +2016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_callers_callees_grep_fallback_incoming() {
+    async fn test_analyze_impact_grep_fallback_provides_incoming_heuristic() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2079,7 +2099,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_callers_callees_grep_fallback_outgoing() {
+    async fn test_analyze_impact_grep_fallback_no_results_stays_none() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2158,5 +2178,261 @@ mod tests {
             val.incoming.is_none(),
             "incoming should be None when search returns no matches"
         );
+    }
+
+    // ── BFS multi-node continuation after error ──────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_continues_after_single_node_error() {
+        // When queue has items A, B and querying A fails, B should still be processed.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        // Incoming: first call fails (error for initial item), second succeeds
+        lawyer.push_incoming_call_result(Err(LspError::Protocol(
+            "transient error".to_string(),
+        )));
+        // Outgoing succeeds with one callee
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token()".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            max_references: 50,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed despite BFS error");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Not degraded — the LSP prepare succeeded, BFS errors are partial failures
+        assert!(!val.degraded);
+        // Incoming errored → empty vec (not None)
+        let incoming = val.incoming.as_ref().expect("incoming must be Some");
+        assert!(incoming.is_empty(), "incoming should be empty after error");
+        // Outgoing succeeded
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].file, "src/token.rs");
+    }
+
+    // ── BFS text output format ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_formats_response_correctly() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: Some("fn handle_request()".into()),
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+
+        // Verify text output format
+        let text = match &call_res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert!(text.contains("Incoming references: 1"), "text: {text}");
+        assert!(text.contains("Outgoing references: 0"), "text: {text}");
+        assert!(text.contains("[depth="), "text: {text}");
+        assert!(text.contains("src/server.rs:L20"), "text: {text}");
+        assert!(text.contains("[completed in"), "text: {text}");
+    }
+
+    // ── include_test_coverage=true path ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_impact_with_test_coverage() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        // Configure scout to return test file matches
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth_test.rs".to_string(),
+                line: 10,
+                column: 4,
+                content: "fn test_login() { login(); }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: Some("src/auth_test.rs::test_login".to_string()),
+                is_definition: Some(true),
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            include_test_coverage: true,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // Verify test coverage results
+        assert!(val.test_callers.is_some(), "test_callers should be populated");
+        let test_refs = val.test_callers.as_ref().unwrap();
+        assert_eq!(test_refs.len(), 1);
+        assert_eq!(test_refs[0].file, "src/auth_test.rs");
+        assert_eq!(test_refs[0].direction, "test_coverage");
+        assert_eq!(val.test_coverage_status, Some("found".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_test_coverage_not_found() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        // Scout returns empty — no test files found
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![],
+            total_matches: 0,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        }));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            include_test_coverage: true,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.test_callers.is_none(), "test_callers should be None when not found");
+        assert_eq!(val.test_coverage_status, Some("not_found".to_owned()));
     }
 }

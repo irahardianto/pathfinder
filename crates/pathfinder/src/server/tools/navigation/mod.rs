@@ -204,6 +204,21 @@ fn extract_call_candidates(symbol_content: &str, language: &str) -> Vec<String> 
     result
 }
 
+/// Extract the last segment name from a semantic path's symbol chain.
+///
+/// Returns `None` if the semantic path has no symbol chain or the chain is empty.
+/// Used by `analyze_impact` and `read_with_deep_context` to get the symbol name
+/// for grep-based fallback searches.
+pub(crate) fn last_symbol_name(
+    semantic_path: &pathfinder_common::types::SemanticPath,
+) -> Option<String> {
+    semantic_path
+        .symbol_chain
+        .as_ref()
+        .and_then(|c| c.segments.last())
+        .map(|s| s.name.clone())
+}
+
 /// Returns language keywords to filter out from call-candidate extraction.
 #[expect(
     clippy::too_many_lines,
