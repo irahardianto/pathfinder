@@ -20,7 +20,7 @@ const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
 ///
 /// All methods take `&self` (interior mutability via `Mutex`) so the
 /// dispatcher can be shared across the writer and reader tasks via `Arc`.
-pub(super) struct RequestDispatcher {
+pub(crate) struct RequestDispatcher {
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, LspError>>>>,
     next_id: AtomicU64,
     /// Broadcast channel for unsolicited server notifications (no `id`).
@@ -36,7 +36,7 @@ pub(super) struct RequestDispatcher {
 }
 
 impl RequestDispatcher {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (server_request_tx, _) = broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY);
         Self {
@@ -52,7 +52,7 @@ impl RequestDispatcher {
     /// Returns `(id, rx)`. The caller should write a JSON-RPC request with
     /// this `id` and then `.await rx` to receive the response.
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
-    pub(super) fn register(&self) -> (u64, oneshot::Receiver<Result<Value, LspError>>) {
+    pub(crate) fn register(&self) -> (u64, oneshot::Receiver<Result<Value, LspError>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().expect("dispatcher lock").insert(id, tx);
@@ -61,7 +61,7 @@ impl RequestDispatcher {
 
     /// Build a JSON-RPC request value for the given method and params.
     #[must_use]
-    pub(super) fn make_request(id: u64, method: &str, params: &Value) -> Value {
+    pub(crate) fn make_request(id: u64, method: &str, params: &Value) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -72,7 +72,7 @@ impl RequestDispatcher {
 
     /// Build a JSON-RPC notification (no id, no response expected).
     #[must_use]
-    pub(super) fn make_notification(method: &str, params: &Value) -> Value {
+    pub(crate) fn make_notification(method: &str, params: &Value) -> Value {
         json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -87,7 +87,7 @@ impl RequestDispatcher {
     /// broadcast channel (subscribers include the `progress_watcher_task`).
     /// Unmatched responses are silently ignored.
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
-    pub(super) fn dispatch_response(&self, message: &Value) {
+    pub(crate) fn dispatch_response(&self, message: &Value) {
         let Some(id_val) = message.get("id") else {
             // Server notification (no id) — forward to notification broadcast channel.
             // Ignore send errors (no active subscribers is fine).
@@ -127,7 +127,7 @@ impl RequestDispatcher {
     /// Returns a `broadcast::Receiver` that yields each incoming notification
     /// value (messages without a JSON-RPC `id`). Used by `progress_watcher_task`
     /// to detect `$/progress` events for LSP indexing completion.
-    pub(super) fn subscribe_notifications(&self) -> broadcast::Receiver<Value> {
+    pub(crate) fn subscribe_notifications(&self) -> broadcast::Receiver<Value> {
         self.notification_tx.subscribe()
     }
     /// MT-3: Subscribe to server-to-client requests.
@@ -136,7 +136,7 @@ impl RequestDispatcher {
     /// `method` but were NOT initiated by us (i.e., not in the pending map).
     /// Used by `registration_watcher_task` to handle `client/registerCapability`
     /// and `client/unregisterCapability` from the LSP server.
-    pub(super) fn subscribe_server_requests(&self) -> broadcast::Receiver<Value> {
+    pub(crate) fn subscribe_server_requests(&self) -> broadcast::Receiver<Value> {
         self.server_request_tx.subscribe()
     }
 
@@ -145,7 +145,7 @@ impl RequestDispatcher {
     /// Prevents request IDs from leaking forever in the dispatcher when
     /// the caller gives up waiting for a response.
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
-    pub(super) fn remove(&self, id: u64) {
+    pub(crate) fn remove(&self, id: u64) {
         self.pending.lock().expect("dispatcher lock").remove(&id);
     }
 
@@ -153,7 +153,7 @@ impl RequestDispatcher {
     ///
     /// Called when the LSP process exits to unblock all waiting callers.
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
-    pub(super) fn cancel_all(&self) {
+    pub(crate) fn cancel_all(&self) {
         let drained: Vec<_> = self
             .pending
             .lock()

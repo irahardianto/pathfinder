@@ -60,7 +60,7 @@ use tokio::sync::Mutex;
 /// `ManagedProcess` and is not trait-virtualized — those are tested via
 /// integration tests with real child processes.
 #[async_trait]
-pub(super) trait LspTransport: Send + Sync {
+pub(crate) trait LspTransport: Send + Sync {
     /// Write a JSON-RPC message to the process stdin.
     async fn send(&self, message: &Value) -> Result<(), LspError>;
 
