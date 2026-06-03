@@ -212,16 +212,17 @@ impl Sandbox {
             } else {
                 // Bare filename: exact match or prefix with separator
                 // Prevents ".gitignorex" from matching ".gitignore"
-                if path_str == *allowed
-                    || path_str.starts_with(&format!("{allowed}/"))
-                {
+                if path_str == *allowed || path_str.starts_with(&format!("{allowed}/")) {
                     return false;
                 }
             }
         }
 
         // Check against all hardcoded deny patterns.
-        if HARDCODED_DENY_PATTERNS.iter().any(|p| path_str.starts_with(*p)) {
+        if HARDCODED_DENY_PATTERNS
+            .iter()
+            .any(|p| path_str.starts_with(*p))
+        {
             return true;
         }
 
