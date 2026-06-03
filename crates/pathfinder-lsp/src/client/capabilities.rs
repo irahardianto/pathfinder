@@ -80,6 +80,17 @@ pub struct DetectedCapabilities {
     /// Not populated from the `initialize` handshake.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub dynamic_registrations: std::collections::HashMap<String, String>,
+    /// M-7: Snapshot of capabilities from the `initialize` handshake.
+    /// Used to prevent `apply_unregistration` from reverting a capability
+    /// that was statically advertised by the server.
+    #[serde(skip)]
+    pub(crate) static_definition_provider: bool,
+    #[serde(skip)]
+    pub(crate) static_call_hierarchy_provider: bool,
+    #[serde(skip)]
+    pub(crate) static_formatting_provider: bool,
+    #[serde(skip)]
+    pub(crate) static_diagnostics_strategy: DiagnosticsStrategy,
 }
 
 impl DetectedCapabilities {
@@ -134,15 +145,24 @@ impl DetectedCapabilities {
             .and_then(|n| n.as_str())
             .map(ToOwned::to_owned);
 
+        let definition_provider = is_cap("definitionProvider");
+        let call_hierarchy_provider = is_cap("callHierarchyProvider");
+        let formatting_provider = is_cap("documentFormattingProvider");
+
         Self {
-            definition_provider: is_cap("definitionProvider"),
-            call_hierarchy_provider: is_cap("callHierarchyProvider"),
-            formatting_provider: is_cap("documentFormattingProvider"),
+            definition_provider,
+            call_hierarchy_provider,
+            formatting_provider,
             diagnostics_strategy,
             workspace_diagnostic_provider,
             server_name,
             // MT-3: Populated at runtime by registration_watcher_task, not from initialize.
             dynamic_registrations: std::collections::HashMap::new(),
+            // M-7: Snapshot static capabilities for safe unregistration.
+            static_definition_provider: definition_provider,
+            static_call_hierarchy_provider: call_hierarchy_provider,
+            static_formatting_provider: formatting_provider,
+            static_diagnostics_strategy: diagnostics_strategy,
         }
     }
 
@@ -216,6 +236,10 @@ impl DetectedCapabilities {
     /// the `registration_id` stored by `apply_registration` and reverts the
     /// corresponding capability flag.
     ///
+    /// M-7: Does NOT revert capabilities that were statically advertised by
+    /// the server during the `initialize` handshake. Only dynamically added
+    /// capabilities are reverted.
+    ///
     /// Returns `true` if the capability was found and reverted, `false` if
     /// `registration_id` was never registered.
     pub fn apply_unregistration(&mut self, registration_id: &str) -> bool {
@@ -225,27 +249,32 @@ impl DetectedCapabilities {
 
         match method.as_str() {
             "textDocument/diagnostic" => {
-                // If no other diagnostic registration remains, revert to None.
-                // (If a static capability existed from initialize, this is a best-effort
-                //  revert — static caps are not tracked in dynamic_registrations.)
+                // If no other diagnostic registration remains, revert — but only
+                // if the static initialize didn't already have this capability.
                 let has_other_diag = self
                     .dynamic_registrations
                     .values()
                     .any(|m| m == "textDocument/diagnostic");
-                if !has_other_diag {
+                if !has_other_diag
+                    && !matches!(self.static_diagnostics_strategy, DiagnosticsStrategy::Pull)
+                {
                     self.diagnostics_strategy = DiagnosticsStrategy::None;
                     self.workspace_diagnostic_provider = false;
                 }
             }
-            "textDocument/definition" => {
+            "textDocument/definition" if !self.static_definition_provider => {
                 self.definition_provider = false;
             }
             "callHierarchy/incomingCalls"
             | "callHierarchy/outgoingCalls"
-            | "textDocument/prepareCallHierarchy" => {
+            | "textDocument/prepareCallHierarchy"
+                if !self.static_call_hierarchy_provider =>
+            {
                 self.call_hierarchy_provider = false;
             }
-            "textDocument/formatting" | "textDocument/rangeFormatting" => {
+            "textDocument/formatting" | "textDocument/rangeFormatting"
+                if !self.static_formatting_provider =>
+            {
                 self.formatting_provider = false;
             }
             _ => {}

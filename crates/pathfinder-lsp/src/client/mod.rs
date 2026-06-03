@@ -47,14 +47,22 @@ pub(crate) struct ProcessLifecycle {
 pub(crate) struct LanguageState {
     pub(crate) transport: Arc<dyn LspTransport>,
     pub(crate) lifecycle: Option<ProcessLifecycle>,
+    /// The supervisor task handle — stored as `reader_handle` for compatibility
+    /// with stale-reader detection in `request()`/`notify()`.
     pub(crate) reader_handle: tokio::task::JoinHandle<()>,
+    /// C-2: Set to `true` when the process entry is created. The reader task
+    /// sets this to `false` on exit (EOF, error, or abort). The supervisor's
+    /// `remove_if` predicate checks this flag to distinguish the old entry
+    /// from a replacement spawned by crash recovery.
+    pub(crate) reader_alive: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) restart_count: u32,
     pub(crate) spawned_at: Instant,
     pub(crate) indexing_complete: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) indexing_completion_source: Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
-    pub(crate) indexing_duration_secs: Arc<std::sync::Mutex<Option<u64>>>,
-    pub(crate) indexing_progress_percent: Arc<std::sync::Mutex<Option<u8>>>,
-    pub(crate) live_capabilities: Arc<std::sync::RwLock<DetectedCapabilities>>,
+    pub(crate) indexing_completion_source:
+        Arc<parking_lot::Mutex<Option<IndexingCompletionSource>>>,
+    pub(crate) indexing_duration_secs: Arc<parking_lot::Mutex<Option<u64>>>,
+    pub(crate) indexing_progress_percent: Arc<parking_lot::Mutex<Option<u8>>>,
+    pub(crate) live_capabilities: Arc<parking_lot::RwLock<DetectedCapabilities>>,
     pub(crate) in_coexistence_mode: bool,
     pub(crate) watcher_handles: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -90,31 +98,20 @@ impl ProcessEntry {
         match self {
             Self::Running(state) => {
                 // MT-3: Read from live_capabilities (may include dynamic registrations).
-                #[allow(clippy::expect_used)]
-                let caps = state
-                    .live_capabilities
-                    .read()
-                    .expect("live_capabilities lock");
-                #[allow(clippy::expect_used)]
-                let indexing_source = state
-                    .indexing_completion_source
-                    .lock()
-                    .expect("indexing_completion_source lock")
-                    .as_ref()
-                    .map(|source| match source {
-                        IndexingCompletionSource::Progress => "progress".to_string(),
-                        IndexingCompletionSource::TimeoutFallback => "timeout_fallback".to_string(),
-                    });
-                #[allow(clippy::expect_used)]
-                let indexing_duration_secs = *state
-                    .indexing_duration_secs
-                    .lock()
-                    .expect("indexing_duration_secs lock");
-                #[allow(clippy::expect_used)]
-                let indexing_progress_pct = *state
-                    .indexing_progress_percent
-                    .lock()
-                    .expect("indexing_progress_percent lock");
+                let caps = state.live_capabilities.read();
+                let indexing_source =
+                    state
+                        .indexing_completion_source
+                        .lock()
+                        .as_ref()
+                        .map(|source| match source {
+                            IndexingCompletionSource::Progress => "progress".to_string(),
+                            IndexingCompletionSource::TimeoutFallback => {
+                                "timeout_fallback".to_string()
+                            }
+                        });
+                let indexing_duration_secs = *state.indexing_duration_secs.lock();
+                let indexing_progress_pct = *state.indexing_progress_percent.lock();
                 let effective_diag_strategy = if state.in_coexistence_mode {
                     DiagnosticsStrategy::None
                 } else {
@@ -258,14 +255,16 @@ pub(crate) struct InFlightGuard {
 
 impl InFlightGuard {
     pub(crate) fn new(counter: Arc<AtomicU32>) -> Self {
-        counter.fetch_add(1, Ordering::Release);
+        // L-9: Relaxed ordering suffices — in_flight is only used for idle-timeout
+        // gating, not for cross-thread synchronization.
+        counter.fetch_add(1, Ordering::Relaxed);
         Self { counter }
     }
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Release);
+        self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -273,6 +272,17 @@ impl Drop for InFlightGuard {
 ///
 /// Manages per-language LSP child processes and provides JSON-RPC request
 /// routing for `textDocument/definition` and future capabilities.
+///
+/// # Lifecycle
+///
+/// `LspClient` is `Clone`-able — all fields are `Arc`-wrapped. The client is
+/// shared across async tasks via cloning. When the last clone is dropped, the
+/// `shutdown_tx` `Arc` is dropped, which causes the `idle_timeout_task` to see
+/// a `Closed` error on its broadcast receiver and exit cleanly. Therefore,
+/// **no `Drop` impl is needed** — cleanup is handled by the idle-timeout task's
+/// natural exit when the broadcast channel closes. Adding a naive `Drop` impl
+/// that calls `shutdown()` would fire on every clone drop (not just the last),
+/// which is incorrect. Use `shutdown()` explicitly for deterministic cleanup.
 #[derive(Clone)]
 pub struct LspClient {
     pub(crate) descriptors: Arc<Vec<LspDescriptor>>,
@@ -281,6 +291,9 @@ pub struct LspClient {
     pub(crate) init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) dispatcher: Arc<RequestDispatcher>,
     pub(crate) shutdown_tx: Arc<broadcast::Sender<()>>,
+    /// C-1: Set atomically when `shutdown()` is called. Checked by `start_process`
+    /// to prevent inserting new processes after the `idle_timeout_task` has exited.
+    pub(crate) shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) doc_versions: Arc<DashMap<String, std::sync::atomic::AtomicI32>>,
     pub(crate) warm_start_complete: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -504,6 +517,7 @@ mod tests {
             init_locks: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -541,6 +555,7 @@ mod tests {
             init_locks: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -563,15 +578,19 @@ mod tests {
             transport: Arc::clone(&fake) as Arc<dyn LspTransport>,
             lifecycle: None,
             reader_handle,
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             restart_count: 0,
             spawned_at: Instant::now(),
             indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(std::sync::Mutex::new(Some(
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(Some(
                 IndexingCompletionSource::Progress,
             ))),
-            indexing_duration_secs: Arc::new(std::sync::Mutex::new(Some(0))),
-            indexing_progress_percent: Arc::new(std::sync::Mutex::new(None)),
-            live_capabilities: Arc::new(std::sync::RwLock::new(DetectedCapabilities::default())),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(Some(0))),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities {
+                definition_provider: true,
+                ..DetectedCapabilities::default()
+            })),
             in_coexistence_mode: false,
             watcher_handles: vec![],
         }));
@@ -596,6 +615,7 @@ mod tests {
             init_locks: Arc::new(DashMap::new()),
             dispatcher,
             shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };

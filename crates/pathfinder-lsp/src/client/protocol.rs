@@ -8,9 +8,7 @@
 use crate::LspError;
 use dashmap::DashMap;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use tokio::sync::{broadcast, oneshot};
 
 /// Capacity of the server-notification broadcast channel.
@@ -19,7 +17,7 @@ const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
 
 /// Correlates outgoing JSON-RPC requests with their responses.
 ///
-/// All methods take `&self` (interior mutability via `Mutex`) so the
+/// All methods take `&self` (interior mutability via `DashMap`) so the
 /// dispatcher can be shared across the writer and reader tasks via `Arc`.
 ///
 /// LSP-INIT-002: Per-language isolation prevents cross-language interference:
@@ -29,7 +27,9 @@ const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
 type PendingRequest = (String, oneshot::Sender<Result<Value, LspError>>);
 
 pub(crate) struct RequestDispatcher {
-    pending: Mutex<HashMap<u64, PendingRequest>>,
+    /// `DashMap` for concurrent request registration, dispatch, and cancellation.
+    /// ID-based sharding gives natural parallelism across languages.
+    pending: DashMap<u64, PendingRequest>,
     next_id: AtomicU64,
     /// Per-language broadcast channels for unsolicited server notifications (no `id`).
     /// Key: `language_id`, Value: `broadcast::Sender<Value>`
@@ -48,7 +48,7 @@ pub(crate) struct RequestDispatcher {
 impl RequestDispatcher {
     pub(crate) fn new() -> Self {
         Self {
-            pending: Mutex::new(HashMap::new()),
+            pending: DashMap::new(),
             next_id: AtomicU64::new(1),
             notification_channels: DashMap::new(),
             server_request_channels: DashMap::new(),
@@ -63,17 +63,13 @@ impl RequestDispatcher {
     /// LSP-INIT-002: `language_id` is stored alongside the sender so that
     /// `cancel_for_language()` can selectively cancel only requests from
     /// a crashed language server without affecting other languages.
-    #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(crate) fn register(
         &self,
         language_id: &str,
     ) -> (u64, oneshot::Receiver<Result<Value, LspError>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("dispatcher lock")
-            .insert(id, (language_id.to_owned(), tx));
+        self.pending.insert(id, (language_id.to_owned(), tx));
         (id, rx)
     }
 
@@ -145,8 +141,15 @@ impl RequestDispatcher {
     /// 2. Has `id` + `method` → server-to-client request → per-language `server_request` channel
     /// 3. Has `id`, no `method`, in pending → response to our request → resolve oneshot
     /// 4. Has `id`, not in pending → unmatched response → silently dropped
-    #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(crate) fn dispatch_response_for_language(&self, source_language_id: &str, message: &Value) {
+        // M-2: Handle JSON-RPC batch arrays — dispatch each element individually.
+        if let Some(batch) = message.as_array() {
+            for item in batch {
+                self.dispatch_response_for_language(source_language_id, item);
+            }
+            return;
+        }
+
         let Some(id_val) = message.get("id") else {
             // Server notification (no id) — forward to per-language notification channel.
             let method = message
@@ -163,24 +166,18 @@ impl RequestDispatcher {
             }
             return;
         };
-        let Some(id) = id_val.as_u64() else {
-            return;
-        };
 
-        // Check for method BEFORE checking pending to prevent ID collision
-        // between server-to-client requests (e.g. client/registerCapability)
-        // and our outgoing requests. A message with both `id` and `method`
-        // is a server request, not a response to our request.
+        // M-1: Check for method BEFORE ID type to handle string-ID server requests.
+        // A message with both `id` and `method` is a server-to-client request
+        // (e.g. client/registerCapability), not a response to our request.
         if message.get("method").is_some() {
-            // Server-to-client request (has id AND method).
-            // Forward to per-language server_request channel.
             let method = message
                 .get("method")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             tracing::debug!(
                 language = %source_language_id,
-                id = %id,
+                id = %id_val,
                 method = %method,
                 "LSP: dispatching server-to-client request"
             );
@@ -190,8 +187,19 @@ impl RequestDispatcher {
             return;
         }
 
+        // M-1: Now check ID type. Only u64 IDs can be correlated with pending requests.
+        let Some(id) = id_val.as_u64() else {
+            // String ID on a non-method message — likely a malformed response.
+            tracing::warn!(
+                language = %source_language_id,
+                id = %id_val,
+                "LSP: received non-u64 response ID (string IDs are spec-compliant but uncommon)"
+            );
+            return;
+        };
+
         // Normal response to a request we sent (has id, no method).
-        if let Some((_lang, sender)) = self.pending.lock().expect("dispatcher lock").remove(&id) {
+        if let Some((_id, (_lang, sender))) = self.pending.remove(&id) {
             let is_error = message.get("error").is_some();
             tracing::debug!(
                 language = %source_language_id,
@@ -209,6 +217,20 @@ impl RequestDispatcher {
                 Ok(message["result"].clone())
             };
             let _ = sender.send(result);
+        } else {
+            // L-8: Log unmatched responses with categorization.
+            let has_error = message.get("error").is_some();
+            let error_code = message
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(serde_json::Value::as_i64);
+            tracing::warn!(
+                language = %source_language_id,
+                id = %id,
+                has_error = has_error,
+                error_code = error_code,
+                "LSP: unmatched response — request timed out or ID never registered"
+            );
         }
     }
 
@@ -242,9 +264,8 @@ impl RequestDispatcher {
     ///
     /// Prevents request IDs from leaking forever in the dispatcher when
     /// the caller gives up waiting for a response.
-    #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(crate) fn remove(&self, id: u64) {
-        self.pending.lock().expect("dispatcher lock").remove(&id);
+        self.pending.remove(&id);
     }
 
     /// Cancel all pending requests with `LspError::ConnectionLost`.
@@ -253,16 +274,14 @@ impl RequestDispatcher {
     /// LSP-INIT-002: For per-language cancellation (when one language crashes),
     /// use `cancel_for_language()` instead.
     #[allow(dead_code)] // Kept for tests and future use
-    #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(crate) fn cancel_all(&self) {
-        let drained: Vec<_> = self
-            .pending
-            .lock()
-            .expect("dispatcher lock")
-            .drain()
-            .collect();
-        for (_id, (_lang, tx)) in drained {
-            let _ = tx.send(Err(LspError::ConnectionLost));
+        // Collect all IDs, then remove each by key to take ownership of the sender.
+        // DashMap doesn't have into_iter(), so we collect IDs first.
+        let ids: Vec<u64> = self.pending.iter().map(|e| *e.key()).collect();
+        for id in ids {
+            if let Some((_id, (_lang, tx))) = self.pending.remove(&id) {
+                let _ = tx.send(Err(LspError::ConnectionLost));
+            }
         }
     }
 
@@ -271,14 +290,15 @@ impl RequestDispatcher {
     /// LSP-INIT-002: Called when a single language's LSP process crashes.
     /// This isolates the crash to only that language's pending requests,
     /// leaving other languages' requests unaffected.
-    #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(crate) fn cancel_for_language(&self, language_id: &str) {
-        let mut pending = self.pending.lock().expect("dispatcher lock");
-
-        let ids_to_cancel: Vec<u64> = pending
+        // Collect IDs for matching language entries, then remove each by key
+        // to take ownership of the sender (oneshot::Sender doesn't impl Clone).
+        // With DashMap, this doesn't block register/dispatch on other shards.
+        let ids_to_cancel: Vec<u64> = self
+            .pending
             .iter()
-            .filter(|(_id, (lang, _tx))| lang == language_id)
-            .map(|(&id, _)| id)
+            .filter(|entry| entry.value().0 == language_id)
+            .map(|entry| *entry.key())
             .collect();
 
         let count = ids_to_cancel.len();
@@ -291,7 +311,7 @@ impl RequestDispatcher {
         }
 
         for id in ids_to_cancel {
-            if let Some((_lang, tx)) = pending.remove(&id) {
+            if let Some((_id, (_lang, tx))) = self.pending.remove(&id) {
                 let _ = tx.send(Err(LspError::ConnectionLost));
             }
         }
@@ -354,7 +374,7 @@ mod tests {
 
         // The pending entry for `id` should still be there
         assert_eq!(
-            dispatcher.pending.lock().unwrap().len(),
+            dispatcher.pending.len(),
             1,
             "notification must not remove pending request"
         );
@@ -366,10 +386,10 @@ mod tests {
         let dispatcher = RequestDispatcher::new();
         let (_id1, _rx1) = dispatcher.register("test");
         let (_id2, _rx2) = dispatcher.register("test");
-        assert_eq!(dispatcher.pending.lock().unwrap().len(), 2);
+        assert_eq!(dispatcher.pending.len(), 2);
 
         dispatcher.cancel_all();
-        assert!(dispatcher.pending.lock().unwrap().is_empty());
+        assert!(dispatcher.pending.is_empty());
     }
 
     #[tokio::test]
@@ -411,7 +431,7 @@ mod tests {
         dispatcher.dispatch_response(&response);
 
         // The original pending entry should still be there
-        assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
+        assert_eq!(dispatcher.pending.len(), 1);
         // The receiver should not have been fulfilled
         assert!(rx.try_recv().is_err(), "unmatched id should not deliver");
     }
@@ -434,10 +454,10 @@ mod tests {
     async fn test_remove_drops_pending() {
         let dispatcher = RequestDispatcher::new();
         let (id, rx) = dispatcher.register("test");
-        assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
+        assert_eq!(dispatcher.pending.len(), 1);
 
         dispatcher.remove(id);
-        assert!(dispatcher.pending.lock().unwrap().is_empty());
+        assert!(dispatcher.pending.is_empty());
 
         // Receiver should error (sender dropped)
         assert!(rx.await.is_err());
@@ -453,7 +473,7 @@ mod tests {
         dispatcher.dispatch_response(&response);
 
         // Should not match — our ID is numeric
-        assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
+        assert_eq!(dispatcher.pending.len(), 1);
         assert!(rx.try_recv().is_err());
     }
 
@@ -578,7 +598,7 @@ mod tests {
 
         // Verify both are in pending
         assert_eq!(
-            dispatcher.pending.lock().unwrap().len(),
+            dispatcher.pending.len(),
             2,
             "should have 2 pending requests before cancel"
         );
@@ -595,7 +615,7 @@ mod tests {
 
         // Go request should still be pending (not cancelled)
         assert_eq!(
-            dispatcher.pending.lock().unwrap().len(),
+            dispatcher.pending.len(),
             1,
             "should have 1 pending request (go) after rust cancel"
         );
@@ -620,7 +640,7 @@ mod tests {
 
         // Rust request should still be pending
         assert_eq!(
-            dispatcher.pending.lock().unwrap().len(),
+            dispatcher.pending.len(),
             1,
             "rust request should still be pending after no-op cancel"
         );
@@ -639,7 +659,7 @@ mod tests {
         let (_id_t1, mut rx_t1) = dispatcher.register("typescript");
         let (_id_g2, rx_g2) = dispatcher.register("go");
 
-        assert_eq!(dispatcher.pending.lock().unwrap().len(), 5);
+        assert_eq!(dispatcher.pending.len(), 5);
 
         // Cancel all go requests
         dispatcher.cancel_for_language("go");
@@ -652,7 +672,7 @@ mod tests {
         assert!(matches!(go_result_2, Err(LspError::ConnectionLost)));
 
         // Rust and TS receivers should not have been cancelled
-        assert_eq!(dispatcher.pending.lock().unwrap().len(), 3);
+        assert_eq!(dispatcher.pending.len(), 3);
         assert!(rx_r1.try_recv().is_err());
         assert!(rx_r2.try_recv().is_err());
         assert!(rx_t1.try_recv().is_err());
@@ -665,7 +685,7 @@ mod tests {
         assert!(matches!(rust_result_2, Err(LspError::ConnectionLost)));
 
         // Only TS remains
-        assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
+        assert_eq!(dispatcher.pending.len(), 1);
     }
 
     #[tokio::test]
@@ -931,9 +951,98 @@ mod tests {
 
         // The pending entry should still exist
         assert_eq!(
-            dispatcher.pending.lock().unwrap().len(),
+            dispatcher.pending.len(),
             1,
             "pending request should still be registered"
         );
+    }
+
+    // ── M-2: JSON-RPC batch dispatch tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_batch_array_dispatches_each_element() {
+        let dispatcher = RequestDispatcher::new();
+        let (id1, rx1) = dispatcher.register("test");
+        let (id2, rx2) = dispatcher.register("test");
+
+        let batch = json!([
+            { "jsonrpc": "2.0", "id": id1, "result": { "uri": "file:///a.rs" } },
+            { "jsonrpc": "2.0", "id": id2, "result": { "uri": "file:///b.rs" } }
+        ]);
+        dispatcher.dispatch_response_for_language("test", &batch);
+
+        let r1 = rx1.await.expect("should receive");
+        let r2 = rx2.await.expect("should receive");
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+        assert_eq!(r1.unwrap()["uri"], "file:///a.rs");
+        assert_eq!(r2.unwrap()["uri"], "file:///b.rs");
+    }
+
+    #[tokio::test]
+    async fn test_batch_array_with_mixed_types() {
+        let dispatcher = RequestDispatcher::new();
+        let (id1, rx1) = dispatcher.register("test");
+        let mut notif_rx = dispatcher.subscribe_notifications_for_language("test");
+
+        let batch = json!([
+            { "jsonrpc": "2.0", "id": id1, "result": {} },
+            { "jsonrpc": "2.0", "method": "window/logMessage", "params": {} }
+        ]);
+        dispatcher.dispatch_response_for_language("test", &batch);
+
+        let r1 = rx1.await.expect("should receive response");
+        assert!(r1.is_ok());
+
+        let notif = tokio::time::timeout(tokio::time::Duration::from_millis(100), notif_rx.recv())
+            .await
+            .expect("should not time out")
+            .expect("should receive notification");
+        assert_eq!(notif["method"], "window/logMessage");
+    }
+
+    #[tokio::test]
+    async fn test_empty_batch_array_is_noop() {
+        let dispatcher = RequestDispatcher::new();
+        let (_id, mut rx) = dispatcher.register("test");
+
+        let batch = json!([]);
+        dispatcher.dispatch_response_for_language("test", &batch);
+
+        // No responses should be delivered for an empty batch.
+        assert!(
+            rx.try_recv().is_err(),
+            "empty batch should not deliver any response"
+        );
+    }
+
+    // ── M-1: String-ID server request tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_string_id_server_request_forwarded_to_watcher() {
+        // When the server sends a request with a string ID (e.g. "reg-001"),
+        // it must be forwarded to the server_request channel, not silently dropped.
+        let dispatcher = RequestDispatcher::new();
+        let mut rx = dispatcher.subscribe_server_requests_for_language("rust");
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": "string-id-001",
+            "method": "client/registerCapability",
+            "params": { "registrations": [] }
+        });
+        dispatcher.dispatch_response_for_language("rust", &req);
+
+        let received = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("should not time out")
+            .expect("should receive");
+
+        assert_eq!(
+            received["method"].as_str().unwrap_or(""),
+            "client/registerCapability",
+            "string-ID server request must reach the watcher"
+        );
+        assert_eq!(received["id"], "string-id-001");
     }
 }

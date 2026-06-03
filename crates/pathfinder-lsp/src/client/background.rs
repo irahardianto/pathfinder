@@ -21,6 +21,7 @@ const IDLE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mins(
 pub async fn reader_supervisor_task(
     language_id: String,
     reader_handle: tokio::task::JoinHandle<()>,
+    reader_alive: Arc<std::sync::atomic::AtomicBool>,
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
 ) {
@@ -42,12 +43,16 @@ pub async fn reader_supervisor_task(
         }
     };
 
-    // P1-2 fix: Use remove_if to only remove if reader_handle is still finished.
-    // This prevents killing a healthy replacement process that was spawned by
+    // C-2 fix: Mark reader as no longer alive. The remove_if predicate checks
+    // this flag to distinguish the old entry from a replacement spawned by
     // crash recovery between reader_handle.await() and this remove operation.
+    // Without this, the supervisor's remove_if was dead code (checking its own
+    // handle, which is always "not finished" while running).
+    reader_alive.store(false, std::sync::atomic::Ordering::Release);
+
     let removed = processes.remove_if(
         &language_id,
-        |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
+        |_, v| matches!(v, ProcessEntry::Running(s) if !s.reader_alive.load(std::sync::atomic::Ordering::Acquire)),
     );
 
     if let Some((_lang, ProcessEntry::Running(state))) = removed {
@@ -69,19 +74,22 @@ pub async fn reader_supervisor_task(
             let _ = lifecycle.child.lock().await.wait().await;
         }
 
-        if crashed {
-            tracing::warn!(
-                language = %language_id,
-                "LSP: inserting Unavailable entry after crash for backoff protection"
-            );
-            processes.insert(
-                language_id,
-                ProcessEntry::Unavailable(super::UnavailableState {
-                    unavailable_since: std::time::Instant::now(),
-                    backoff_attempt: 1,
-                }),
-            );
-        }
+        // Insert Unavailable on BOTH crash and normal EOF to prevent unthrottled
+        // respawn loops. Without this, an LSP that exits immediately on startup
+        // (bad config, missing deps) creates a tight spawn-exit loop.
+        // Only the crash path previously got backoff — normal EOF was unprotected.
+        tracing::warn!(
+            language = %language_id,
+            crashed = crashed,
+            "LSP: inserting Unavailable entry for backoff protection"
+        );
+        processes.insert(
+            language_id,
+            ProcessEntry::Unavailable(super::UnavailableState {
+                unavailable_since: std::time::Instant::now(),
+                backoff_attempt: 1,
+            }),
+        );
     } else {
         tracing::debug!(
             language = %language_id,
@@ -92,17 +100,16 @@ pub async fn reader_supervisor_task(
 
 pub async fn progress_watcher_task(
     language_id: String,
-    dispatcher: Arc<RequestDispatcher>,
+    // M-6: Accept pre-created receiver instead of creating via dispatcher.
+    mut rx: broadcast::Receiver<serde_json::Value>,
     indexing_complete: Arc<std::sync::atomic::AtomicBool>,
-    indexing_completion_source: Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
-    indexing_duration_secs: Arc<std::sync::Mutex<Option<u64>>>,
-    indexing_progress_percent: Arc<std::sync::Mutex<Option<u8>>>,
+    indexing_completion_source: Arc<parking_lot::Mutex<Option<IndexingCompletionSource>>>,
+    indexing_duration_secs: Arc<parking_lot::Mutex<Option<u64>>>,
+    indexing_progress_percent: Arc<parking_lot::Mutex<Option<u8>>>,
     spawned_at: Instant,
 ) {
-    // LSP-INIT-002: Subscribe only to this language's notifications.
-    // This prevents progress notifications from other languages (e.g., rust's
-    // WorkDoneProgressEnd) from falsely marking this language as indexing-complete.
-    let mut rx = dispatcher.subscribe_notifications_for_language(&language_id);
+    // LSP-INIT-002: Receiver was created with per-language subscription.
+    // This ensures progress notifications from other languages don't bleed.
     tracing::debug!(language = %language_id, "progress_watcher_task: started");
 
     loop {
@@ -147,14 +154,13 @@ pub async fn progress_watcher_task(
 
 pub async fn registration_watcher_task(
     language_id: String,
-    dispatcher: Arc<RequestDispatcher>,
-    live_capabilities: Arc<std::sync::RwLock<crate::client::DetectedCapabilities>>,
+    // M-6: Accept pre-created receiver instead of creating via dispatcher.
+    mut rx: broadcast::Receiver<serde_json::Value>,
+    live_capabilities: Arc<parking_lot::RwLock<crate::client::DetectedCapabilities>>,
     transport: Arc<dyn crate::client::process::LspTransport>,
 ) {
-    // LSP-INIT-002: Subscribe only to this language's server requests.
-    // This prevents capability registrations from other languages (e.g., rust's
-    // pull diagnostics registration) from polluting this language's live_capabilities.
-    let mut rx = dispatcher.subscribe_server_requests_for_language(&language_id);
+    // LSP-INIT-002: Receiver was created with per-language subscription.
+    // This ensures registrations from other languages don't pollute capabilities.
     tracing::debug!(language = %language_id, "registration_watcher_task: started");
 
     loop {
@@ -162,11 +168,26 @@ pub async fn registration_watcher_task(
             Ok(msg) => {
                 let action = extract_registration_action(&msg);
 
+                // H-5: Send response BEFORE applying registration locally.
+                // If send fails, the LSP server never received the acknowledgment,
+                // so applying locally would create state inconsistency.
+                if let Some(ref id_val) = action.response_id {
+                    let response = build_registration_response(id_val);
+                    if let Err(e) = transport.send(&response).await {
+                        tracing::warn!(
+                            language = %language_id,
+                            error = %e,
+                            "registration_watcher_task: failed to send response, \
+                             skipping local capability update"
+                        );
+                        // Don't apply registrations if we couldn't ack them.
+                        // The server will retry.
+                        continue;
+                    }
+                }
+
                 if !action.registrations.is_empty() {
-                    #[allow(clippy::expect_used)]
-                    let mut caps = live_capabilities
-                        .write()
-                        .expect("live_capabilities write lock");
+                    let mut caps = live_capabilities.write();
                     for (reg_method, reg_id, opts) in &action.registrations {
                         if caps.apply_registration(reg_method, reg_id, opts) {
                             tracing::info!(
@@ -180,10 +201,7 @@ pub async fn registration_watcher_task(
                 }
 
                 if !action.unregistrations.is_empty() {
-                    #[allow(clippy::expect_used)]
-                    let mut caps = live_capabilities
-                        .write()
-                        .expect("live_capabilities write lock");
+                    let mut caps = live_capabilities.write();
                     for reg_id in &action.unregistrations {
                         if caps.apply_unregistration(reg_id) {
                             tracing::info!(
@@ -192,17 +210,6 @@ pub async fn registration_watcher_task(
                                 "LSP: dynamic capability unregistered"
                             );
                         }
-                    }
-                }
-
-                if let Some(ref id_val) = action.response_id {
-                    let response = build_registration_response(id_val);
-                    if let Err(e) = transport.send(&response).await {
-                        tracing::warn!(
-                            language = %language_id,
-                            error = %e,
-                            "registration_watcher_task: failed to send response"
-                        );
                     }
                 }
             }
@@ -240,12 +247,21 @@ pub async fn idle_timeout_task(
                 for lang in keys {
                     if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
                         tracing::debug!(language = %lang, "LSP: shutting down process");
+                        // C-3: Send shutdown request BEFORE aborting reader.
+                        // If reader is aborted first, nobody reads the shutdown response,
+                        // causing the 2s timeout to always fire. With 5 languages,
+                        // shutdown takes minimum 10 seconds.
+                        // H-4: Wrap transport.shutdown() in timeout to prevent blocking
+                        // if child lock is contended (supervisor zombie reaping).
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            state.transport.shutdown(&dispatcher, &lang),
+                        ).await;
                         state.reader_handle.abort();
                         state.abort_watchers();
                         // BUG-4 fix: reader is aborted so it won't call cancel_for_language.
                         // We must cancel pending requests for this language explicitly.
                         dispatcher.cancel_for_language(&lang);
-                        state.transport.shutdown(&dispatcher, &lang).await;
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
                         }
@@ -285,6 +301,16 @@ pub async fn idle_timeout_task(
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
                         }
+                        // M-9: Insert Unavailable for backoff protection. Without this,
+                        // ensure_process would immediately retry and could create a tight
+                        // spawn-exit loop if the child keeps dying.
+                        processes.insert(
+                            lang,
+                            ProcessEntry::Unavailable(super::UnavailableState {
+                                unavailable_since: std::time::Instant::now(),
+                                backoff_attempt: 1,
+                            }),
+                        );
                     }
                 }
 
@@ -327,11 +353,16 @@ pub async fn idle_timeout_task(
                             restarts = state.restart_count,
                             "LSP: idle timeout — terminating"
                         );
+                        // C-3: Send shutdown BEFORE aborting reader so response can be read.
+                        // H-4: Wrap in timeout to prevent blocking.
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            state.transport.shutdown(&dispatcher, &lang),
+                        ).await;
                         state.reader_handle.abort();
                         state.abort_watchers();
                         // Idle timeout: reader is aborted, so call cancel_for_language explicitly.
                         dispatcher.cancel_for_language(&lang);
-                        state.transport.shutdown(&dispatcher, &lang).await;
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
                         }
@@ -384,9 +415,9 @@ pub fn extract_progress_action(msg: &serde_json::Value) -> ProgressAction {
 pub fn apply_progress_action(
     action: ProgressAction,
     indexing_complete: &std::sync::atomic::AtomicBool,
-    indexing_completion_source: &std::sync::Mutex<Option<IndexingCompletionSource>>,
-    indexing_duration_secs: &std::sync::Mutex<Option<u64>>,
-    indexing_progress_percent: &std::sync::Mutex<Option<u8>>,
+    indexing_completion_source: &parking_lot::Mutex<Option<IndexingCompletionSource>>,
+    indexing_duration_secs: &parking_lot::Mutex<Option<u64>>,
+    indexing_progress_percent: &parking_lot::Mutex<Option<u8>>,
     spawned_at: Instant,
 ) {
     use std::sync::atomic::Ordering;
@@ -400,18 +431,18 @@ pub fn apply_progress_action(
 
             let duration = spawned_at.elapsed().as_secs();
 
-            if let Ok(mut source) = indexing_completion_source.lock() {
+            if let Some(mut source) = indexing_completion_source.try_lock() {
                 *source = Some(IndexingCompletionSource::Progress);
             }
-            if let Ok(mut dur) = indexing_duration_secs.lock() {
+            if let Some(mut dur) = indexing_duration_secs.try_lock() {
                 *dur = Some(duration);
             }
-            if let Ok(mut progress) = indexing_progress_percent.lock() {
+            if let Some(mut progress) = indexing_progress_percent.try_lock() {
                 *progress = None;
             }
         }
         ProgressAction::Report { percentage } => {
-            if let Ok(mut progress) = indexing_progress_percent.lock() {
+            if let Some(mut progress) = indexing_progress_percent.try_lock() {
                 *progress = Some(percentage);
             }
         }
@@ -581,9 +612,9 @@ mod tests {
     #[test]
     fn test_apply_progress_action_end() {
         let indexing_complete = std::sync::atomic::AtomicBool::new(false);
-        let indexing_completion_source = std::sync::Mutex::new(None);
-        let indexing_duration_secs = std::sync::Mutex::new(None);
-        let indexing_progress_percent = std::sync::Mutex::new(Some(50));
+        let indexing_completion_source = parking_lot::Mutex::new(None);
+        let indexing_duration_secs = parking_lot::Mutex::new(None);
+        let indexing_progress_percent = parking_lot::Mutex::new(Some(50));
         let spawned_at = Instant::now();
 
         let action = ProgressAction::End {
@@ -601,20 +632,20 @@ mod tests {
 
         assert!(indexing_complete.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(
-            *indexing_completion_source.lock().unwrap(),
+            *indexing_completion_source.lock(),
             Some(IndexingCompletionSource::Progress)
         );
-        assert!(indexing_duration_secs.lock().unwrap().is_some());
-        assert_eq!(*indexing_progress_percent.lock().unwrap(), None);
+        assert!(indexing_duration_secs.lock().is_some());
+        assert_eq!(*indexing_progress_percent.lock(), None);
     }
 
     #[test]
     fn test_apply_progress_action_end_already_complete() {
         let indexing_complete = std::sync::atomic::AtomicBool::new(true);
         let indexing_completion_source =
-            std::sync::Mutex::new(Some(IndexingCompletionSource::TimeoutFallback));
-        let indexing_duration_secs = std::sync::Mutex::new(Some(100));
-        let indexing_progress_percent = std::sync::Mutex::new(None);
+            parking_lot::Mutex::new(Some(IndexingCompletionSource::TimeoutFallback));
+        let indexing_duration_secs = parking_lot::Mutex::new(Some(100));
+        let indexing_progress_percent = parking_lot::Mutex::new(None);
         let spawned_at = Instant::now()
             .checked_sub(Duration::from_secs(200))
             .unwrap();
@@ -634,18 +665,18 @@ mod tests {
 
         assert!(indexing_complete.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(
-            *indexing_completion_source.lock().unwrap(),
+            *indexing_completion_source.lock(),
             Some(IndexingCompletionSource::TimeoutFallback)
         );
-        assert_eq!(*indexing_duration_secs.lock().unwrap(), Some(100));
+        assert_eq!(*indexing_duration_secs.lock(), Some(100));
     }
 
     #[test]
     fn test_apply_progress_action_report() {
         let indexing_complete = std::sync::atomic::AtomicBool::new(false);
-        let indexing_completion_source = std::sync::Mutex::new(None);
-        let indexing_duration_secs = std::sync::Mutex::new(None);
-        let indexing_progress_percent = std::sync::Mutex::new(None);
+        let indexing_completion_source = parking_lot::Mutex::new(None);
+        let indexing_duration_secs = parking_lot::Mutex::new(None);
+        let indexing_progress_percent = parking_lot::Mutex::new(None);
         let spawned_at = Instant::now();
 
         let action = ProgressAction::Report { percentage: 75 };
@@ -660,8 +691,8 @@ mod tests {
         );
 
         assert!(!indexing_complete.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(*indexing_progress_percent.lock().unwrap(), Some(75));
-        assert!(indexing_duration_secs.lock().unwrap().is_none());
+        assert_eq!(*indexing_progress_percent.lock(), Some(75));
+        assert!(indexing_duration_secs.lock().is_none());
     }
 
     #[test]

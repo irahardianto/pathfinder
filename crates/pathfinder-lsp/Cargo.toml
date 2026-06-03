@@ -26,6 +26,7 @@ tokio = { version = "1", features = ["full", "sync", "test-util"] }
 tracing = "0.1"
 url = "2"
 dashmap = "6"
+parking_lot = "0.12"
 schemars = "1.2.1"
 # Spawn LSP children into their own process group so they are cleaned up
 # automatically when Pathfinder exits — even via SIGKILL.

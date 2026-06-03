@@ -51,6 +51,14 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
+        // M-10: Check capability before sending request.
+        let caps = self.capabilities_for(language_id)?;
+        if !caps.definition_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "definitionProvider".to_owned(),
+            });
+        }
+
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
@@ -200,6 +208,14 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
+        // M-10: references uses the same definitionProvider capability.
+        let caps = self.capabilities_for(language_id)?;
+        if !caps.definition_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "definitionProvider (required for references)".to_owned(),
+            });
+        }
+
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
@@ -255,6 +271,14 @@ impl Lawyer for LspClient {
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
 
         self.ensure_process(language_id).await?;
+
+        // M-10: implementation uses definitionProvider capability.
+        let caps = self.capabilities_for(language_id)?;
+        if !caps.definition_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "definitionProvider (required for goto_implementation)".to_owned(),
+            });
+        }
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -361,10 +385,7 @@ mod tests {
 
         if let Some(entry) = client.processes.get(language_id) {
             if let crate::client::ProcessEntry::Running(state) = entry.value() {
-                let mut caps = state
-                    .live_capabilities
-                    .write()
-                    .expect("live_capabilities lock");
+                let mut caps = state.live_capabilities.write();
                 caps.call_hierarchy_provider = true;
                 caps.definition_provider = true;
             }

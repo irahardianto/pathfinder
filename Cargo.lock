@@ -1067,6 +1067,7 @@ dependencies = [
  "command-group",
  "dashmap",
  "libc",
+ "parking_lot",
  "pathfinder-mcp-common",
  "schemars",
  "serde",

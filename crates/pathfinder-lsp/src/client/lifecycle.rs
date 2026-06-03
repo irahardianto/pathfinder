@@ -66,6 +66,7 @@ impl super::LspClient {
             init_locks: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::clone(&shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -140,7 +141,13 @@ impl super::LspClient {
 
         tokio::spawn(async move {
             for handle in handles {
-                let _ = handle.await;
+                // L-5: Log JoinError from panics instead of silently swallowing.
+                if let Err(e) = handle.await {
+                    tracing::error!(
+                        error = %e,
+                        "L-5: warm_start task panicked"
+                    );
+                }
             }
             warm_flag.store(true, std::sync::atomic::Ordering::Release);
             tracing::info!(
@@ -211,6 +218,14 @@ impl super::LspClient {
     }
 
     pub fn shutdown(&self) {
+        // L-6: Log if shutdown was already called to aid debugging.
+        if self
+            .shutdown_requested
+            .swap(true, std::sync::atomic::Ordering::Release)
+        {
+            tracing::debug!("LspClient: shutdown called again (already shutting down)");
+            return;
+        }
         tracing::info!("LspClient: shutdown requested");
         let _ = self.shutdown_tx.send(());
     }
@@ -251,18 +266,23 @@ impl super::LspClient {
                 language = %language_id,
                 "LSP: force_respawn — killing existing process before respawn"
             );
+            // C-3: Send shutdown BEFORE aborting reader so response can be read.
+            // H-4: Wrap in timeout to prevent blocking.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                state.transport.shutdown(&self.dispatcher, language_id),
+            )
+            .await;
             state.reader_handle.abort();
             state.abort_watchers();
             // BUG-4 fix: reader is aborted, call cancel_for_language explicitly
             // to unblock any pending requests for this language.
             self.dispatcher.cancel_for_language(language_id);
-            state
-                .transport
-                .shutdown(&self.dispatcher, language_id)
-                .await;
             if let Some(ref lifecycle) = state.lifecycle {
                 let _ = lifecycle.child.lock().await.wait().await;
             }
+            // Clear stale doc_versions — new LSP instance won't know about them.
+            self.doc_versions.clear();
             // DEL-4.1: FUTURE: init_locks cleanup when dynamic language support is added.
             // Currently bounded to 5 languages (rust/go/typescript/python/java),
             // so memory cost is negligible (~5 entries * 100 bytes each).
@@ -288,6 +308,10 @@ impl super::LspClient {
                             elapsed_secs,
                             "LSP: backoff elapsed, attempting recovery"
                         );
+                        // M-8: Don't clear doc_versions here — this is outside the
+                        // init_lock. The locked section below handles the actual
+                        // recovery, and doc_versions should only be cleared there
+                        // to avoid cross-language version wipe without synchronization.
                         self.processes.remove(language_id);
                     } else {
                         tracing::debug!(
@@ -325,6 +349,8 @@ impl super::LspClient {
                             "LSP: backoff elapsed (post-lock check), attempting recovery"
                         );
                         self.processes.remove(language_id);
+                        // Clear stale doc_versions from the crashed instance.
+                        self.clear_doc_versions_for_language(language_id);
                     } else {
                         return Err(LspError::NoLspAvailable);
                     }
@@ -345,10 +371,10 @@ impl super::LspClient {
     pub(crate) fn spawn_indexing_timeout_fallback(
         language_id: &str,
         indexing_complete: &Arc<std::sync::atomic::AtomicBool>,
-        indexing_completion_source: &Arc<std::sync::Mutex<Option<IndexingCompletionSource>>>,
-        indexing_duration_secs: &Arc<std::sync::Mutex<Option<u64>>>,
+        indexing_completion_source: &Arc<parking_lot::Mutex<Option<IndexingCompletionSource>>>,
+        indexing_duration_secs: &Arc<parking_lot::Mutex<Option<u64>>>,
         spawned_at: Instant,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let timeout_flag = Arc::clone(indexing_complete);
         let source_flag = Arc::clone(indexing_completion_source);
         let duration_flag = Arc::clone(indexing_duration_secs);
@@ -359,12 +385,8 @@ impl super::LspClient {
             if !timeout_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 timeout_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 let duration_secs = spawned_at.elapsed().as_secs();
-                #[allow(clippy::expect_used)]
-                {
-                    *source_flag.lock().expect("source_flag lock") =
-                        Some(IndexingCompletionSource::TimeoutFallback);
-                    *duration_flag.lock().expect("duration_flag lock") = Some(duration_secs);
-                }
+                *source_flag.lock() = Some(IndexingCompletionSource::TimeoutFallback);
+                *duration_flag.lock() = Some(duration_secs);
                 tracing::info!(
                     language = %timeout_lang,
                     duration_sec = duration_secs,
@@ -373,7 +395,7 @@ impl super::LspClient {
                      assuming indexing complete (timeout fallback)"
                 );
             }
-        });
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -406,6 +428,18 @@ impl super::LspClient {
 
         let plugins = descriptor.auto_plugins.clone();
         let init_options = descriptor.init_options.clone();
+
+        // M-6: Pre-create notification channels BEFORE spawning the reader.
+        // The reader task dispatches to these channels immediately on startup.
+        // Without pre-creation, any server requests (e.g. client/registerCapability)
+        // sent during the initialize handshake would be silently dropped.
+        let notif_rx = self
+            .dispatcher
+            .subscribe_notifications_for_language(&language_id);
+        let server_req_rx = self
+            .dispatcher
+            .subscribe_server_requests_for_language(&language_id);
+
         let spawn_result = spawn_and_initialize(
             &descriptor.command,
             &descriptor.args,
@@ -442,9 +476,32 @@ impl super::LspClient {
             }
         };
 
+        // C-2: Track reader liveness via an atomic flag. The reader task sets
+        // this to false on exit. The supervisor's remove_if checks it to
+        // distinguish the old entry from a replacement spawned by crash recovery.
+        let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reader_alive_for_reader = Arc::clone(&reader_alive);
+
+        // Wrap the raw reader to set reader_alive=false on exit.
+        let raw_reader_handle = {
+            let alive = reader_alive_for_reader;
+            tokio::spawn(async move {
+                let result = reader_handle.await;
+                alive.store(false, std::sync::atomic::Ordering::Release);
+                if let Err(e) = result {
+                    tracing::error!(
+                        error = %e,
+                        "LSP: raw reader panicked"
+                    );
+                }
+            })
+        };
+
+        let reader_alive_for_supervisor = Arc::clone(&reader_alive);
         let supervisor_handle = tokio::spawn(reader_supervisor_task(
             language_id.clone(),
-            reader_handle,
+            raw_reader_handle,
+            reader_alive_for_supervisor,
             Arc::clone(&self.processes),
             Arc::clone(&self.dispatcher),
         ));
@@ -458,32 +515,32 @@ impl super::LspClient {
         }
 
         let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let indexing_completion_source = Arc::new(std::sync::Mutex::new(None));
-        let indexing_duration_secs = Arc::new(std::sync::Mutex::new(None));
-        let indexing_progress = Arc::new(std::sync::Mutex::new(None::<u8>));
+        let indexing_completion_source = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_duration_secs = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_progress = Arc::new(parking_lot::Mutex::new(None::<u8>));
         let spawned_at = Instant::now();
 
         let indexing_flag = Arc::clone(&indexing_complete);
         let indexing_source_flag = Arc::clone(&indexing_completion_source);
         let indexing_duration_flag = Arc::clone(&indexing_duration_secs);
         let indexing_progress_flag = Arc::clone(&indexing_progress);
-        let lang_id_for_watcher = language_id.clone();
-        let dispatcher_for_watcher = Arc::clone(&self.dispatcher);
         let spawned_at_for_watcher = spawned_at;
-        let progress_handle = tokio::spawn(async move {
-            progress_watcher_task(
-                lang_id_for_watcher,
-                dispatcher_for_watcher,
-                indexing_flag,
-                indexing_source_flag,
-                indexing_duration_flag,
-                indexing_progress_flag,
-                spawned_at_for_watcher,
-            )
-            .await;
-        });
+        // M-6: Use pre-created receiver so we don't miss notifications
+        // dispatched between reader start and watcher spawn.
+        let progress_handle = tokio::spawn(progress_watcher_task(
+            language_id.clone(),
+            notif_rx,
+            indexing_flag,
+            indexing_source_flag,
+            indexing_duration_flag,
+            indexing_progress_flag,
+            spawned_at_for_watcher,
+        ));
 
-        Self::spawn_indexing_timeout_fallback(
+        // H-2: Store the indexing timeout handle so it gets aborted on restart.
+        // Without this, a stale timeout task can overwrite the NEW process's
+        // indexing_complete with stale timing data.
+        let indexing_timeout_handle = Self::spawn_indexing_timeout_fallback(
             &language_id,
             &indexing_complete,
             &indexing_completion_source,
@@ -491,7 +548,7 @@ impl super::LspClient {
             spawned_at,
         );
 
-        let live_capabilities = Arc::new(std::sync::RwLock::new(process.capabilities.clone()));
+        let live_capabilities = Arc::new(parking_lot::RwLock::new(process.capabilities.clone()));
 
         let child_handle = process.child_handle();
         let lifecycle = ProcessLifecycle {
@@ -503,16 +560,14 @@ impl super::LspClient {
 
         let caps_for_reg = Arc::clone(&live_capabilities);
         let lang_id_for_reg = language_id.clone();
-        let dispatcher_for_reg = Arc::clone(&self.dispatcher);
-        let registration_handle = tokio::spawn(async move {
-            registration_watcher_task(
-                lang_id_for_reg,
-                dispatcher_for_reg,
-                caps_for_reg,
-                transport_for_reg,
-            )
-            .await;
-        });
+        // M-6: Use pre-created receiver so we don't miss server requests
+        // dispatched between reader start and watcher spawn.
+        let registration_handle = tokio::spawn(registration_watcher_task(
+            lang_id_for_reg,
+            server_req_rx,
+            caps_for_reg,
+            transport_for_reg,
+        ));
 
         if in_coexistence_mode {
             tracing::warn!(
@@ -522,12 +577,29 @@ impl super::LspClient {
             );
         }
 
+        // C-1: Check shutdown signal before inserting process. If shutdown was
+        // called while spawn_and_initialize was running (up to 120s for jdtls),
+        // inserting now would orphan the process — idle_timeout_task already exited.
+        if self
+            .shutdown_requested
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::warn!(
+                language = %language_id,
+                "LSP: shutdown requested during init, aborting process insertion"
+            );
+            supervisor_handle.abort();
+            indexing_timeout_handle.abort();
+            return Err(LspError::ConnectionLost);
+        }
+
         self.processes.insert(
             language_id,
             ProcessEntry::Running(Box::new(LanguageState {
                 transport,
                 lifecycle: Some(lifecycle),
                 reader_handle: supervisor_handle,
+                reader_alive,
                 restart_count: attempt,
                 spawned_at,
                 indexing_complete,
@@ -536,7 +608,11 @@ impl super::LspClient {
                 indexing_progress_percent: indexing_progress,
                 live_capabilities,
                 in_coexistence_mode,
-                watcher_handles: vec![progress_handle, registration_handle],
+                watcher_handles: vec![
+                    progress_handle,
+                    registration_handle,
+                    indexing_timeout_handle,
+                ],
             })),
         );
 
@@ -645,6 +721,29 @@ impl super::LspClient {
         }
     }
 
+    /// Clear all `doc_versions` entries whose URIs contain the language's file extensions.
+    ///
+    /// After a crash recovery, the new LSP instance doesn't know about previously
+    /// opened documents. Clearing stale entries ensures documents are re-opened
+    /// on next access via `did_open`.
+    fn clear_doc_versions_for_language(&self, language_id: &str) {
+        // doc_versions is a flat DashMap<URI, version> without language metadata.
+        // Since we can't reliably map language_id → file extensions → URIs,
+        // clear ALL entries. This is safe because:
+        // 1. Documents are re-opened on next access (did_open is always called first)
+        // 2. Crash recovery is rare — clearing all is simpler and more correct than
+        //    trying to match extensions.
+        let count = self.doc_versions.len();
+        if count > 0 {
+            self.doc_versions.clear();
+            tracing::debug!(
+                language = %language_id,
+                cleared = count,
+                "LSP: cleared stale doc_versions after crash recovery"
+            );
+        }
+    }
+
     pub(crate) async fn request(
         &self,
         language_id: &str,
@@ -684,7 +783,13 @@ impl super::LspClient {
                 );
                 if let Some((_, ProcessEntry::Running(state))) = removed {
                     state.abort_watchers();
-                    transport.shutdown(&self.dispatcher, language_id).await;
+                    // C-3: shutdown before abort — but reader is already dead here,
+                    // so just force-kill directly (no response to read).
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        transport.shutdown(&self.dispatcher, language_id),
+                    )
+                    .await;
                     if let Some(ref lc) = lifecycle {
                         let _ = lc.child.lock().await.wait().await;
                     }
@@ -700,7 +805,12 @@ impl super::LspClient {
             (InFlightGuard::new(counter), transport)
         };
 
-        transport.send(&message).await?;
+        // H-1: Clean up dispatcher entry on send failure to prevent leak.
+        let send_result = transport.send(&message).await;
+        if send_result.is_err() {
+            self.dispatcher.remove(id);
+        }
+        send_result?;
 
         tokio::time::timeout(timeout, rx)
             .await
@@ -742,7 +852,11 @@ impl super::LspClient {
             );
             if let Some((_, ProcessEntry::Running(state))) = removed {
                 state.abort_watchers();
-                transport.shutdown(&self.dispatcher, language_id).await;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    transport.shutdown(&self.dispatcher, language_id),
+                )
+                .await;
                 if let Some(ref lc) = lifecycle {
                     let _ = lc.child.lock().await.wait().await;
                 }
@@ -769,12 +883,7 @@ impl super::LspClient {
             None => Err(LspError::NoLspAvailable),
             Some(entry) => match entry.value() {
                 ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
-                #[allow(clippy::expect_used)]
-                ProcessEntry::Running(state) => Ok(state
-                    .live_capabilities
-                    .read()
-                    .expect("live_capabilities lock")
-                    .clone()),
+                ProcessEntry::Running(state) => Ok(state.live_capabilities.read().clone()),
             },
         }
     }
@@ -1102,10 +1211,7 @@ mod tests {
 
         if let Some(entry) = client.processes.get("rust") {
             if let ProcessEntry::Running(state) = entry.value() {
-                let mut live_caps = state
-                    .live_capabilities
-                    .write()
-                    .expect("live_capabilities lock");
+                let mut live_caps = state.live_capabilities.write();
                 *live_caps = caps;
             }
         }
@@ -1546,6 +1652,7 @@ mod tests {
             init_locks: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RequestDispatcher::new()),
             shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -1591,8 +1698,8 @@ mod tests {
         tokio::time::pause();
 
         let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let indexing_completion_source = Arc::new(std::sync::Mutex::new(None));
-        let indexing_duration_secs = Arc::new(std::sync::Mutex::new(None));
+        let indexing_completion_source = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_duration_secs = Arc::new(parking_lot::Mutex::new(None));
         let spawned_at = Instant::now();
 
         crate::client::LspClient::spawn_indexing_timeout_fallback(
@@ -1604,8 +1711,8 @@ mod tests {
         );
 
         assert!(!indexing_complete.load(std::sync::atomic::Ordering::Relaxed));
-        assert_eq!(*indexing_completion_source.lock().unwrap(), None);
-        assert_eq!(*indexing_duration_secs.lock().unwrap(), None);
+        assert_eq!(*indexing_completion_source.lock(), None);
+        assert_eq!(*indexing_duration_secs.lock(), None);
 
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_mins(1) + Duration::from_millis(10)).await;
@@ -1617,12 +1724,12 @@ mod tests {
             "should be marked complete after timeout"
         );
         assert_eq!(
-            *indexing_completion_source.lock().unwrap(),
+            *indexing_completion_source.lock(),
             Some(IndexingCompletionSource::TimeoutFallback),
             "should indicate source is timeout fallback"
         );
         assert!(
-            indexing_duration_secs.lock().unwrap().is_some(),
+            indexing_duration_secs.lock().is_some(),
             "should have a duration"
         );
     }
@@ -1632,10 +1739,10 @@ mod tests {
         tokio::time::pause();
 
         let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let indexing_completion_source = Arc::new(std::sync::Mutex::new(Some(
+        let indexing_completion_source = Arc::new(parking_lot::Mutex::new(Some(
             IndexingCompletionSource::Progress,
         )));
-        let indexing_duration_secs = Arc::new(std::sync::Mutex::new(Some(42)));
+        let indexing_duration_secs = Arc::new(parking_lot::Mutex::new(Some(42)));
         let spawned_at = Instant::now();
 
         crate::client::LspClient::spawn_indexing_timeout_fallback(
@@ -1655,12 +1762,12 @@ mod tests {
             "should remain complete"
         );
         assert_eq!(
-            *indexing_completion_source.lock().unwrap(),
+            *indexing_completion_source.lock(),
             Some(IndexingCompletionSource::Progress),
             "should preserve Progress source (not overwrite with TimeoutFallback)"
         );
         assert_eq!(
-            *indexing_duration_secs.lock().unwrap(),
+            *indexing_duration_secs.lock(),
             Some(42),
             "should preserve duration 42"
         );

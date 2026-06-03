@@ -5,6 +5,7 @@
 
 use crate::client::detect::language_id_for_extension;
 use crate::client::LspClient;
+use crate::client::ProcessEntry;
 use crate::LspError;
 use serde_json::json;
 use url::Url;
@@ -113,12 +114,28 @@ impl LspClient {
         tracing::debug!(file = %file_path.display(), "LSP: did_close");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
-        self.ensure_process(language_id).await?;
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
+        // Always clean up doc_versions regardless of process state.
         self.doc_versions.remove(&file_uri.to_string());
+
+        // Check if process is already running WITHOUT spawning a new one.
+        // If the LSP crashed, re-spawning just to send didClose is wasteful —
+        // the new instance doesn't know about this document anyway.
+        let has_running = self
+            .processes
+            .get(language_id)
+            .is_some_and(|e| matches!(e.value(), ProcessEntry::Running(_)));
+
+        if !has_running {
+            tracing::debug!(
+                file = %file_path.display(),
+                "LSP: did_close skipped notify — process not running, doc_versions cleaned up"
+            );
+            return Ok(());
+        }
 
         let params = json!({
             "textDocument": { "uri": file_uri.as_str() }

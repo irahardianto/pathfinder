@@ -111,7 +111,7 @@ pub(super) struct ManagedProcess {
     ///
     /// Wrapped in `Mutex` for interior mutability through `LspTransport` trait
     /// (`&self` methods). The lock is never contended.
-    pub(super) last_used: std::sync::Mutex<Instant>,
+    pub(super) last_used: parking_lot::Mutex<Instant>,
     /// Number of in-flight requests (prevents idle timeout during active ops).
     pub(super) in_flight: Arc<AtomicU32>,
 }
@@ -131,10 +131,20 @@ impl ManagedProcess {
 #[async_trait]
 impl LspTransport for ManagedProcess {
     async fn send(&self, message: &Value) -> Result<(), LspError> {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let mut stdin = self.stdin.lock().await;
-            write_message(&mut *stdin, message).await
-        })
+        // Separate lock-acquisition timeout from write timeout to prevent
+        // queueing behind a stuck write. If the lock can't be acquired in 3s,
+        // another write is blocking stdin — fail fast instead of waiting up to 10s.
+        let mut stdin = tokio::time::timeout(std::time::Duration::from_secs(3), self.stdin.lock())
+            .await
+            .map_err(|_| LspError::Timeout {
+                operation: "send_lock".to_owned(),
+                timeout_ms: 3_000,
+            })?;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            write_message(&mut *stdin, message),
+        )
         .await
         .map_err(|_| LspError::Timeout {
             operation: "send".to_owned(),
@@ -167,11 +177,11 @@ impl LspTransport for ManagedProcess {
     }
 
     fn last_used(&self) -> Instant {
-        *self.last_used.lock().expect("last_used lock")
+        *self.last_used.lock()
     }
 
     fn set_last_used(&self, when: Instant) {
-        *self.last_used.lock().expect("last_used lock") = when;
+        *self.last_used.lock() = when;
     }
 
     fn in_flight(&self) -> &Arc<AtomicU32> {
@@ -240,6 +250,14 @@ pub(super) async fn spawn_and_initialize(
     plugins: Vec<String>,
     init_options: serde_json::Value,
 ) -> Result<(ManagedProcess, tokio::task::JoinHandle<()>), LspError> {
+    // M-3: Re-validate Python venv path at spawn time. The venv may have been
+    // created or deleted since detection. Re-detect and update init_options.
+    let init_options = if language_id == "python" {
+        revalidate_python_init_options(init_options, project_root)
+    } else {
+        init_options
+    };
+
     let (child, stdin, stdout) =
         spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)?;
     let mut writer = tokio::io::BufWriter::new(stdin);
@@ -286,7 +304,7 @@ pub(super) async fn spawn_and_initialize(
         child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin: Arc::new(Mutex::new(writer)),
         capabilities,
-        last_used: std::sync::Mutex::new(Instant::now()),
+        last_used: parking_lot::Mutex::new(Instant::now()),
         in_flight: Arc::new(AtomicU32::new(0)),
     };
 
@@ -319,6 +337,8 @@ fn spawn_lsp_child(
     // build cache, causing one or both to stall indefinitely during indexing.
     if isolate_target_dir && language_id == "rust" {
         let isolated_target = project_root.join("target").join("pathfinder-lsp");
+        // L-1: Pre-create isolation directory to prevent first-write race.
+        let _ = std::fs::create_dir_all(&isolated_target);
         cmd.env("CARGO_TARGET_DIR", isolated_target);
         tracing::info!(
             language = language_id,
@@ -331,6 +351,9 @@ fn spawn_lsp_child(
     // to avoid Go module cache lock contention between IDE's gopls and Pathfinder's gopls.
     if isolate_target_dir && language_id == "go" {
         let isolated_cache = project_root.join(".pathfinder").join("gopls-cache");
+        // L-1: Pre-create isolation directories to prevent first-write race.
+        let _ = std::fs::create_dir_all(isolated_cache.join("build"));
+        let _ = std::fs::create_dir_all(isolated_cache.join("mod"));
         cmd.env("GOCACHE", isolated_cache.join("build"));
         cmd.env("GOMODCACHE", isolated_cache.join("mod"));
         tracing::info!(
@@ -344,6 +367,8 @@ fn spawn_lsp_child(
     // can corrupt build info files. Isolate to a per-Pathfinder temp directory.
     if isolate_target_dir && language_id == "typescript" {
         let isolated_tmp = project_root.join(".pathfinder").join("tsserver-tmp");
+        // L-1: Pre-create isolation directory to prevent first-write race.
+        let _ = std::fs::create_dir_all(&isolated_tmp);
         cmd.env("TMPDIR", &isolated_tmp);
         tracing::info!(
             language = language_id,
@@ -355,6 +380,8 @@ fn spawn_lsp_child(
     // between concurrent pyright/ruff-lsp instances.
     if isolate_target_dir && language_id == "python" {
         let isolated_cache = project_root.join(".pathfinder").join("python-cache");
+        // L-1: Pre-create isolation directory to prevent first-write race.
+        let _ = std::fs::create_dir_all(isolated_cache.join("pyc"));
         cmd.env("PYTHONPYCACHEPREFIX", isolated_cache.join("pyc"));
         tracing::info!(
             language = language_id,
@@ -367,7 +394,14 @@ fn spawn_lsp_child(
     // isolation concern. Without -data, jdtls fails or shares state between projects.
     if language_id == "java" {
         let data_dir = project_root.join(".pathfinder").join("jdtls-data");
-        std::fs::create_dir_all(&data_dir).ok();
+        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+            tracing::error!(
+                language = language_id,
+                data_dir = %data_dir.display(),
+                error = %e,
+                "LSP: failed to create jdtls data directory — jdtls may fail to start"
+            );
+        }
         cmd.arg("-data").arg(&data_dir);
         tracing::info!(
             language = language_id,
@@ -443,18 +477,36 @@ fn ensure_pathfinder_in_gitignore(project_root: &Path) {
             content.push('\n');
         }
         content.push_str("\n# Pathfinder LSP cache isolation\n.pathfinder/\n");
-        if std::fs::write(&gitignore_path, content).is_ok() {
-            tracing::info!(path = %gitignore_path.display(), "Appended .pathfinder/ to .gitignore");
+        match std::fs::write(&gitignore_path, content) {
+            Ok(()) => {
+                tracing::info!(path = %gitignore_path.display(), "Appended .pathfinder/ to .gitignore");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %gitignore_path.display(),
+                    error = %e,
+                    "L-2: Failed to append .pathfinder/ to .gitignore — \
+                     isolated cache directories may be tracked by git"
+                );
+            }
         }
     } else {
         // No .gitignore exists — create one with just .pathfinder/
-        if std::fs::write(
+        match std::fs::write(
             &gitignore_path,
             "# Pathfinder LSP cache isolation\n.pathfinder/\n",
-        )
-        .is_ok()
-        {
-            tracing::info!(path = %gitignore_path.display(), "Created .gitignore with .pathfinder/ entry");
+        ) {
+            Ok(()) => {
+                tracing::info!(path = %gitignore_path.display(), "Created .gitignore with .pathfinder/ entry");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %gitignore_path.display(),
+                    error = %e,
+                    "L-2: Failed to create .gitignore — \
+                     isolated cache directories may be tracked by git"
+                );
+            }
         }
     }
 }
@@ -532,6 +584,13 @@ async fn build_initialize_request(
 /// LSP-INIT-002: `language_id` ensures the reader task:
 /// 1. Only dispatches notifications/server-requests to its own language's subscribers
 /// 2. Only cancels pending requests from its own language on EOF
+///
+/// Maximum consecutive non-ConnectionLost IO errors before aborting the reader.
+/// Prevents CPU-spin on persistent IO errors (e.g., EBADF after child exits).
+/// Protocol errors (malformed messages) do NOT count toward this limit — they
+/// are the server's fault, not a broken pipe.
+const MAX_CONSECUTIVE_READER_ERRORS: u32 = 5;
+
 pub(super) fn start_reader_task(
     stdout: ChildStdout,
     dispatcher: Arc<RequestDispatcher>,
@@ -539,26 +598,113 @@ pub(super) fn start_reader_task(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
+        let mut consecutive_io_errors: u32 = 0;
+        let mut malformed_message_count: u32 = 0;
         loop {
             match read_message(&mut reader).await {
                 Ok(msg) => {
+                    consecutive_io_errors = 0;
                     dispatcher.dispatch_response_for_language(&language_id, &msg);
                 }
                 Err(LspError::ConnectionLost) => {
                     tracing::info!(
                         language = %language_id,
+                        malformed_messages = malformed_message_count,
                         "LSP stdout EOF — cancelling pending requests for language"
                     );
                     dispatcher.cancel_for_language(&language_id);
                     break;
                 }
+                Err(LspError::Protocol(msg)) => {
+                    // L-8: Protocol errors = malformed messages (bad Content-Length,
+                    // invalid JSON, missing header). These are the server's fault.
+                    // Log with categorization and increment counter. Do NOT count
+                    // toward consecutive IO errors — a malformed message doesn't
+                    // mean the pipe is broken.
+                    malformed_message_count += 1;
+                    tracing::warn!(
+                        error = %msg,
+                        language = %language_id,
+                        malformed_message_count,
+                        error_category = "malformed_message",
+                        "LSP reader: malformed message from server (protocol violation)"
+                    );
+                }
                 Err(e) => {
-                    tracing::warn!(error = %e, language = %language_id, "LSP reader error");
-                    // Continue reading — transient errors should not kill the reader
+                    // IO errors (broken pipe, etc.) — these indicate the process
+                    // may be dead. Count toward consecutive error limit.
+                    consecutive_io_errors += 1;
+                    tracing::warn!(
+                        error = %e,
+                        language = %language_id,
+                        consecutive_io_errors,
+                        error_category = "io_error",
+                        "LSP reader: IO error"
+                    );
+                    // H-3: Break after N consecutive IO errors.
+                    // Without this, a persistent IO error (e.g., EBADF after child
+                    // exits) creates a tight CPU-spin loop with log spam and no
+                    // crash recovery triggered.
+                    if consecutive_io_errors >= MAX_CONSECUTIVE_READER_ERRORS {
+                        tracing::error!(
+                            language = %language_id,
+                            consecutive_io_errors,
+                            malformed_messages = malformed_message_count,
+                            "LSP: too many consecutive IO errors, aborting reader"
+                        );
+                        dispatcher.cancel_for_language(&language_id);
+                        break;
+                    }
                 }
             }
         }
     })
+}
+
+/// M-3: Re-validate Python venv path at spawn time.
+///
+/// The `pythonPath` in `init_options` was set at detection time. The venv may
+/// have been created (user ran `python -m venv .venv`) or deleted since then.
+/// Re-detect and update `init_options` to reflect the current state.
+fn revalidate_python_init_options(
+    init_options: serde_json::Value,
+    project_root: &Path,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let current_path = init_options
+        .get("python")
+        .and_then(|p| p.get("pythonPath"))
+        .and_then(|v| v.as_str());
+
+    // Check if the existing path is still valid.
+    if let Some(path) = current_path {
+        if std::path::Path::new(path).exists() {
+            return init_options; // Still valid, no change.
+        }
+        tracing::info!(
+            old_path = path,
+            "M-3: Python venv path no longer exists, re-detecting"
+        );
+    }
+
+    // Re-detect venv from workspace root.
+    if let Some(venv_path) = crate::client::detect::detect_venv(project_root) {
+        tracing::info!(
+            new_path = %venv_path.display(),
+            "M-3: Python venv re-detected at spawn time"
+        );
+        json!({
+            "python": {
+                "pythonPath": venv_path.to_string_lossy().as_ref()
+            }
+        })
+    } else {
+        if current_path.is_some() {
+            tracing::info!("M-3: Python venv removed, falling back to system interpreter");
+        }
+        serde_json::Value::Null
+    }
 }
 
 /// Convert a filesystem path to a `file://` URI string.
@@ -804,7 +950,7 @@ mod process_tests {
             child: Arc::new(tokio::sync::Mutex::new(child_process)),
             stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
             capabilities: crate::client::capabilities::DetectedCapabilities::default(),
-            last_used: std::sync::Mutex::new(std::time::Instant::now()),
+            last_used: parking_lot::Mutex::new(std::time::Instant::now()),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
@@ -847,7 +993,7 @@ mod process_tests {
             child: Arc::new(tokio::sync::Mutex::new(child)),
             stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
             capabilities: crate::client::capabilities::DetectedCapabilities::default(),
-            last_used: std::sync::Mutex::new(std::time::Instant::now()),
+            last_used: parking_lot::Mutex::new(std::time::Instant::now()),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }

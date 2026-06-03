@@ -25,10 +25,11 @@ pub(crate) struct FakeTransport {
     responses: Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
     notifications_sent: Arc<Mutex<Vec<(String, Value)>>>,
     alive: Arc<AtomicBool>,
-    last_used: Mutex<Instant>,
+    last_used: parking_lot::Mutex<Instant>,
     in_flight: Arc<AtomicU32>,
-    capabilities: Mutex<DetectedCapabilities>,
-    dispatcher: Mutex<Option<Arc<RequestDispatcher>>>,
+    capabilities: parking_lot::Mutex<DetectedCapabilities>,
+    dispatcher: parking_lot::Mutex<Option<Arc<RequestDispatcher>>>,
+    language_id: String,
 }
 
 impl FakeTransport {
@@ -37,15 +38,20 @@ impl FakeTransport {
             responses: Arc::new(Mutex::new(HashMap::new())),
             notifications_sent: Arc::new(Mutex::new(Vec::new())),
             alive: Arc::new(AtomicBool::new(true)),
-            last_used: Mutex::new(Instant::now()),
+            last_used: parking_lot::Mutex::new(Instant::now()),
             in_flight: Arc::new(AtomicU32::new(0)),
-            capabilities: Mutex::new(DetectedCapabilities::default()),
-            dispatcher: Mutex::new(None),
+            capabilities: parking_lot::Mutex::new(DetectedCapabilities::default()),
+            dispatcher: parking_lot::Mutex::new(None),
+            language_id: "test".to_owned(),
         }
     }
 
     pub(super) fn set_dispatcher(&self, dispatcher: Arc<RequestDispatcher>) {
-        *self.dispatcher.lock().expect("dispatcher lock") = Some(dispatcher);
+        *self.dispatcher.lock() = Some(dispatcher);
+    }
+
+    pub(super) fn set_language_id(&mut self, language_id: &str) {
+        self.language_id = language_id.to_owned();
     }
 
     pub fn set_response(&self, method: &str, result: Value) {
@@ -68,7 +74,7 @@ impl FakeTransport {
     }
 
     pub fn with_capabilities(&self, caps: DetectedCapabilities) {
-        *self.capabilities.lock().expect("capabilities lock") = caps;
+        *self.capabilities.lock() = caps;
     }
 
     pub fn take_notifications(&self) -> Vec<(String, Value)> {
@@ -129,8 +135,12 @@ impl LspTransport for FakeTransport {
                 obj.insert("id".to_owned(), id.clone());
             }
 
-            if let Some(ref dispatcher) = *self.dispatcher.lock().expect("dispatcher lock") {
-                dispatcher.dispatch_response(&response);
+            // FIX-8: Use dispatch_response_for_language to exercise per-language
+            // dispatch routing in tests. The legacy dispatch_response always used
+            // "test" as the source language, which didn't exercise per-language
+            // notification/server-request routing.
+            if let Some(ref dispatcher) = *self.dispatcher.lock() {
+                dispatcher.dispatch_response_for_language(&self.language_id, &response);
             }
 
             if response.get("error").is_some() {
@@ -155,11 +165,11 @@ impl LspTransport for FakeTransport {
     }
 
     fn last_used(&self) -> Instant {
-        *self.last_used.lock().expect("last_used lock")
+        *self.last_used.lock()
     }
 
     fn set_last_used(&self, when: Instant) {
-        *self.last_used.lock().expect("last_used lock") = when;
+        *self.last_used.lock() = when;
     }
 
     fn in_flight(&self) -> &Arc<AtomicU32> {
@@ -167,7 +177,7 @@ impl LspTransport for FakeTransport {
     }
 
     fn capabilities(&self) -> DetectedCapabilities {
-        self.capabilities.lock().expect("capabilities lock").clone()
+        self.capabilities.lock().clone()
     }
 
     async fn shutdown(&self, _dispatcher: &RequestDispatcher, _language_id: &str) {
