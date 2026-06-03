@@ -4,8 +4,8 @@
 //! matches with configurable context lines, then computes a SHA-256 version
 //! hash for each matched file as a content fingerprint.
 //!
-//! Hashing is performed lazily: a file is only read for hashing when it
-//! contains at least one match, avoiding redundant I/O for non-matching files.
+//! Hashing is performed incrementally: bytes are fed to both the grep engine
+//! and a SHA-256 hasher simultaneously, avoiding redundant file I/O.
 
 use crate::searcher::{Scout, SearchError};
 use crate::types::{SearchMatch, SearchParams, SearchResult};
@@ -13,8 +13,38 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch};
 use ignore::WalkBuilder;
 use pathfinder_common::types::VersionHash;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
+use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
+
+struct TeeHasher<R> {
+    reader: R,
+    hasher: Sha256,
+}
+
+impl<R> TeeHasher<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.hasher.finalize().into()
+    }
+}
+
+impl<R: Read> Read for TeeHasher<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.reader.read(buf)?;
+        if n > 0 {
+            self.hasher.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
 
 /// Truncate a line to a maximum byte length, ensuring valid UTF-8 boundaries.
 /// Appends `... [TRUNCATED]` if the line was shortened.
@@ -27,6 +57,29 @@ fn truncate_line(line: &str, limit: usize) -> String {
         split_at -= 1;
     }
     format!("{}... [TRUNCATED]", &line[..split_at])
+}
+
+#[inline]
+fn decode_line(bytes: &[u8]) -> String {
+    let trimmed = strip_line_endings(bytes);
+    if let Ok(s) = std::str::from_utf8(trimmed) {
+        truncate_line(s, 1000)
+    } else {
+        let s = String::from_utf8_lossy(trimmed);
+        truncate_line(&s, 1000)
+    }
+}
+
+#[inline]
+fn strip_line_endings(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    if end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
+    }
+    if end > 0 && bytes[end - 1] == b'\r' {
+        end -= 1;
+    }
+    &bytes[..end]
 }
 
 // ── Sink implementation ──────────────────────────────────────────────
@@ -131,12 +184,7 @@ impl Sink for MatchCollector<'_> {
                 self.context_before_buf.clear();
             }
             self.last_seen_line = line;
-            let bytes = mat.bytes();
-            let content = String::from_utf8_lossy(bytes)
-                .trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_owned();
-            let content = truncate_line(&content, 1000);
+            let content = decode_line(mat.bytes());
             if self.context_lines > 0 {
                 if self.context_before_buf.len() >= self.context_lines {
                     self.context_before_buf.pop_front();
@@ -169,13 +217,8 @@ impl Sink for MatchCollector<'_> {
         self.last_seen_line = line;
 
         let bytes = mat.bytes();
-        let content = String::from_utf8_lossy(bytes)
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_owned();
-        let content = truncate_line(&content, 1000);
+        let content = decode_line(bytes);
 
-        // Column is 1-indexed per PRD §3.1.
         let mut column = 1_u64;
         if let Ok(Some(m)) = grep_matcher::Matcher::find(self.matcher, bytes) {
             if let Ok(prefix) = std::str::from_utf8(&bytes[..m.start()]) {
@@ -217,11 +260,7 @@ impl Sink for MatchCollector<'_> {
         }
         self.last_seen_line = line_num;
 
-        let line = String::from_utf8_lossy(ctx.bytes())
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_owned();
-        let line = truncate_line(&line, 1000);
+        let line = decode_line(ctx.bytes());
 
         if self.context_lines > 0 {
             if self.context_before_buf.len() >= self.context_lines {
@@ -390,7 +429,8 @@ impl Scout for RipgrepScout {
             let files = Self::walk_files(params)?;
             let files_in_scope = files.len();
 
-            let mut match_buf: Vec<SearchMatch> = Vec::new();
+            let mut match_buf: Vec<SearchMatch> =
+                Vec::with_capacity(params.max_results.min(256));
             let mut total_count: usize = 0;
             let mut skipped_count: usize = 0;
             let mut truncated = false;
@@ -406,6 +446,15 @@ impl Scout for RipgrepScout {
                 files_searched += 1;
                 let matches_before = match_buf.len();
 
+                let file = match std::fs::File::open(abs_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(file = %relative, error = %e, "Scout: failed to open file; skipping");
+                        continue;
+                    }
+                };
+                let mut tee = TeeHasher::new(BufReader::new(file));
+
                 let mut sink = MatchCollector::new(
                     relative.clone(),
                     &mut match_buf,
@@ -417,26 +466,27 @@ impl Scout for RipgrepScout {
                     &matcher,
                 );
 
-                if let Err(e) = searcher.search_path(&matcher, abs_path, &mut sink) {
+                if let Err(e) = searcher.search_reader(&matcher, &mut tee, &mut sink) {
                     tracing::warn!(file = %relative, error = %e, "Scout: failed to search file; skipping");
                     continue;
                 }
 
-                // Only hash the file when it produced at least one new match.
-                // This avoids reading every file into memory just to compute a hash.
                 let matches_after = sink.current_match_count();
                 if matches_after > matches_before {
-                    let Ok(bytes) = std::fs::read(abs_path) else {
-                        tracing::warn!(file = %relative, "Scout: failed to read file for hashing; skipping hash");
-                        continue;
-                    };
-                    let hash = VersionHash::compute(&bytes).short().to_owned();
-                    sink.backfill_hash(&hash);
+                    let hash_bytes = tee.finish();
+                    let hex: String = hash_bytes
+                        .iter()
+                        .fold(String::with_capacity(64), |mut acc, b| {
+                            use std::fmt::Write;
+                            let _ = write!(acc, "{b:02x}");
+                            acc
+                        });
+                    let hash = VersionHash::from_raw(format!("sha256:{hex}"));
+                    sink.backfill_hash(hash.short());
                 }
 
                 if sink.truncated {
                     truncated = true;
-                    // Stop searching remaining files to avoid useless work.
                     break;
                 }
             }
