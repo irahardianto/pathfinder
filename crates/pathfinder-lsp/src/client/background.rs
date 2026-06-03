@@ -22,6 +22,7 @@ pub async fn reader_supervisor_task(
     language_id: String,
     reader_handle: tokio::task::JoinHandle<()>,
     processes: Arc<DashMap<String, ProcessEntry>>,
+    dispatcher: Arc<RequestDispatcher>,
 ) {
     let crashed = match reader_handle.await {
         Ok(()) => {
@@ -47,6 +48,14 @@ pub async fn reader_supervisor_task(
             "LSP: supervisor reaping child process to free PID slot"
         );
         state.reader_handle.abort();
+
+        // MEDIUM-1 fix: Cancel pending requests for this language when reader crashes.
+        // Normal EOF path has reader_task itself calling cancel_for_language before
+        // exit. But panic/abort bypasses that, so supervisor must do it.
+        if crashed {
+            dispatcher.cancel_for_language(&language_id);
+        }
+
         if let Some(ref lifecycle) = state.lifecycle {
             let _ = lifecycle.child.lock().await.wait().await;
         }

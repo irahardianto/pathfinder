@@ -236,6 +236,16 @@ impl super::LspClient {
             .ok_or(LspError::NoLspAvailable)?
             .clone();
 
+        // DEL-2.1: Acquire init_lock BEFORE killing/removing process to prevent
+        // race with concurrent ensure_process or force_respawn calls.
+        // Follows exact same pattern as ensure_process.
+        let init_lock = self
+            .init_locks
+            .entry(language_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = init_lock.lock().await;
+
         if let Some((_, ProcessEntry::Running(state))) = self.processes.remove(language_id) {
             tracing::info!(
                 language = %language_id,
@@ -430,6 +440,7 @@ impl super::LspClient {
             language_id.clone(),
             reader_handle,
             Arc::clone(&self.processes),
+            Arc::clone(&self.dispatcher),
         ));
 
         if attempt > 0 {
@@ -1741,6 +1752,79 @@ mod tests {
                 .warm_start_complete
                 .load(std::sync::atomic::Ordering::Relaxed),
             "warm_start_complete should be true even if some languages failed"
+        );
+    }
+
+    // MEDIUM-2: DEL-2.1 tests for force_respawn init_lock acquisition
+    // BUG-4: force_respawn previously bypassed init_locks, enabling concurrent
+    // ensure_process + force_respawn to spawn orphaned processes.
+
+    #[tokio::test]
+    async fn test_force_respawn_concurrent_with_ensure_process_produces_single_entry() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        let mut handles = Vec::new();
+
+        for i in 0..10 {
+            let client = client.clone();
+            handles.push(tokio::spawn(async move {
+                if i % 2 == 0 {
+                    let _ = client.ensure_process("rust").await;
+                } else {
+                    let _ = client.force_respawn("rust").await;
+                }
+            }));
+        }
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        let count = client.processes.iter().count();
+        assert!(
+            count <= 1,
+            "concurrent ensure_process + force_respawn should produce at most 1 entry, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_force_respawn_uses_same_init_lock_as_ensure_process() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        let init_lock = client
+            .init_locks
+            .entry("rust".to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        let guard = init_lock.lock().await;
+
+        let ensure_handle = tokio::spawn({
+            let client = client.clone();
+            async move { client.ensure_process("rust").await }
+        });
+
+        let respawn_handle = tokio::spawn({
+            let client = client.clone();
+            async move { client.force_respawn("rust").await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(
+            client.processes.get("rust").is_none(),
+            "while init_lock held, neither ensure_process nor force_respawn should have created entry"
+        );
+
+        drop(guard);
+
+        let _ = ensure_handle.await;
+        let _ = respawn_handle.await;
+
+        let count = client.processes.iter().count();
+        assert!(
+            count <= 1,
+            "after lock release, at most 1 entry should exist, got {count}"
         );
     }
 }
