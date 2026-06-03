@@ -8,6 +8,20 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// Directories that should always be excluded from search and file traversal.
+///
+/// These are never source code and cause false positives in grep fallback.
+/// Used by both the sandbox (file access control) and search (file walking).
+/// Includes both Unix (`/`) and Windows (`\`) path separators.
+pub const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
+    ".git/",
+    "node_modules/",
+    "vendor/",
+    ".idea/",
+    ".vscode/",
+    "__pycache__/",
+];
+
 /// A parsed semantic path in the format `file_path[::symbol_chain]`.
 ///
 /// The semantic path is the unified addressing scheme used by all
@@ -189,14 +203,13 @@ impl VersionHash {
 
     #[must_use]
     pub fn compute_from_raw(hash_bytes: [u8; 32]) -> Self {
-        let hex: String = hash_bytes
-            .iter()
-            .fold(String::with_capacity(64), |mut acc, b| {
-                use std::fmt::Write;
-                let _ = write!(acc, "{b:02x}");
-                acc
-            });
-        Self(format!("sha256:{hex}"))
+        // "sha256:" (7 bytes) + 64 hex chars = 71 bytes total
+        let mut buf = String::with_capacity(Self::PREFIX.len() + 64);
+        let _ = std::fmt::write(&mut buf, std::format_args!("{}", Self::PREFIX));
+        for b in hash_bytes {
+            let _ = std::fmt::write(&mut buf, std::format_args!("{b:02x}"));
+        }
+        Self(buf)
     }
 
     /// Create from a raw hash string (for deserialization from client input).

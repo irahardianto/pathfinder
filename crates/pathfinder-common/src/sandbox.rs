@@ -204,22 +204,25 @@ impl Sandbox {
 
         // Path starts with '.' — check git allowlist first (cheapest)
         for allowed in GIT_ALLOWLIST {
-            if path_str.starts_with(allowed) || path_str == *allowed {
-                return false;
+            if allowed.ends_with('/') {
+                // Directory pattern: use prefix match
+                if path_str.starts_with(allowed) {
+                    return false;
+                }
+            } else {
+                // Bare filename: exact match or prefix with separator
+                // Prevents ".gitignorex" from matching ".gitignore"
+                if path_str == *allowed
+                    || path_str.starts_with(&format!("{allowed}/"))
+                {
+                    return false;
+                }
             }
         }
 
-        // All hardcoded deny patterns share the ".git/" prefix
-        if path_str.starts_with(".git/") {
+        // Check against all hardcoded deny patterns.
+        if HARDCODED_DENY_PATTERNS.iter().any(|p| path_str.starts_with(*p)) {
             return true;
-        }
-
-        // Check remaining individual hardcoded entries (.git/HEAD, .git/index, etc.)
-        // These are bare filenames without trailing slash
-        for pattern in HARDCODED_DENY_PATTERNS {
-            if !pattern.ends_with('/') && path_str == *pattern {
-                return true;
-            }
         }
 
         // Check hardcoded deny extensions
@@ -680,5 +683,18 @@ mod tests {
             !Sandbox::matches_wildcard_pattern(".env.*", "secrets.txt"),
             ".env.* must not match secrets.txt"
         );
+    }
+
+    /// Validate that all hardcoded deny patterns start with ".git/".
+    /// If this assumption changes, `is_hardcoded_denied` must be updated.
+    #[test]
+    fn test_hardcoded_deny_patterns_all_start_with_git() {
+        for pattern in HARDCODED_DENY_PATTERNS {
+            assert!(
+                pattern.starts_with(".git/"),
+                "HARDCODED_DENY_PATTERNS contains non-git pattern: {pattern}. \
+                 Update is_hardcoded_denied() to handle it."
+            );
+        }
     }
 }

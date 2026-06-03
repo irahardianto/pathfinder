@@ -12,11 +12,12 @@ use crate::types::{SearchMatch, SearchParams, SearchResult};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch};
 use ignore::WalkBuilder;
-use pathfinder_common::types::VersionHash;
+use pathfinder_common::types::{VersionHash, ALWAYS_EXCLUDED_DIRS};
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 struct TeeHasher<R> {
     reader: R,
@@ -48,6 +49,9 @@ impl<R: Read> Read for TeeHasher<R> {
 
 /// Truncate a line to a maximum byte length, ensuring valid UTF-8 boundaries.
 /// Appends `... [TRUNCATED]` if the line was shortened.
+///
+/// Retained for testing; production code uses `safe_truncate_bytes` + `decode_line`.
+#[cfg(test)]
 fn truncate_line(line: &str, limit: usize) -> String {
     if line.len() <= limit {
         return line.to_owned();
@@ -59,14 +63,39 @@ fn truncate_line(line: &str, limit: usize) -> String {
     format!("{}... [TRUNCATED]", &line[..split_at])
 }
 
+/// Find a safe UTF-8 truncation point at or before `limit` bytes.
+///
+/// Walks backward from `limit` to find a char boundary so we avoid
+/// splitting a multi-byte UTF-8 sequence.
+fn safe_truncate_bytes(bytes: &[u8], limit: usize) -> &[u8] {
+    if bytes.len() <= limit {
+        return bytes;
+    }
+    let mut split_at = limit;
+    // UTF-8 continuation bytes (10xxxxxx) are not char boundaries.
+    // Walk backward until we find a leading byte or ASCII char.
+    while split_at > 0 && (bytes[split_at] & 0xC0) == 0x80 {
+        split_at -= 1;
+    }
+    &bytes[..split_at]
+}
+
 #[inline]
 fn decode_line(bytes: &[u8]) -> String {
     let trimmed = strip_line_endings(bytes);
-    if let Ok(s) = std::str::from_utf8(trimmed) {
-        truncate_line(s, 1000)
+    // Truncate raw bytes first to avoid UTF-8 validation on discarded tail.
+    // 1000 ASCII chars = 1000 bytes max; non-ASCII may truncate shorter but
+    // that's acceptable for display context.
+    let truncated = safe_truncate_bytes(trimmed, 1000);
+    if let Ok(s) = std::str::from_utf8(truncated) {
+        if truncated.len() < trimmed.len() {
+            format!("{s}... [TRUNCATED]")
+        } else {
+            s.to_owned()
+        }
     } else {
-        let s = String::from_utf8_lossy(trimmed);
-        truncate_line(&s, 1000)
+        let s = String::from_utf8_lossy(truncated);
+        format!("{s}... [TRUNCATED]")
     }
 }
 
@@ -89,7 +118,8 @@ fn strip_line_endings(bytes: &[u8]) -> &[u8] {
 /// One `MatchCollector` is created per file search run.
 struct MatchCollector<'a> {
     /// File path relative to the workspace root (for display in results).
-    relative_path: String,
+    /// Uses `Rc<str>` to share across matches without per-match allocation.
+    relative_path: Rc<str>,
     /// SHA-256 hash of the file being searched.
     version_hash: String,
     /// Buffer of context lines that appear *before* the next match.
@@ -122,7 +152,7 @@ struct MatchCollector<'a> {
 impl<'a> MatchCollector<'a> {
     #[allow(clippy::similar_names, clippy::too_many_arguments)]
     fn new(
-        relative_path: String,
+        relative_path: Rc<str>,
         matches: &'a mut Vec<SearchMatch>,
         total_count: &'a mut usize,
         max_results: usize,
@@ -150,17 +180,6 @@ impl<'a> MatchCollector<'a> {
     }
 
     /// Backfill the version hash into all collected matches for this file.
-    ///
-    /// Called after the search completes and only if the file had matches,
-    /// so we only pay the cost of reading + hashing files that actually matched.
-    fn backfill_hash(&mut self, hash: &str) {
-        for m in self.matches.iter_mut() {
-            if m.file == self.relative_path && m.version_hash.is_empty() {
-                m.version_hash = hash.to_string();
-            }
-        }
-    }
-
     fn current_match_count(&self) -> usize {
         self.matches.len()
     }
@@ -226,11 +245,17 @@ impl Sink for MatchCollector<'_> {
             }
         }
 
+        let content_for_context = if self.context_lines > 0 {
+            Some(content.clone())
+        } else {
+            None
+        };
+
         let search_match = SearchMatch {
-            file: self.relative_path.clone(),
+            file: self.relative_path.to_string(),
             line,
             column,
-            content: content.clone(),
+            content,
             context_before: std::mem::take(&mut self.context_before_buf).into(),
             context_after: Vec::new(),
             enclosing_semantic_path: None,
@@ -240,8 +265,8 @@ impl Sink for MatchCollector<'_> {
         };
 
         // This matching line itself acts as "before context" for a subsequent adjacent overlap match
-        if self.context_lines > 0 {
-            self.context_before_buf.push_back(content);
+        if let Some(ctx) = content_for_context {
+            self.context_before_buf.push_back(ctx);
         }
 
         self.matches.push(search_match);
@@ -375,17 +400,12 @@ impl RipgrepScout {
             // Always exclude git internals, dependency directories, and IDE configs.
             // These are never source code and cause false positives in grep fallback.
             // Use both Unix (/) and Windows (\) path separators for cross-platform support.
-            if relative.starts_with(".git/")
-                || relative.starts_with(".git\\")
-                || relative.starts_with("node_modules/")
-                || relative.starts_with("node_modules\\")
-                || relative.starts_with("vendor/")
-                || relative.starts_with("vendor\\")
-                || relative.starts_with(".idea/")
-                || relative.starts_with(".idea\\")
-                || relative.starts_with(".vscode/")
-                || relative.starts_with(".vscode\\")
-            {
+            if ALWAYS_EXCLUDED_DIRS.iter().any(|dir| {
+                let unix_dir = *dir;
+                // Convert "foo/" to "foo\" for Windows
+                let win_dir = &unix_dir[..unix_dir.len() - 1];
+                relative.starts_with(unix_dir) || relative.starts_with(win_dir)
+            }) {
                 continue;
             }
 
@@ -456,7 +476,7 @@ impl Scout for RipgrepScout {
                 let mut tee = TeeHasher::new(BufReader::new(file));
 
                 let mut sink = MatchCollector::new(
-                    relative.clone(),
+                    Rc::from(relative.as_str()),
                     &mut match_buf,
                     &mut total_count,
                     params.max_results,
@@ -472,20 +492,22 @@ impl Scout for RipgrepScout {
                 }
 
                 let matches_after = sink.current_match_count();
+                let is_truncated = sink.truncated;
+                // Release the mutable borrow on match_buf before indexing into it.
+                drop(sink);
+
                 if matches_after > matches_before {
                     let hash_bytes = tee.finish();
-                    let hex: String = hash_bytes
-                        .iter()
-                        .fold(String::with_capacity(64), |mut acc, b| {
-                            use std::fmt::Write;
-                            let _ = write!(acc, "{b:02x}");
-                            acc
-                        });
-                    let hash = VersionHash::from_raw(format!("sha256:{hex}"));
-                    sink.backfill_hash(hash.short());
+                    let hash = VersionHash::compute_from_raw(hash_bytes);
+                    let short = hash.short().to_owned();
+                    // Only update matches from this file (known range) instead of
+                    // scanning all matches with a string comparison.
+                    for m in &mut match_buf[matches_before..matches_after] {
+                        m.version_hash.clone_from(&short);
+                    }
                 }
 
-                if sink.truncated {
+                if is_truncated {
                     truncated = true;
                     break;
                 }
