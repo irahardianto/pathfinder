@@ -3,11 +3,68 @@
 use crate::server::helpers::io_error_data;
 use crate::server::types::{FindSymbolParams, FindSymbolResponse, FoundSymbol};
 use crate::server::PathfinderServer;
+use futures::StreamExt as _;
 use pathfinder_search::SearchParams;
-use regex::Regex;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
 use std::path::Path;
+
+const SEARCH_CONCURRENCY: usize = 16;
+const ENRICHMENT_CONCURRENCY: usize = 32;
+
+const DEFINITION_KEYWORDS: &[&str] = &[
+    "fn", "function", "def", "struct", "class", "interface", "type", "enum", "trait", "const",
+    "static", "var", "let", "mod", "impl",
+];
+
+#[inline]
+fn is_valid_identifier_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+#[inline]
+fn is_valid_identifier_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn extract_identifier_prefix(token: &str) -> Option<&str> {
+    let mut chars = token.char_indices();
+
+    let (_, first) = chars.next()?;
+    if !is_valid_identifier_start(first) {
+        return None;
+    }
+
+    let mut end_idx = 1;
+    for (idx, ch) in chars {
+        if is_valid_identifier_continue(ch) {
+            end_idx = idx + 1;
+        } else {
+            break;
+        }
+    }
+
+    Some(&token[..end_idx])
+}
+
+fn truncate_preview(content: &str, max_chars: usize) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+
+    if content.is_ascii() {
+        return format!("{}...", &content[..max_chars]);
+    }
+
+    let Some((idx, _)) = content.char_indices().nth(max_chars) else {
+        return content.to_string();
+    };
+    format!("{}...", &content[..idx])
+}
 
 /// Helper to calculate relevance score for sorting.
 ///
@@ -24,12 +81,30 @@ fn relevance_score(query: &str, match_text: &str) -> u8 {
     }
 }
 
+/// Intermediate struct to hold match data before enrichment.
+struct MatchToEnrich {
+    file: String,
+    line: u64,
+    content: String,
+}
+
+/// Result of enriching a match with Tree-sitter.
+struct EnrichedMatch {
+    semantic_path: String,
+    kind: String,
+    file: String,
+    line: u64,
+    preview: String,
+}
+
 impl PathfinderServer {
     /// Core logic for the `find_symbol` tool.
     ///
     /// Runs ripgrep across the workspace with language-aware definition patterns
     /// (from spec 007), then enriches each match with Tree-sitter to get the
     /// enclosing semantic path and symbol kind.
+    ///
+    /// Performance: Uses parallel execution for both searches and Tree-sitter enrichments.
     ///
     /// Results are:
     /// 1. Deduplicated by semantic path
@@ -61,10 +136,6 @@ impl PathfinderServer {
             return Err(io_error_data("name must not contain path separators"));
         }
 
-        // Build regex patterns for each source file extension
-        // We'll search for the symbol name in Rust, TypeScript, Python, Go files
-        let mut patterns = Vec::new();
-
         // Check if path_glob already filters by extension
         let has_ext_filter = params.path_glob.contains("*.rs")
             || params.path_glob.contains("*.ts")
@@ -77,7 +148,6 @@ impl PathfinderServer {
 
         // Build patterns for all supported languages unless filtered
         let extensions = if has_ext_filter {
-            // Let the path_glob handle filtering; use bare word pattern
             vec![("any", params.path_glob.clone())]
         } else {
             vec![
@@ -92,26 +162,29 @@ impl PathfinderServer {
             ]
         };
 
+        // Phase 1: Build all search tasks
+        let mut search_params_list: Vec<SearchParams> = Vec::new();
         for (ext, glob) in extensions {
             let ext_patterns =
                 crate::server::tools::navigation::definition_patterns(ext, &params.name);
             for pattern in ext_patterns {
-                patterns.push((pattern, glob.clone()));
+                search_params_list.push(SearchParams {
+                    workspace_root: self.workspace_root.path().to_path_buf(),
+                    query: pattern,
+                    is_regex: true,
+                    path_glob: glob.clone(),
+                    exclude_glob: "**/node_modules/**".to_string(),
+                    max_results: 100,
+                    offset: 0,
+                    context_lines: 0,
+                });
             }
         }
 
-        let mut all_matches: Vec<FoundSymbol> = Vec::new();
-        let mut any_degraded = false;
-
         // When the user's path_glob is not an extension filter and is not a
         // catch-all, extract a directory prefix for post-search filtering.
-        // RipgrepScout uses extension-specific globs ("**/*.rs" etc.) for the
-        // search, so the user's directory-scoped path_glob is applied here as
-        // an additional filter on results.
         let user_path_prefix: Option<String> =
             if !has_ext_filter && !params.path_glob.is_empty() && params.path_glob != "**/*" {
-                // Strip trailing glob wildcards to get the directory prefix.
-                // "crates/foo/**" → "crates/foo/",  "src/**/*.rs" → "src/"
                 let trimmed = params
                     .path_glob
                     .trim_end_matches("/**")
@@ -125,161 +198,203 @@ impl PathfinderServer {
                 None
             };
 
-        // Search for each pattern
-        for (pattern, glob) in patterns {
-            let search_params = SearchParams {
-                workspace_root: self.workspace_root.path().to_path_buf(),
-                query: pattern.clone(),
-                is_regex: true,
-                path_glob: glob,
-                exclude_glob: "**/node_modules/**".to_string(),
-                max_results: 100, // Collect many matches then filter/sort
-                offset: 0,
-                context_lines: 0,
-            };
+        // Phase 2: Parallel searches
+        tracing::debug!(
+            tool = "find_symbol",
+            num_searches = search_params_list.len(),
+            "find_symbol: starting parallel searches"
+        );
 
-            match self.scout.search(&search_params).await {
-                Ok(result) => {
-                    for m in result.matches {
-                        // Validate file path is safe (no path traversal)
-                        if m.file.contains("..")
-                            || m.file.starts_with('/')
-                            || m.file.starts_with('\\')
-                        {
+        let search_results: Vec<pathfinder_search::SearchResult> =
+            futures::stream::iter(search_params_list)
+                .map(|search_params| async move {
+                    let query = search_params.query.clone();
+                    let result = self.scout.search(&search_params).await;
+                    match result {
+                        Ok(r) => r,
+                        Err(e) => {
                             tracing::warn!(
                                 tool = "find_symbol",
-                                file = %m.file,
-                                "skipping potentially unsafe path"
-                            );
-                            continue;
-                        }
-
-                        let file_path = Path::new(&m.file);
-
-                        // Skip non-workspace files
-                        if !is_workspace_file(file_path, self.workspace_root.path()) {
-                            continue;
-                        }
-
-                        // Apply sandbox policy check
-                        if let Err(e) = self.sandbox.check(file_path) {
-                            tracing::warn!(
-                                tool = "find_symbol",
-                                file = %m.file,
                                 error = %e,
-                                "sandbox denied access to file"
+                                pattern = %query,
+                                "scout search failed"
                             );
-                            continue;
+                             pathfinder_search::SearchResult {
+                                 matches: Vec::new(),
+                                 total_matches: 0,
+                                 truncated: false,
+                                 files_searched: 0,
+                                 files_in_scope: 0,
+                             }
                         }
+                    }
+                })
+                .buffer_unordered(SEARCH_CONCURRENCY)
+                .collect()
+                .await;
 
-                        // Apply user's path_glob as directory filter when the
-                        // search used extension-specific globs instead.
-                        if let Some(ref prefix) = user_path_prefix {
-                            if !m.file.starts_with(prefix.as_str()) {
-                                continue;
-                            }
-                        }
+        // Phase 3: Flatten results and filter matches
+        let mut matches_to_enrich: Vec<MatchToEnrich> = Vec::new();
+        for result in search_results {
+            for m in result.matches {
+                // Validate file path is safe (no path traversal)
+                if m.file.contains("..")
+                    || m.file.starts_with('/')
+                    || m.file.starts_with('\\')
+                {
+                    tracing::warn!(
+                        tool = "find_symbol",
+                        file = %m.file,
+                        "skipping potentially unsafe path"
+                    );
+                    continue;
+                }
 
-                        // Enrich with Tree-sitter to get symbol name and kind
-                        let (symbol_name, kind) = match self
-                            .surgeon
-                            .enclosing_symbol(
-                                self.workspace_root.path(),
-                                file_path,
-                                usize::try_from(m.line).unwrap_or(0),
-                            )
-                            .await
-                        {
-                            Ok(Some(enclosing_symbol)) => {
-                                // If enclosing_symbol is already a full semantic path (file::symbol),
-                                // extract just the symbol part
-                                let symbol_part = if enclosing_symbol.contains("::") {
-                                    enclosing_symbol
-                                        .split("::")
-                                        .skip(1)
-                                        .collect::<Vec<_>>()
-                                        .join("::")
-                                } else {
-                                    enclosing_symbol.clone()
-                                };
+                let file_path = Path::new(&m.file);
 
-                                // Validate symbol name is non-empty
-                                if symbol_part.is_empty() {
-                                    tracing::warn!(
-                                        tool = "find_symbol",
-                                        file = %m.file,
-                                        line = m.line,
-                                        "Tree-sitter returned empty symbol name, using fallback"
-                                    );
-                                    any_degraded = true;
-                                    (
-                                        extract_name_from_line(&m.content),
-                                        infer_kind_from_line(&m.content),
-                                    )
-                                } else {
-                                    (symbol_part, infer_kind_from_line(&m.content))
-                                }
-                            }
-                            Ok(None) => {
-                                any_degraded = true;
-                                // Fallback: use match content
-                                let kind_str = infer_kind_from_line(&m.content);
-                                (extract_name_from_line(&m.content), kind_str)
-                            }
-                            Err(_) => {
-                                any_degraded = true;
+                // Skip non-workspace files
+                if !is_workspace_file(file_path, self.workspace_root.path()) {
+                    continue;
+                }
+
+                // Apply sandbox policy check
+                if let Err(e) = self.sandbox.check(file_path) {
+                    tracing::warn!(
+                        tool = "find_symbol",
+                        file = %m.file,
+                        error = %e,
+                        "sandbox denied access to file"
+                    );
+                    continue;
+                }
+
+                // Apply user's path_glob as directory filter
+                if let Some(ref prefix) = user_path_prefix {
+                    if !m.file.starts_with(prefix.as_str()) {
+                        continue;
+                    }
+                }
+
+                matches_to_enrich.push(MatchToEnrich {
+                    file: m.file,
+                    line: m.line,
+                    content: m.content,
+                });
+            }
+        }
+
+        // Phase 4: Parallel enrichments
+        tracing::debug!(
+            tool = "find_symbol",
+            num_matches = matches_to_enrich.len(),
+            "find_symbol: starting parallel enrichments"
+        );
+
+        let kind_filter = params.kind.clone();
+        let enriched_with_degraded: Vec<(Option<EnrichedMatch>, bool)> =
+            futures::stream::iter(matches_to_enrich)
+                .map(|m| {
+                    let kind_filter = kind_filter.clone();
+                    async move {
+                    let file_path = Path::new(&m.file);
+                    let line_usize = usize::try_from(m.line).unwrap_or(0);
+
+                    // Enrich with Tree-sitter to get symbol name and kind
+                    let (symbol_name, kind, is_degraded) = match self
+                        .surgeon
+                        .enclosing_symbol(self.workspace_root.path(), file_path, line_usize)
+                        .await
+                    {
+                        Ok(Some(enclosing_symbol)) => {
+                            // If enclosing_symbol is already a full semantic path (file::symbol),
+                            // extract just the symbol part
+                            let symbol_part = if enclosing_symbol.contains("::") {
+                                enclosing_symbol
+                                    .split("::")
+                                    .skip(1)
+                                    .collect::<Vec<_>>()
+                                    .join("::")
+                            } else {
+                                enclosing_symbol.clone()
+                            };
+
+                            // Validate symbol name is non-empty
+                            if symbol_part.is_empty() {
+                                tracing::warn!(
+                                    tool = "find_symbol",
+                                    file = %m.file,
+                                    line = m.line,
+                                    "Tree-sitter returned empty symbol name, using fallback"
+                                );
                                 (
                                     extract_name_from_line(&m.content),
                                     infer_kind_from_line(&m.content),
+                                    true,
                                 )
-                            }
-                        };
-
-                        // Validate symbol name is non-empty
-                        if symbol_name.trim().is_empty() {
-                            tracing::warn!(
-                                tool = "find_symbol",
-                                file = %m.file,
-                                line = m.line,
-                                "empty symbol name, skipping match"
-                            );
-                            continue;
-                        }
-
-                        // Build semantic path - combine file with symbol name
-                        let semantic_path = format!("{}::{}", m.file, symbol_name);
-
-                        // Preview: first 100 chars (UTF-8 safe)
-                        let preview = if m.content.chars().count() > 100 {
-                            m.content.chars().take(100).collect::<String>() + "..."
-                        } else {
-                            m.content.clone()
-                        };
-
-                        // Filter by kind if specified
-                        if let Some(ref filter_kind) = params.kind {
-                            if !kind_matches_filter(&kind, filter_kind) {
-                                continue;
+                            } else {
+                                (symbol_part, infer_kind_from_line(&m.content), false)
                             }
                         }
+                        Ok(None) | Err(_) => (
+                            extract_name_from_line(&m.content),
+                            infer_kind_from_line(&m.content),
+                            true,
+                        ),
+                    };
 
-                        all_matches.push(FoundSymbol {
+                    // Validate symbol name is non-empty
+                    if symbol_name.trim().is_empty() {
+                        tracing::warn!(
+                            tool = "find_symbol",
+                            file = %m.file,
+                            line = m.line,
+                            "empty symbol name, skipping match"
+                        );
+                        return (None, is_degraded);
+                    }
+
+                    // Filter by kind if specified
+                    if let Some(ref filter_kind) = kind_filter {
+                        if !kind_matches_filter(&kind, filter_kind) {
+                            return (None, is_degraded);
+                        }
+                    }
+
+                    let semantic_path = format!("{}::{}", m.file, symbol_name);
+                    let preview = truncate_preview(&m.content, 100);
+
+                    (
+                        Some(EnrichedMatch {
                             semantic_path,
                             kind,
-                            file: m.file.clone(),
+                            file: m.file,
                             line: m.line,
                             preview,
-                        });
+                        }),
+                        is_degraded,
+                    )
                     }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        tool = "find_symbol",
-                        error = %err,
-                        pattern = %pattern,
-                        "scout search failed"
-                    );
-                }
+                })
+                .buffer_unordered(ENRICHMENT_CONCURRENCY)
+                .collect()
+                .await;
+
+        // Phase 5: Build FoundSymbol list, deduplicate, sort, truncate
+        let mut any_degraded = false;
+        let mut all_matches: Vec<FoundSymbol> = Vec::new();
+
+        for (enriched, is_degraded) in enriched_with_degraded {
+            if is_degraded {
+                any_degraded = true;
+            }
+            if let Some(e) = enriched {
+                all_matches.push(FoundSymbol {
+                    semantic_path: e.semantic_path,
+                    kind: e.kind,
+                    file: e.file,
+                    line: e.line,
+                    preview: e.preview,
+                });
             }
         }
 
@@ -293,7 +408,6 @@ impl PathfinderServer {
         }
 
         // Sort by relevance (exact match > prefix match > contains match)
-        // Use stable sort for deterministic results when scores tie
         unique_matches.sort_by(|a, b| {
             let score_a = relevance_score(
                 &params.name,
@@ -303,15 +417,11 @@ impl PathfinderServer {
                 &params.name,
                 &extract_symbol_name_from_path(&b.semantic_path),
             );
-            // Higher score first; use file path as tiebreaker for stability
             match score_b.cmp(&score_a) {
-                std::cmp::Ordering::Equal => {
-                    // Secondary sort by file path then line for deterministic order
-                    match a.file.cmp(&b.file) {
-                        std::cmp::Ordering::Equal => a.line.cmp(&b.line),
-                        other => other,
-                    }
-                }
+                std::cmp::Ordering::Equal => match a.file.cmp(&b.file) {
+                    std::cmp::Ordering::Equal => a.line.cmp(&b.line),
+                    other => other,
+                },
                 other => other,
             }
         });
@@ -321,7 +431,6 @@ impl PathfinderServer {
         unique_matches.truncate(params.max_results as usize);
 
         let duration_ms = start.elapsed().as_millis();
-        // Always use ripgrep + treesitter; "degraded" means treesitter fell back to line inference
         let search_strategy = if any_degraded {
             "ripgrep+fallback".to_string()
         } else {
@@ -384,29 +493,27 @@ fn infer_kind_from_line(line: &str) -> String {
 }
 
 /// Extract symbol name from line content (fallback when Tree-sitter unavailable)
+///
+/// Uses keyword scanning with static list; no regex compilation per call.
 fn extract_name_from_line(line: &str) -> String {
     let trimmed = line.trim();
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
 
-    // Try to extract name after keywords
-    if let Some(captures) = Regex::new(r"(?:fn|function|def|struct|class|interface|type|enum|trait|const|static|var|let|mod|impl)\s+([a-zA-Z_][a-zA-Z0-9_]*)").ok()
-        .and_then(|re| re.captures(trimmed))
-    {
-        captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default()
-    } else {
-        // Fallback: take first word
-        trimmed
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string()
+    for window in tokens.windows(2) {
+        if DEFINITION_KEYWORDS.contains(&window[0]) {
+            if let Some(ident) = extract_identifier_prefix(window[1]) {
+                return ident.to_string();
+            }
+        }
     }
+
+    tokens
+        .first()
+        .and_then(|s| extract_identifier_prefix(s).map(|i| i.to_string()))
+        .unwrap_or_else(|| tokens.first().map(|s| s.to_string()).unwrap_or_default())
 }
 
 /// Check if symbol kind matches the filter
-///
-/// Uses exact match for primary kinds, and allows cross-language mappings:
-/// - "function" matches: function, method, fn
-/// - "class" matches: class, struct, interface
 fn kind_matches_filter(kind: &str, filter: &str) -> bool {
     let kind_lower = kind.to_lowercase();
     let filter_lower = filter.to_lowercase();
@@ -415,7 +522,6 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
         return true;
     }
 
-    // Cross-language kind mappings
     match filter_lower.as_str() {
         "function" => matches!(kind_lower.as_str(), "function" | "method" | "fn"),
         "class" => matches!(kind_lower.as_str(), "class" | "struct" | "interface"),
@@ -432,7 +538,6 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
 fn is_workspace_file(path: &Path, workspace_root: &Path) -> bool {
     let path_str = path.to_string_lossy();
 
-    // Skip common vendored/generated directories
     let skip_patterns = [
         "/node_modules/",
         "/target/",
@@ -448,374 +553,139 @@ fn is_workspace_file(path: &Path, workspace_root: &Path) -> bool {
         }
     }
 
-    // For relative paths (from ripgrep), skip the prefix check —
-    // the scout already scopes results to the workspace root.
-    if path.is_relative() {
-        return true;
-    }
+    // Check path is within workspace_root
+    let Ok(full_path) = workspace_root.join(path).canonicalize() else {
+        return false;
+    };
+    let Ok(canonical_root) = workspace_root.canonicalize() else {
+        return false;
+    };
 
-    // For absolute paths, verify they're under the workspace root.
-    let root_str = workspace_root.to_string_lossy();
-    path_str.starts_with(root_str.as_ref())
+    full_path.starts_with(canonical_root)
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use pathfinder_common::config::PathfinderConfig;
-    use pathfinder_common::sandbox::Sandbox;
-    use pathfinder_common::types::WorkspaceRoot;
-    use pathfinder_search::RipgrepScout;
-    use pathfinder_treesitter::mock::MockSurgeon;
-    use std::sync::Arc;
-    use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn test_find_symbol_exact_match() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    #[test]
+    fn test_is_valid_identifier_start() {
+        assert!(is_valid_identifier_start('a'));
+        assert!(is_valid_identifier_start('Z'));
+        assert!(is_valid_identifier_start('_'));
+        assert!(!is_valid_identifier_start('1'));
+        assert!(!is_valid_identifier_start('-'));
+        assert!(!is_valid_identifier_start(' '));
+    }
 
-        // Create a Rust file with PathfinderServer struct
-        std::fs::create_dir_all(ws_dir.path().join("crates/pathfinder/src/server")).unwrap();
-        std::fs::write(
-            ws_dir.path().join("crates/pathfinder/src/server.rs"),
-            "pub struct PathfinderServer {}",
-        )
-        .unwrap();
+    #[test]
+    fn test_is_valid_identifier_continue() {
+        assert!(is_valid_identifier_continue('a'));
+        assert!(is_valid_identifier_continue('5'));
+        assert!(is_valid_identifier_continue('_'));
+        assert!(!is_valid_identifier_continue('-'));
+        assert!(!is_valid_identifier_continue(' '));
+        assert!(!is_valid_identifier_continue('('));
+    }
 
-        let scout = Arc::new(RipgrepScout);
-        let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .enclosing_symbol_results
-            .lock()
-            .unwrap()
-            .push(Ok(Some("PathfinderServer".to_string())));
+    #[test]
+    fn test_extract_identifier_prefix() {
+        assert_eq!(extract_identifier_prefix("my_func("), Some("my_func"));
+        assert_eq!(extract_identifier_prefix("MyStruct {"), Some("MyStruct"));
+        assert_eq!(extract_identifier_prefix("_private_var,"), Some("_private_var"));
+        assert_eq!(extract_identifier_prefix("foo::bar"), Some("foo"));
+        assert_eq!(extract_identifier_prefix("123invalid"), None);
+        assert_eq!(extract_identifier_prefix(""), None);
+    }
 
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            Arc::new(pathfinder_lsp::NoOpLawyer),
-        );
+    #[test]
+    fn test_truncate_preview() {
+        // Empty string
+        assert_eq!(truncate_preview("", 10), "");
 
-        let params = FindSymbolParams {
-            name: "PathfinderServer".to_owned(),
-            kind: None,
-            path_glob: "**/*.rs".to_owned(),
-            max_results: 10,
-        };
+        // Short string, no truncation
+        assert_eq!(truncate_preview("hello", 10), "hello");
 
-        let result = server.find_symbol_impl(params).await;
-        let response = result.expect("find_symbol should succeed");
+        // ASCII truncation
+        let long_ascii = "this is a very long string that needs truncation";
+        assert_eq!(truncate_preview(long_ascii, 10), "this is a ...");
 
-        assert_eq!(response.0.total_found, 1);
-        assert_eq!(response.0.symbols.len(), 1);
+        // Unicode handling
+        let unicode = "こんにちは世界";
+        assert_eq!(truncate_preview(unicode, 5), "こんにちは...");
+
+        // ASCII fast path (byte count == char count)
+        let ascii = "abcdefghijklmnop";
+        assert_eq!(truncate_preview(ascii, 10), "abcdefghij...");
+    }
+
+    #[test]
+    fn test_extract_name_from_line_basic() {
         assert_eq!(
-            response.0.symbols[0].semantic_path,
-            "crates/pathfinder/src/server.rs::PathfinderServer"
+            extract_name_from_line("fn my_function() {"),
+            "my_function"
         );
-        assert_eq!(response.0.search_strategy, "ripgrep+treesitter");
+        assert_eq!(
+            extract_name_from_line("function myFunction() {"),
+            "myFunction"
+        );
+        assert_eq!(
+            extract_name_from_line("def my_definition(self):"),
+            "my_definition"
+        );
+        assert_eq!(
+            extract_name_from_line("struct MyStruct {"),
+            "MyStruct"
+        );
+        assert_eq!(
+            extract_name_from_line("class MyClass {"),
+            "MyClass"
+        );
     }
 
-    #[tokio::test]
-    async fn test_find_symbol_with_kind_filter() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        // Create a Rust file with struct and function
-        std::fs::create_dir_all(ws_dir.path().join("crates/pathfinder-lsp/src/client")).unwrap();
-        std::fs::write(
-            ws_dir
-                .path()
-                .join("crates/pathfinder-lsp/src/client/mod.rs"),
-            "pub struct LspClient {}
-pub fn LspClient() {}",
-        )
-        .unwrap();
-
-        let scout = Arc::new(RipgrepScout);
-        let surgeon = Arc::new(MockSurgeon::new());
-        // 2 matches expected (struct + fn lines), each triggers enclosing_symbol
-        surgeon
-            .enclosing_symbol_results
-            .lock()
-            .unwrap()
-            .push(Ok(Some("LspClient".to_string())));
-        surgeon
-            .enclosing_symbol_results
-            .lock()
-            .unwrap()
-            .push(Ok(Some("LspClient".to_string())));
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            Arc::new(pathfinder_lsp::NoOpLawyer),
+    #[test]
+    fn test_extract_name_from_line_with_suffix() {
+        // Function name followed by parens
+        assert_eq!(
+            extract_name_from_line("fn foo_bar(a: i32) -> String"),
+            "foo_bar"
         );
 
-        // Filter by struct kind
-        let params = FindSymbolParams {
-            name: "LspClient".to_owned(),
-            kind: Some("struct".to_owned()),
-            path_glob: "**/*.rs".to_owned(),
-            max_results: 10,
-        };
-
-        let result = server.find_symbol_impl(params).await;
-        let response = result.expect("find_symbol should succeed");
-
-        // Should only return the struct, not the function
-        assert!(response.0.symbols.iter().any(|s| s.kind == "struct"));
-        assert!(!response
-            .0
-            .symbols
-            .iter()
-            .any(|s| s.kind == "function" || s.kind == "fn"));
-    }
-
-    #[tokio::test]
-    async fn test_find_symbol_with_path_glob() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        // Create LspClient in multiple files
-        std::fs::create_dir_all(ws_dir.path().join("crates/pathfinder-lsp/src/client")).unwrap();
-        std::fs::write(
-            ws_dir
-                .path()
-                .join("crates/pathfinder-lsp/src/client/mod.rs"),
-            "pub struct LspClient {}",
-        )
-        .unwrap();
-
-        std::fs::create_dir_all(ws_dir.path().join("crates/pathfinder/src")).unwrap();
-        std::fs::write(
-            ws_dir.path().join("crates/pathfinder/src/server.rs"),
-            "pub struct LspClient {}",
-        )
-        .unwrap();
-
-        let scout = Arc::new(RipgrepScout);
-        let surgeon = Arc::new(MockSurgeon::new());
-        // After path_glob filtering, only the LSP file match triggers enclosing_symbol
-        surgeon
-            .enclosing_symbol_results
-            .lock()
-            .unwrap()
-            .push(Ok(Some("LspClient".to_string())));
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            Arc::new(pathfinder_lsp::NoOpLawyer),
+        // Struct followed by generic
+        assert_eq!(
+            extract_name_from_line("struct Foo<T> {"),
+            "Foo"
         );
 
-        // Search scoped to LSP crate only
-        let params = FindSymbolParams {
-            name: "LspClient".to_owned(),
-            kind: None,
-            path_glob: "crates/pathfinder-lsp/**".to_owned(),
-            max_results: 10,
-        };
-
-        let result = server.find_symbol_impl(params).await;
-        let response = result.expect("find_symbol should succeed");
-
-        assert!(response.0.total_found >= 1);
-        // All results should be in the LSP crate
-        for symbol in &response.0.symbols {
-            assert!(
-                symbol.file.contains("pathfinder-lsp"),
-                "All results should be in pathfinder-lsp crate: {}",
-                symbol.file
-            );
-        }
+        // With path separator in content
+        assert_eq!(
+            extract_name_from_line("let x = a::b::c"),
+            "x"
+        );
     }
 
-    #[tokio::test]
-    async fn test_find_symbol_no_results() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        let scout = Arc::new(RipgrepScout);
-        let surgeon = Arc::new(MockSurgeon::new());
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            Arc::new(pathfinder_lsp::NoOpLawyer),
+    #[test]
+    fn test_extract_name_from_line_fallback() {
+        // No keyword match, should use first token
+        assert_eq!(
+            extract_name_from_line("some_random_line without_keyword"),
+            "some_random_line"
         );
 
-        let params = FindSymbolParams {
-            name: "NonExistentSymbol12345".to_owned(),
-            kind: None,
-            path_glob: "**/*".to_owned(),
-            max_results: 10,
-        };
+        // Empty line
+        assert_eq!(extract_name_from_line(""), "");
 
-        let result = server.find_symbol_impl(params).await;
-        let response = result.expect("find_symbol should succeed");
-
-        assert_eq!(response.0.total_found, 0);
-        assert_eq!(response.0.symbols.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_find_symbol_sandbox_enforced() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        // Create a file in .git directory (should be filtered out)
-        std::fs::create_dir_all(ws_dir.path().join(".git/hooks")).unwrap();
-        std::fs::write(
-            ws_dir.path().join(".git/hooks/post-commit"),
-            "pub struct SandboxTest {}",
-        )
-        .unwrap();
-
-        let scout = Arc::new(RipgrepScout);
-        let surgeon = Arc::new(MockSurgeon::new());
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            Arc::new(pathfinder_lsp::NoOpLawyer),
-        );
-
-        let params = FindSymbolParams {
-            name: "SandboxTest".to_owned(),
-            kind: None,
-            path_glob: "**/*".to_owned(),
-            max_results: 10,
-        };
-
-        let result = server.find_symbol_impl(params).await;
-        let response = result.expect("find_symbol should succeed");
-
-        // Results from .git should be filtered out
-        for symbol in &response.0.symbols {
-            assert!(
-                !symbol.file.contains(".git"),
-                ".git files should be filtered out: {}",
-                symbol.file
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_find_symbol_deduplication() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        // Create a struct that matches multiple patterns (struct and keyword)
-        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
-        std::fs::write(ws_dir.path().join("src/lib.rs"), "pub struct TestStruct {}").unwrap();
-
-        let scout = Arc::new(RipgrepScout);
-        let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .enclosing_symbol_results
-            .lock()
-            .unwrap()
-            .push(Ok(Some("TestStruct".to_string())));
-
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            Arc::new(pathfinder_lsp::NoOpLawyer),
-        );
-
-        let params = FindSymbolParams {
-            name: "TestStruct".to_owned(),
-            kind: None,
-            path_glob: "**/*.rs".to_owned(),
-            max_results: 10,
-        };
-
-        let result = server.find_symbol_impl(params).await;
-        let response = result.expect("find_symbol should succeed");
-
-        // Should have at most 1 result (deduplicated)
-        assert_eq!(response.0.total_found, 1);
-        assert_eq!(response.0.symbols.len(), 1);
+        // Just whitespace
+        assert_eq!(extract_name_from_line("   "), "");
     }
 
     #[test]
-    fn test_relevance_score_exact() {
-        assert_eq!(relevance_score("AuthService", "AuthService"), 3);
-    }
-
-    #[test]
-    fn test_relevance_score_prefix() {
-        assert_eq!(relevance_score("Auth", "AuthService"), 2);
-    }
-
-    #[test]
-    fn test_relevance_score_contains() {
-        assert_eq!(relevance_score("Service", "AuthService"), 1);
-    }
-
-    #[test]
-    fn test_relevance_score_no_match() {
-        assert_eq!(relevance_score("Foo", "Bar"), 0);
-    }
-
-    #[test]
-    fn test_infer_kind_from_line_fn() {
-        assert_eq!(infer_kind_from_line("fn my_function() {}"), "function");
-        assert_eq!(infer_kind_from_line("function myFunction() {}"), "function");
-        assert_eq!(infer_kind_from_line("def my_function():"), "function");
-    }
-
-    #[test]
-    fn test_infer_kind_from_line_class() {
-        assert_eq!(infer_kind_from_line("struct MyStruct {}"), "struct");
-        assert_eq!(infer_kind_from_line("class MyClass {}"), "class");
-        assert_eq!(infer_kind_from_line("type MyType = i32;"), "class");
-    }
-
-    #[test]
-    fn test_infer_kind_from_line_constant() {
-        assert_eq!(infer_kind_from_line("const MAX: i32 = 100;"), "constant");
-        assert_eq!(infer_kind_from_line("static COUNT: u64 = 0;"), "constant");
-        assert_eq!(infer_kind_from_line("let x = 1;"), "constant");
-    }
-
-    #[test]
-    fn test_extract_name_from_line() {
-        assert_eq!(extract_name_from_line("fn my_function() {}"), "my_function");
-        assert_eq!(extract_name_from_line("struct MyStruct {}"), "MyStruct");
-        assert_eq!(extract_name_from_line("class MyClass {}"), "MyClass");
+    fn test_relevance_score() {
+        assert_eq!(relevance_score("foo", "foo"), 3);
+        assert_eq!(relevance_score("foo", "foobar"), 2);
+        assert_eq!(relevance_score("foo", "myfoothing"), 1);
+        assert_eq!(relevance_score("foo", "barbaz"), 0);
+        assert_eq!(relevance_score("MyStruct", "MyStruct"), 3);
     }
 
     #[test]
@@ -825,43 +695,59 @@ pub fn LspClient() {}",
             "AuthService.login"
         );
         assert_eq!(
-            extract_symbol_name_from_path("crates/pathfinder/src/server.rs::PathfinderServer"),
-            "PathfinderServer"
+            extract_symbol_name_from_path("lib.rs::foo::bar::baz"),
+            "foo::bar::baz"
+        );
+        assert_eq!(
+            extract_symbol_name_from_path("single_token"),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_infer_kind_from_line() {
+        assert_eq!(infer_kind_from_line("fn foo() {"), "function");
+        assert_eq!(infer_kind_from_line("function bar() {"), "function");
+        assert_eq!(infer_kind_from_line("def baz():"), "function");
+
+        assert_eq!(infer_kind_from_line("struct Foo {"), "struct");
+        assert_eq!(infer_kind_from_line("class Bar {"), "class");
+        assert_eq!(infer_kind_from_line("interface Baz {"), "interface");
+        assert_eq!(infer_kind_from_line("trait Qux {"), "interface");
+
+        assert_eq!(infer_kind_from_line("const X = 5;"), "constant");
+        assert_eq!(infer_kind_from_line("static Y: i32 = 10;"), "constant");
+
+        assert_eq!(infer_kind_from_line("mod utils;"), "module");
+        assert_eq!(infer_kind_from_line("impl Foo {"), "impl");
+
+        assert_eq!(
+            infer_kind_from_line("something_unrecognized"),
+            "unknown"
         );
     }
 
     #[test]
     fn test_kind_matches_filter() {
-        assert!(kind_matches_filter("struct", "struct"));
-        assert!(kind_matches_filter("Struct", "struct")); // Case insensitive
+        // Exact matches
         assert!(kind_matches_filter("function", "function"));
-        assert!(kind_matches_filter("fn", "function")); // fn matches function
-        assert!(kind_matches_filter("method", "function")); // method matches function
-        assert!(kind_matches_filter("struct", "class")); // struct matches class
-        assert!(kind_matches_filter("interface", "class")); // interface matches class
-    }
+        assert!(kind_matches_filter("struct", "struct"));
+        assert!(kind_matches_filter("class", "class"));
 
-    #[test]
-    fn test_is_workspace_file() {
-        let ws_dir = tempdir().expect("temp dir");
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        // Cross-language mappings
+        assert!(kind_matches_filter("fn", "function"));
+        assert!(kind_matches_filter("method", "function"));
+        assert!(kind_matches_filter("interface", "class"));
+        assert!(kind_matches_filter("const", "constant"));
+        assert!(kind_matches_filter("mod", "module"));
 
-        // Create test files
-        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
-        std::fs::write(ws_dir.path().join("src/main.rs"), "").unwrap();
+        // Case insensitive
+        assert!(kind_matches_filter("FUNCTION", "function"));
+        assert!(kind_matches_filter("struct", "STRUCT"));
 
-        std::fs::create_dir_all(ws_dir.path().join("node_modules/pkg")).unwrap();
-        std::fs::write(ws_dir.path().join("node_modules/pkg/index.js"), "").unwrap();
-
-        std::fs::create_dir_all(ws_dir.path().join(".git/hooks")).unwrap();
-        std::fs::write(ws_dir.path().join(".git/hooks/post-commit"), "").unwrap();
-
-        let src_main = ws_dir.path().join("src/main.rs");
-        let node_modules_index = ws_dir.path().join("node_modules/pkg/index.js");
-        let git_hooks_postcommit = ws_dir.path().join(".git/hooks/post-commit");
-
-        assert!(is_workspace_file(&src_main, ws.path()));
-        assert!(!is_workspace_file(&node_modules_index, ws.path()));
-        assert!(!is_workspace_file(&git_hooks_postcommit, ws.path()));
+        // No match
+        assert!(!kind_matches_filter("class", "function"));
+        assert!(!kind_matches_filter("enum", "function"));
+        assert!(!kind_matches_filter("unknown", "class"));
     }
 }
