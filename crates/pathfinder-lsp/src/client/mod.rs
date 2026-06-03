@@ -249,14 +249,14 @@ pub(crate) struct InFlightGuard {
 
 impl InFlightGuard {
     pub(crate) fn new(counter: Arc<AtomicU32>) -> Self {
-        counter.fetch_add(1, Ordering::Relaxed);
+        counter.fetch_add(1, Ordering::Release);
         Self { counter }
     }
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
+        self.counter.fetch_sub(1, Ordering::Release);
     }
 }
 

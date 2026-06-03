@@ -651,11 +651,13 @@ impl super::LspClient {
         let (id, rx) = self.dispatcher.register(language_id);
         let message = RequestDispatcher::make_request(id, method, &params);
 
-        let _in_flight_guard = {
+        let (_in_flight_guard, transport) = {
             let Some(entry) = self.processes.get(language_id) else {
+                self.dispatcher.remove(id);
                 return Err(LspError::NoLspAvailable);
             };
             let ProcessEntry::Running(state) = entry.value() else {
+                self.dispatcher.remove(id);
                 return Err(LspError::NoLspAvailable);
             };
             if state.reader_handle.is_finished() {
@@ -666,30 +668,30 @@ impl super::LspClient {
                 let transport = Arc::clone(&state.transport);
                 let lifecycle = state.lifecycle.clone();
                 drop(entry);
-                self.processes.remove(language_id);
-                transport.shutdown(&self.dispatcher, language_id).await;
-                if let Some(ref lc) = lifecycle {
-                    let _ = lc.child.lock().await.wait().await;
+                // P1-1 fix: Use remove_if to only remove if reader is still finished.
+                // This prevents killing a healthy replacement process spawned between
+                // drop(entry) and the remove operation.
+                let removed = self.processes.remove_if(language_id, |_, v| {
+                    matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished())
+                });
+                if let Some((_, ProcessEntry::Running(_))) = removed {
+                    transport.shutdown(&self.dispatcher, language_id).await;
+                    if let Some(ref lc) = lifecycle {
+                        let _ = lc.child.lock().await.wait().await;
+                    }
+                    tracing::warn!(
+                        language = %language_id,
+                        "LSP: reader task not alive, removed stale entry for recovery"
+                    );
                 }
-                tracing::warn!(
-                    language = %language_id,
-                    "LSP: reader task not alive, removed stale entry for recovery"
-                );
                 return Err(LspError::ConnectionLost);
             }
             let counter = Arc::clone(state.transport.in_flight());
-            InFlightGuard::new(counter)
+            let transport = Arc::clone(&state.transport);
+            (InFlightGuard::new(counter), transport)
         };
 
-        {
-            let Some(entry) = self.processes.get(language_id) else {
-                return Err(LspError::NoLspAvailable);
-            };
-            let ProcessEntry::Running(state) = entry.value() else {
-                return Err(LspError::NoLspAvailable);
-            };
-            state.transport.send(&message).await?;
-        }
+        transport.send(&message).await?;
 
         tokio::time::timeout(timeout, rx)
             .await
@@ -724,18 +726,28 @@ impl super::LspClient {
             let transport = Arc::clone(&state.transport);
             let lifecycle = state.lifecycle.clone();
             drop(entry);
-            self.processes.remove(language_id);
-            transport.shutdown(&self.dispatcher, language_id).await;
-            if let Some(ref lc) = lifecycle {
-                let _ = lc.child.lock().await.wait().await;
+            // P1-1 fix: Use remove_if to only remove if reader is still finished.
+            let removed = self.processes.remove_if(language_id, |_, v| {
+                matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished())
+            });
+            if let Some((_, ProcessEntry::Running(_))) = removed {
+                transport.shutdown(&self.dispatcher, language_id).await;
+                if let Some(ref lc) = lifecycle {
+                    let _ = lc.child.lock().await.wait().await;
+                }
+                tracing::warn!(
+                    language = %language_id,
+                    "LSP: reader task not alive in notify, removed stale entry for recovery"
+                );
             }
-            tracing::warn!(
-                language = %language_id,
-                "LSP: reader task not alive in notify, removed stale entry for recovery"
-            );
             return Err(LspError::ConnectionLost);
         }
-        state.transport.send(&message).await
+        // P2-3 fix: Extract transport clone before sending, so we don't hold
+        // the DashMap Ref across the send().await. This prevents blocking
+        // concurrent remove() operations on the same shard.
+        let transport = Arc::clone(&state.transport);
+        drop(entry);
+        transport.send(&message).await
     }
 
     pub(crate) fn capabilities_for(

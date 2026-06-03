@@ -42,7 +42,14 @@ pub async fn reader_supervisor_task(
         }
     };
 
-    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&language_id) {
+    // P1-2 fix: Use remove_if to only remove if reader_handle is still finished.
+    // This prevents killing a healthy replacement process that was spawned by
+    // crash recovery between reader_handle.await() and this remove operation.
+    let removed = processes.remove_if(&language_id, |_, v| {
+        matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished())
+    });
+
+    if let Some((_lang, ProcessEntry::Running(state))) = removed {
         tracing::debug!(
             language = %language_id,
             "LSP: supervisor reaping child process to free PID slot"
@@ -76,7 +83,7 @@ pub async fn reader_supervisor_task(
     } else {
         tracing::debug!(
             language = %language_id,
-            "LSP: supervisor found entry already removed (raced with idle-loop or force_respawn)"
+            "LSP: supervisor found entry already removed (raced with idle-loop or force_respawn) or replaced by recovery"
         );
     }
 }
@@ -276,13 +283,17 @@ pub async fn idle_timeout_task(
                     }
                 }
 
-                let languages_to_remove: Vec<String> = processes
+                // P2-2 + P3-2 fix: Use remove_if for atomic check-and-remove.
+                // This eliminates the TOCTOU window between checking in_flight and
+                // actually removing the entry. First collect candidates, then try
+                // to remove each with remove_if.
+                let candidates: Vec<String> = processes
                     .iter()
                     .filter_map(|entry| {
                         let lang = entry.key();
                         if let ProcessEntry::Running(state) = entry.value() {
                             if state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
-                                && state.transport.in_flight().load(Ordering::Relaxed) == 0
+                                && state.transport.in_flight().load(Ordering::Acquire) == 0
                             {
                                 Some(lang.clone())
                             } else {
@@ -294,8 +305,18 @@ pub async fn idle_timeout_task(
                     })
                     .collect();
 
-                for lang in languages_to_remove {
-                    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
+                for lang in candidates {
+                    // Atomically check in_flight and remove if still idle.
+                    let removed = processes.remove_if(&lang, |_, v| {
+                        if let ProcessEntry::Running(state) = v {
+                            state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
+                                && state.transport.in_flight().load(Ordering::Acquire) == 0
+                        } else {
+                            false
+                        }
+                    });
+
+                    if let Some((_lang, ProcessEntry::Running(state))) = removed {
                         tracing::info!(
                             language = %lang,
                             restarts = state.restart_count,
@@ -308,6 +329,11 @@ pub async fn idle_timeout_task(
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
                         }
+                    } else {
+                        tracing::debug!(
+                            language = %lang,
+                            "LSP: idle timeout skipped — in_flight request arrived or entry removed"
+                        );
                     }
                 }
             }
