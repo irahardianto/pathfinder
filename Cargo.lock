@@ -1150,6 +1150,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "criterion",
  "futures",
  "pathfinder-mcp-common",
  "pathfinder-mcp-lsp",
