@@ -45,9 +45,10 @@ pub async fn reader_supervisor_task(
     // P1-2 fix: Use remove_if to only remove if reader_handle is still finished.
     // This prevents killing a healthy replacement process that was spawned by
     // crash recovery between reader_handle.await() and this remove operation.
-    let removed = processes.remove_if(&language_id, |_, v| {
-        matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished())
-    });
+    let removed = processes.remove_if(
+        &language_id,
+        |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
+    );
 
     if let Some((_lang, ProcessEntry::Running(state))) = removed {
         tracing::debug!(

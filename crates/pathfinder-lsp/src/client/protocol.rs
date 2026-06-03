@@ -23,13 +23,16 @@ const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
 /// dispatcher can be shared across the writer and reader tasks via `Arc`.
 ///
 /// LSP-INIT-002: Per-language isolation prevents cross-language interference:
+///
 /// - Pending requests are tagged with `language_id` so `cancel_all` can be scoped
 /// - Notifications and server requests are routed through per-language channels
+type PendingRequest = (String, oneshot::Sender<Result<Value, LspError>>);
+
 pub(crate) struct RequestDispatcher {
-    pending: Mutex<HashMap<u64, (String, oneshot::Sender<Result<Value, LspError>>)>>,
+    pending: Mutex<HashMap<u64, PendingRequest>>,
     next_id: AtomicU64,
     /// Per-language broadcast channels for unsolicited server notifications (no `id`).
-    /// Key: language_id, Value: broadcast::Sender<Value>
+    /// Key: `language_id`, Value: `broadcast::Sender<Value>`
     notification_channels: DashMap<String, broadcast::Sender<Value>>,
     /// MT-3: Per-language broadcast channels for server-to-client *requests*
     /// (has both `id` and `method`, but the `id` is NOT in the pending map).
@@ -110,7 +113,7 @@ impl RequestDispatcher {
     /// Get or create a server request channel for the given language.
     ///
     /// LSP-INIT-002: Per-language channel isolation ensures capability registrations
-    /// from one language don't pollute other languages' live_capabilities.
+    /// from one language don't pollute other languages' `live_capabilities`.
     pub(crate) fn subscribe_server_requests_for_language(
         &self,
         language_id: &str,
@@ -133,15 +136,20 @@ impl RequestDispatcher {
     /// If the message has an `id` that matches a pending request, fires its
     /// oneshot. Notifications (no `id`) are forwarded to the per-language
     /// notification broadcast channel. Unmatched responses with `method` are
-    /// forwarded to the per-language server_request channel.
+    /// forwarded to the per-language `server_request` channel.
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
-    pub(crate) fn dispatch_response_for_language(
-        &self,
-        source_language_id: &str,
-        message: &Value,
-    ) {
+    pub(crate) fn dispatch_response_for_language(&self, source_language_id: &str, message: &Value) {
         let Some(id_val) = message.get("id") else {
             // Server notification (no id) — forward to per-language notification channel.
+            let method = message
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            tracing::debug!(
+                language = %source_language_id,
+                method = %method,
+                "LSP: dispatching notification"
+            );
             if let Some(tx) = self.notification_channels.get(source_language_id) {
                 let _ = tx.send(message.clone());
             }
@@ -155,7 +163,14 @@ impl RequestDispatcher {
 
         if let Some((_lang, sender)) = tx {
             // Normal response to a request we sent: resolve the waiting oneshot.
-            let result = if message.get("error").is_some() {
+            let is_error = message.get("error").is_some();
+            tracing::debug!(
+                language = %source_language_id,
+                id = %id,
+                is_error = %is_error,
+                "LSP: dispatching response to pending request"
+            );
+            let result = if is_error {
                 let err_msg = message["error"]["message"]
                     .as_str()
                     .unwrap_or("LSP returned an error")
@@ -168,6 +183,16 @@ impl RequestDispatcher {
         } else if message.get("method").is_some() {
             // MT-3: Server-to-client request (has id AND method, NOT in pending).
             // Forward to per-language server_request channel.
+            let method = message
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            tracing::debug!(
+                language = %source_language_id,
+                id = %id,
+                method = %method,
+                "LSP: dispatching server-to-client request"
+            );
             if let Some(tx) = self.server_request_channels.get(source_language_id) {
                 let _ = tx.send(message.clone());
             }
@@ -242,6 +267,15 @@ impl RequestDispatcher {
             .filter(|(_id, (lang, _tx))| lang == language_id)
             .map(|(&id, _)| id)
             .collect();
+
+        let count = ids_to_cancel.len();
+        if count > 0 {
+            tracing::debug!(
+                language = %language_id,
+                count = %count,
+                "LSP: cancel_for_language: cancelling pending requests"
+            );
+        }
 
         for id in ids_to_cancel {
             if let Some((_lang, tx)) = pending.remove(&id) {
@@ -599,10 +633,10 @@ mod tests {
 
         // Check: rust and ts should still have pending requests
         // go receivers should get ConnectionLost
-        let result_g1 = rx_g1.await.expect("should receive");
-        let result_g2 = rx_g2.await.expect("should receive");
-        assert!(matches!(result_g1, Err(LspError::ConnectionLost)));
-        assert!(matches!(result_g2, Err(LspError::ConnectionLost)));
+        let go_result_1 = rx_g1.await.expect("should receive");
+        let go_result_2 = rx_g2.await.expect("should receive");
+        assert!(matches!(go_result_1, Err(LspError::ConnectionLost)));
+        assert!(matches!(go_result_2, Err(LspError::ConnectionLost)));
 
         // Rust and TS receivers should not have been cancelled
         assert_eq!(dispatcher.pending.lock().unwrap().len(), 3);
@@ -612,10 +646,10 @@ mod tests {
 
         // Now cancel rust
         dispatcher.cancel_for_language("rust");
-        let result_r1 = rx_r1.await.expect("should receive");
-        let result_r2 = rx_r2.await.expect("should receive");
-        assert!(matches!(result_r1, Err(LspError::ConnectionLost)));
-        assert!(matches!(result_r2, Err(LspError::ConnectionLost)));
+        let rust_result_1 = rx_r1.await.expect("should receive");
+        let rust_result_2 = rx_r2.await.expect("should receive");
+        assert!(matches!(rust_result_1, Err(LspError::ConnectionLost)));
+        assert!(matches!(rust_result_2, Err(LspError::ConnectionLost)));
 
         // Only TS remains
         assert_eq!(dispatcher.pending.lock().unwrap().len(), 1);
@@ -644,13 +678,11 @@ mod tests {
         dispatcher.dispatch_response_for_language("rust", &rust_notif);
 
         // Rust subscriber should receive it
-        let received_rust = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            rx_rust.recv(),
-        )
-        .await
-        .expect("should not time out")
-        .expect("should receive");
+        let received_rust =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), rx_rust.recv())
+                .await
+                .expect("should not time out")
+                .expect("should receive");
 
         assert_eq!(
             received_rust["method"].as_str().unwrap_or(""),
@@ -673,13 +705,11 @@ mod tests {
         dispatcher.dispatch_response_for_language("go", &go_notif);
 
         // Go subscriber should receive
-        let received_go = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            rx_go.recv(),
-        )
-        .await
-        .expect("should not time out")
-        .expect("should receive");
+        let received_go =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), rx_go.recv())
+                .await
+                .expect("should not time out")
+                .expect("should receive");
 
         assert_eq!(
             received_go["method"].as_str().unwrap_or(""),
@@ -720,13 +750,11 @@ mod tests {
         dispatcher.dispatch_response_for_language("rust", &rust_reg);
 
         // Rust subscriber should receive
-        let received_rust = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            rx_rust.recv(),
-        )
-        .await
-        .expect("should not time out")
-        .expect("should receive");
+        let received_rust =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), rx_rust.recv())
+                .await
+                .expect("should not time out")
+                .expect("should receive");
 
         assert_eq!(
             received_rust["method"].as_str().unwrap_or(""),
@@ -757,13 +785,11 @@ mod tests {
         dispatcher.dispatch_response_for_language("typescript", &ts_reg);
 
         // TypeScript subscriber should receive
-        let received_ts = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            rx_ts.recv(),
-        )
-        .await
-        .expect("should not time out")
-        .expect("should receive");
+        let received_ts =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), rx_ts.recv())
+                .await
+                .expect("should not time out")
+                .expect("should receive");
 
         assert_eq!(
             received_ts["method"].as_str().unwrap_or(""),
@@ -812,21 +838,17 @@ mod tests {
         dispatcher.dispatch_response_for_language("typescript", &ts_msg);
 
         // Verify routing: rust_rx gets id=100, ts_rx gets id=200
-        let rust_received = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            rust_rx.recv(),
-        )
-        .await
-        .expect("should not time out")
-        .expect("should receive");
+        let rust_received =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), rust_rx.recv())
+                .await
+                .expect("should not time out")
+                .expect("should receive");
 
-        let ts_received = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            ts_rx.recv(),
-        )
-        .await
-        .expect("should not time out")
-        .expect("should receive");
+        let ts_received =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), ts_rx.recv())
+                .await
+                .expect("should not time out")
+                .expect("should receive");
 
         // Critical assertions for BUG-3 fix:
         // Each language only receives its own server requests

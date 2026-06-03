@@ -252,8 +252,7 @@ pub(super) async fn spawn_and_initialize(
     // would never be filled, causing a deadlock.
     //
     // LSP-INIT-002: Pass language_id to enable per-language isolation.
-    let reader_handle =
-        start_reader_task(stdout, Arc::clone(&dispatcher), language_id.to_owned());
+    let reader_handle = start_reader_task(stdout, Arc::clone(&dispatcher), language_id.to_owned());
 
     let (id, rx) = dispatcher.register(language_id);
     let init_request = build_initialize_request(id, project_root, &plugins, init_options).await?;

@@ -255,10 +255,17 @@ impl super::LspClient {
             // BUG-4 fix: reader is aborted, call cancel_for_language explicitly
             // to unblock any pending requests for this language.
             self.dispatcher.cancel_for_language(language_id);
-            state.transport.shutdown(&self.dispatcher, language_id).await;
+            state
+                .transport
+                .shutdown(&self.dispatcher, language_id)
+                .await;
             if let Some(ref lifecycle) = state.lifecycle {
                 let _ = lifecycle.child.lock().await.wait().await;
             }
+            // DEL-4.1: FUTURE: init_locks cleanup when dynamic language support is added.
+            // Currently bounded to 5 languages (rust/go/typescript/python/java),
+            // so memory cost is negligible (~5 entries * 100 bytes each).
+            // self.init_locks.remove(language_id);
         }
 
         self.start_process(descriptor, 0).await
@@ -671,9 +678,10 @@ impl super::LspClient {
                 // P1-1 fix: Use remove_if to only remove if reader is still finished.
                 // This prevents killing a healthy replacement process spawned between
                 // drop(entry) and the remove operation.
-                let removed = self.processes.remove_if(language_id, |_, v| {
-                    matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished())
-                });
+                let removed = self.processes.remove_if(
+                    language_id,
+                    |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
+                );
                 if let Some((_, ProcessEntry::Running(_))) = removed {
                     transport.shutdown(&self.dispatcher, language_id).await;
                     if let Some(ref lc) = lifecycle {
@@ -727,9 +735,10 @@ impl super::LspClient {
             let lifecycle = state.lifecycle.clone();
             drop(entry);
             // P1-1 fix: Use remove_if to only remove if reader is still finished.
-            let removed = self.processes.remove_if(language_id, |_, v| {
-                matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished())
-            });
+            let removed = self.processes.remove_if(
+                language_id,
+                |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
+            );
             if let Some((_, ProcessEntry::Running(_))) = removed {
                 transport.shutdown(&self.dispatcher, language_id).await;
                 if let Some(ref lc) = lifecycle {
