@@ -968,22 +968,23 @@ pub fn did_you_mean(
     }
 
     let target = chain.to_string();
-    let target_len = target.len();
 
     let mut all_paths: Vec<&str> = Vec::new();
     collect_paths(symbols, &mut all_paths);
 
-    let threshold = 5.max(target_len / 4);
+    // Phase 1: short-circuit on exact match — avoids O(n) Levenshtein scan
+    if let Some(exact) = all_paths.iter().find(|p| **p == target) {
+        return vec![(*exact).to_string()];
+    }
 
+    // Phase 2: fuzzy match
+    let target_len = target.len();
+    let threshold = 5.max(target_len / 4);
     let max_len_delta = threshold;
 
     let mut distances: Vec<(usize, &str)> = all_paths
         .into_iter()
         .filter_map(|path| {
-            if path == target {
-                return Some((0, path));
-            }
-
             let len_delta = path.len().abs_diff(target_len);
             if len_delta > max_len_delta && !path.contains(&target) && !target.contains(path) {
                 return None;

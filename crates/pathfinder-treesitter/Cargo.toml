@@ -40,7 +40,7 @@ thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
 strsim = "0.11" # For did_you_mean Levenshtein distance
-tokio = { version = "1", features = ["fs", "rt"] }
+tokio = { version = "1", features = ["fs", "rt", "macros"] }
 ignore = "0.4"
 lru = "0.18"
 futures = "0.3"

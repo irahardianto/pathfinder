@@ -386,8 +386,15 @@ pub async fn generate_skeleton_text(
     let read_futures: Vec<_> = file_entries
         .iter()
         .map(|entry| async {
-            let read_result = tokio::fs::read(&entry.abs_path).await;
-            (entry.rel_path.clone(), entry.lang, read_result)
+            let (read_result, meta_result) = tokio::join!(
+                tokio::fs::read(&entry.abs_path),
+                tokio::fs::metadata(&entry.abs_path)
+            );
+            let mtime = meta_result
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (entry.rel_path.clone(), entry.lang, read_result, mtime)
         })
         .collect();
 
@@ -400,11 +407,10 @@ pub async fn generate_skeleton_text(
     }
 
     let mut processed: Vec<ProcessedFile> = Vec::new();
-    let mut files_scanned = 0;
-    let mut files_truncated = 0;
+    let mut files_with_symbols = 0;
     let mut version_hashes = HashMap::default();
 
-    for (rel_path, _lang, read_result) in read_results {
+    for (rel_path, _lang, read_result, mtime) in read_results {
         let source = match read_result {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -418,11 +424,6 @@ pub async fn generate_skeleton_text(
         };
         let hash = VersionHash::compute(&source);
         version_hashes.insert(rel_path.display().to_string(), hash.short().to_owned());
-
-        let mtime = std::fs::metadata(&rel_path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
         let content_arc: std::sync::Arc<[u8]> = std::sync::Arc::from(source);
 
@@ -447,7 +448,7 @@ pub async fn generate_skeleton_text(
             continue;
         }
 
-        files_scanned += 1;
+        files_with_symbols += 1;
 
         let file_skeleton = render_file_skeleton(&symbols, config.max_tokens_per_file);
         let file_skeleton_tokens = estimate_tokens(&file_skeleton);
@@ -462,15 +463,11 @@ pub async fn generate_skeleton_text(
     processed.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
     let mut skeleton_out = String::default();
+    let mut current_tokens: u32 = 0;
+    let mut files_rendered: usize = 0;
+    let mut files_truncated: usize = 0;
 
     for pf in &processed {
-        let path_header = format!(
-            "\nFile: {}\n{}\n",
-            pf.rel_path.display(),
-            "=".repeat(pf.rel_path.display().to_string().len() + 6)
-        );
-
-        let current_tokens = estimate_tokens(&skeleton_out);
         if current_tokens + pf.skeleton_tokens > config.max_tokens {
             if current_tokens + 50 <= config.max_tokens {
                 use std::fmt::Write;
@@ -479,11 +476,21 @@ pub async fn generate_skeleton_text(
                     "\n// [... Omitted {} due to token budget]",
                     pf.rel_path.display()
                 );
+                current_tokens += 50;
             }
             files_truncated += 1;
             continue;
         }
 
+        let path_header = format!(
+            "\nFile: {}\n{}\n",
+            pf.rel_path.display(),
+            "=".repeat(pf.rel_path.display().to_string().len() + 6)
+        );
+
+        let header_tokens = estimate_tokens(&path_header);
+        current_tokens += header_tokens + pf.skeleton_tokens;
+        files_rendered += 1;
         skeleton_out.push_str(&path_header);
         skeleton_out.push_str(&pf.skeleton);
     }
@@ -494,7 +501,7 @@ pub async fn generate_skeleton_text(
             clippy::cast_sign_loss,
             clippy::cast_precision_loss
         )]
-        let percent = ((files_scanned as f32 / files_in_scope as f32) * 100.0) as u8;
+        let percent = ((files_with_symbols as f32 / files_in_scope as f32) * 100.0) as u8;
         percent
     } else {
         100
@@ -503,7 +510,7 @@ pub async fn generate_skeleton_text(
     Ok(RepoMapResult {
         skeleton: skeleton_out.trim().to_string(),
         tech_stack: tech_stack.iter().map(|l| format!("{l:?}")).collect(),
-        files_scanned,
+        files_scanned: files_rendered,
         files_truncated,
         files_in_scope,
         coverage_percent,

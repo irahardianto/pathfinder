@@ -355,6 +355,90 @@ impl AstCache {
         }
     }
 
+    /// Retrieve the multi-zone parse result for a Vue SFC using pre-loaded content.
+    ///
+    /// Identical to [`get_or_parse_vue`] but accepts pre-read file bytes and mtime
+    /// instead of reading from disk. Eliminates the double-read when the caller
+    /// already has the file content (e.g., `generate_skeleton_text`).
+    ///
+    /// # Errors
+    /// Returns `SurgeonError` if the script zone fails to parse.
+    #[instrument(skip(self, content), fields(cache_hit = false))]
+    pub async fn get_or_parse_vue_preloaded(
+        &self,
+        path: &Path,
+        content: &[u8],
+        mtime: SystemTime,
+    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
+        {
+            let mut lock = self.vue_entries.lock();
+
+            if let Some(entry) = lock.get(path) {
+                if entry.mtime == mtime {
+                    tracing::Span::current().record("cache_hit", true);
+                    let multi = (*entry.multi).clone();
+                    return Ok((multi, entry.content_hash.clone()));
+                }
+            }
+        }
+
+        let cell = {
+            let mut vue_in_flight = self.vue_in_flight.lock();
+            vue_in_flight
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
+
+        let result = cell
+            .get_or_init(|| {
+                let owned_content = content.to_vec();
+                async move {
+                    let content_hash = VersionHash::compute(&owned_content);
+                    let multi = parse_vue_multizone(&owned_content).map_err(|e| {
+                        SurgeonError::ParseError {
+                            path: path.to_path_buf(),
+                            reason: format!("Vue multi-zone parse failed: {e}"),
+                        }
+                    })?;
+
+                    let cached_multi = Arc::new(MultiZoneTree {
+                        script_tree: multi.script_tree.clone(),
+                        template_tree: multi.template_tree.clone(),
+                        style_tree: multi.style_tree.clone(),
+                        zones: multi.zones.clone(),
+                        source: multi.source.clone(),
+                        degraded: multi.degraded,
+                    });
+
+                    self.vue_entries.lock().put(
+                        path.to_path_buf(),
+                        MultiZoneEntry {
+                            multi: cached_multi,
+                            content_hash: content_hash.clone(),
+                            mtime,
+                        },
+                    );
+
+                    Ok::<_, SurgeonError>((multi, content_hash))
+                }
+            })
+            .await;
+
+        {
+            let mut vue_in_flight = self.vue_in_flight.lock();
+            vue_in_flight.remove(path);
+        }
+
+        match result.as_ref() {
+            Ok((multi, hash)) => Ok((multi.clone(), hash.clone())),
+            Err(e) => Err(SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!("Parse failed: {e}"),
+            }),
+        }
+    }
+
     /// Remove a file from the cache, forcing a re-parse on next access.
     ///
     /// Flushes the file from *both* single-zone and Vue multi-zone caches so

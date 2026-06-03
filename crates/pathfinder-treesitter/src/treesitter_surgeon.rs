@@ -160,7 +160,10 @@ impl Surgeon for TreeSitterSurgeon {
         let abs_path = workspace_root.join(file_path);
 
         if lang == SupportedLanguage::Vue {
-            let (multi, _hash) = self.cache.get_or_parse_vue(&abs_path).await?;
+            let (multi, _hash) = self
+                .cache
+                .get_or_parse_vue_preloaded(&abs_path, &content, mtime)
+                .await?;
             return Ok(extract_symbols_from_multizone(&multi));
         }
 
