@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::format_push_string,
+    clippy::format_collect
+)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_common::types::SymbolChain;
 use pathfinder_treesitter::language::SupportedLanguage;
@@ -54,8 +61,11 @@ fn bench_did_you_mean(c: &mut Criterion) {
         small_source.as_bytes(),
     )
     .expect("parse small");
-    let small_symbols =
-        extract_symbols_from_tree(&small_tree, small_source.as_bytes(), SupportedLanguage::Rust);
+    let small_symbols = extract_symbols_from_tree(
+        &small_tree,
+        small_source.as_bytes(),
+        SupportedLanguage::Rust,
+    );
     let small_miss = SymbolChain::parse("func_1").expect("chain");
     group.bench_with_input(
         BenchmarkId::new("near_miss", 20),

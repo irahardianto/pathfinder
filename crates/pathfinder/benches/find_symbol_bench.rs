@@ -1,11 +1,31 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::redundant_closure_for_method_calls,
+    clippy::semicolon_if_nothing_returned
+)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 // Import the functions we optimized
 // Note: These are from the pathfinder crate, but we're benchmarking the algorithm itself
 
 const DEFINITION_KEYWORDS: &[&str] = &[
-    "fn", "function", "def", "struct", "class", "interface", "type", "enum", "trait", "const",
-    "static", "var", "let", "mod", "impl",
+    "fn",
+    "function",
+    "def",
+    "struct",
+    "class",
+    "interface",
+    "type",
+    "enum",
+    "trait",
+    "const",
+    "static",
+    "var",
+    "let",
+    "mod",
+    "impl",
 ];
 
 #[inline]

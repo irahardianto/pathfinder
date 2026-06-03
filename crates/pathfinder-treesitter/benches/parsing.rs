@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pathfinder_treesitter::language::SupportedLanguage;
 use pathfinder_treesitter::parser::AstParser;

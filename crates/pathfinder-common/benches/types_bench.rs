@@ -1,7 +1,7 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use pathfinder_common::types::{
-    SemanticPath, VersionHash, WorkspaceRoot,
-};
+use pathfinder_common::types::{SemanticPath, VersionHash, WorkspaceRoot};
 use std::path::Path;
 
 fn bench_semantic_path_parse(c: &mut Criterion) {
@@ -12,17 +12,16 @@ fn bench_semantic_path_parse(c: &mut Criterion) {
         ("file_and_symbol", "src/auth.ts::AuthService.login"),
         ("overloaded", "src/auth.ts::AuthService.refreshToken#2"),
         ("deep_chain", "src/mod.rs::Outer::Inner::method"),
-        ("long_path", "crates/pathfinder-common/src/types.rs::SymbolChain.parse"),
+        (
+            "long_path",
+            "crates/pathfinder-common/src/types.rs::SymbolChain.parse",
+        ),
     ];
 
     for (name, input) in &inputs {
-        group.bench_with_input(
-            BenchmarkId::new("parse", *name),
-            input,
-            |b, input| {
-                b.iter(|| SemanticPath::parse(black_box(input)));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("parse", *name), input, |b, input| {
+            b.iter(|| SemanticPath::parse(black_box(input)));
+        });
     }
     group.finish();
 }
@@ -47,13 +46,9 @@ fn bench_semantic_path_display(c: &mut Criterion) {
     ];
 
     for (name, sp) in &cases {
-        group.bench_with_input(
-            BenchmarkId::new("display", *name),
-            sp,
-            |b, sp| {
-                b.iter(|| black_box(sp.to_string()));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("display", *name), sp, |b, sp| {
+            b.iter(|| black_box(sp.to_string()));
+        });
     }
     group.finish();
 }
@@ -74,13 +69,9 @@ fn bench_version_hash_compute(c: &mut Criterion) {
 
     for (name, content) in &cases {
         group.throughput(Throughput::Bytes(content.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("compute", *name),
-            content,
-            |b, content| {
-                b.iter(|| VersionHash::compute(black_box(content)));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("compute", *name), content, |b, content| {
+            b.iter(|| VersionHash::compute(black_box(content)));
+        });
     }
     group.finish();
 }
@@ -98,13 +89,9 @@ fn bench_version_hash_matches(c: &mut Criterion) {
     ];
 
     for (name, input) in &cases {
-        group.bench_with_input(
-            BenchmarkId::new("matches", *name),
-            input,
-            |b, input| {
-                b.iter(|| hash.matches(black_box(input)));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("matches", *name), input, |b, input| {
+            b.iter(|| hash.matches(black_box(input)));
+        });
     }
     group.finish();
 }
@@ -122,13 +109,9 @@ fn bench_workspace_root_resolve(c: &mut Criterion) {
     ];
 
     for (name, path) in &cases {
-        group.bench_with_input(
-            BenchmarkId::new("resolve", *name),
-            path,
-            |b, path| {
-                b.iter(|| black_box(root.resolve(black_box(path))));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("resolve", *name), path, |b, path| {
+            b.iter(|| black_box(root.resolve(black_box(path))));
+        });
     }
     group.finish();
 }

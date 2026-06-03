@@ -165,15 +165,15 @@ impl AstCache {
                 let tree = AstParser::parse_source(path, lang, &parse_input)?;
 
                 self.entries.lock().put(
-                        path.to_path_buf(),
-                        CacheEntry {
-                            tree: tree.clone(),
-                            source: content_arc.clone(),
-                            content_hash: current_hash,
-                            lang,
-                            mtime: current_mtime,
-                        },
-                    );
+                    path.to_path_buf(),
+                    CacheEntry {
+                        tree: tree.clone(),
+                        source: content_arc.clone(),
+                        content_hash: current_hash,
+                        lang,
+                        mtime: current_mtime,
+                    },
+                );
 
                 Ok::<_, SurgeonError>((tree, content_arc.clone()))
             })
@@ -237,15 +237,15 @@ impl AstCache {
                     let tree = AstParser::parse_source(path, lang, &parse_input)?;
 
                     self.entries.lock().put(
-                            path.to_path_buf(),
-                            CacheEntry {
-                                tree: tree.clone(),
-                                source: content_arc.clone(),
-                                content_hash: current_hash,
-                                lang,
-                                mtime,
-                            },
-                        );
+                        path.to_path_buf(),
+                        CacheEntry {
+                            tree: tree.clone(),
+                            source: content_arc.clone(),
+                            content_hash: current_hash,
+                            lang,
+                            mtime,
+                        },
+                    );
 
                     Ok::<_, SurgeonError>((tree, content_arc.clone()))
                 }
@@ -329,13 +329,13 @@ impl AstCache {
                 });
 
                 self.vue_entries.lock().put(
-                        path.to_path_buf(),
-                        MultiZoneEntry {
-                            multi: cached_multi,
-                            content_hash: content_hash.clone(),
-                            mtime: current_mtime,
-                        },
-                    );
+                    path.to_path_buf(),
+                    MultiZoneEntry {
+                        multi: cached_multi,
+                        content_hash: content_hash.clone(),
+                        mtime: current_mtime,
+                    },
+                );
 
                 Ok::<_, SurgeonError>((multi, content_hash))
             })
@@ -538,11 +538,7 @@ mod tests {
         // (and defensively from entries too, even though it's not there)
         cache.invalidate(vue_file.path());
 
-        assert_eq!(
-            cache.vue_entries.lock().len(),
-            0,
-            "Vue entry cleared"
-        );
+        assert_eq!(cache.vue_entries.lock().len(), 0, "Vue entry cleared");
         // Non-Vue entry must not be disturbed
         assert_eq!(cache.entries.lock().len(), 1, "Go entry untouched");
     }

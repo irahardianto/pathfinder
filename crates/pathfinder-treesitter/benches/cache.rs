@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use pathfinder_treesitter::cache::AstCache;
 use pathfinder_treesitter::language::SupportedLanguage;
@@ -82,9 +84,9 @@ function third() { count.value = 0 }
             for _ in 0..5 {
                 let cache = std::sync::Arc::clone(&cache);
                 let path = std::sync::Arc::clone(&path);
-                handles.push(rt.spawn(async move {
-                    cache.get_or_parse(&path, SupportedLanguage::Go).await
-                }));
+                handles.push(
+                    rt.spawn(async move { cache.get_or_parse(&path, SupportedLanguage::Go).await }),
+                );
             }
             for h in handles {
                 rt.block_on(h).expect("join").expect("parse");

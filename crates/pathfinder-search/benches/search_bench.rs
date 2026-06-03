@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::semicolon_if_nothing_returned,
+    clippy::assigning_clones
+)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_search::{RipgrepScout, Scout, SearchParams};
 use std::io::Write;
@@ -64,10 +71,25 @@ fn create_workspace(file_count: usize, files_with_needle: usize) -> WorkspaceFix
 
     for i in 0..file_count {
         let has_needle = i < files_with_needle;
-        let ext = if i % 3 == 0 { "rs" } else if i % 3 == 1 { "ts" } else { "go" };
-        let dir_name = if i % 5 == 0 { "src" } else if i % 5 == 1 { "lib" } else { "pkg" };
+        let ext = if i % 3 == 0 {
+            "rs"
+        } else if i % 3 == 1 {
+            "ts"
+        } else {
+            "go"
+        };
+        let dir_name = if i % 5 == 0 {
+            "src"
+        } else if i % 5 == 1 {
+            "lib"
+        } else {
+            "pkg"
+        };
 
-        let path = dir.path().join(dir_name).join(format!("module_{i:03}.{ext}"));
+        let path = dir
+            .path()
+            .join(dir_name)
+            .join(format!("module_{i:03}.{ext}"));
         std::fs::create_dir_all(path.parent().unwrap()).expect("create dirs");
 
         let mut f = std::fs::File::create(&path).expect("create file");

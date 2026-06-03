@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::format_push_string)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pathfinder_treesitter::vue_zones::{parse_vue_multizone, scan_vue_zones};
 
@@ -107,13 +109,9 @@ fn bench_vue_zones(c: &mut Criterion) {
     for &n in &[20, 50, 100] {
         let large_sfc = generate_large_sfc(n);
         group.throughput(Throughput::Bytes(large_sfc.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("parse_large", n),
-            &large_sfc,
-            |b, sfc| {
-                b.iter(|| parse_vue_multizone(black_box(sfc)).expect("parse"));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("parse_large", n), &large_sfc, |b, sfc| {
+            b.iter(|| parse_vue_multizone(black_box(sfc)).expect("parse"));
+        });
     }
 
     group.finish();

@@ -13,8 +13,21 @@ const SEARCH_CONCURRENCY: usize = 16;
 const ENRICHMENT_CONCURRENCY: usize = 32;
 
 const DEFINITION_KEYWORDS: &[&str] = &[
-    "fn", "function", "def", "struct", "class", "interface", "type", "enum", "trait", "const",
-    "static", "var", "let", "mod", "impl",
+    "fn",
+    "function",
+    "def",
+    "struct",
+    "class",
+    "interface",
+    "type",
+    "enum",
+    "trait",
+    "const",
+    "static",
+    "var",
+    "let",
+    "mod",
+    "impl",
 ];
 
 #[inline]
@@ -219,13 +232,13 @@ impl PathfinderServer {
                                 pattern = %query,
                                 "scout search failed"
                             );
-                             pathfinder_search::SearchResult {
-                                 matches: Vec::new(),
-                                 total_matches: 0,
-                                 truncated: false,
-                                 files_searched: 0,
-                                 files_in_scope: 0,
-                             }
+                            pathfinder_search::SearchResult {
+                                matches: Vec::new(),
+                                total_matches: 0,
+                                truncated: false,
+                                files_searched: 0,
+                                files_in_scope: 0,
+                            }
                         }
                     }
                 })
@@ -238,10 +251,7 @@ impl PathfinderServer {
         for result in search_results {
             for m in result.matches {
                 // Validate file path is safe (no path traversal)
-                if m.file.contains("..")
-                    || m.file.starts_with('/')
-                    || m.file.starts_with('\\')
-                {
+                if m.file.contains("..") || m.file.starts_with('/') || m.file.starts_with('\\') {
                     tracing::warn!(
                         tool = "find_symbol",
                         file = %m.file,
@@ -296,83 +306,83 @@ impl PathfinderServer {
                 .map(|m| {
                     let kind_filter = kind_filter.clone();
                     async move {
-                    let file_path = Path::new(&m.file);
-                    let line_usize = usize::try_from(m.line).unwrap_or(0);
+                        let file_path = Path::new(&m.file);
+                        let line_usize = usize::try_from(m.line).unwrap_or(0);
 
-                    // Enrich with Tree-sitter to get symbol name and kind
-                    let (symbol_name, kind, is_degraded) = match self
-                        .surgeon
-                        .enclosing_symbol(self.workspace_root.path(), file_path, line_usize)
-                        .await
-                    {
-                        Ok(Some(enclosing_symbol)) => {
-                            // If enclosing_symbol is already a full semantic path (file::symbol),
-                            // extract just the symbol part
-                            let symbol_part = if enclosing_symbol.contains("::") {
-                                enclosing_symbol
-                                    .split("::")
-                                    .skip(1)
-                                    .collect::<Vec<_>>()
-                                    .join("::")
-                            } else {
-                                enclosing_symbol.clone()
-                            };
+                        // Enrich with Tree-sitter to get symbol name and kind
+                        let (symbol_name, kind, is_degraded) = match self
+                            .surgeon
+                            .enclosing_symbol(self.workspace_root.path(), file_path, line_usize)
+                            .await
+                        {
+                            Ok(Some(enclosing_symbol)) => {
+                                // If enclosing_symbol is already a full semantic path (file::symbol),
+                                // extract just the symbol part
+                                let symbol_part = if enclosing_symbol.contains("::") {
+                                    enclosing_symbol
+                                        .split("::")
+                                        .skip(1)
+                                        .collect::<Vec<_>>()
+                                        .join("::")
+                                } else {
+                                    enclosing_symbol.clone()
+                                };
 
-                            // Validate symbol name is non-empty
-                            if symbol_part.is_empty() {
-                                tracing::warn!(
-                                    tool = "find_symbol",
-                                    file = %m.file,
-                                    line = m.line,
-                                    "Tree-sitter returned empty symbol name, using fallback"
-                                );
-                                (
-                                    extract_name_from_line(&m.content),
-                                    infer_kind_from_line(&m.content),
-                                    true,
-                                )
-                            } else {
-                                (symbol_part, infer_kind_from_line(&m.content), false)
+                                // Validate symbol name is non-empty
+                                if symbol_part.is_empty() {
+                                    tracing::warn!(
+                                        tool = "find_symbol",
+                                        file = %m.file,
+                                        line = m.line,
+                                        "Tree-sitter returned empty symbol name, using fallback"
+                                    );
+                                    (
+                                        extract_name_from_line(&m.content),
+                                        infer_kind_from_line(&m.content),
+                                        true,
+                                    )
+                                } else {
+                                    (symbol_part, infer_kind_from_line(&m.content), false)
+                                }
                             }
-                        }
-                        Ok(None) | Err(_) => (
-                            extract_name_from_line(&m.content),
-                            infer_kind_from_line(&m.content),
-                            true,
-                        ),
-                    };
+                            Ok(None) | Err(_) => (
+                                extract_name_from_line(&m.content),
+                                infer_kind_from_line(&m.content),
+                                true,
+                            ),
+                        };
 
-                    // Validate symbol name is non-empty
-                    if symbol_name.trim().is_empty() {
-                        tracing::warn!(
-                            tool = "find_symbol",
-                            file = %m.file,
-                            line = m.line,
-                            "empty symbol name, skipping match"
-                        );
-                        return (None, is_degraded);
-                    }
-
-                    // Filter by kind if specified
-                    if let Some(ref filter_kind) = kind_filter {
-                        if !kind_matches_filter(&kind, filter_kind) {
+                        // Validate symbol name is non-empty
+                        if symbol_name.trim().is_empty() {
+                            tracing::warn!(
+                                tool = "find_symbol",
+                                file = %m.file,
+                                line = m.line,
+                                "empty symbol name, skipping match"
+                            );
                             return (None, is_degraded);
                         }
-                    }
 
-                    let semantic_path = format!("{}::{}", m.file, symbol_name);
-                    let preview = truncate_preview(&m.content, 100);
+                        // Filter by kind if specified
+                        if let Some(ref filter_kind) = kind_filter {
+                            if !kind_matches_filter(&kind, filter_kind) {
+                                return (None, is_degraded);
+                            }
+                        }
 
-                    (
-                        Some(EnrichedMatch {
-                            semantic_path,
-                            kind,
-                            file: m.file,
-                            line: m.line,
-                            preview,
-                        }),
-                        is_degraded,
-                    )
+                        let semantic_path = format!("{}::{}", m.file, symbol_name);
+                        let preview = truncate_preview(&m.content, 100);
+
+                        (
+                            Some(EnrichedMatch {
+                                semantic_path,
+                                kind,
+                                file: m.file,
+                                line: m.line,
+                                preview,
+                            }),
+                            is_degraded,
+                        )
                     }
                 })
                 .buffer_unordered(ENRICHMENT_CONCURRENCY)
@@ -509,8 +519,8 @@ fn extract_name_from_line(line: &str) -> String {
 
     tokens
         .first()
-        .and_then(|s| extract_identifier_prefix(s).map(|i| i.to_string()))
-        .unwrap_or_else(|| tokens.first().map(|s| s.to_string()).unwrap_or_default())
+        .and_then(|s| extract_identifier_prefix(s).map(ToString::to_string))
+        .unwrap_or_else(|| tokens.first().map(ToString::to_string).unwrap_or_default())
 }
 
 /// Check if symbol kind matches the filter
@@ -592,7 +602,10 @@ mod tests {
     fn test_extract_identifier_prefix() {
         assert_eq!(extract_identifier_prefix("my_func("), Some("my_func"));
         assert_eq!(extract_identifier_prefix("MyStruct {"), Some("MyStruct"));
-        assert_eq!(extract_identifier_prefix("_private_var,"), Some("_private_var"));
+        assert_eq!(
+            extract_identifier_prefix("_private_var,"),
+            Some("_private_var")
+        );
         assert_eq!(extract_identifier_prefix("foo::bar"), Some("foo"));
         assert_eq!(extract_identifier_prefix("123invalid"), None);
         assert_eq!(extract_identifier_prefix(""), None);
@@ -621,10 +634,7 @@ mod tests {
 
     #[test]
     fn test_extract_name_from_line_basic() {
-        assert_eq!(
-            extract_name_from_line("fn my_function() {"),
-            "my_function"
-        );
+        assert_eq!(extract_name_from_line("fn my_function() {"), "my_function");
         assert_eq!(
             extract_name_from_line("function myFunction() {"),
             "myFunction"
@@ -633,14 +643,8 @@ mod tests {
             extract_name_from_line("def my_definition(self):"),
             "my_definition"
         );
-        assert_eq!(
-            extract_name_from_line("struct MyStruct {"),
-            "MyStruct"
-        );
-        assert_eq!(
-            extract_name_from_line("class MyClass {"),
-            "MyClass"
-        );
+        assert_eq!(extract_name_from_line("struct MyStruct {"), "MyStruct");
+        assert_eq!(extract_name_from_line("class MyClass {"), "MyClass");
     }
 
     #[test]
@@ -652,16 +656,10 @@ mod tests {
         );
 
         // Struct followed by generic
-        assert_eq!(
-            extract_name_from_line("struct Foo<T> {"),
-            "Foo"
-        );
+        assert_eq!(extract_name_from_line("struct Foo<T> {"), "Foo");
 
         // With path separator in content
-        assert_eq!(
-            extract_name_from_line("let x = a::b::c"),
-            "x"
-        );
+        assert_eq!(extract_name_from_line("let x = a::b::c"), "x");
     }
 
     #[test]
@@ -698,10 +696,7 @@ mod tests {
             extract_symbol_name_from_path("lib.rs::foo::bar::baz"),
             "foo::bar::baz"
         );
-        assert_eq!(
-            extract_symbol_name_from_path("single_token"),
-            ""
-        );
+        assert_eq!(extract_symbol_name_from_path("single_token"), "");
     }
 
     #[test]
@@ -721,10 +716,7 @@ mod tests {
         assert_eq!(infer_kind_from_line("mod utils;"), "module");
         assert_eq!(infer_kind_from_line("impl Foo {"), "impl");
 
-        assert_eq!(
-            infer_kind_from_line("something_unrecognized"),
-            "unknown"
-        );
+        assert_eq!(infer_kind_from_line("something_unrecognized"), "unknown");
     }
 
     #[test]

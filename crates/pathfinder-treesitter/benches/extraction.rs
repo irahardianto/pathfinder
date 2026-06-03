@@ -1,7 +1,15 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::format_push_string,
+    clippy::unnecessary_trailing_comma,
+    clippy::too_many_lines
+)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pathfinder_treesitter::language::SupportedLanguage;
-use pathfinder_treesitter::symbols::extract_symbols_from_tree;
 use pathfinder_treesitter::parser::AstParser;
+use pathfinder_treesitter::symbols::extract_symbols_from_tree;
 
 fn generate_rust_source(n_functions: usize) -> Vec<u8> {
     let mut src = String::from("struct Foo { x: i32 }\n\nimpl Foo {\n");
@@ -20,9 +28,7 @@ fn generate_rust_source(n_functions: usize) -> Vec<u8> {
 fn generate_go_source(n_functions: usize) -> Vec<u8> {
     let mut src = String::from("package main\n\n");
     for i in 0..n_functions {
-        src.push_str(&format!(
-            "func Handle{i:04}() int {{ return {i} }}\n"
-        ));
+        src.push_str(&format!("func Handle{i:04}() int {{ return {i} }}\n"));
     }
     src.push_str("type Server struct { ID int }\n");
     for i in 0..n_functions {
@@ -41,9 +47,7 @@ fn generate_typescript_source(n_classes: usize, methods_per_class: usize) -> Vec
         src.push_str(&format!(
             "export class Service{i:04} extends BaseEntity {{\n"
         ));
-        src.push_str(&format!(
-            "  private data{i}: number = {i};\n",
-        ));
+        src.push_str(&format!("  private data{i}: number = {i};\n",));
         for j in 0..methods_per_class {
             src.push_str(&format!(
                 "  async process_{j:03}(): Promise<number> {{ return this.data{i} + {j}; }}\n"
@@ -52,9 +56,7 @@ fn generate_typescript_source(n_classes: usize, methods_per_class: usize) -> Vec
         src.push_str("}\n\n");
     }
     for i in 0..n_classes {
-        src.push_str(&format!(
-            "const handler{i:04} = () => {{ return {i}; }};\n"
-        ));
+        src.push_str(&format!("const handler{i:04} = () => {{ return {i}; }};\n"));
     }
     src.into_bytes()
 }
@@ -108,7 +110,11 @@ fn bench_extraction(c: &mut Criterion) {
             &(&tree, &source),
             |b, (tree, src)| {
                 b.iter(|| {
-                    extract_symbols_from_tree(black_box(tree), black_box(src), SupportedLanguage::Rust)
+                    extract_symbols_from_tree(
+                        black_box(tree),
+                        black_box(src),
+                        SupportedLanguage::Rust,
+                    )
                 });
             },
         );
@@ -126,7 +132,11 @@ fn bench_extraction(c: &mut Criterion) {
             &(&tree, &source),
             |b, (tree, src)| {
                 b.iter(|| {
-                    extract_symbols_from_tree(black_box(tree), black_box(src), SupportedLanguage::Go)
+                    extract_symbols_from_tree(
+                        black_box(tree),
+                        black_box(src),
+                        SupportedLanguage::Go,
+                    )
                 });
             },
         );
@@ -144,7 +154,11 @@ fn bench_extraction(c: &mut Criterion) {
             &(&tree, &source),
             |b, (tree, src)| {
                 b.iter(|| {
-                    extract_symbols_from_tree(black_box(tree), black_box(src), SupportedLanguage::Python)
+                    extract_symbols_from_tree(
+                        black_box(tree),
+                        black_box(src),
+                        SupportedLanguage::Python,
+                    )
                 });
             },
         );

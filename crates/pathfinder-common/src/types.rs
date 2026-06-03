@@ -183,20 +183,19 @@ impl VersionHash {
         let hash = Sha256::digest(content);
         // "sha256:" (7 bytes) + 64 hex chars = 71 bytes total
         let mut buf = String::with_capacity(Self::PREFIX.len() + 64);
-        let _ = std::fmt::write(
-            &mut buf,
-            std::format_args!("{}{:x}", Self::PREFIX, hash),
-        );
+        let _ = std::fmt::write(&mut buf, std::format_args!("{}{:x}", Self::PREFIX, hash));
         Self(buf)
     }
 
     #[must_use]
     pub fn compute_from_raw(hash_bytes: [u8; 32]) -> Self {
-        let hex: String = hash_bytes.iter().fold(String::with_capacity(64), |mut acc, b| {
-            use std::fmt::Write;
-            let _ = write!(acc, "{b:02x}");
-            acc
-        });
+        let hex: String = hash_bytes
+            .iter()
+            .fold(String::with_capacity(64), |mut acc, b| {
+                use std::fmt::Write;
+                let _ = write!(acc, "{b:02x}");
+                acc
+            });
         Self(format!("sha256:{hex}"))
     }
 

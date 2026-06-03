@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_common::config::SandboxConfig;
 use pathfinder_common::sandbox::Sandbox;
@@ -7,11 +9,7 @@ fn bench_sandbox_check(c: &mut Criterion) {
     let mut group = c.benchmark_group("sandbox_check");
 
     let workspace = tempfile::tempdir().unwrap();
-    let sandbox = Sandbox::with_user_rules(
-        workspace.path(),
-        &SandboxConfig::default(),
-        None,
-    );
+    let sandbox = Sandbox::with_user_rules(workspace.path(), &SandboxConfig::default(), None);
 
     let allowed_cases = [
         ("normal_rs", Path::new("src/main.rs")),
@@ -23,13 +21,9 @@ fn bench_sandbox_check(c: &mut Criterion) {
     ];
 
     for (name, path) in &allowed_cases {
-        group.bench_with_input(
-            BenchmarkId::new("allowed", *name),
-            path,
-            |b, path| {
-                b.iter(|| sandbox.check(black_box(path)).is_ok());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("allowed", *name), path, |b, path| {
+            b.iter(|| sandbox.check(black_box(path)).is_ok());
+        });
     }
 
     let denied_cases = [
@@ -44,13 +38,9 @@ fn bench_sandbox_check(c: &mut Criterion) {
     ];
 
     for (name, path) in &denied_cases {
-        group.bench_with_input(
-            BenchmarkId::new("denied", *name),
-            path,
-            |b, path| {
-                b.iter(|| sandbox.check(black_box(path)).is_err());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("denied", *name), path, |b, path| {
+            b.iter(|| sandbox.check(black_box(path)).is_err());
+        });
     }
 
     group.finish();
