@@ -307,9 +307,15 @@ impl PathfinderServer {
                     let kind_filter = kind_filter.clone();
                     async move {
                         let file_path = Path::new(&m.file);
-                        let line_usize = usize::try_from(m.line).unwrap_or(0);
+                        // m.line is 1-indexed from ripgrep; tree-sitter also expects 1-indexed.
+                        // Default to 1 (first line) if conversion fails, preserving valid indexing.
+                        let line_usize = usize::try_from(m.line).unwrap_or(1);
 
                         // Enrich with Tree-sitter to get symbol name and kind
+                        // Cache fallback values to avoid recomputation on degraded paths
+                        let fallback_name = extract_name_from_line(&m.content);
+                        let fallback_kind = infer_kind_from_line(&m.content);
+
                         let (symbol_name, kind, is_degraded) = match self
                             .surgeon
                             .enclosing_symbol(self.workspace_root.path(), file_path, line_usize)
@@ -317,15 +323,10 @@ impl PathfinderServer {
                         {
                             Ok(Some(enclosing_symbol)) => {
                                 // If enclosing_symbol is already a full semantic path (file::symbol),
-                                // extract just the symbol part
-                                let symbol_part = if enclosing_symbol.contains("::") {
-                                    enclosing_symbol
-                                        .split("::")
-                                        .skip(1)
-                                        .collect::<Vec<_>>()
-                                        .join("::")
-                                } else {
-                                    enclosing_symbol.clone()
+                                // extract just the symbol part. Avoid clone by splitting in-place.
+                                let symbol_part = match enclosing_symbol.find("::") {
+                                    Some(pos) => enclosing_symbol[pos + 2..].to_string(),
+                                    None => enclosing_symbol,
                                 };
 
                                 // Validate symbol name is non-empty
@@ -336,20 +337,12 @@ impl PathfinderServer {
                                         line = m.line,
                                         "Tree-sitter returned empty symbol name, using fallback"
                                     );
-                                    (
-                                        extract_name_from_line(&m.content),
-                                        infer_kind_from_line(&m.content),
-                                        true,
-                                    )
+                                    (fallback_name, fallback_kind, true)
                                 } else {
-                                    (symbol_part, infer_kind_from_line(&m.content), false)
+                                    (symbol_part, fallback_kind, false)
                                 }
                             }
-                            Ok(None) | Err(_) => (
-                                extract_name_from_line(&m.content),
-                                infer_kind_from_line(&m.content),
-                                true,
-                            ),
+                            Ok(None) | Err(_) => (fallback_name, fallback_kind, true),
                         };
 
                         // Validate symbol name is non-empty
