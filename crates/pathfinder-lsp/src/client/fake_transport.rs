@@ -170,7 +170,7 @@ impl LspTransport for FakeTransport {
         self.capabilities.lock().expect("capabilities lock").clone()
     }
 
-    async fn shutdown(&self, _dispatcher: &RequestDispatcher) {
+    async fn shutdown(&self, _dispatcher: &RequestDispatcher, _language_id: &str) {
         // No-op for fake transport
     }
 }

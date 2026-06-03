@@ -81,7 +81,10 @@ pub async fn progress_watcher_task(
     indexing_progress_percent: Arc<std::sync::Mutex<Option<u8>>>,
     spawned_at: Instant,
 ) {
-    let mut rx = dispatcher.subscribe_notifications();
+    // LSP-INIT-002: Subscribe only to this language's notifications.
+    // This prevents progress notifications from other languages (e.g., rust's
+    // WorkDoneProgressEnd) from falsely marking this language as indexing-complete.
+    let mut rx = dispatcher.subscribe_notifications_for_language(&language_id);
     tracing::debug!(language = %language_id, "progress_watcher_task: started");
 
     loop {
@@ -130,7 +133,10 @@ pub async fn registration_watcher_task(
     live_capabilities: Arc<std::sync::RwLock<crate::client::DetectedCapabilities>>,
     transport: Arc<dyn crate::client::process::LspTransport>,
 ) {
-    let mut rx = dispatcher.subscribe_server_requests();
+    // LSP-INIT-002: Subscribe only to this language's server requests.
+    // This prevents capability registrations from other languages (e.g., rust's
+    // pull diagnostics registration) from polluting this language's live_capabilities.
+    let mut rx = dispatcher.subscribe_server_requests_for_language(&language_id);
     tracing::debug!(language = %language_id, "registration_watcher_task: started");
 
     loop {
@@ -216,7 +222,10 @@ pub async fn idle_timeout_task(
                     if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
                         tracing::debug!(language = %lang, "LSP: shutting down process");
                         state.reader_handle.abort();
-                        state.transport.shutdown(&dispatcher).await;
+                        // BUG-4 fix: reader is aborted so it won't call cancel_for_language.
+                        // We must cancel pending requests for this language explicitly.
+                        dispatcher.cancel_for_language(&lang);
+                        state.transport.shutdown(&dispatcher, &lang).await;
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
                         }
@@ -249,6 +258,9 @@ pub async fn idle_timeout_task(
                              removing entry so recovery can proceed"
                         );
                         state.reader_handle.abort();
+                        // Zombie reap: reader may or may not have called cancel_for_language.
+                        // Call it again to ensure pending requests are unblocked.
+                        dispatcher.cancel_for_language(&lang);
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
                         }
@@ -281,7 +293,9 @@ pub async fn idle_timeout_task(
                             "LSP: idle timeout — terminating"
                         );
                         state.reader_handle.abort();
-                        state.transport.shutdown(&dispatcher).await;
+                        // Idle timeout: reader is aborted, so call cancel_for_language explicitly.
+                        dispatcher.cancel_for_language(&lang);
+                        state.transport.shutdown(&dispatcher, &lang).await;
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
                         }

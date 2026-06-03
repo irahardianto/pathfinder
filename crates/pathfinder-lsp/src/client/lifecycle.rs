@@ -242,7 +242,10 @@ impl super::LspClient {
                 "LSP: force_respawn — killing existing process before respawn"
             );
             state.reader_handle.abort();
-            state.transport.shutdown(&self.dispatcher).await;
+            // BUG-4 fix: reader is aborted, call cancel_for_language explicitly
+            // to unblock any pending requests for this language.
+            self.dispatcher.cancel_for_language(language_id);
+            state.transport.shutdown(&self.dispatcher, language_id).await;
             if let Some(ref lifecycle) = state.lifecycle {
                 let _ = lifecycle.child.lock().await.wait().await;
             }
@@ -631,7 +634,10 @@ impl super::LspClient {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, LspError> {
-        let (id, rx) = self.dispatcher.register();
+        // LSP-INIT-002: Tag pending request with language_id so it can be
+        // selectively cancelled if this language's LSP crashes, without
+        // affecting other languages' pending requests.
+        let (id, rx) = self.dispatcher.register(language_id);
         let message = RequestDispatcher::make_request(id, method, &params);
 
         let _in_flight_guard = {
@@ -643,11 +649,14 @@ impl super::LspClient {
             };
             if state.reader_handle.is_finished() {
                 state.reader_handle.abort();
+                // Stale reader: may have panicked before calling cancel_for_language.
+                // Explicitly cancel pending requests for this language.
+                self.dispatcher.cancel_for_language(language_id);
                 let transport = Arc::clone(&state.transport);
                 let lifecycle = state.lifecycle.clone();
                 drop(entry);
                 self.processes.remove(language_id);
-                transport.shutdown(&self.dispatcher).await;
+                transport.shutdown(&self.dispatcher, language_id).await;
                 if let Some(ref lc) = lifecycle {
                     let _ = lc.child.lock().await.wait().await;
                 }
@@ -699,11 +708,13 @@ impl super::LspClient {
         };
         if state.reader_handle.is_finished() {
             state.reader_handle.abort();
+            // Stale reader: cancel pending requests explicitly
+            self.dispatcher.cancel_for_language(language_id);
             let transport = Arc::clone(&state.transport);
             let lifecycle = state.lifecycle.clone();
             drop(entry);
             self.processes.remove(language_id);
-            transport.shutdown(&self.dispatcher).await;
+            transport.shutdown(&self.dispatcher, language_id).await;
             if let Some(ref lc) = lifecycle {
                 let _ = lc.child.lock().await.wait().await;
             }

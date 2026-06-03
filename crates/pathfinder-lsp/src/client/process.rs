@@ -83,7 +83,10 @@ pub(crate) trait LspTransport: Send + Sync {
     /// Terminate the LSP process gracefully.
     ///
     /// Sends `shutdown` + `exit` requests, then force-kills after 2s.
-    async fn shutdown(&self, dispatcher: &RequestDispatcher);
+    ///
+    /// LSP-INIT-002: `language_id` is used to tag the pending shutdown request
+    /// so it can be properly tracked in the per-language dispatcher.
+    async fn shutdown(&self, dispatcher: &RequestDispatcher, language_id: &str);
 }
 
 /// A running LSP child process with its I/O handles.
@@ -179,8 +182,8 @@ impl LspTransport for ManagedProcess {
         self.capabilities.clone()
     }
 
-    async fn shutdown(&self, dispatcher: &RequestDispatcher) {
-        let (id, rx) = dispatcher.register();
+    async fn shutdown(&self, dispatcher: &RequestDispatcher, language_id: &str) {
+        let (id, rx) = dispatcher.register(language_id);
         let shutdown_req = RequestDispatcher::make_request(id, "shutdown", &Value::Null);
         if let Ok(mut stdin) =
             tokio::time::timeout(std::time::Duration::from_secs(2), self.stdin.lock()).await
@@ -247,9 +250,12 @@ pub(super) async fn spawn_and_initialize(
     // the RequestDispatcher. Without it running, the initialize response would
     // sit unread in the stdout pipe buffer forever — the oneshot channel `rx`
     // would never be filled, causing a deadlock.
-    let reader_handle = start_reader_task(stdout, Arc::clone(&dispatcher));
+    //
+    // LSP-INIT-002: Pass language_id to enable per-language isolation.
+    let reader_handle =
+        start_reader_task(stdout, Arc::clone(&dispatcher), language_id.to_owned());
 
-    let (id, rx) = dispatcher.register();
+    let (id, rx) = dispatcher.register(language_id);
     let init_request = build_initialize_request(id, project_root, &plugins, init_options).await?;
     write_message(&mut writer, &init_request).await?;
 
@@ -522,25 +528,33 @@ async fn build_initialize_request(
 /// Start the background reader task that dispatches incoming messages.
 ///
 /// The task runs until EOF on stdout (i.e., the LSP process exits),
-/// then calls `dispatcher.cancel_all()`.
+/// then calls `dispatcher.cancel_for_language(language_id)`.
+///
+/// LSP-INIT-002: `language_id` ensures the reader task:
+/// 1. Only dispatches notifications/server-requests to its own language's subscribers
+/// 2. Only cancels pending requests from its own language on EOF
 pub(super) fn start_reader_task(
     stdout: ChildStdout,
     dispatcher: Arc<RequestDispatcher>,
+    language_id: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         loop {
             match read_message(&mut reader).await {
                 Ok(msg) => {
-                    dispatcher.dispatch_response(&msg);
+                    dispatcher.dispatch_response_for_language(&language_id, &msg);
                 }
                 Err(LspError::ConnectionLost) => {
-                    tracing::info!("LSP stdout EOF — dispatcher cancel_all");
-                    dispatcher.cancel_all();
+                    tracing::info!(
+                        language = %language_id,
+                        "LSP stdout EOF — cancelling pending requests for language"
+                    );
+                    dispatcher.cancel_for_language(&language_id);
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "LSP reader error");
+                    tracing::warn!(error = %e, language = %language_id, "LSP reader error");
                     // Continue reading — transient errors should not kill the reader
                 }
             }
@@ -798,7 +812,7 @@ mod process_tests {
         let dispatcher = std::sync::Arc::new(RequestDispatcher::new());
 
         // Act
-        process.shutdown(&dispatcher).await;
+        process.shutdown(&dispatcher, "test").await;
 
         // Assert
         // Give the OS a moment to reap the process
