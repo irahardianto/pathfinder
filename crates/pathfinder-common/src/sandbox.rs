@@ -186,16 +186,38 @@ impl Sandbox {
     }
 
     fn is_hardcoded_denied(path_str: &str, path: &Path) -> bool {
-        // Check if path is in the git allowlist first
+        // Fast-reject: if path doesn't start with '.', it can't match any
+        // hardcoded deny pattern (.git/*, .pem, .key, .pfx, .p12).
+        // Only check extension for non-dot paths.
+        if !path_str.starts_with('.') {
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy();
+                if HARDCODED_DENY_EXTENSIONS
+                    .iter()
+                    .any(|e| ext_str.eq_ignore_ascii_case(e))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Path starts with '.' — check git allowlist first (cheapest)
         for allowed in GIT_ALLOWLIST {
             if path_str.starts_with(allowed) || path_str == *allowed {
                 return false;
             }
         }
 
-        // Check hardcoded deny patterns
+        // All hardcoded deny patterns share the ".git/" prefix
+        if path_str.starts_with(".git/") {
+            return true;
+        }
+
+        // Check remaining individual hardcoded entries (.git/HEAD, .git/index, etc.)
+        // These are bare filenames without trailing slash
         for pattern in HARDCODED_DENY_PATTERNS {
-            if path_str.starts_with(pattern) {
+            if !pattern.ends_with('/') && path_str == *pattern {
                 return true;
             }
         }

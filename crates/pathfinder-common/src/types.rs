@@ -92,7 +92,13 @@ impl SymbolChain {
             return None;
         }
 
-        let segments: Vec<Symbol> = input.split('.').filter_map(Symbol::parse).collect();
+        let dot_count = input.bytes().filter(|&b| b == b'.').count();
+        let mut segments = Vec::with_capacity(dot_count + 1);
+        for seg in input.split('.') {
+            if let Some(s) = Symbol::parse(seg) {
+                segments.push(s);
+            }
+        }
 
         if segments.is_empty() {
             return None;
@@ -104,8 +110,15 @@ impl SymbolChain {
 
 impl fmt::Display for SymbolChain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let parts: Vec<String> = self.segments.iter().map(ToString::to_string).collect();
-        write!(f, "{}", parts.join("."))
+        let mut first = true;
+        for seg in &self.segments {
+            if !first {
+                write!(f, ".")?;
+            }
+            write!(f, "{seg}")?;
+            first = false;
+        }
+        Ok(())
     }
 }
 
@@ -168,7 +181,23 @@ impl VersionHash {
     pub fn compute(content: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(content);
-        Self(format!("sha256:{hash:x}"))
+        // "sha256:" (7 bytes) + 64 hex chars = 71 bytes total
+        let mut buf = String::with_capacity(Self::PREFIX.len() + 64);
+        let _ = std::fmt::write(
+            &mut buf,
+            std::format_args!("{}{:x}", Self::PREFIX, hash),
+        );
+        Self(buf)
+    }
+
+    #[must_use]
+    pub fn compute_from_raw(hash_bytes: [u8; 32]) -> Self {
+        let hex: String = hash_bytes.iter().fold(String::with_capacity(64), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
+        Self(format!("sha256:{hex}"))
     }
 
     /// Create from a raw hash string (for deserialization from client input).
