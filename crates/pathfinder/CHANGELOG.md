@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1](https://github.com/irahardianto/pathfinder/compare/v0.11.0...v0.11.1) - 2026-06-03
+
+### Fixed
+
+- *(lsp)* address 27 audit findings across LSP client lifecycle
+- *(lsp)* eliminate cross-language dispatch interference in polyglot workspaces
+- *(lsp)* address phase 3 audit findings for cross-language dispatch isolation
+- *(pathfinder-lsp)* fix cross-language init race and panic recovery
+- Cross-language LSP dispatch isolation (LSP-INIT-002 Phase 1)
+
+### Other
+
+- *(lsp)* add cross-language dispatch observability (LSP-INIT-002 phase 4)
+
 ## [0.11.0](https://github.com/irahardianto/pathfinder/compare/v0.10.0...v0.11.0) - 2026-06-02
 
 ### Added
