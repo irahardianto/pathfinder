@@ -33,9 +33,15 @@ pub(crate) struct RequestDispatcher {
     next_id: AtomicU64,
     /// Per-language broadcast channels for unsolicited server notifications (no `id`).
     /// Key: `language_id`, Value: `broadcast::Sender<Value>`
+    ///
+    /// FUTURE: cleanup when dynamic language support is added. Currently bounded to
+    /// 5 languages (rust/go/typescript/python/java), so memory cost is negligible.
     notification_channels: DashMap<String, broadcast::Sender<Value>>,
     /// MT-3: Per-language broadcast channels for server-to-client *requests*
     /// (has both `id` and `method`, but the `id` is NOT in the pending map).
+    ///
+    /// FUTURE: cleanup when dynamic language support is added. Currently bounded to
+    /// 5 languages (rust/go/typescript/python/java), so memory cost is negligible.
     server_request_channels: DashMap<String, broadcast::Sender<Value>>,
 }
 
@@ -133,10 +139,12 @@ impl RequestDispatcher {
     /// LSP-INIT-002: The `source_language_id` parameter ensures notifications and
     /// server requests are only routed to subscribers of that specific language.
     ///
-    /// If the message has an `id` that matches a pending request, fires its
-    /// oneshot. Notifications (no `id`) are forwarded to the per-language
-    /// notification broadcast channel. Unmatched responses with `method` are
-    /// forwarded to the per-language `server_request` channel.
+    /// Dispatch priority (eliminates ID collision between client responses and
+    /// server-to-client requests per JSON-RPC 2.0):
+    /// 1. No `id` → notification → per-language notification channel
+    /// 2. Has `id` + `method` → server-to-client request → per-language `server_request` channel
+    /// 3. Has `id`, no `method`, in pending → response to our request → resolve oneshot
+    /// 4. Has `id`, not in pending → unmatched response → silently dropped
     #[allow(clippy::expect_used)] // Mutex poisoning is unrecoverable
     pub(crate) fn dispatch_response_for_language(&self, source_language_id: &str, message: &Value) {
         let Some(id_val) = message.get("id") else {
@@ -159,10 +167,31 @@ impl RequestDispatcher {
             return;
         };
 
-        let tx = self.pending.lock().expect("dispatcher lock").remove(&id);
+        // Check for method BEFORE checking pending to prevent ID collision
+        // between server-to-client requests (e.g. client/registerCapability)
+        // and our outgoing requests. A message with both `id` and `method`
+        // is a server request, not a response to our request.
+        if message.get("method").is_some() {
+            // Server-to-client request (has id AND method).
+            // Forward to per-language server_request channel.
+            let method = message
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            tracing::debug!(
+                language = %source_language_id,
+                id = %id,
+                method = %method,
+                "LSP: dispatching server-to-client request"
+            );
+            if let Some(tx) = self.server_request_channels.get(source_language_id) {
+                let _ = tx.send(message.clone());
+            }
+            return;
+        }
 
-        if let Some((_lang, sender)) = tx {
-            // Normal response to a request we sent: resolve the waiting oneshot.
+        // Normal response to a request we sent (has id, no method).
+        if let Some((_lang, sender)) = self.pending.lock().expect("dispatcher lock").remove(&id) {
             let is_error = message.get("error").is_some();
             tracing::debug!(
                 language = %source_language_id,
@@ -180,22 +209,6 @@ impl RequestDispatcher {
                 Ok(message["result"].clone())
             };
             let _ = sender.send(result);
-        } else if message.get("method").is_some() {
-            // MT-3: Server-to-client request (has id AND method, NOT in pending).
-            // Forward to per-language server_request channel.
-            let method = message
-                .get("method")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            tracing::debug!(
-                language = %source_language_id,
-                id = %id,
-                method = %method,
-                "LSP: dispatching server-to-client request"
-            );
-            if let Some(tx) = self.server_request_channels.get(source_language_id) {
-                let _ = tx.send(message.clone());
-            }
         }
     }
 
@@ -867,5 +880,60 @@ mod tests {
         // And importantly: no cross-talk
         assert!(rust_rx.try_recv().is_err(), "rust queue is now empty");
         assert!(ts_rx.try_recv().is_err(), "typescript queue is now empty");
+    }
+
+    #[tokio::test]
+    async fn test_server_request_with_colliding_id_not_treated_as_response() {
+        // When a server sends client/registerCapability with an id that happens
+        // to match one of our pending request ids, it must be dispatched as a
+        // server request (has method), NOT as a response to our pending request.
+        let dispatcher = RequestDispatcher::new();
+
+        // Register a pending request — gets id=1
+        let (id, mut rx) = dispatcher.register("rust");
+        assert_eq!(id, 1);
+
+        let mut server_rx = dispatcher.subscribe_server_requests_for_language("rust");
+
+        // Server sends client/registerCapability with id=1 (same as our pending request)
+        let server_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "reg-001",
+                    "method": "textDocument/diagnostic",
+                    "registerOptions": {}
+                }]
+            }
+        });
+        dispatcher.dispatch_response_for_language("rust", &server_req);
+
+        // The server request should go to the server_request channel (has method)
+        let received =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), server_rx.recv())
+                .await
+                .expect("should not time out")
+                .expect("should receive");
+
+        assert_eq!(
+            received["method"].as_str().unwrap_or(""),
+            "client/registerCapability",
+            "server request with colliding id should be dispatched to server_request channel"
+        );
+
+        // The pending request should NOT have been resolved
+        assert!(
+            rx.try_recv().is_err(),
+            "pending request must NOT be resolved by a server request with colliding id"
+        );
+
+        // The pending entry should still exist
+        assert_eq!(
+            dispatcher.pending.lock().unwrap().len(),
+            1,
+            "pending request should still be registered"
+        );
     }
 }

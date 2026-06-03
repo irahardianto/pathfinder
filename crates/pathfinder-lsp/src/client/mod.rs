@@ -56,6 +56,15 @@ pub(crate) struct LanguageState {
     pub(crate) indexing_progress_percent: Arc<std::sync::Mutex<Option<u8>>>,
     pub(crate) live_capabilities: Arc<std::sync::RwLock<DetectedCapabilities>>,
     pub(crate) in_coexistence_mode: bool,
+    pub(crate) watcher_handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl LanguageState {
+    pub(crate) fn abort_watchers(&self) {
+        for handle in &self.watcher_handles {
+            handle.abort();
+        }
+    }
 }
 
 /// Tracks backoff state for a language whose last spawn attempt failed.
@@ -564,6 +573,7 @@ mod tests {
             indexing_progress_percent: Arc::new(std::sync::Mutex::new(None)),
             live_capabilities: Arc::new(std::sync::RwLock::new(DetectedCapabilities::default())),
             in_coexistence_mode: false,
+            watcher_handles: vec![],
         }));
 
         let descriptors = vec![LspDescriptor {

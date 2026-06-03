@@ -56,6 +56,7 @@ pub async fn reader_supervisor_task(
             "LSP: supervisor reaping child process to free PID slot"
         );
         state.reader_handle.abort();
+        state.abort_watchers();
 
         // MEDIUM-1 fix: Cancel pending requests for this language when reader crashes.
         // Normal EOF path has reader_task itself calling cancel_for_language before
@@ -223,6 +224,7 @@ pub async fn registration_watcher_task(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn idle_timeout_task(
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
@@ -239,6 +241,7 @@ pub async fn idle_timeout_task(
                     if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
                         tracing::debug!(language = %lang, "LSP: shutting down process");
                         state.reader_handle.abort();
+                        state.abort_watchers();
                         // BUG-4 fix: reader is aborted so it won't call cancel_for_language.
                         // We must cancel pending requests for this language explicitly.
                         dispatcher.cancel_for_language(&lang);
@@ -275,6 +278,7 @@ pub async fn idle_timeout_task(
                              removing entry so recovery can proceed"
                         );
                         state.reader_handle.abort();
+                        state.abort_watchers();
                         // Zombie reap: reader may or may not have called cancel_for_language.
                         // Call it again to ensure pending requests are unblocked.
                         dispatcher.cancel_for_language(&lang);
@@ -324,6 +328,7 @@ pub async fn idle_timeout_task(
                             "LSP: idle timeout — terminating"
                         );
                         state.reader_handle.abort();
+                        state.abort_watchers();
                         // Idle timeout: reader is aborted, so call cancel_for_language explicitly.
                         dispatcher.cancel_for_language(&lang);
                         state.transport.shutdown(&dispatcher, &lang).await;

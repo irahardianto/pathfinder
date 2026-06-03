@@ -252,6 +252,7 @@ impl super::LspClient {
                 "LSP: force_respawn — killing existing process before respawn"
             );
             state.reader_handle.abort();
+            state.abort_watchers();
             // BUG-4 fix: reader is aborted, call cancel_for_language explicitly
             // to unblock any pending requests for this language.
             self.dispatcher.cancel_for_language(language_id);
@@ -273,8 +274,8 @@ impl super::LspClient {
 
     pub(crate) async fn ensure_process(&self, language_id: &str) -> Result<(), LspError> {
         if let Some(entry) = self.processes.get(language_id) {
-            return match entry.value() {
-                ProcessEntry::Running(_) => Ok(()),
+            match entry.value() {
+                ProcessEntry::Running(_) => return Ok(()),
                 ProcessEntry::Unavailable(state) => {
                     let backoff_secs =
                         std::cmp::min(1u64 << state.backoff_attempt, MAX_BACKOFF_SECS);
@@ -288,7 +289,6 @@ impl super::LspClient {
                             "LSP: backoff elapsed, attempting recovery"
                         );
                         self.processes.remove(language_id);
-                        Ok(())
                     } else {
                         tracing::debug!(
                             language = %language_id,
@@ -296,10 +296,10 @@ impl super::LspClient {
                             elapsed_secs,
                             "LSP: in backoff window, returning NoLspAvailable"
                         );
-                        Err(LspError::NoLspAvailable)
+                        return Err(LspError::NoLspAvailable);
                     }
                 }
-            };
+            }
         }
 
         let init_lock = self
@@ -310,8 +310,8 @@ impl super::LspClient {
         let _guard = init_lock.lock().await;
 
         if let Some(entry) = self.processes.get(language_id) {
-            return match entry.value() {
-                ProcessEntry::Running(_) => Ok(()),
+            match entry.value() {
+                ProcessEntry::Running(_) => return Ok(()),
                 ProcessEntry::Unavailable(state) => {
                     let backoff_secs =
                         std::cmp::min(1u64 << state.backoff_attempt, MAX_BACKOFF_SECS);
@@ -325,12 +325,11 @@ impl super::LspClient {
                             "LSP: backoff elapsed (post-lock check), attempting recovery"
                         );
                         self.processes.remove(language_id);
-                        Ok(())
                     } else {
-                        Err(LspError::NoLspAvailable)
+                        return Err(LspError::NoLspAvailable);
                     }
                 }
-            };
+            }
         }
 
         let descriptor = self
@@ -471,7 +470,7 @@ impl super::LspClient {
         let lang_id_for_watcher = language_id.clone();
         let dispatcher_for_watcher = Arc::clone(&self.dispatcher);
         let spawned_at_for_watcher = spawned_at;
-        tokio::spawn(async move {
+        let progress_handle = tokio::spawn(async move {
             progress_watcher_task(
                 lang_id_for_watcher,
                 dispatcher_for_watcher,
@@ -505,7 +504,7 @@ impl super::LspClient {
         let caps_for_reg = Arc::clone(&live_capabilities);
         let lang_id_for_reg = language_id.clone();
         let dispatcher_for_reg = Arc::clone(&self.dispatcher);
-        tokio::spawn(async move {
+        let registration_handle = tokio::spawn(async move {
             registration_watcher_task(
                 lang_id_for_reg,
                 dispatcher_for_reg,
@@ -537,6 +536,7 @@ impl super::LspClient {
                 indexing_progress_percent: indexing_progress,
                 live_capabilities,
                 in_coexistence_mode,
+                watcher_handles: vec![progress_handle, registration_handle],
             })),
         );
 
@@ -682,7 +682,8 @@ impl super::LspClient {
                     language_id,
                     |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
                 );
-                if let Some((_, ProcessEntry::Running(_))) = removed {
+                if let Some((_, ProcessEntry::Running(state))) = removed {
+                    state.abort_watchers();
                     transport.shutdown(&self.dispatcher, language_id).await;
                     if let Some(ref lc) = lifecycle {
                         let _ = lc.child.lock().await.wait().await;
@@ -739,7 +740,8 @@ impl super::LspClient {
                 language_id,
                 |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
             );
-            if let Some((_, ProcessEntry::Running(_))) = removed {
+            if let Some((_, ProcessEntry::Running(state))) = removed {
+                state.abort_watchers();
                 transport.shutdown(&self.dispatcher, language_id).await;
                 if let Some(ref lc) = lifecycle {
                     let _ = lc.child.lock().await.wait().await;
@@ -906,7 +908,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ensure_process_unavailable_cooldown_elapsed_removes_entry() {
+    async fn test_ensure_process_unavailable_cooldown_elapsed_attempts_start() {
         let processes = HashMap::from([(
             "rust".to_owned(),
             ProcessEntry::Unavailable(UnavailableState {
@@ -917,14 +919,23 @@ mod tests {
         let client = client_with_descriptors(vec!["rust"], processes);
 
         let result = client.ensure_process("rust").await;
+
+        // After fix: ensure_process falls through to start_process when backoff elapsed.
+        // Since the fake binary doesn't exist, start_process fails and inserts a new
+        // Unavailable entry with incremented backoff.
         assert!(
-            result.is_ok(),
-            "cooldown-elapsed should clear unavailable and return Ok: {result:?}"
+            result.is_err(),
+            "cooldown-elapsed should attempt start_process (which fails without real binary): {result:?}"
         );
 
+        let entry = client.processes.get("rust");
         assert!(
-            client.processes.get("rust").is_none(),
-            "entry should be removed after cooldown-elapsed path"
+            entry.is_some(),
+            "should have a new Unavailable entry after failed start_process"
+        );
+        assert!(
+            matches!(entry.unwrap().value(), ProcessEntry::Unavailable(_)),
+            "entry should be Unavailable after failed start"
         );
     }
 
@@ -1503,16 +1514,19 @@ mod tests {
 
         let _ = client.ensure_process("rust").await;
 
+        // After fix: ensure_process falls through to start_process when backoff elapsed.
+        // start_process(descriptor, 0) fails → inserts Unavailable with backoff_attempt=1.
         let entry = client.processes.get("rust");
-        if let Some(entry) = entry {
-            if let ProcessEntry::Unavailable(state) = entry.value() {
-                assert!(
-                    state.backoff_attempt > 2,
-                    "backoff_attempt should be incremented: got {}",
-                    state.backoff_attempt
-                );
-            }
-        }
+        assert!(
+            entry.is_some(),
+            "should have Unavailable entry after failed start"
+        );
+        if let ProcessEntry::Unavailable(state) = entry.unwrap().value() {
+            assert_eq!(
+                state.backoff_attempt, 1,
+                "backoff_attempt should be 1 (fresh attempt from start_process failure)"
+            );
+        };
     }
 
     #[test]

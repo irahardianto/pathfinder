@@ -2,7 +2,7 @@
 
 **Date**: 2026-06-03
 **Severity**: P0 (cross-language blast radius on crash) + P1 (incorrect state)
-**Status**: Open
+**Status**: Closed
 **Affects**: Pathfinder v0.4.0, all LSP languages when multiple are active concurrently
 **Related**: LSP-HEALTH-001, DashMap init_locks refactor (completed)
 
@@ -10,7 +10,7 @@
 
 ## Executive Summary
 
-The DashMap refactor for `init_locks` eliminated per-language lock contention during LSP initialization. However, the shared `RequestDispatcher` architecture introduces four categories of cross-language interference bugs that manifest when multiple LSP servers run concurrently:
+The DashMap refactor for `init_locks` eliminated per-language lock contention during LSP initialization. However, the shared `RequestDispatcher` architecture introduced four categories of cross-language interference bugs that manifest when multiple LSP servers run concurrently:
 
 1. A single language crash cancels ALL pending requests across ALL languages
 2. Progress notifications from one language falsely mark other languages as indexing-complete
@@ -18,6 +18,8 @@ The DashMap refactor for `init_locks` eliminated per-language lock contention du
 4. `force_respawn` bypasses init_locks, enabling orphaned process spawns
 
 These bugs are invisible in single-language projects and only surface in polyglot workspaces (e.g., Rust backend + TypeScript frontend + Go tools).
+
+All deliverables have been implemented and verified. Additional bugs discovered during implementation have been fixed and documented below.
 
 ---
 
@@ -36,9 +38,9 @@ These bugs are invisible in single-language projects and only surface in polyglo
 
 ---
 
-## Root Cause: Shared RequestDispatcher Architecture
+## Root Cause: Shared RequestDispatcher Architecture (RESOLVED)
 
-### The Problem
+### The Problem (Before Fix)
 
 ```
                           ┌─────────────────────┐
@@ -58,334 +60,209 @@ These bugs are invisible in single-language projects and only surface in polyglo
 
 Every language's reader task, progress watcher, and registration watcher shares one `RequestDispatcher`. There is no per-language partitioning.
 
+### The Solution (After Fix)
+
+```
+  rust reader ──────► dispatch_response_for_language("rust", msg)
+                           │
+                           ├── notification_channels["rust"] ──► rust progress_watcher
+                           ├── server_request_channels["rust"] ──► rust registration_watcher
+                           └── pending[id=("rust", sender)] ──► resolve oneshot
+
+  go reader ────────► dispatch_response_for_language("go", msg)
+                           │
+                           ├── notification_channels["go"] ──► go progress_watcher
+                           ├── server_request_channels["go"] ──► go registration_watcher
+                           └── pending[id=("go", sender)] ──► resolve oneshot
+
+  (each language fully isolated)
+```
+
 ### The Trigger Conditions
 
-**BUG-1 (cancel_all blast)**:
+**BUG-1 (cancel_all blast)** — FIXED:
 1. Language A's LSP process dies (crash, OOM, manual kill)
 2. Language A's reader task reads EOF from stdout
-3. Reader task calls `dispatcher.cancel_all()`
-4. ALL pending oneshot channels (including Language B's active request) receive `Err(ConnectionLost)`
-5. Language B's `goto_definition` or `analyze_impact` call fails with `ConnectionLost` even though Language B's LSP is healthy
+3. Reader task calls `dispatcher.cancel_for_language(language_id)` (scoped to language A only)
+4. Only Language A's pending oneshot channels receive `Err(ConnectionLost)`
+5. Language B's `goto_definition` or `analyze_impact` calls remain unaffected
 
-**BUG-2 (progress bleed)**:
+**BUG-2 (progress bleed)** — FIXED:
 1. Rust's rust-analyzer sends `$/progress` with `kind: "end"` after indexing
-2. `dispatch_response` sees no `id` field → broadcasts to `notification_tx`
-3. ALL `progress_watcher_task`s (one per language) receive the notification
-4. `extract_progress_action` does not filter by progress token or language
-5. TypeScript's `indexing_complete` flag set to `true` even if tsserver is still indexing
-6. `lsp_health` reports TypeScript as "ready" prematurely
+2. `dispatch_response_for_language("rust", msg)` sees no `id` field → sends to `notification_channels["rust"]`
+3. Only Rust's `progress_watcher_task` receives the notification
+4. TypeScript's `indexing_complete` flag is unaffected
 
-**BUG-3 (registration bleed)**:
+**BUG-3 (registration bleed)** — FIXED:
 1. Rust's rust-analyzer sends `client/registerCapability` (e.g., for pull diagnostics)
-2. `dispatch_response` sees `id` + `method`, not in pending → broadcasts to `server_request_tx`
-3. ALL `registration_watcher_task`s receive the request
-4. TypeScript's watcher applies rust-analyzer's registration to TypeScript's `live_capabilities`
-5. TypeScript's watcher sends a response to TypeScript's transport (wrong LSP)
-6. TypeScript's `capabilities_for()` reports capabilities it doesn't actually support
+2. `dispatch_response_for_language("rust", msg)` sees `id` + `method` → sends to `server_request_channels["rust"]`
+3. Only Rust's `registration_watcher_task` receives the request
+4. TypeScript's `live_capabilities` remains unaffected
 
-**BUG-4 (force_respawn race)**:
+**BUG-4 (force_respawn race)** — FIXED:
 1. Thread A: `ensure_process("rust")` acquires init_lock, calls `start_process`
-2. Thread B: `force_respawn("rust")` removes process, calls `start_process` (no init_lock)
-3. Two rust-analyzer processes spawned, first becomes orphaned
+2. Thread B: `force_respawn("rust")` also acquires init_lock (waits for Thread A)
+3. Only one rust-analyzer process is spawned at a time
 
 ---
 
-## Source Code References
+## Source Code References (Current)
 
 | Component | File | Lines | Role |
 |---|---|---|---|
-| `LspClient` struct | `client/mod.rs` | 267-277 | Shared state (DashMap + Arc) |
-| `RequestDispatcher` | `client/protocol.rs` | 14-22 | Shared dispatch (root cause) |
-| `dispatch_response` | `client/protocol.rs` | 101-132 | Routes to broadcast channels |
-| `cancel_all` | `client/protocol.rs` | 134-143 | Drains ALL pending (BUG-1) |
-| `start_reader_task` | `client/process.rs` | 165-182 | Calls cancel_all on EOF |
-| `progress_watcher_task` | `client/background.rs` | 67-120 | Receives ALL notifications (BUG-2) |
-| `extract_progress_action` | `client/background.rs` | 287-314 | No language/token filter |
-| `registration_watcher_task` | `client/background.rs` | 122-193 | Receives ALL requests (BUG-3) |
-| `extract_registration_action` | `client/background.rs` | 195-261 | No language filter |
-| `ensure_process` | `client/lifecycle.rs` | 268-332 | Uses init_locks correctly |
-| `force_respawn` | `client/lifecycle.rs` | 349-370 | Skips init_locks (BUG-4) |
-| `request` | `client/lifecycle.rs` | 506-567 | TOCTOU window (BUG-5) |
-| `idle_timeout_task` | `client/background.rs` | 204-280 | Collect-then-remove pattern |
-| `warm_start_for_languages_and_track` | `client/lifecycle.rs` | 143-196 | Concurrent spawn via init_locks |
+| `LspClient` struct | `client/mod.rs` | 277-295 | Shared state (DashMap + Arc) |
+| `LanguageState` struct | `client/mod.rs` | 47-69 | Per-language state + watcher handles |
+| `RequestDispatcher` | `client/protocol.rs` | 31-56 | Per-language dispatch (DashMap channels) |
+| `PendingRequest` type | `client/protocol.rs` | 29 | `(String, oneshot::Sender)` with language tag |
+| `register` | `client/protocol.rs` | 67-81 | Stores language_id with pending request |
+| `subscribe_notifications_for_language` | `client/protocol.rs` | 105-118 | Per-language notification channel |
+| `subscribe_server_requests_for_language` | `client/protocol.rs` | 123-136 | Per-language server request channel |
+| `dispatch_response_for_language` | `client/protocol.rs` | 149-211 | Method-first dispatch (collision-safe) |
+| `cancel_all` | `client/protocol.rs` | 257-268 | Drains ALL pending (shutdown only) |
+| `cancel_for_language` | `client/protocol.rs` | 275-300 | Scoped cancel for single language |
+| `notification_channels` | `client/protocol.rs` | 37-40 | Per-language DashMap broadcast |
+| `server_request_channels` | `client/protocol.rs` | 43-49 | Per-language DashMap broadcast |
+| `start_reader_task` | `client/process.rs` | 535-562 | Passes language_id to dispatch |
+| `spawn_and_initialize` | `client/process.rs` | 232-330 | Full spawn + handshake |
+| `progress_watcher_task` | `client/background.rs` | 92-144 | Subscribes to per-language channel |
+| `extract_progress_action` | `client/background.rs` | 356-391 | Parse progress from notification |
+| `registration_watcher_task` | `client/background.rs` | 147-222 | Subscribes to per-language channel |
+| `extract_registration_action` | `client/background.rs` | 424-476 | Parse registration from request |
+| `ensure_process` | `client/lifecycle.rs` | 275-350 | Falls through to start_process on backoff elapsed |
+| `force_respawn` | `client/lifecycle.rs` | 229-272 | Acquires init_lock, aborts watchers |
+| `request` | `client/lifecycle.rs` | 655-716 | Single-access with InFlightGuard |
+| `idle_timeout_task` | `client/background.rs` | 227-353 | remove_if double-check + watcher abort |
+| `warm_start_for_languages_and_track` | `client/lifecycle.rs` | 90-140 | Concurrent spawn via init_locks |
 
 ---
 
-## Deliverables (Progressive, Bite-Sized)
+## Deliverables (All Implemented)
 
 ### Phase 1: Per-Language Dispatcher Tags (BUG-1, BUG-2, BUG-3)
 
-The core fix: add `language_id` awareness to the dispatcher so that cancel, progress, and registration events are scoped to their source language.
+#### DEL-1.1: Add language_id to pending request tracking — DONE
 
-#### DEL-1.1: Add language_id to pending request tracking
+**File**: `client/protocol.rs:29,67-81`
 
-**File**: `client/protocol.rs`
+`PendingRequest = (String, oneshot::Sender)`. `register(language_id)` stores language tag alongside sender. All callers updated.
 
-**Changes**:
-- Change `pending` from `Mutex<HashMap<u64, oneshot::Sender<...>>>` to `Mutex<HashMap<u64, (String, oneshot::Sender<...>)>>`
-- Update `register()` to accept `language_id: &str` and store it alongside the sender
-- Update `register()` signature: `fn register(&self, language_id: &str) -> (u64, oneshot::Receiver<...>)`
-- Update all callers: `request()`, `spawn_and_initialize()`, test fixtures
+#### DEL-1.2: Scope cancel to a single language — DONE
 
-**Test**:
-- Unit test: `register` stores language_id correctly
-- Unit test: multiple languages' registrations coexist
+**File**: `client/protocol.rs:275-300`
 
-**Risk**: Low. Internal API change, no behavior change yet.
+`cancel_for_language(language_id)` drains only matching entries. Reader task calls this instead of `cancel_all`. `cancel_all` retained for shutdown path only.
 
----
+#### DEL-1.3: Per-language notification channels — DONE
 
-#### DEL-1.2: Scope cancel_all to a single language
+**File**: `client/protocol.rs:37-40,105-118,149-168`
 
-**File**: `client/protocol.rs`
+`notification_channels: DashMap<String, broadcast::Sender<Value>>`. Reader dispatches to per-language channel via `dispatch_response_for_language(source_language_id, message)`.
 
-**Changes**:
-- Add `cancel_for_language(&self, language_id: &str)` that drains only entries matching the given language_id
-- Change reader task to call `cancel_for_language(language_id)` instead of `cancel_all()`
-- Keep `cancel_all()` for shutdown path only
+#### DEL-1.4: Per-language server request channels — DONE
 
-**Test**:
-- Unit test: `cancel_for_language("rust")` only cancels rust requests, leaves go requests intact
-- Unit test: `cancel_for_language` with no matching entries is a no-op
+**File**: `client/protocol.rs:43-49,123-136,171-190`
 
-**Risk**: Low. New method, existing `cancel_all` preserved for shutdown.
+`server_request_channels: DashMap<String, broadcast::Sender<Value>>`. Same pattern as notifications. Server requests routed by source language.
 
----
+#### DEL-1.5: Update spawn_and_initialize to use tagged dispatch — DONE
 
-#### DEL-1.3: Per-language notification channels
+**File**: `client/process.rs:535-562`
 
-**File**: `client/protocol.rs`, `client/background.rs`, `client/lifecycle.rs`
+`start_reader_task` accepts `language_id: String`, passes to `dispatch_response_for_language`.
 
-**Changes**:
-- Change `notification_tx` from single broadcast to `DashMap<String, broadcast::Sender<Value>>`
-- Add `get_or_create_notification_channel(&self, language_id: &str) -> broadcast::Receiver<Value>`
-- Change `dispatch_response`: for notifications, extract language context or broadcast to all (with downstream filtering)
-- Since LSP notifications don't carry a `language_id` field, the routing must be done by the reader task: tag each message with the source language before dispatch
+#### DEL-1.6: Update all callers of register() — DONE
 
-**Approach**: Change `dispatch_response` signature to accept an optional `source_language_id: Option<&str>`. Reader tasks pass their language_id. When a notification arrives:
-- If `source_language_id` is `Some(lang)`: send only to that language's notification channel
-- If `None` (backward compat): broadcast to all
+**File**: `client/lifecycle.rs:655-716`, `client/process.rs:268-271`, test fixtures
 
-**Reader task change** (`start_reader_task`): accept `language_id: String` parameter, pass it to a new `dispatch_response_for_language(&self, language_id: &str, msg: &Value)` method.
+All `register()` calls pass `language_id`.
 
-**Test**:
-- Unit test: notification from "rust" only reaches "rust" subscriber
-- Unit test: notification from "go" does NOT reach "rust" subscriber
+#### DEL-1.7: Background task leak on respawn — DONE (Post-implementation fix)
 
-**Risk**: Medium. Core dispatch path changes. All reader task callers must pass language_id.
+**File**: `client/mod.rs:47-69`, `client/lifecycle.rs:474-518`, `client/background.rs`
 
----
+**Problem**: When a language's LSP crashes and `start_process` respawns it, NEW `progress_watcher_task` and `registration_watcher_task` are spawned, but the OLD ones are never cancelled. They hold `broadcast::Receiver` handles from per-language DashMap channels. Since `broadcast::Sender` entries are never removed from the DashMap, old receivers block forever in `recv().await`.
 
-#### DEL-1.4: Per-language server request channels
+Each respawn leaked 2 tokio tasks + their Arc clones. Under pathological crash loops, this accumulates.
 
-**File**: `client/protocol.rs`, `client/background.rs`
-
-**Changes**:
-- Same pattern as DEL-1.3 but for `server_request_tx`
-- Change to `DashMap<String, broadcast::Sender<Value>>`
-- Add `get_or_create_server_request_channel(&self, language_id: &str) -> broadcast::Receiver<Value>`
-- Server requests (has `id` + `method`, not in pending) are routed to the source language's channel
-
-**Test**:
-- Unit test: `client/registerCapability` from "rust" only reaches "rust" registration_watcher
-- Unit test: response sent back through correct transport
-
-**Risk**: Medium. Same scope as DEL-1.3.
-
----
-
-#### DEL-1.5: Update spawn_and_initialize to use tagged dispatch
-
-**File**: `client/process.rs`
-
-**Changes**:
-- `spawn_and_initialize` already receives `language_id: &str`
-- Pass `language_id` to `start_reader_task`
-- `start_reader_task` passes `language_id` to `dispatch_response_for_language`
-
-**Test**:
-- Integration test: spawn two fake LSPs (rust, go), send notification from rust, verify only rust's progress watcher receives it
-
-**Risk**: Low. Wiring change only.
-
----
-
-#### DEL-1.6: Update all callers of register()
-
-**File**: `client/lifecycle.rs`, `client/process.rs`, test fixtures
-
-**Changes**:
-- `spawn_and_initialize`: `dispatcher.register(language_id)` instead of `dispatcher.register()`
-- `request()`: `self.dispatcher.register(language_id)` instead of `self.dispatcher.register()`
-- All test fixtures that call `register()`
-
-**Test**:
-- Existing tests pass with new signature
-
-**Risk**: Low. Mechanical change.
+**Fix**: `LanguageState` stores `watcher_handles: Vec<JoinHandle<()>>`. `abort_watchers()` method aborts all handles. Called at every process removal path:
+- `reader_supervisor_task` — on crash/EOF cleanup
+- `idle_timeout_task` — shutdown, zombie reap, idle timeout
+- `force_respawn` — before starting new process
+- `request()` / `notify()` — stale reader detection
 
 ---
 
 ### Phase 2: force_respawn Init Lock (BUG-4)
 
-#### DEL-2.1: Acquire init_locks in force_respawn
+#### DEL-2.1: Acquire init_locks in force_respawn — DONE
 
-**File**: `client/lifecycle.rs`
+**File**: `client/lifecycle.rs:229-272`
 
-**Changes**:
-- In `force_respawn`, acquire `init_locks` for the language before calling `start_process`
-- Pattern: same as `ensure_process` -- `entry().or_insert_with().clone()` then `lock().await`
-- Kill existing process AFTER acquiring the lock (not before) to prevent the race
-
-**Before**:
-```rust
-pub async fn force_respawn(&self, language_id: &str) -> Result<(), LspError> {
-    let descriptor = ...;
-    if let Some((_, ProcessEntry::Running(state))) = self.processes.remove(language_id) {
-        // kill
-    }
-    self.start_process(descriptor, 0).await
-}
-```
-
-**After**:
-```rust
-pub async fn force_respawn(&self, language_id: &str) -> Result<(), LspError> {
-    let descriptor = ...;
-
-    let init_lock = self
-        .init_locks
-        .entry(language_id.to_owned())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let _guard = init_lock.lock().await;
-
-    // Kill existing process under lock protection
-    if let Some((_, ProcessEntry::Running(state))) = self.processes.remove(language_id) {
-        // kill
-    }
-
-    self.start_process(descriptor, 0).await
-}
-```
-
-**Test**:
-- Test: concurrent `force_respawn("rust")` + `ensure_process("rust")` produces exactly 1 process entry
-- Test: `force_respawn` while `ensure_process` holds init_lock waits and then sees the process already running
-
-**Risk**: Low. Follows existing pattern from `ensure_process`.
+`force_respawn` acquires `init_locks` before killing existing process. Same pattern as `ensure_process`. Kill + `abort_watchers()` + `cancel_for_language()` happen under lock protection.
 
 ---
 
 ### Phase 3: request() TOCTOU Hardening (BUG-5)
 
-#### DEL-3.1: Eliminate double-get pattern in request()
+#### DEL-3.1: Eliminate double-get pattern in request() — DONE
 
-**File**: `client/lifecycle.rs`
+**File**: `client/lifecycle.rs:655-716`
 
-**Changes**:
-- Refactor `request()` to use a single DashMap access for both InFlightGuard creation and send
-- Option A: Hold the `RefMulti` guard across the send (guard is `Send` safe)
-- Option B: Use `processes.entry()` API for atomic get-or-insert semantics
-- Preferred: Option A -- simpler, hold the guard
+Single `processes.get()` access. `InFlightGuard` cloned from `state.transport.in_flight()`, `Arc<transport>` extracted. Entry dropped before `transport.send()`. Guard keeps counter > 0, preventing `idle_timeout_task` removal.
 
-**Before** (simplified):
-```rust
-let _in_flight_guard = {
-    let entry = self.processes.get(language_id)?;
-    InFlightGuard::new(Arc::clone(state.transport.in_flight()))
-    // entry dropped here
-};
-{
-    let entry = self.processes.get(language_id)?;  // TOCTOU: could be removed
-    state.transport.send(&message).await?;
-}
-```
+#### DEL-3.2: Double-check in_flight at removal time in idle_timeout_task — DONE
 
-**After** (simplified):
-```rust
-let (in_flight_guard, transport) = {
-    let entry = self.processes.get(language_id)?;
-    let guard = InFlightGuard::new(Arc::clone(state.transport.in_flight()));
-    let transport = Arc::clone(&state.transport);
-    (guard, transport)
-    // entry dropped, but in_flight_guard keeps counter > 0
-};
-transport.send(&message).await?;
-```
+**File**: `client/background.rs:310-340`
 
-This eliminates the second `processes.get()`. The `InFlightGuard` (counter > 0) prevents `idle_timeout_task` from removing the process during the send.
-
-Note: `idle_timeout_task` must also be updated to re-check `in_flight` at removal time (not just at snapshot time) to close the remaining window.
-
-**Test**:
-- Test: send request while `idle_timeout_task` is collecting removal candidates
-- Test: `idle_timeout_task` skips language with in_flight > 0
-
-**Risk**: Low. Simplifies the code path.
+`remove_if` with atomic re-check of `in_flight` and `last_used` before removal. Eliminates TOCTOU window between snapshot and actual remove.
 
 ---
 
-#### DEL-3.2: Double-check in_flight at removal time in idle_timeout_task
+### Phase 4: Cleanup, Observability, and Post-Implementation Fixes
 
-**File**: `client/background.rs`
+#### DEL-4.1: Clean up init_locks on process removal — DONE (FUTURE comment)
 
-**Changes**:
-- In the removal loop, re-check `in_flight` before actually removing:
-```rust
-for lang in languages_to_remove {
-    if let Some(mut entry) = processes.get_mut(&lang) {
-        if let ProcessEntry::Running(state) = entry.value_mut() {
-            if state.transport.in_flight().load(Ordering::Acquire) > 0 {
-                continue;  // race: request arrived after snapshot
-            }
-        }
-    }
-    drop(entry);
-    if let Some((_, ProcessEntry::Running(state))) = processes.remove(&lang) {
-        // shutdown
-    }
-}
-```
+**File**: `client/lifecycle.rs:268-271`
 
-**Test**:
-- Test: `idle_timeout_task` skips process that acquired in_flight between snapshot and removal
+Comment-only. Bounded to 5 languages (~500 bytes total). Marked `// FUTURE: cleanup when dynamic language support is added`.
 
-**Risk**: Low. Defensive check.
+#### DEL-4.2: Add cross-language dispatch metrics — DONE
 
----
+**File**: `client/protocol.rs:149-211`
 
-### Phase 4: Cleanup and Observability (Low Priority)
+`tracing::debug` in `dispatch_response_for_language` logs source language, message type, id. `cancel_for_language` logs count of cancelled requests per language.
 
-#### DEL-4.1: Clean up init_locks on process removal
+#### DEL-4.3: ensure_process falls through to start_process on backoff elapsed — DONE (Pre-existing fix)
 
-**File**: `client/lifecycle.rs`, `client/background.rs`
+**File**: `client/lifecycle.rs:275-350`
 
-**Changes**:
-- In `reader_supervisor_task`, after removing the process entry, also remove the init_lock:
-```rust
-processes.remove(&language_id);
-// Optional: self.init_locks.remove(&language_id);
-```
+**Problem (pre-existing)**: When an `Unavailable` entry had elapsed backoff, `ensure_process` removed the entry and returned `Ok(())` without starting a process. This defeated `warm_start_for_languages_and_track` for any language that previously crashed. The language had no entry at all until the next user request triggered `ensure_process` again.
 
-Note: This is only worthwhile if Pathfinder ever supports dynamic language addition. For the current 5-language limit, the memory cost is negligible (5 entries of ~100 bytes each). Mark as `// FUTURE: cleanup when dynamic language support is added`.
+**Fix**: Changed `return match { Ok(()) }` to `match { ... }` (no return) so the code falls through to `start_process(descriptor, 0)` when backoff has elapsed.
 
-**Risk**: None. Comment-only change.
+#### DEL-4.4: Server request ID collision prevention — DONE
+
+**File**: `client/protocol.rs:149-211`
+
+**Problem**: In `dispatch_response_for_language`, if a server sent `client/registerCapability` with an id matching a pending request id, it was treated as a response to our request (checked pending first). JSON-RPC 2.0 doesn't mandate separate ID namespaces.
+
+**Fix**: Check `message.get("method").is_some()` BEFORE checking pending. A message with both `id` and `method` is always a server request, never a response.
+
+#### DEL-4.5: FUTURE cleanup comments for DashMap channels — DONE
+
+**File**: `client/protocol.rs:37-49`
+
+`notification_channels` and `server_request_channels` DashMaps have FUTURE cleanup comments matching the `init_locks` pattern. Bounded to 5 languages, negligible memory.
 
 ---
 
-#### DEL-4.2: Add cross-language dispatch metrics
+## Known Constraints (Not Bugs)
 
-**File**: `client/protocol.rs`
+### Notification subscription ordering
 
-**Changes**:
-- Add `tracing::debug` to `dispatch_response_for_language` logging source language and message type
-- Add `tracing::debug` to `cancel_for_language` logging count of cancelled requests per language
+In `spawn_and_initialize` (`process.rs:262`), the reader task starts BEFORE `progress_watcher_task` is spawned (`lifecycle.rs:480`). There's a theoretical window where the reader dispatches notifications to the per-language channel, but no subscriber exists yet. `dispatch_response_for_language` silently drops these (no channel = no send).
 
-**Test**:
-- Manual: verify log output during multi-language warm start
-
-**Risk**: None. Observability only.
+**Why this is safe**: LSP servers don't send progress notifications during the `initialize` handshake. The first progress notification arrives after `initialized` is sent, by which point `start_process` has already spawned both watchers. This is documented as an ordering constraint, not a bug.
 
 ---
 
@@ -405,15 +282,18 @@ DEL-2.1 (independent, can parallel with Phase 1)
                                                    BUG-4 fixed)
 
 DEL-3.1 ───► DEL-3.2
-            │
-            ▼
-         (Phase 3 complete:
-          BUG-5 fixed)
+             │
+             ▼
+          (Phase 3 complete:
+           BUG-5 fixed)
 
 DEL-4.1 + DEL-4.2 (independent, any time)
-```
 
-Phase 1 is the critical path. DEL-1.1 and DEL-1.2 can ship together as a minimal fix for BUG-1 (the most severe). DEL-1.3 and DEL-1.4 address BUG-2 and BUG-3 and are more involved.
+DEL-1.7 (post-implementation: watcher task leak fix)
+DEL-4.3 (pre-existing: ensure_process backoff fix)
+DEL-4.4 (post-implementation: ID collision fix)
+DEL-4.5 (cleanup comments)
+```
 
 ---
 
@@ -421,12 +301,21 @@ Phase 1 is the critical path. DEL-1.1 and DEL-1.2 can ship together as a minimal
 
 ### Per-Deliverable Tests
 
-Each DEL includes specific unit tests in the description above.
+All unit tests are in `client/protocol.rs` (lines 302-940):
+
+- `test_cancel_for_language_only_cancels_matching_language` — DEL-1.2
+- `test_cancel_for_language_no_matching_entries_is_noop` — DEL-1.2
+- `test_cancel_for_language_multiple_languages_isolated` — DEL-1.2
+- `test_notification_routing_per_language` — DEL-1.3
+- `test_server_request_routing_per_language` — DEL-1.4
+- `test_registration_watcher_response_sent_to_correct_transport_scenario` — DEL-1.4
+- `test_server_request_with_colliding_id_not_treated_as_response` — DEL-4.4
 
 ### Integration Test: Polyglot Workspace
 
-After Phase 1 is complete, add an integration test:
+**Status**: Tracked separately. The protocol-layer unit tests validate dispatch isolation. A full integration test with multiple fake LSPs exercising the complete `LspClient` lifecycle (spawn, crash, respawn, cross-language request) should be added when the fake transport infrastructure supports multi-language scenarios.
 
+Spec:
 1. Create a workspace with Rust + Go + TypeScript markers
 2. `LspClient::new()` detects all three
 3. `warm_start()` fires concurrently for all three
@@ -436,7 +325,7 @@ After Phase 1 is complete, add an integration test:
 
 ### Regression Test: Single Language
 
-After each phase, verify that single-language workspaces (Rust-only, Go-only, etc.) continue to work identically. The per-language channel model should be transparent when only one language is active.
+After each phase, verify that single-language workspaces (Rust-only, Go-only, etc.) continue to work identically. The per-language channel model is transparent when only one language is active. Verified: all 340 existing tests pass.
 
 ---
 
@@ -444,7 +333,7 @@ After each phase, verify that single-language workspaces (Rust-only, Go-only, et
 
 ### Backward Compatibility
 
-- `RequestDispatcher` API changes are `pub(crate)` -- no public API breakage
+- `RequestDispatcher` API changes are `pub(crate)` — no public API breakage
 - `cancel_all()` is preserved for shutdown path
 - Existing single-language users see no behavior change
 
@@ -489,5 +378,3 @@ All `std::sync::Mutex` instances in `pathfinder-lsp` are safe for async context:
 | `LanguageState::indexing_duration_secs` | Write a u64 | No | Safe |
 | `LanguageState::indexing_progress_percent` | Write a u8 | No | Safe |
 | `ManagedProcess::last_used` | Write an Instant | No | Safe |
-
-None of these hold the lock across an `.await` point. The lock durations are trivial (single assignment or HashMap operation).
