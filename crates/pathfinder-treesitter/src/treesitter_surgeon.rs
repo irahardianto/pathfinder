@@ -146,6 +146,31 @@ impl Surgeon for TreeSitterSurgeon {
         Ok(symbols)
     }
 
+    #[instrument(skip(self, workspace_root, content))]
+    async fn extract_symbols_preloaded(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: std::sync::Arc<[u8]>,
+        mtime: std::time::SystemTime,
+    ) -> Result<Vec<ExtractedSymbol>, SurgeonError> {
+        let lang = SupportedLanguage::detect(file_path)
+            .ok_or_else(|| SurgeonError::UnsupportedLanguage(file_path.to_path_buf()))?;
+
+        let abs_path = workspace_root.join(file_path);
+
+        if lang == SupportedLanguage::Vue {
+            let (multi, _hash) = self.cache.get_or_parse_vue(&abs_path).await?;
+            return Ok(extract_symbols_from_multizone(&multi));
+        }
+
+        let (tree, source) = self
+            .cache
+            .get_or_parse_preloaded(&abs_path, lang, content, mtime)
+            .await?;
+        Ok(extract_symbols_from_tree(&tree, &source, lang))
+    }
+
     #[instrument(skip(self, workspace_root))]
     async fn enclosing_symbol(
         &self,

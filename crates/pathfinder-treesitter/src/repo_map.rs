@@ -307,6 +307,7 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
     clippy::too_many_lines,
     reason = "Sequential directory-walk pipeline; splitting into sub-functions would obscure the linear data flow without improving readability"
 )]
+#[allow(clippy::items_after_statements)]
 pub async fn generate_skeleton_text(
     surgeon: &impl crate::surgeon::Surgeon,
     workspace_root: &Path,
@@ -319,18 +320,20 @@ pub async fn generate_skeleton_text(
     let abs_target = workspace_root.join(target_path);
 
     let mut builder = WalkBuilder::new(&abs_target);
-    builder.max_depth(Some(config.depth as usize)); // WalkBuilder handles max_depth
+    builder.max_depth(Some(config.depth as usize));
     builder.require_git(false);
-    builder.hidden(true); // Ignore hidden files
-    builder.add_custom_ignore_filename(".pathfinderignore"); // Standard ignore from searcher
+    builder.hidden(true);
+    builder.add_custom_ignore_filename(".pathfinderignore");
 
     let walker = builder.build();
 
-    let mut skeleton_out = String::default();
-    let mut files_scanned = 0;
-    let mut files_in_scope = 0;
-    let mut files_truncated = 0;
-    let mut version_hashes = HashMap::default();
+    struct FileEntry {
+        abs_path: PathBuf,
+        rel_path: PathBuf,
+        lang: crate::language::SupportedLanguage,
+    }
+
+    let mut file_entries: Vec<FileEntry> = Vec::new();
     let mut tech_stack: Vec<crate::language::SupportedLanguage> = Vec::default();
 
     for result in walker {
@@ -341,17 +344,14 @@ pub async fn generate_skeleton_text(
             continue;
         }
 
-        // Strip prefix carefully
         let rel_path = path.strip_prefix(workspace_root).unwrap_or(path);
 
-        // Filter by changed files (if requested)
         if let Some(changed) = &config.changed_files {
             if !changed.contains(rel_path) {
                 continue;
             }
         }
 
-        // Filter by file extensions (if requested)
         if !config.include_extensions.is_empty() || !config.exclude_extensions.is_empty() {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             if !config.include_extensions.is_empty()
@@ -366,27 +366,50 @@ pub async fn generate_skeleton_text(
             }
         }
 
-        // Only parse supported languages
         let Some(lang) = crate::language::SupportedLanguage::detect(path) else {
             continue;
         };
-
-        // Count only after language detection: coverage_percent = "source files mapped / source files found"
-        files_in_scope += 1;
 
         if !tech_stack.contains(&lang) {
             tech_stack.push(lang);
         }
 
-        // Read the raw file bytes to compute a per-file version hash.
-        // `extract_symbols` does not return a hash, so we read the file separately.
-        // Files that fail to read (e.g., permission denied, race-deleted) are skipped
-        // so a transient I/O error does not corrupt the hash map with empty-byte hashes.
-        let source = match tokio::fs::read(path).await {
+        file_entries.push(FileEntry {
+            abs_path: path.to_path_buf(),
+            rel_path: rel_path.to_path_buf(),
+            lang,
+        });
+    }
+
+    let files_in_scope = file_entries.len();
+
+    let read_futures: Vec<_> = file_entries
+        .iter()
+        .map(|entry| async {
+            let read_result = tokio::fs::read(&entry.abs_path).await;
+            (entry.rel_path.clone(), entry.lang, read_result)
+        })
+        .collect();
+
+    let read_results = futures::future::join_all(read_futures).await;
+
+    struct ProcessedFile {
+        rel_path: PathBuf,
+        skeleton: String,
+        skeleton_tokens: u32,
+    }
+
+    let mut processed: Vec<ProcessedFile> = Vec::new();
+    let mut files_scanned = 0;
+    let mut files_truncated = 0;
+    let mut version_hashes = HashMap::default();
+
+    for (rel_path, _lang, read_result) in read_results {
+        let source = match read_result {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!(
-                    path = %path.display(),
+                    path = %rel_path.display(),
                     error = %e,
                     "get_repo_map: skipping file (read failed)"
                 );
@@ -394,11 +417,19 @@ pub async fn generate_skeleton_text(
             }
         };
         let hash = VersionHash::compute(&source);
-
         version_hashes.insert(rel_path.display().to_string(), hash.short().to_owned());
 
-        // AST extraction — log failures so operators can diagnose missing files in the repo map
-        let raw_symbols = match surgeon.extract_symbols(workspace_root, rel_path).await {
+        let mtime = std::fs::metadata(&rel_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+        let content_arc: std::sync::Arc<[u8]> = std::sync::Arc::from(source);
+
+        let raw_symbols = match surgeon
+            .extract_symbols_preloaded(workspace_root, &rel_path, content_arc, mtime)
+            .await
+        {
             Ok(syms) => syms,
             Err(e) => {
                 tracing::debug!(
@@ -410,7 +441,6 @@ pub async fn generate_skeleton_text(
             }
         };
 
-        // Apply visibility filtering
         let symbols = filter_by_visibility(raw_symbols, config.visibility, config.include_tests);
 
         if symbols.is_empty() {
@@ -422,20 +452,32 @@ pub async fn generate_skeleton_text(
         let file_skeleton = render_file_skeleton(&symbols, config.max_tokens_per_file);
         let file_skeleton_tokens = estimate_tokens(&file_skeleton);
 
+        processed.push(ProcessedFile {
+            rel_path,
+            skeleton: file_skeleton,
+            skeleton_tokens: file_skeleton_tokens,
+        });
+    }
+
+    processed.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    let mut skeleton_out = String::default();
+
+    for pf in &processed {
         let path_header = format!(
             "\nFile: {}\n{}\n",
-            rel_path.display(),
-            "=".repeat(rel_path.display().to_string().len() + 6)
+            pf.rel_path.display(),
+            "=".repeat(pf.rel_path.display().to_string().len() + 6)
         );
 
         let current_tokens = estimate_tokens(&skeleton_out);
-        if current_tokens + file_skeleton_tokens > config.max_tokens {
+        if current_tokens + pf.skeleton_tokens > config.max_tokens {
             if current_tokens + 50 <= config.max_tokens {
                 use std::fmt::Write;
                 let _ = writeln!(
                     skeleton_out,
                     "\n// [... Omitted {} due to token budget]",
-                    rel_path.display()
+                    pf.rel_path.display()
                 );
             }
             files_truncated += 1;
@@ -443,7 +485,7 @@ pub async fn generate_skeleton_text(
         }
 
         skeleton_out.push_str(&path_header);
-        skeleton_out.push_str(&file_skeleton);
+        skeleton_out.push_str(&pf.skeleton);
     }
 
     let coverage_percent = if files_in_scope > 0 {

@@ -1,18 +1,21 @@
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
+use std::cell::RefCell;
 use tracing::instrument;
 use tree_sitter::{Parser, Tree};
 
-/// A stateless parser wrapper that converts source code to an AST using tree-sitter.
+thread_local! {
+    static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
+}
+
 #[derive(Debug, Default)]
 pub struct AstParser;
 
 impl AstParser {
     /// Parse the given source code bytes into a tree-sitter `Tree`.
     ///
-    /// This is a pure function that does no caching. Since tree-sitter `Parser`
-    /// instances are lightweight but not thread-safe (`!Send`), this function
-    /// creates a new parser per call.
+    /// Uses a thread-local parser pool to avoid per-call `Parser` allocation.
+    /// Tree-sitter `Parser` is `!Send`, so a `thread_local!` `RefCell` is safe.
     ///
     /// # Errors
     ///
@@ -23,28 +26,26 @@ impl AstParser {
         lang: SupportedLanguage,
         source: &[u8],
     ) -> Result<Tree, SurgeonError> {
-        let mut parser = Parser::new();
+        PARSER.with(|cell| {
+            let mut parser = cell.borrow_mut();
 
-        parser
-            .set_language(&lang.grammar())
-            .map_err(|e| SurgeonError::ParseError {
-                path: path.to_path_buf(),
-                reason: format!("Failed to set language: {e}"),
-            })?;
+            parser
+                .set_language(&lang.grammar())
+                .map_err(|e| SurgeonError::ParseError {
+                    path: path.to_path_buf(),
+                    reason: format!("Failed to set language: {e}"),
+                })?;
 
-        // The timeout forces tree-sitter to give up on pathological inputs.
-        // We set it to 500ms which is way more than enough for normal files.
-        #[allow(deprecated)]
-        parser.set_timeout_micros(500_000);
+            #[allow(deprecated)]
+            parser.set_timeout_micros(500_000);
 
-        let tree = parser
-            .parse(source, None)
-            .ok_or_else(|| SurgeonError::ParseError {
-                path: path.to_path_buf(),
-                reason: "Parser returned None or timed out".into(),
-            })?;
-
-        Ok(tree)
+            parser
+                .parse(source, None)
+                .ok_or_else(|| SurgeonError::ParseError {
+                    path: path.to_path_buf(),
+                    reason: "Parser returned None or timed out".into(),
+                })
+        })
     }
 }
 

@@ -111,6 +111,22 @@ pub trait Surgeon: Send + Sync {
         file_path: &Path,
     ) -> Result<Vec<ExtractedSymbol>, SurgeonError>;
 
+    /// Extract symbols using pre-loaded file content and mtime.
+    ///
+    /// Default implementation delegates to [`extract_symbols`]. Override in
+    /// implementations that support pre-loaded content to avoid redundant
+    /// disk reads.
+    async fn extract_symbols_preloaded(
+        &self,
+        workspace_root: &Path,
+        file_path: &Path,
+        content: std::sync::Arc<[u8]>,
+        mtime: std::time::SystemTime,
+    ) -> Result<Vec<ExtractedSymbol>, SurgeonError> {
+        let _ = (content, mtime);
+        self.extract_symbols(workspace_root, file_path).await
+    }
+
     /// Find the semantic path of the innermost symbol that encloses the
     /// given 1-indexed line.
     async fn enclosing_symbol(

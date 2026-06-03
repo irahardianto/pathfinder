@@ -3,12 +3,12 @@ use crate::language::SupportedLanguage;
 use crate::parser::AstParser;
 use crate::vue_zones::{parse_vue_multizone, MultiZoneTree};
 use lru::LruCache;
+use parking_lot::Mutex;
 use pathfinder_common::types::VersionHash;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::SystemTime;
 use tokio::sync::OnceCell;
 use tracing::instrument;
@@ -61,11 +61,8 @@ pub struct CacheEntry {
 /// multi-zone trees don't pollute the single-zone eviction budget.
 #[derive(Debug)]
 pub struct MultiZoneEntry {
-    /// Multi-zone trees (script + template + style).
-    pub multi: MultiZoneTree,
-    /// SHA-256 hash of the *original* SFC content (content fingerprint).
+    pub multi: Arc<MultiZoneTree>,
     pub content_hash: VersionHash,
-    /// Mtime at parse time (fast-path guard).
     pub mtime: SystemTime,
 }
 
@@ -135,17 +132,7 @@ impl AstCache {
 
         // Check cache while holding the lock; release before any async I/O.
         {
-            // COVERAGE NOTE: The `map_err` arm below ("Lock poisoned") is intentionally
-            // untested. A `std::sync::Mutex` only becomes poisoned when a thread panics
-            // while holding the lock — a catastrophic OS-level scenario that cannot be
-            // triggered in safe Rust without an `unsafe` thread-panic harness. Attempting
-            // to test it would introduce flakiness and violate the project's safe-Rust
-            // testing policy. The arm exists as a defensive last-resort error path.
-            // Do NOT attempt to write a test for this branch.
-            let mut lock = self.entries.lock().map_err(|_| SurgeonError::ParseError {
-                path: path.to_path_buf(),
-                reason: "Lock poisoned".into(),
-            })?;
+            let mut lock = self.entries.lock();
 
             if let Some(entry) = lock.get(path) {
                 if entry.mtime == current_mtime && entry.lang == lang {
@@ -157,15 +144,7 @@ impl AstCache {
 
         // --- Singleflight: check if another request is already parsing this file ---
         let cell = {
-            // COVERAGE NOTE: lock-poison arm — see the identical note above.
-            // Structurally untestable in safe Rust; intentionally left uncovered.
-            let mut in_flight = self
-                .in_flight
-                .lock()
-                .map_err(|_| SurgeonError::ParseError {
-                    path: path.to_path_buf(),
-                    reason: "In-flight lock poisoned".into(),
-                })?;
+            let mut in_flight = self.in_flight.lock();
             in_flight
                 .entry(path.to_path_buf())
                 .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -185,16 +164,7 @@ impl AstCache {
                 let parse_input = lang.preprocess_source(&content_arc);
                 let tree = AstParser::parse_source(path, lang, &parse_input)?;
 
-                // Re-acquire the lock to insert/update.
-                // COVERAGE NOTE: lock-poison arm — see the identical note above.
-                // Structurally untestable in safe Rust; intentionally left uncovered.
-                self.entries
-                    .lock()
-                    .map_err(|_| SurgeonError::ParseError {
-                        path: path.to_path_buf(),
-                        reason: "Lock poisoned".into(),
-                    })?
-                    .put(
+                self.entries.lock().put(
                         path.to_path_buf(),
                         CacheEntry {
                             tree: tree.clone(),
@@ -209,17 +179,81 @@ impl AstCache {
             })
             .await;
 
-        // Clean up the in-flight entry now that parsing is complete
         {
-            // COVERAGE NOTE: lock-poison arm — see the identical note above.
-            // Structurally untestable in safe Rust; intentionally left uncovered.
-            let mut in_flight = self
-                .in_flight
-                .lock()
-                .map_err(|_| SurgeonError::ParseError {
-                    path: path.to_path_buf(),
-                    reason: "In-flight lock poisoned".into(),
-                })?;
+            let mut in_flight = self.in_flight.lock();
+            in_flight.remove(path);
+        }
+
+        match result.as_ref() {
+            Ok((tree, source)) => Ok((tree.clone(), source.clone())),
+            Err(e) => Err(SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!("Parse failed: {e}"),
+            }),
+        }
+    }
+
+    /// Retrieve the tree and source code using pre-loaded content and mtime.
+    ///
+    /// Identical to [`get_or_parse`] but accepts pre-read file bytes and mtime
+    /// instead of reading from disk. Eliminates the double-read when the caller
+    /// already has the file content (e.g., `generate_skeleton_text`).
+    ///
+    /// # Errors
+    /// Returns `SurgeonError` if parsing fails.
+    #[instrument(skip(self, content), fields(cache_hit = false))]
+    pub async fn get_or_parse_preloaded(
+        &self,
+        path: &Path,
+        lang: SupportedLanguage,
+        content: Arc<[u8]>,
+        mtime: SystemTime,
+    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
+        {
+            let mut lock = self.entries.lock();
+
+            if let Some(entry) = lock.get(path) {
+                if entry.mtime == mtime && entry.lang == lang {
+                    tracing::Span::current().record("cache_hit", true);
+                    return Ok((entry.tree.clone(), entry.source.clone()));
+                }
+            }
+        }
+
+        let cell = {
+            let mut in_flight = self.in_flight.lock();
+            in_flight
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
+
+        let result = cell
+            .get_or_init(|| {
+                let content_arc = content.clone();
+                async move {
+                    let current_hash = VersionHash::compute(&content_arc);
+                    let parse_input = lang.preprocess_source(&content_arc);
+                    let tree = AstParser::parse_source(path, lang, &parse_input)?;
+
+                    self.entries.lock().put(
+                            path.to_path_buf(),
+                            CacheEntry {
+                                tree: tree.clone(),
+                                source: content_arc.clone(),
+                                content_hash: current_hash,
+                                lang,
+                                mtime,
+                            },
+                        );
+
+                    Ok::<_, SurgeonError>((tree, content_arc.clone()))
+                }
+            })
+            .await;
+
+        {
+            let mut in_flight = self.in_flight.lock();
             in_flight.remove(path);
         }
 
@@ -253,27 +287,12 @@ impl AstCache {
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
         {
-            // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
-            // Structurally untestable in safe Rust; intentionally left uncovered.
-            let mut lock = self
-                .vue_entries
-                .lock()
-                .map_err(|_| SurgeonError::ParseError {
-                    path: path.to_path_buf(),
-                    reason: "Vue cache lock poisoned".into(),
-                })?;
+            let mut lock = self.vue_entries.lock();
 
             if let Some(entry) = lock.get(path) {
                 if entry.mtime == current_mtime {
                     tracing::Span::current().record("cache_hit", true);
-                    let multi = MultiZoneTree {
-                        script_tree: entry.multi.script_tree.clone(),
-                        template_tree: entry.multi.template_tree.clone(),
-                        style_tree: entry.multi.style_tree.clone(),
-                        zones: entry.multi.zones.clone(),
-                        source: entry.multi.source.clone(),
-                        degraded: entry.multi.degraded,
-                    };
+                    let multi = (*entry.multi).clone();
                     return Ok((multi, entry.content_hash.clone()));
                 }
             }
@@ -281,15 +300,7 @@ impl AstCache {
 
         // --- Singleflight: check if another request is already parsing this Vue file ---
         let cell = {
-            // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
-            // Structurally untestable in safe Rust; intentionally left uncovered.
-            let mut vue_in_flight =
-                self.vue_in_flight
-                    .lock()
-                    .map_err(|_| SurgeonError::ParseError {
-                        path: path.to_path_buf(),
-                        reason: "Vue in-flight lock poisoned".into(),
-                    })?;
+            let mut vue_in_flight = self.vue_in_flight.lock();
             vue_in_flight
                 .entry(path.to_path_buf())
                 .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -308,24 +319,16 @@ impl AstCache {
                         reason: format!("Vue multi-zone parse failed: {e}"),
                     })?;
 
-                let cached_multi = MultiZoneTree {
+                let cached_multi = Arc::new(MultiZoneTree {
                     script_tree: multi.script_tree.clone(),
                     template_tree: multi.template_tree.clone(),
                     style_tree: multi.style_tree.clone(),
                     zones: multi.zones.clone(),
                     source: multi.source.clone(),
                     degraded: multi.degraded,
-                };
+                });
 
-                // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
-                // Structurally untestable in safe Rust; intentionally left uncovered.
-                self.vue_entries
-                    .lock()
-                    .map_err(|_| SurgeonError::ParseError {
-                        path: path.to_path_buf(),
-                        reason: "Vue cache lock poisoned".into(),
-                    })?
-                    .put(
+                self.vue_entries.lock().put(
                         path.to_path_buf(),
                         MultiZoneEntry {
                             multi: cached_multi,
@@ -338,17 +341,8 @@ impl AstCache {
             })
             .await;
 
-        // Clean up the in-flight entry now that parsing is complete
         {
-            // COVERAGE NOTE: lock-poison arm — see the identical note in get_or_parse.
-            // Structurally untestable in safe Rust; intentionally left uncovered.
-            let mut vue_in_flight =
-                self.vue_in_flight
-                    .lock()
-                    .map_err(|_| SurgeonError::ParseError {
-                        path: path.to_path_buf(),
-                        reason: "Vue in-flight lock poisoned".into(),
-                    })?;
+            let mut vue_in_flight = self.vue_in_flight.lock();
             vue_in_flight.remove(path);
         }
 
@@ -366,12 +360,8 @@ impl AstCache {
     /// Flushes the file from *both* single-zone and Vue multi-zone caches so
     /// that all paths are invalidated simultaneously.
     pub fn invalidate(&self, path: &Path) {
-        if let Ok(mut lock) = self.entries.lock() {
-            lock.pop(path);
-        }
-        if let Ok(mut lock) = self.vue_entries.lock() {
-            lock.pop(path);
-        }
+        self.entries.lock().pop(path);
+        self.vue_entries.lock().pop(path);
     }
 }
 
@@ -411,7 +401,7 @@ mod tests {
         );
         // Fast path: cached mtime must equal file mtime
         {
-            let lock = cache.entries.lock().unwrap();
+            let lock = cache.entries.lock();
             let entry = lock.peek(&path).unwrap();
             let meta = std::fs::metadata(&path).unwrap();
             assert_eq!(
@@ -455,7 +445,7 @@ mod tests {
             .unwrap();
 
         {
-            let lock = cache.entries.lock().unwrap();
+            let lock = cache.entries.lock();
             assert_eq!(lock.len(), 2);
             assert!(lock.contains(f1.path()));
             assert!(lock.contains(f2.path()));
@@ -475,7 +465,7 @@ mod tests {
             .unwrap();
 
         {
-            let lock = cache.entries.lock().unwrap();
+            let lock = cache.entries.lock();
             assert_eq!(lock.len(), 2);
             assert!(lock.contains(f1.path()));
             assert!(!lock.contains(f2.path())); // F2 evicted
@@ -493,10 +483,10 @@ mod tests {
             .get_or_parse(f1.path(), SupportedLanguage::Go)
             .await
             .unwrap();
-        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+        assert_eq!(cache.entries.lock().len(), 1);
 
         cache.invalidate(f1.path());
-        assert_eq!(cache.entries.lock().unwrap().len(), 0);
+        assert_eq!(cache.entries.lock().len(), 0);
     }
 
     #[tokio::test]
@@ -518,7 +508,7 @@ mod tests {
         assert_eq!(hash1, hash2, "hash must be stable across cache hits");
 
         {
-            let lock = cache.vue_entries.lock().unwrap();
+            let lock = cache.vue_entries.lock();
             assert_eq!(lock.len(), 1, "exactly one Vue entry cached");
         }
     }
@@ -541,20 +531,20 @@ mod tests {
         vue_file.write_all(sfc).unwrap();
         cache.get_or_parse_vue(vue_file.path()).await.unwrap();
 
-        assert_eq!(cache.entries.lock().unwrap().len(), 1);
-        assert_eq!(cache.vue_entries.lock().unwrap().len(), 1);
+        assert_eq!(cache.entries.lock().len(), 1);
+        assert_eq!(cache.vue_entries.lock().len(), 1);
 
         // Invalidate the Vue file — should clear from vue_entries
         // (and defensively from entries too, even though it's not there)
         cache.invalidate(vue_file.path());
 
         assert_eq!(
-            cache.vue_entries.lock().unwrap().len(),
+            cache.vue_entries.lock().len(),
             0,
             "Vue entry cleared"
         );
         // Non-Vue entry must not be disturbed
-        assert_eq!(cache.entries.lock().unwrap().len(), 1, "Go entry untouched");
+        assert_eq!(cache.entries.lock().len(), 1, "Go entry untouched");
     }
 
     /// Test that singleflight prevents redundant parsing when multiple
@@ -594,7 +584,7 @@ mod tests {
         }
 
         // Only one entry should be in the cache (not 5)
-        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+        assert_eq!(cache.entries.lock().len(), 1);
     }
 
     /// Test that singleflight works correctly for Vue SFC parsing as well.
@@ -627,7 +617,7 @@ mod tests {
         }
 
         // Only one entry should be in the Vue cache
-        assert_eq!(cache.vue_entries.lock().unwrap().len(), 1);
+        assert_eq!(cache.vue_entries.lock().len(), 1);
     }
 
     // ── FileNotFound propagation tests ───────────────────────────────────────

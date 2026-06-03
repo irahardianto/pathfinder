@@ -43,8 +43,31 @@ strsim = "0.11" # For did_you_mean Levenshtein distance
 tokio = { version = "1", features = ["fs", "rt"] }
 ignore = "0.4"
 lru = "0.18"
+futures = "0.3"
+parking_lot = "0.12"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 futures = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "extraction"
+harness = false
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[[bench]]
+name = "cache"
+harness = false
+
+[[bench]]
+name = "did_you_mean"
+harness = false
+
+[[bench]]
+name = "vue_zones"
+harness = false

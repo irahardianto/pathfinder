@@ -11,7 +11,7 @@ pub fn extract_symbols_from_tree(
     source: &[u8],
     lang: SupportedLanguage,
 ) -> Vec<ExtractedSymbol> {
-    let mut symbols = Vec::new();
+    let mut symbols = Vec::with_capacity(64);
     let root = tree.root_node();
     let types = lang.node_types();
 
@@ -235,9 +235,18 @@ impl<'a> SymbolExtractionContext<'a> {
 
     fn build_path(&self, name: &str, suffix: &str) -> String {
         if self.parent_path.is_empty() {
-            format!("{name}{suffix}")
+            let mut s = String::with_capacity(name.len() + suffix.len());
+            s.push_str(name);
+            s.push_str(suffix);
+            s
         } else {
-            format!("{}.{}{}", self.parent_path, name, suffix)
+            let cap = self.parent_path.len() + 1 + name.len() + suffix.len();
+            let mut s = String::with_capacity(cap);
+            s.push_str(self.parent_path);
+            s.push('.');
+            s.push_str(name);
+            s.push_str(suffix);
+            s
         }
     }
 
@@ -282,7 +291,7 @@ fn extract_symbols_recursive(
         lang,
         parent_path,
         out,
-        name_counts: std::collections::HashMap::new(),
+        name_counts: std::collections::HashMap::with_capacity(4),
     };
     ctx.process_children();
 }
@@ -721,15 +730,24 @@ fn extract_impl_block(
 
     let (unique_name, suffix) = make_unique_name(name_counts, type_name);
     let impl_path = if parent_path.is_empty() {
-        format!("{unique_name}{suffix}")
+        let mut s = String::with_capacity(unique_name.len() + suffix.len());
+        s.push_str(&unique_name);
+        s.push_str(&suffix);
+        s
     } else {
-        format!("{parent_path}.{unique_name}{suffix}")
+        let cap = parent_path.len() + 1 + unique_name.len() + suffix.len();
+        let mut s = String::with_capacity(cap);
+        s.push_str(parent_path);
+        s.push('.');
+        s.push_str(&unique_name);
+        s.push_str(&suffix);
+        s
     };
 
     // Collect all child function_items from the impl body as Method symbols.
-    let mut methods: Vec<ExtractedSymbol> = Vec::new();
+    let mut methods: Vec<ExtractedSymbol> = Vec::with_capacity(8);
     let mut method_name_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::with_capacity(8);
     if let Some(body) = node.child_by_field_name("body") {
         let mut body_cursor = body.walk();
         for item in body.named_children(&mut body_cursor) {
@@ -938,7 +956,6 @@ pub fn did_you_mean(
     chain: &SymbolChain,
     max_suggestions: usize,
 ) -> Vec<String> {
-    // Collect &str references — no cloning here.
     fn collect_paths<'a>(syms: &'a [ExtractedSymbol], out: &mut Vec<&'a str>) {
         for s in syms {
             out.push(&s.semantic_path);
@@ -951,18 +968,29 @@ pub fn did_you_mean(
     }
 
     let target = chain.to_string();
+    let target_len = target.len();
 
     let mut all_paths: Vec<&str> = Vec::new();
     collect_paths(symbols, &mut all_paths);
 
-    // Dynamic threshold: allow more typos for longer symbol names
-    let threshold = 5.max(target.len() / 4);
+    let threshold = 5.max(target_len / 4);
+
+    let max_len_delta = threshold;
 
     let mut distances: Vec<(usize, &str)> = all_paths
         .into_iter()
         .filter_map(|path| {
+            if path == target {
+                return Some((0, path));
+            }
+
+            let len_delta = path.len().abs_diff(target_len);
+            if len_delta > max_len_delta && !path.contains(&target) && !target.contains(path) {
+                return None;
+            }
+
             let dist = if path.contains(&target) || target.contains(path) {
-                path.len().abs_diff(target.len())
+                len_delta
             } else {
                 levenshtein(&target, path)
             };
@@ -975,10 +1003,8 @@ pub fn did_you_mean(
         })
         .collect();
 
-    // Sort by smallest distance
     distances.sort_by_key(|(dist, _)| *dist);
 
-    // Allocate only for the final results — at most max_suggestions strings.
     distances
         .into_iter()
         .take(max_suggestions)
