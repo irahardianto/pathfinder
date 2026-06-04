@@ -51,7 +51,15 @@ impl TreeSitterSurgeon {
         // ── Vue SFC: multi-zone parse path ────────────────────────────────────
         if lang == SupportedLanguage::Vue {
             let (multi, _content_hash) = self.cache.get_or_parse_vue(&abs_path).await?;
-            let symbols = extract_symbols_from_multizone(&multi);
+            let multi_clone = multi.clone();
+            let abs_path_clone = abs_path.clone();
+            let symbols =
+                tokio::task::spawn_blocking(move || extract_symbols_from_multizone(&multi_clone))
+                    .await
+                    .map_err(|_| SurgeonError::ParseError {
+                        path: abs_path_clone,
+                        reason: "spawn_blocking task panicked during symbol extraction".into(),
+                    })?;
             let (tree, source) = if let Some(script_tree) = multi.script_tree {
                 (script_tree, multi.source)
             } else {
@@ -61,9 +69,19 @@ impl TreeSitterSurgeon {
             return Ok((lang, tree, source, symbols));
         }
 
-        // ── All other languages: single-zone path (unchanged) ─────────────────
+        // ── All other languages: single-zone path ─────────────────────────────
         let (tree, source) = self.cache.get_or_parse(&abs_path, lang).await?;
-        let symbols = extract_symbols_from_tree(&tree, &source, lang);
+        let tree_clone = tree.clone();
+        let source_clone = source.clone();
+        let abs_path_clone = abs_path.clone();
+        let symbols = tokio::task::spawn_blocking(move || {
+            extract_symbols_from_tree(&tree_clone, &source_clone, lang)
+        })
+        .await
+        .map_err(|_| SurgeonError::ParseError {
+            path: abs_path_clone,
+            reason: "spawn_blocking task panicked during symbol extraction".into(),
+        })?;
         Ok((lang, tree, source, symbols))
     }
 }
@@ -164,14 +182,34 @@ impl Surgeon for TreeSitterSurgeon {
                 .cache
                 .get_or_parse_vue_preloaded(&abs_path, &content, mtime)
                 .await?;
-            return Ok(extract_symbols_from_multizone(&multi));
+            let multi_clone = multi.clone();
+            let abs_path_clone = abs_path.clone();
+            let symbols =
+                tokio::task::spawn_blocking(move || extract_symbols_from_multizone(&multi_clone))
+                    .await
+                    .map_err(|_| SurgeonError::ParseError {
+                        path: abs_path_clone,
+                        reason: "spawn_blocking task panicked during symbol extraction".into(),
+                    })?;
+            return Ok(symbols);
         }
 
         let (tree, source) = self
             .cache
             .get_or_parse_preloaded(&abs_path, lang, content, mtime)
             .await?;
-        Ok(extract_symbols_from_tree(&tree, &source, lang))
+        let tree_clone = tree.clone();
+        let source_clone = source.clone();
+        let abs_path_clone = abs_path.clone();
+        let symbols = tokio::task::spawn_blocking(move || {
+            extract_symbols_from_tree(&tree_clone, &source_clone, lang)
+        })
+        .await
+        .map_err(|_| SurgeonError::ParseError {
+            path: abs_path_clone,
+            reason: "spawn_blocking task panicked during symbol extraction".into(),
+        })?;
+        Ok(symbols)
     }
 
     #[instrument(skip(self, workspace_root))]
@@ -295,6 +333,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::Builder;
 
     #[tokio::test]
@@ -695,5 +734,146 @@ function doThing() { count.value++ }
             node_type, "string",
             "Java text block should be classified as string, got: {node_type}"
         );
+    }
+
+    // ── THR-001-B: Concurrent symbol extraction stress test ────────────────────
+    // Validates that spawn_blocking-based symbol extraction works correctly
+    // under concurrent load without panics or deadlocks.
+
+    #[tokio::test]
+    async fn test_concurrent_symbol_extraction_stress() {
+        const CONCURRENT_TASKS: usize = 20;
+
+        use futures::stream::{self, StreamExt};
+
+        let surgeon = Arc::new(TreeSitterSurgeon::new(10));
+        let mut file = Builder::new().suffix(".rs").tempfile().unwrap();
+
+        writeln!(
+            file,
+            r"
+pub struct Config {{
+    pub max_tokens: usize,
+    pub timeout_ms: u64,
+}}
+
+impl Config {{
+    pub fn new() -> Self {{
+        Self {{
+            max_tokens: 16000,
+            timeout_ms: 30000,
+        }}
+    }}
+
+    pub fn with_max_tokens(mut self, val: usize) -> Self {{
+        self.max_tokens = val;
+        self
+    }}
+}}
+
+pub fn process_data(input: &str) -> Result<String, std::io::Error> {{
+    Ok(input.to_uppercase())
+}}
+
+#[cfg(test)]
+mod tests {{
+    use super::*;
+
+    #[test]
+    fn test_config_default() {{
+        let c = Config::new();
+        assert_eq!(c.max_tokens, 16000);
+    }}
+}}
+"
+        )
+        .unwrap();
+
+        let workspace_root = PathBuf::from("/");
+        let relative = file.path().strip_prefix("/").unwrap().to_path_buf();
+        let relative_arc = Arc::new(relative);
+
+        let tasks: Vec<_> = (0..CONCURRENT_TASKS)
+            .map(|i| {
+                let surgeon = surgeon.clone();
+                let workspace_root = workspace_root.clone();
+                let relative = relative_arc.clone();
+                async move {
+                    for round in 0..3 {
+                        let result = surgeon.extract_symbols(&workspace_root, &relative).await;
+
+                        assert!(
+                            result.is_ok(),
+                            "Task {i}, round {round}: extract_symbols failed: {:?}",
+                            result.err()
+                        );
+
+                        let symbols = result.unwrap();
+
+                        let struct_config = symbols.iter().find(|s| s.name == "Config");
+                        assert!(
+                            struct_config.is_some(),
+                            "Task {i}, round {round}: Config struct not found"
+                        );
+
+                        let fn_process_data = symbols.iter().find(|s| s.name == "process_data");
+                        assert!(
+                            fn_process_data.is_some(),
+                            "Task {i}, round {round}: process_data fn not found"
+                        );
+                    }
+                }
+            })
+            .collect();
+
+        stream::iter(tasks)
+            .buffer_unordered(10)
+            .collect::<Vec<_>>()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_symbol_extraction_vue_stress() {
+        const CONCURRENT_TASKS: usize = 15;
+
+        use futures::stream::{self, StreamExt};
+
+        let surgeon = Arc::new(TreeSitterSurgeon::new(10));
+        let mut file = Builder::new().suffix(".vue").tempfile().unwrap();
+        file.write_all(BASIC_VUE_SFC).unwrap();
+
+        let workspace_root = PathBuf::from("/");
+        let relative = file.path().strip_prefix("/").unwrap().to_path_buf();
+        let relative_arc = Arc::new(relative);
+
+        let tasks: Vec<_> = (0..CONCURRENT_TASKS)
+            .map(|i| {
+                let surgeon = surgeon.clone();
+                let workspace_root = workspace_root.clone();
+                let relative = relative_arc.clone();
+                async move {
+                    let result = surgeon.read_source_file(&workspace_root, &relative).await;
+
+                    assert!(
+                        result.is_ok(),
+                        "Vue task {i}: read_source_file failed: {:?}",
+                        result.err()
+                    );
+
+                    let (_, _, symbols) = result.unwrap();
+
+                    let func_sym = symbols.iter().find(|s| s.name == "doThing");
+                    assert!(func_sym.is_some(), "Vue task {i}: doThing not found");
+
+                    let template_sym = symbols.iter().find(|s| s.name == "template");
+                    assert!(template_sym.is_some(), "Vue task {i}: template not found");
+                }
+            })
+            .collect();
+
+        stream::iter(tasks)
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
     }
 }

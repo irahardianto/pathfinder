@@ -330,7 +330,6 @@ pub async fn generate_skeleton_text(
     struct FileEntry {
         abs_path: PathBuf,
         rel_path: PathBuf,
-        lang: crate::language::SupportedLanguage,
     }
 
     let mut file_entries: Vec<FileEntry> = Vec::new();
@@ -377,15 +376,37 @@ pub async fn generate_skeleton_text(
         file_entries.push(FileEntry {
             abs_path: path.to_path_buf(),
             rel_path: rel_path.to_path_buf(),
-            lang,
         });
     }
 
     let files_in_scope = file_entries.len();
 
-    let read_futures: Vec<_> = file_entries
-        .iter()
-        .map(|entry| async {
+    const READ_CONCURRENCY: usize = 32;
+
+    struct ProcessedFile {
+        rel_path: PathBuf,
+        skeleton: String,
+        skeleton_tokens: u32,
+    }
+
+    struct FileProcessOutput {
+        processed: Option<ProcessedFile>,
+        version_entry: Option<(String, String)>,
+        has_symbols: bool,
+    }
+
+    let visibility = config.visibility.to_string();
+    let include_tests = config.include_tests;
+    let max_tokens_per_file = config.max_tokens_per_file;
+    let workspace_root = workspace_root.to_path_buf();
+
+    use futures::stream::{self, StreamExt};
+
+    let process_stream = stream::iter(file_entries).map(|entry| {
+        let workspace_root = workspace_root.clone();
+        let visibility = visibility.clone();
+
+        async move {
             let (read_result, meta_result) = tokio::join!(
                 tokio::fs::read(&entry.abs_path),
                 tokio::fs::metadata(&entry.abs_path)
@@ -394,70 +415,92 @@ pub async fn generate_skeleton_text(
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            (entry.rel_path.clone(), entry.lang, read_result, mtime)
-        })
-        .collect();
 
-    let read_results = futures::future::join_all(read_futures).await;
+            let source = match read_result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %entry.rel_path.display(),
+                        error = %e,
+                        "get_repo_map: skipping file (read failed)"
+                    );
+                    return FileProcessOutput {
+                        processed: None,
+                        version_entry: None,
+                        has_symbols: false,
+                    };
+                }
+            };
 
-    struct ProcessedFile {
-        rel_path: PathBuf,
-        skeleton: String,
-        skeleton_tokens: u32,
-    }
+            let hash = VersionHash::compute(&source);
+            let path_str = entry.rel_path.display().to_string();
+            let hash_short = hash.short().to_owned();
+
+            let content_arc: std::sync::Arc<[u8]> = std::sync::Arc::from(source);
+
+            let raw_symbols = match surgeon
+                .extract_symbols_preloaded(&workspace_root, &entry.rel_path, content_arc, mtime)
+                .await
+            {
+                Ok(syms) => syms,
+                Err(e) => {
+                    tracing::debug!(
+                        path = %entry.rel_path.display(),
+                        error = %e,
+                        "get_repo_map: skipping file (symbol extraction failed)"
+                    );
+                    return FileProcessOutput {
+                        processed: None,
+                        version_entry: Some((path_str, hash_short)),
+                        has_symbols: false,
+                    };
+                }
+            };
+
+            let symbols = filter_by_visibility(raw_symbols, &visibility, include_tests);
+
+            if symbols.is_empty() {
+                return FileProcessOutput {
+                    processed: None,
+                    version_entry: Some((path_str, hash_short)),
+                    has_symbols: false,
+                };
+            }
+
+            let file_skeleton = render_file_skeleton(&symbols, max_tokens_per_file);
+            let file_skeleton_tokens = estimate_tokens(&file_skeleton);
+
+            FileProcessOutput {
+                processed: Some(ProcessedFile {
+                    rel_path: entry.rel_path,
+                    skeleton: file_skeleton,
+                    skeleton_tokens: file_skeleton_tokens,
+                }),
+                version_entry: Some((path_str, hash_short)),
+                has_symbols: true,
+            }
+        }
+    });
+
+    let process_results: Vec<FileProcessOutput> = process_stream
+        .buffer_unordered(READ_CONCURRENCY)
+        .collect()
+        .await;
 
     let mut processed: Vec<ProcessedFile> = Vec::new();
     let mut files_with_symbols = 0;
     let mut version_hashes = HashMap::default();
 
-    for (rel_path, _lang, read_result, mtime) in read_results {
-        let source = match read_result {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!(
-                    path = %rel_path.display(),
-                    error = %e,
-                    "get_repo_map: skipping file (read failed)"
-                );
-                continue;
-            }
-        };
-        let hash = VersionHash::compute(&source);
-        version_hashes.insert(rel_path.display().to_string(), hash.short().to_owned());
-
-        let content_arc: std::sync::Arc<[u8]> = std::sync::Arc::from(source);
-
-        let raw_symbols = match surgeon
-            .extract_symbols_preloaded(workspace_root, &rel_path, content_arc, mtime)
-            .await
-        {
-            Ok(syms) => syms,
-            Err(e) => {
-                tracing::debug!(
-                    path = %rel_path.display(),
-                    error = %e,
-                    "get_repo_map: skipping file (symbol extraction failed)"
-                );
-                continue;
-            }
-        };
-
-        let symbols = filter_by_visibility(raw_symbols, config.visibility, config.include_tests);
-
-        if symbols.is_empty() {
-            continue;
+    for output in process_results {
+        if let Some((path, hash)) = output.version_entry {
+            version_hashes.insert(path, hash);
         }
-
-        files_with_symbols += 1;
-
-        let file_skeleton = render_file_skeleton(&symbols, config.max_tokens_per_file);
-        let file_skeleton_tokens = estimate_tokens(&file_skeleton);
-
-        processed.push(ProcessedFile {
-            rel_path,
-            skeleton: file_skeleton,
-            skeleton_tokens: file_skeleton_tokens,
-        });
+        if output.has_symbols {
+            files_with_symbols += 1;
+        }
+        if let Some(pf) = output.processed {
+            processed.push(pf);
+        }
     }
 
     processed.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));

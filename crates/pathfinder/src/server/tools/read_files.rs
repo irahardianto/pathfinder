@@ -5,6 +5,9 @@ use crate::server::types::{FileResult, ReadFilesParams, ReadFilesResponse};
 use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
+use tokio::task::JoinSet;
+
+const READ_FILES_CONCURRENCY: usize = 5;
 
 /// Source file extensions that get AST-based processing via `read_source_file`.
 ///
@@ -72,18 +75,45 @@ impl PathfinderServer {
             ));
         }
 
-        let (mut succeeded, mut failed, mut file_results) =
-            (0, 0, Vec::with_capacity(params.paths.len()));
+        let mut set = JoinSet::new();
+        let mut spawned = 0;
 
-        for file_path in &params.paths {
-            let result = self.read_single_file(file_path, &params).await;
+        for (idx, file_path) in params.paths.iter().enumerate() {
+            let server = self.clone();
+            let file_path = file_path.clone();
+            let params = params.clone();
 
+            while spawned >= READ_FILES_CONCURRENCY {
+                if let Some(res) = set.join_next().await {
+                    spawned -= 1;
+                    if let Err(e) = res {
+                        tracing::error!(tool = "read_files", error = %e, "spawned task panicked");
+                    }
+                }
+            }
+
+            set.spawn(async move { (idx, server.read_single_file(&file_path, &params).await) });
+            spawned += 1;
+        }
+
+        let mut indexed_results: Vec<(usize, FileResult)> = Vec::with_capacity(params.paths.len());
+        while let Some(res) = set.join_next().await {
+            match res {
+                Ok((idx, result)) => indexed_results.push((idx, result)),
+                Err(e) => tracing::error!(tool = "read_files", error = %e, "spawned task panicked"),
+            }
+        }
+
+        indexed_results.sort_by_key(|(idx, _)| *idx);
+        let file_results: Vec<FileResult> = indexed_results.into_iter().map(|(_, r)| r).collect();
+
+        let (mut succeeded, mut failed) = (0, 0);
+        for result in &file_results {
             if result.error.is_some() {
                 failed += 1;
             } else {
                 succeeded += 1;
             }
-            file_results.push(result);
         }
 
         let duration_ms = start.elapsed().as_millis();

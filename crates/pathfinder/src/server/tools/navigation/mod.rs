@@ -160,29 +160,33 @@ struct LspResolution {
     dependencies_truncated: bool,
 }
 
+static CALL_PATTERN_FULL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+static CALL_PATTERN_SIMPLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+#[allow(clippy::expect_used)]
+fn call_pattern_full() -> &'static regex::Regex {
+    CALL_PATTERN_FULL.get_or_init(|| {
+        regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(|\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+            .expect("call pattern full is valid regex")
+    })
+}
+
+#[allow(clippy::expect_used)]
+fn call_pattern_simple() -> &'static regex::Regex {
+    CALL_PATTERN_SIMPLE.get_or_init(|| {
+        regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+            .expect("call pattern simple is valid regex")
+    })
+}
+
 /// PATCH-005: Extract function call patterns from symbol body using language-aware regex.
 ///
 /// Returns candidate function names that might be called by this symbol.
 /// Filters out language keywords and caps at 20 candidates.
 fn extract_call_candidates(symbol_content: &str, language: &str) -> Vec<String> {
-    let pattern = match language {
-        "typescript" | "javascript" | "python" => {
-            r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(|\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\("
-        }
-        _ => r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-    };
-
-    let re = if let Ok(re) = regex::Regex::new(pattern) {
-        re
-    } else {
-        tracing::warn!(
-            language = language,
-            "PATCH-005: failed to compile call pattern, using fallback"
-        );
-        let Ok(fallback) = regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(") else {
-            return Vec::new();
-        };
-        fallback
+    let re = match language {
+        "typescript" | "javascript" | "python" => call_pattern_full(),
+        _ => call_pattern_simple(),
     };
 
     let keywords = keywords_for_language(language);

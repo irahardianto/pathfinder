@@ -31,7 +31,12 @@ struct Cli {
 ///
 /// Extracted from `main()` for testability. Accepts pre-parsed CLI args
 /// so that tests can inject configurations without going through the CLI parser.
-pub(crate) async fn run(workspace_path: PathBuf, lsp_trace: bool) -> anyhow::Result<()> {
+pub(crate) async fn run(
+    workspace_path: PathBuf,
+    lsp_trace: bool,
+    worker_threads: usize,
+    max_blocking_threads: usize,
+) -> anyhow::Result<()> {
     let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     if lsp_trace {
         if let Ok(dir) = "pathfinder_lsp::client::transport=debug".parse() {
@@ -50,6 +55,8 @@ pub(crate) async fn run(workspace_path: PathBuf, lsp_trace: bool) -> anyhow::Res
     tracing::info!(
         workspace = %workspace_path.display(),
         version = env!("CARGO_PKG_VERSION"),
+        worker_threads = worker_threads,
+        max_blocking_threads = max_blocking_threads,
         "Pathfinder starting"
     );
 
@@ -80,10 +87,28 @@ pub(crate) async fn run(workspace_path: PathBuf, lsp_trace: bool) -> anyhow::Res
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    run(cli.workspace_path, cli.lsp_trace).await
+fn main() -> anyhow::Result<()> {
+    const MAX_BLOCKING_THREADS: usize = 64;
+
+    let worker_threads =
+        std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async {
+        let cli = Cli::parse();
+        run(
+            cli.workspace_path,
+            cli.lsp_trace,
+            worker_threads,
+            MAX_BLOCKING_THREADS,
+        )
+        .await
+    })
 }
 
 #[cfg(test)]
@@ -119,6 +144,8 @@ mod tests {
         let result = run(
             PathBuf::from("/nonexistent/path/that/does/not/exist"),
             false,
+            4,
+            64,
         )
         .await;
         // The path might or might not be valid depending on WorkspaceRoot validation

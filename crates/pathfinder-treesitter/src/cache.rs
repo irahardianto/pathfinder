@@ -153,29 +153,49 @@ impl AstCache {
 
         // Use get_or_init to ensure only one parse happens per file
         let result = cell
-            .get_or_init(|| async {
-                // --- Slow path: full read + hash + parse ---
-                let content = tokio::fs::read(path).await.map_err(|e| io_err(e, path))?;
-                let current_hash = VersionHash::compute(&content);
-                let content_arc: Arc<[u8]> = Arc::from(content);
-                // For Vue SFCs, preprocess extracts the <script> block before parsing.
-                // The original `content` is kept for version hashing and change detection —
-                // only the input to the AST parser uses the processed bytes.
-                let parse_input = lang.preprocess_source(&content_arc);
-                let tree = AstParser::parse_source(path, lang, &parse_input)?;
+            .get_or_init(|| {
+                let path_owned = path.to_path_buf();
+                async move {
+                    // --- Slow path: full read + hash + parse ---
+                    let content = tokio::fs::read(&path_owned)
+                        .await
+                        .map_err(|e| io_err(e, &path_owned))?;
 
-                self.entries.lock().put(
-                    path.to_path_buf(),
-                    CacheEntry {
-                        tree: tree.clone(),
-                        source: content_arc.clone(),
-                        content_hash: current_hash,
-                        lang,
-                        mtime: current_mtime,
-                    },
-                );
+                    // CLONE: content must be moved into spawn_blocking.
+                    // The hash/parse CPU work goes to the blocking pool.
+                    let (tree, current_hash, content_arc) = tokio::task::spawn_blocking({
+                        let path = path_owned.clone();
+                        move || {
+                            let current_hash = VersionHash::compute(&content);
+                            let content_arc: Arc<[u8]> = Arc::from(content);
+                            // For Vue SFCs, preprocess extracts the <script> block before parsing.
+                            // The original `content` is kept for version hashing and change detection —
+                            // only the input to the AST parser uses the processed bytes.
+                            let parse_input = lang.preprocess_source(&content_arc);
+                            let tree = AstParser::parse_source(&path, lang, &parse_input)?;
+                            Ok::<_, SurgeonError>((tree, current_hash, content_arc))
+                        }
+                    })
+                    .await
+                    .map_err(|join_err| SurgeonError::ParseError {
+                        path: path_owned.clone(),
+                        reason: format!("spawn_blocking panicked: {join_err}"),
+                    })??;
 
-                Ok::<_, SurgeonError>((tree, content_arc.clone()))
+                    // Fast cache insertion back on async worker (nanoseconds)
+                    self.entries.lock().put(
+                        path_owned.clone(),
+                        CacheEntry {
+                            tree: tree.clone(),
+                            source: content_arc.clone(),
+                            content_hash: current_hash,
+                            lang,
+                            mtime: current_mtime,
+                        },
+                    );
+
+                    Ok::<_, SurgeonError>((tree, content_arc))
+                }
             })
             .await;
 
@@ -186,9 +206,24 @@ impl AstCache {
 
         match result.as_ref() {
             Ok((tree, source)) => Ok((tree.clone(), source.clone())),
-            Err(e) => Err(SurgeonError::ParseError {
+            Err(SurgeonError::FileNotFound(p)) => Err(SurgeonError::FileNotFound(p.clone())),
+            Err(SurgeonError::UnsupportedLanguage(p)) => {
+                Err(SurgeonError::UnsupportedLanguage(p.clone()))
+            }
+            Err(SurgeonError::ParseError { path: p, reason }) => Err(SurgeonError::ParseError {
+                path: p.clone(),
+                reason: reason.clone(),
+            }),
+            Err(SurgeonError::SymbolNotFound {
+                path: p,
+                did_you_mean: dym,
+            }) => Err(SurgeonError::SymbolNotFound {
+                path: p.clone(),
+                did_you_mean: dym.clone(),
+            }),
+            Err(SurgeonError::Io(e)) => Err(SurgeonError::ParseError {
                 path: path.to_path_buf(),
-                reason: format!("Parse failed: {e}"),
+                reason: e.to_string(),
             }),
         }
     }
@@ -230,14 +265,30 @@ impl AstCache {
 
         let result = cell
             .get_or_init(|| {
+                let path_owned = path.to_path_buf();
+                // CLONE: content_arc must be moved into spawn_blocking.
+                // It's Arc, so clone is refcount increment only.
                 let content_arc = content.clone();
                 async move {
-                    let current_hash = VersionHash::compute(&content_arc);
-                    let parse_input = lang.preprocess_source(&content_arc);
-                    let tree = AstParser::parse_source(path, lang, &parse_input)?;
+                    let (tree, current_hash, content_arc) = tokio::task::spawn_blocking({
+                        let path = path_owned.clone();
+                        let content = content_arc.clone();
+                        move || {
+                            let current_hash = VersionHash::compute(&content);
+                            let parse_input = lang.preprocess_source(&content);
+                            let tree = AstParser::parse_source(&path, lang, &parse_input)?;
+                            Ok::<_, SurgeonError>((tree, current_hash, content))
+                        }
+                    })
+                    .await
+                    .map_err(|join_err| SurgeonError::ParseError {
+                        path: path_owned.clone(),
+                        reason: format!("spawn_blocking panicked: {join_err}"),
+                    })??;
 
+                    // Fast cache insertion back on async worker (nanoseconds)
                     self.entries.lock().put(
-                        path.to_path_buf(),
+                        path_owned.clone(),
                         CacheEntry {
                             tree: tree.clone(),
                             source: content_arc.clone(),
@@ -247,7 +298,7 @@ impl AstCache {
                         },
                     );
 
-                    Ok::<_, SurgeonError>((tree, content_arc.clone()))
+                    Ok::<_, SurgeonError>((tree, content_arc))
                 }
             })
             .await;
@@ -259,9 +310,24 @@ impl AstCache {
 
         match result.as_ref() {
             Ok((tree, source)) => Ok((tree.clone(), source.clone())),
-            Err(e) => Err(SurgeonError::ParseError {
+            Err(SurgeonError::FileNotFound(p)) => Err(SurgeonError::FileNotFound(p.clone())),
+            Err(SurgeonError::UnsupportedLanguage(p)) => {
+                Err(SurgeonError::UnsupportedLanguage(p.clone()))
+            }
+            Err(SurgeonError::ParseError { path: p, reason }) => Err(SurgeonError::ParseError {
+                path: p.clone(),
+                reason: reason.clone(),
+            }),
+            Err(SurgeonError::SymbolNotFound {
+                path: p,
+                did_you_mean: dym,
+            }) => Err(SurgeonError::SymbolNotFound {
+                path: p.clone(),
+                did_you_mean: dym.clone(),
+            }),
+            Err(SurgeonError::Io(e)) => Err(SurgeonError::ParseError {
                 path: path.to_path_buf(),
-                reason: format!("Parse failed: {e}"),
+                reason: e.to_string(),
             }),
         }
     }
@@ -309,35 +375,56 @@ impl AstCache {
 
         // Use get_or_init to ensure only one parse happens per file
         let result = cell
-            .get_or_init(|| async {
-                // --- Slow path ---
-                let content = tokio::fs::read(path).await.map_err(|e| io_err(e, path))?;
-                let content_hash = VersionHash::compute(&content);
-                let multi =
-                    parse_vue_multizone(&content).map_err(|e| SurgeonError::ParseError {
-                        path: path.to_path_buf(),
-                        reason: format!("Vue multi-zone parse failed: {e}"),
-                    })?;
+            .get_or_init(|| {
+                let path_owned = path.to_path_buf();
+                async move {
+                    // --- Slow path ---
+                    let content = tokio::fs::read(&path_owned)
+                        .await
+                        .map_err(|e| io_err(e, &path_owned))?;
 
-                let cached_multi = Arc::new(MultiZoneTree {
-                    script_tree: multi.script_tree.clone(),
-                    template_tree: multi.template_tree.clone(),
-                    style_tree: multi.style_tree.clone(),
-                    zones: multi.zones.clone(),
-                    source: multi.source.clone(),
-                    degraded: multi.degraded,
-                });
+                    // CLONE: content must be moved into spawn_blocking.
+                    // The hash + parse_vue_multizone CPU work goes to blocking pool.
+                    let (multi, content_hash) = tokio::task::spawn_blocking({
+                        let path = path_owned.clone();
+                        move || {
+                            let content_hash = VersionHash::compute(&content);
+                            let multi = parse_vue_multizone(&content).map_err(|e| {
+                                SurgeonError::ParseError {
+                                    path,
+                                    reason: format!("Vue multi-zone parse failed: {e}"),
+                                }
+                            })?;
+                            Ok::<_, SurgeonError>((multi, content_hash))
+                        }
+                    })
+                    .await
+                    .map_err(|join_err| SurgeonError::ParseError {
+                        path: path_owned.clone(),
+                        reason: format!("spawn_blocking panicked: {join_err}"),
+                    })??;
 
-                self.vue_entries.lock().put(
-                    path.to_path_buf(),
-                    MultiZoneEntry {
-                        multi: cached_multi,
-                        content_hash: content_hash.clone(),
-                        mtime: current_mtime,
-                    },
-                );
+                    let cached_multi = Arc::new(MultiZoneTree {
+                        script_tree: multi.script_tree.clone(),
+                        template_tree: multi.template_tree.clone(),
+                        style_tree: multi.style_tree.clone(),
+                        zones: multi.zones.clone(),
+                        source: multi.source.clone(),
+                        degraded: multi.degraded,
+                    });
 
-                Ok::<_, SurgeonError>((multi, content_hash))
+                    // Fast cache insertion back on async worker (nanoseconds)
+                    self.vue_entries.lock().put(
+                        path_owned.clone(),
+                        MultiZoneEntry {
+                            multi: cached_multi,
+                            content_hash: content_hash.clone(),
+                            mtime: current_mtime,
+                        },
+                    );
+
+                    Ok::<_, SurgeonError>((multi, content_hash))
+                }
             })
             .await;
 
@@ -348,9 +435,24 @@ impl AstCache {
 
         match result.as_ref() {
             Ok((multi, hash)) => Ok((multi.clone(), hash.clone())),
-            Err(e) => Err(SurgeonError::ParseError {
+            Err(SurgeonError::FileNotFound(p)) => Err(SurgeonError::FileNotFound(p.clone())),
+            Err(SurgeonError::UnsupportedLanguage(p)) => {
+                Err(SurgeonError::UnsupportedLanguage(p.clone()))
+            }
+            Err(SurgeonError::ParseError { path: p, reason }) => Err(SurgeonError::ParseError {
+                path: p.clone(),
+                reason: reason.clone(),
+            }),
+            Err(SurgeonError::SymbolNotFound {
+                path: p,
+                did_you_mean: dym,
+            }) => Err(SurgeonError::SymbolNotFound {
+                path: p.clone(),
+                did_you_mean: dym.clone(),
+            }),
+            Err(SurgeonError::Io(e)) => Err(SurgeonError::ParseError {
                 path: path.to_path_buf(),
-                reason: format!("Parse failed: {e}"),
+                reason: e.to_string(),
             }),
         }
     }
@@ -392,15 +494,29 @@ impl AstCache {
 
         let result = cell
             .get_or_init(|| {
+                let path_owned = path.to_path_buf();
+                // CLONE: content is &[u8], must own it for spawn_blocking.
                 let owned_content = content.to_vec();
                 async move {
-                    let content_hash = VersionHash::compute(&owned_content);
-                    let multi = parse_vue_multizone(&owned_content).map_err(|e| {
-                        SurgeonError::ParseError {
-                            path: path.to_path_buf(),
-                            reason: format!("Vue multi-zone parse failed: {e}"),
+                    // The hash + parse_vue_multizone CPU work goes to blocking pool.
+                    let (multi, content_hash) = tokio::task::spawn_blocking({
+                        let path = path_owned.clone();
+                        move || {
+                            let content_hash = VersionHash::compute(&owned_content);
+                            let multi = parse_vue_multizone(&owned_content).map_err(|e| {
+                                SurgeonError::ParseError {
+                                    path,
+                                    reason: format!("Vue multi-zone parse failed: {e}"),
+                                }
+                            })?;
+                            Ok::<_, SurgeonError>((multi, content_hash))
                         }
-                    })?;
+                    })
+                    .await
+                    .map_err(|join_err| SurgeonError::ParseError {
+                        path: path_owned.clone(),
+                        reason: format!("spawn_blocking panicked: {join_err}"),
+                    })??;
 
                     let cached_multi = Arc::new(MultiZoneTree {
                         script_tree: multi.script_tree.clone(),
@@ -411,8 +527,9 @@ impl AstCache {
                         degraded: multi.degraded,
                     });
 
+                    // Fast cache insertion back on async worker (nanoseconds)
                     self.vue_entries.lock().put(
-                        path.to_path_buf(),
+                        path_owned.clone(),
                         MultiZoneEntry {
                             multi: cached_multi,
                             content_hash: content_hash.clone(),
@@ -432,9 +549,24 @@ impl AstCache {
 
         match result.as_ref() {
             Ok((multi, hash)) => Ok((multi.clone(), hash.clone())),
-            Err(e) => Err(SurgeonError::ParseError {
+            Err(SurgeonError::FileNotFound(p)) => Err(SurgeonError::FileNotFound(p.clone())),
+            Err(SurgeonError::UnsupportedLanguage(p)) => {
+                Err(SurgeonError::UnsupportedLanguage(p.clone()))
+            }
+            Err(SurgeonError::ParseError { path: p, reason }) => Err(SurgeonError::ParseError {
+                path: p.clone(),
+                reason: reason.clone(),
+            }),
+            Err(SurgeonError::SymbolNotFound {
+                path: p,
+                did_you_mean: dym,
+            }) => Err(SurgeonError::SymbolNotFound {
+                path: p.clone(),
+                did_you_mean: dym.clone(),
+            }),
+            Err(SurgeonError::Io(e)) => Err(SurgeonError::ParseError {
                 path: path.to_path_buf(),
-                reason: format!("Parse failed: {e}"),
+                reason: e.to_string(),
             }),
         }
     }
@@ -665,6 +797,115 @@ mod tests {
 
         // Only one entry should be in the cache (not 5)
         assert_eq!(cache.entries.lock().len(), 1);
+    }
+
+    /// Stress test: verify singleflight + `spawn_blocking` work correctly together
+    /// under high concurrency (10+ concurrent tasks). THR-001-A regression guard.
+    ///
+    /// This tests the exact scenario that caused MCP timeouts: concurrent requests
+    /// triggering tree-sitter parses that now run on the blocking pool via `spawn_blocking`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_spawn_blocking_stress() {
+        let cache = Arc::new(AstCache::new(100));
+
+        // Create multiple test files - keep NamedTempFile in scope to prevent deletion
+        let mut temp_files = Vec::with_capacity(5);
+        let mut file_paths = Vec::with_capacity(5);
+        for i in 0..5 {
+            let mut file = NamedTempFile::new().unwrap();
+            let content = format!("package main\n\nfunc Func{i}() int {{ return {i}; }}\n");
+            file.write_all(content.as_bytes()).unwrap();
+            file_paths.push(Arc::new(file.path().to_path_buf()));
+            temp_files.push(file);
+        }
+
+        // Spawn 10 concurrent tasks: each task accesses all 5 files
+        // This creates contention: same files requested simultaneously
+        let mut handles = Vec::with_capacity(10);
+        for task_id in 0..10 {
+            let cache = Arc::clone(&cache);
+            let files = file_paths.clone();
+            handles.push(tokio::spawn(async move {
+                // Round-robin through files to create overlapping access patterns
+                for i in 0..5 {
+                    let file_idx = (task_id + i) % 5;
+                    let result = cache
+                        .get_or_parse(&files[file_idx], SupportedLanguage::Go)
+                        .await;
+                    assert!(result.is_ok(), "task {task_id} file {file_idx} failed");
+                    let (_tree, source) = result.unwrap();
+                    assert!(!source.is_empty(), "task {task_id} got empty source");
+                }
+            }));
+        }
+
+        // All tasks must complete successfully
+        let results = futures::future::join_all(handles).await;
+        for result in results {
+            assert!(result.is_ok(), "spawned task panicked");
+        }
+
+        // Only 5 entries should be in cache (one per unique file, not 50)
+        assert_eq!(
+            cache.entries.lock().len(),
+            5,
+            "singleflight should have prevented redundant parses"
+        );
+
+        // Keep temp_files alive until end of test
+        drop(temp_files);
+    }
+
+    /// Vue stress test: verify singleflight + `spawn_blocking` work correctly
+    /// for Vue SFC multi-zone parsing under high concurrency. THR-001-A regression guard.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_spawn_blocking_vue_stress() {
+        let cache = Arc::new(AstCache::new(100));
+
+        // Create multiple Vue SFC files - keep them in scope to prevent deletion
+        let mut temp_files = Vec::with_capacity(3);
+        let mut file_paths = Vec::with_capacity(3);
+        for i in 0..3 {
+            let mut file = NamedTempFile::new().unwrap();
+            let sfc = format!(
+                "<template>\n  <div>Comp{i}</div>\n</template>\n<script setup lang=\"ts\">\nconst count{i} = ref(0);\n</script>\n<style scoped>\n.comp{i} {{ color: red; }}\n</style>\n"
+            );
+            file.write_all(sfc.as_bytes()).unwrap();
+            file_paths.push(Arc::new(file.path().to_path_buf()));
+            temp_files.push(file);
+        }
+
+        // Spawn 10 concurrent tasks: each task accesses all 3 Vue files
+        let mut handles = Vec::with_capacity(10);
+        for task_id in 0..10 {
+            let cache = Arc::clone(&cache);
+            let files = file_paths.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..3 {
+                    let file_idx = (task_id + i) % 3;
+                    let result = cache.get_or_parse_vue(&files[file_idx]).await;
+                    assert!(result.is_ok(), "task {task_id} vue file {file_idx} failed");
+                    let (multi, _hash) = result.unwrap();
+                    assert!(multi.script_tree.is_some(), "script tree missing");
+                }
+            }));
+        }
+
+        // All tasks must complete successfully
+        let results = futures::future::join_all(handles).await;
+        for result in results {
+            assert!(result.is_ok(), "spawned task panicked");
+        }
+
+        // Only 3 entries should be in Vue cache (one per unique file, not 30)
+        assert_eq!(
+            cache.vue_entries.lock().len(),
+            3,
+            "singleflight should have prevented redundant Vue parses"
+        );
+
+        // Keep temp_files alive until end of test
+        drop(temp_files);
     }
 
     /// Test that singleflight works correctly for Vue SFC parsing as well.

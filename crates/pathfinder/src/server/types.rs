@@ -1025,7 +1025,7 @@ pub struct FindSymbolResponse {
 // ── read_files tool types ─────────────────────────────────────────
 
 /// Parameters for `read_files`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadFilesParams {
     /// File paths to read (max 10 per call).
     pub paths: Vec<String>,
