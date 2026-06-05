@@ -96,7 +96,7 @@ impl Lawyer for LspClient {
             "textDocument/definition complete"
         );
 
-        crate::client::response_parsers::parse_definition_response(response, workspace_root)
+        crate::client::response_parsers::parse_definition_response(response, workspace_root).await
     }
 
     async fn call_hierarchy_prepare(
@@ -254,7 +254,7 @@ impl Lawyer for LspClient {
             "textDocument/references complete"
         );
 
-        crate::client::response_parsers::parse_references_response(&response, workspace_root)
+        crate::client::response_parsers::parse_references_response(&response, workspace_root).await
     }
 
     async fn goto_implementation(
@@ -321,7 +321,8 @@ impl Lawyer for LspClient {
             crate::client::response_parsers::parse_definition_response_multi(
                 &response,
                 workspace_root,
-            ),
+            )
+            .await,
         )
     }
 

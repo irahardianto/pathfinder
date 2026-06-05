@@ -296,6 +296,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools",
  "num-traits",
@@ -1191,6 +1192,7 @@ version = "0.10.1"
 dependencies = [
  "async-trait",
  "command-group",
+ "criterion",
  "dashmap",
  "libc",
  "parking_lot",

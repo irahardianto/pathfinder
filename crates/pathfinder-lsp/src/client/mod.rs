@@ -20,8 +20,8 @@ mod lawyer_impl;
 mod lifecycle;
 mod process;
 mod protocol;
-mod response_parsers;
-mod transport;
+pub mod response_parsers;
+pub mod transport;
 
 pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy};
 pub use detect::install_hint;

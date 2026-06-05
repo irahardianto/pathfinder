@@ -24,7 +24,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 /// Returns `LspError::Io` if the underlying read fails or EOF is reached
 /// mid-message. Returns `LspError::Protocol` if the header is malformed
 /// or the body is not valid JSON.
-pub(super) async fn read_message<R>(reader: &mut BufReader<R>) -> Result<Value, LspError>
+pub async fn read_message<R>(reader: &mut BufReader<R>) -> Result<Value, LspError>
 where
     R: AsyncReadExt + Unpin,
 {
@@ -95,7 +95,7 @@ where
 ///
 /// # Errors
 /// Returns `LspError::Io` if serialisation or the underlying write fails.
-pub(super) async fn write_message<W>(writer: &mut W, message: &Value) -> Result<(), LspError>
+pub async fn write_message<W>(writer: &mut W, message: &Value) -> Result<(), LspError>
 where
     W: AsyncWriteExt + Unpin,
 {

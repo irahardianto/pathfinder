@@ -2,13 +2,77 @@
 //!
 //! Pure functions that parse LSP protocol responses into domain types.
 //! No side effects, no field access on `LspClient`.
+//!
+//! File preview extraction uses async I/O (`tokio::fs`) to avoid blocking
+//! the tokio runtime on filesystem reads during LSP response processing.
 
 use crate::types::{CallHierarchyCall, CallHierarchyItem, ReferenceLocation};
 use crate::{DefinitionLocation, LspError};
 use std::path::Path;
 use url::Url;
 
-pub fn parse_definition_response(
+fn resolve_relative_path(uri_str: &str, workspace_root: &Path, fallback: &str) -> String {
+    Url::parse(uri_str)
+        .ok()
+        .and_then(|u: Url| u.to_file_path().ok())
+        .and_then(|p| {
+            p.strip_prefix(workspace_root)
+                .ok()
+                .map(|rp| rp.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+async fn read_preview_line(abs_path: &Path, line_index: usize) -> String {
+    match tokio::fs::read_to_string(abs_path).await {
+        Ok(content) => content
+            .lines()
+            .nth(line_index)
+            .map(|l| l.trim().to_owned())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+fn parse_uri_and_range(
+    location: &serde_json::Value,
+) -> Option<(String, u64, u64, Option<std::path::PathBuf>)> {
+    let (uri_str, start_line, start_char) = if location.get("targetUri").is_some() {
+        (
+            location["targetUri"].as_str().unwrap_or(""),
+            location["targetSelectionRange"]["start"]["line"]
+                .as_u64()
+                .unwrap_or(0),
+            location["targetSelectionRange"]["start"]["character"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+    } else {
+        (
+            location["uri"].as_str().unwrap_or(""),
+            location["range"]["start"]["line"].as_u64().unwrap_or(0),
+            location["range"]["start"]["character"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+    };
+
+    if uri_str.is_empty() {
+        return None;
+    }
+
+    let abs_path = Url::parse(uri_str)
+        .ok()
+        .and_then(|u: Url| u.to_file_path().ok());
+
+    Some((uri_str.to_owned(), start_line, start_char, abs_path))
+}
+
+/// Parse a single LSP definition response into a `DefinitionLocation`.
+///
+/// # Errors
+/// - `LspError::Protocol` — response has no URI
+pub async fn parse_definition_response(
     response: serde_json::Value,
     workspace_root: &Path,
 ) -> Result<Option<DefinitionLocation>, LspError> {
@@ -30,57 +94,19 @@ pub fn parse_definition_response(
         return Ok(None);
     }
 
-    let (uri_str, start_line, start_char) = if location.get("targetUri").is_some() {
-        (
-            location["targetUri"].as_str().unwrap_or("").to_owned(),
-            location["targetSelectionRange"]["start"]["line"]
-                .as_u64()
-                .unwrap_or(0),
-            location["targetSelectionRange"]["start"]["character"]
-                .as_u64()
-                .unwrap_or(0),
-        )
-    } else {
-        (
-            location["uri"].as_str().unwrap_or("").to_owned(),
-            location["range"]["start"]["line"].as_u64().unwrap_or(0),
-            location["range"]["start"]["character"]
-                .as_u64()
-                .unwrap_or(0),
-        )
-    };
-
-    if uri_str.is_empty() {
+    let Some((uri_str, start_line, start_char, abs_path)) = parse_uri_and_range(&location) else {
         return Err(LspError::Protocol(
             "definition response missing URI".to_owned(),
         ));
-    }
+    };
 
-    let abs_path = Url::parse(&uri_str)
-        .ok()
-        .and_then(|u: Url| u.to_file_path().ok());
+    let file = resolve_relative_path(&uri_str, workspace_root, &uri_str);
 
-    let file = abs_path
-        .as_deref()
-        .and_then(|p| p.strip_prefix(workspace_root).ok())
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|| {
-            abs_path
-                .as_deref()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
-        .unwrap_or(uri_str);
-
-    let preview = abs_path
-        .as_deref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|content| {
-            content
-                .lines()
-                .nth(usize::try_from(start_line).unwrap_or(0))
-                .map(|l| l.trim().to_owned())
-        })
-        .unwrap_or_default();
+    let preview = if let Some(ref p) = abs_path {
+        read_preview_line(p, usize::try_from(start_line).unwrap_or(0)).await
+    } else {
+        String::new()
+    };
 
     Ok(Some(DefinitionLocation {
         file,
@@ -90,7 +116,10 @@ pub fn parse_definition_response(
     }))
 }
 
-pub fn parse_single_definition_location(
+/// Parse a single definition location value.
+///
+/// Returns `None` if the location is null or has no URI.
+pub async fn parse_single_definition_location(
     location: &serde_json::Value,
     workspace_root: &Path,
 ) -> Option<DefinitionLocation> {
@@ -98,55 +127,15 @@ pub fn parse_single_definition_location(
         return None;
     }
 
-    let (uri_str, start_line, start_char) = if location.get("targetUri").is_some() {
-        (
-            location["targetUri"].as_str().unwrap_or("").to_owned(),
-            location["targetSelectionRange"]["start"]["line"]
-                .as_u64()
-                .unwrap_or(0),
-            location["targetSelectionRange"]["start"]["character"]
-                .as_u64()
-                .unwrap_or(0),
-        )
+    let (uri_str, start_line, start_char, abs_path) = parse_uri_and_range(location)?;
+
+    let file = resolve_relative_path(&uri_str, workspace_root, &uri_str);
+
+    let preview = if let Some(ref p) = abs_path {
+        read_preview_line(p, usize::try_from(start_line).unwrap_or(0)).await
     } else {
-        (
-            location["uri"].as_str().unwrap_or("").to_owned(),
-            location["range"]["start"]["line"].as_u64().unwrap_or(0),
-            location["range"]["start"]["character"]
-                .as_u64()
-                .unwrap_or(0),
-        )
+        String::new()
     };
-
-    if uri_str.is_empty() {
-        return None;
-    }
-
-    let abs_path = Url::parse(&uri_str)
-        .ok()
-        .and_then(|u: Url| u.to_file_path().ok());
-
-    let file = abs_path
-        .as_deref()
-        .and_then(|p| p.strip_prefix(workspace_root).ok())
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|| {
-            abs_path
-                .as_deref()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
-        .unwrap_or(uri_str);
-
-    let preview = abs_path
-        .as_deref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|content| {
-            content
-                .lines()
-                .nth(usize::try_from(start_line).unwrap_or(0))
-                .map(|l| l.trim().to_owned())
-        })
-        .unwrap_or_default();
 
     Some(DefinitionLocation {
         file,
@@ -156,7 +145,8 @@ pub fn parse_single_definition_location(
     })
 }
 
-pub fn parse_definition_response_multi(
+/// Parse multiple definition locations from a response.
+pub async fn parse_definition_response_multi(
     response: &serde_json::Value,
     workspace_root: &Path,
 ) -> Vec<DefinitionLocation> {
@@ -167,18 +157,23 @@ pub fn parse_definition_response_multi(
     if let Some(items) = response.as_array() {
         let mut result = Vec::with_capacity(items.len());
         for item in items {
-            if let Some(loc) = parse_single_definition_location(item, workspace_root) {
+            if let Some(loc) = parse_single_definition_location(item, workspace_root).await {
                 result.push(loc);
             }
         }
         result
     } else {
         parse_single_definition_location(response, workspace_root)
+            .await
             .map(|loc| vec![loc])
             .unwrap_or_default()
     }
 }
 
+/// Parse a call hierarchy prepare response into `CallHierarchyItem`s.
+///
+/// # Errors
+/// - `LspError::Protocol` — response is not an array
 pub fn parse_call_hierarchy_prepare_response(
     response: &serde_json::Value,
     workspace_root: &Path,
@@ -194,15 +189,7 @@ pub fn parse_call_hierarchy_prepare_response(
     let mut result = Vec::with_capacity(items.len());
     for item in items {
         let uri_str = item["uri"].as_str().unwrap_or("");
-        let file = Url::parse(uri_str)
-            .ok()
-            .and_then(|u| u.to_file_path().ok())
-            .and_then(|p| {
-                p.strip_prefix(workspace_root)
-                    .map(std::path::Path::to_path_buf)
-                    .ok()
-            })
-            .map_or_else(|| uri_str.to_owned(), |p| p.to_string_lossy().into_owned());
+        let file = resolve_relative_path(uri_str, workspace_root, uri_str);
 
         let line = u32::try_from(
             item["selectionRange"]["start"]["line"]
@@ -246,6 +233,10 @@ pub fn parse_call_hierarchy_prepare_response(
     Ok(result)
 }
 
+/// Parse a call hierarchy calls response (incoming or outgoing).
+///
+/// # Errors
+/// - `LspError::Protocol` — response is not an array
 pub fn parse_call_hierarchy_calls_response(
     response: &serde_json::Value,
     workspace_root: &Path,
@@ -294,7 +285,11 @@ pub fn parse_call_hierarchy_calls_response(
     Ok(result)
 }
 
-pub fn parse_references_response(
+/// Parse a textDocument/references response into a list of `ReferenceLocation`.
+///
+/// # Errors
+/// - `LspError::Protocol` — response is not an array, contains invalid URIs, or missing ranges
+pub async fn parse_references_response(
     response: &serde_json::Value,
     workspace_root: &Path,
 ) -> Result<Vec<ReferenceLocation>, LspError> {
@@ -340,16 +335,11 @@ pub fn parse_references_response(
             .and_then(serde_json::Value::as_u64)
             .map_or(1, |c| (c as u32) + 1);
 
-        let snippet = match std::fs::read_to_string(workspace_root.join(&relative_path)) {
-            Ok(content) => {
-                let snippet_line = content
-                    .lines()
-                    .nth((line as usize).saturating_sub(1))
-                    .unwrap_or("");
-                snippet_line.trim().to_owned()
-            }
-            Err(_) => String::new(),
-        };
+        let snippet = read_preview_line(
+            &workspace_root.join(&relative_path),
+            (line as usize).saturating_sub(1),
+        )
+        .await;
 
         result.push(ReferenceLocation {
             file: relative_path.to_string_lossy().into_owned(),
@@ -368,14 +358,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn test_parse_definition_response_null() {
-        let result = parse_definition_response(json!(null), Path::new("/"));
+    #[tokio::test]
+    async fn test_parse_definition_response_null() {
+        let result = parse_definition_response(json!(null), Path::new("/")).await;
         assert!(result.expect("should not err").is_none());
     }
 
-    #[test]
-    fn test_parse_definition_response_location() {
+    #[tokio::test]
+    async fn test_parse_definition_response_location() {
         let response = json!({
             "uri": "file:///home/user/project/src/auth.rs",
             "range": {
@@ -383,15 +373,17 @@ mod tests {
                 "end":   { "line": 41, "character": 9 }
             }
         });
-        let result = parse_definition_response(response, Path::new("/")).expect("ok");
+        let result = parse_definition_response(response, Path::new("/"))
+            .await
+            .expect("ok");
         let loc = result.expect("some location");
         assert_eq!(loc.line, 42);
         assert_eq!(loc.column, 5);
         assert!(loc.file.contains("auth.rs"));
     }
 
-    #[test]
-    fn test_parse_definition_response_array() {
+    #[tokio::test]
+    async fn test_parse_definition_response_array() {
         let response = json!([{
             "uri": "file:///project/src/lib.rs",
             "range": {
@@ -399,14 +391,16 @@ mod tests {
                 "end":   { "line": 9, "character": 5 }
             }
         }]);
-        let result = parse_definition_response(response, Path::new("/")).expect("ok");
+        let result = parse_definition_response(response, Path::new("/"))
+            .await
+            .expect("ok");
         let loc = result.expect("some location");
         assert_eq!(loc.line, 10);
         assert!(loc.file.contains("lib.rs"));
     }
 
-    #[test]
-    fn test_parse_definition_response_location_link() {
+    #[tokio::test]
+    async fn test_parse_definition_response_location_link() {
         let response = json!({
             "targetUri": "file:///project/src/types.rs",
             "targetRange": {
@@ -418,16 +412,20 @@ mod tests {
                 "end":   { "line": 19, "character": 9 }
             }
         });
-        let result = parse_definition_response(response, Path::new("/")).expect("ok");
+        let result = parse_definition_response(response, Path::new("/"))
+            .await
+            .expect("ok");
         let loc = result.expect("some location");
         assert_eq!(loc.line, 20);
         assert!(loc.file.contains("types.rs"));
     }
 
-    #[test]
-    fn test_parse_definition_empty_array() {
+    #[tokio::test]
+    async fn test_parse_definition_empty_array() {
         let response = json!([]);
-        let result = parse_definition_response(response, Path::new("/")).expect("ok");
+        let result = parse_definition_response(response, Path::new("/"))
+            .await
+            .expect("ok");
         assert!(result.is_none());
     }
 
@@ -638,8 +636,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_references_response_with_locations() {
+    #[tokio::test]
+    async fn test_parse_references_response_with_locations() {
         let temp = tempfile::tempdir().expect("temp dir");
         let workspace_root = temp.path();
         let src_dir = workspace_root.join("src");
@@ -658,6 +656,7 @@ mod tests {
         }]);
 
         let result = parse_references_response(&response, workspace_root)
+            .await
             .expect("should parse successfully");
 
         assert_eq!(result.len(), 1);
@@ -667,17 +666,19 @@ mod tests {
         assert!(result[0].snippet.contains("helper"));
     }
 
-    #[test]
-    fn test_parse_references_response_null_returns_empty() {
-        let result = parse_references_response(&json!(null), Path::new("/workspace")).expect("ok");
+    #[tokio::test]
+    async fn test_parse_references_response_null_returns_empty() {
+        let result = parse_references_response(&json!(null), Path::new("/workspace"))
+            .await
+            .expect("ok");
         assert!(
             result.is_empty(),
             "null response should return empty vector"
         );
     }
 
-    #[test]
-    fn test_parse_references_response_invalid_uri_returns_error() {
+    #[tokio::test]
+    async fn test_parse_references_response_invalid_uri_returns_error() {
         let response = json!([{
             "uri": "not-a-valid-uri",
             "range": {
@@ -686,7 +687,7 @@ mod tests {
             }
         }]);
 
-        let result = parse_references_response(&response, Path::new("/workspace"));
+        let result = parse_references_response(&response, Path::new("/workspace")).await;
         assert!(
             result.is_err(),
             "invalid URI should return error, not empty vector"
@@ -699,5 +700,38 @@ mod tests {
         } else {
             panic!("expected Protocol error for invalid URI");
         }
+    }
+
+    #[test]
+    fn test_resolve_relative_path_with_file_uri() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file_path = temp.path().join("src/lib.rs");
+        std::fs::create_dir_all(temp.path().join("src")).ok();
+        std::fs::write(&file_path, "").ok();
+
+        let uri = Url::from_file_path(&file_path).unwrap().to_string();
+        let result = resolve_relative_path(&uri, temp.path(), &uri);
+        assert_eq!(result, "src/lib.rs");
+    }
+
+    #[test]
+    fn test_resolve_relative_path_invalid_uri() {
+        let result = resolve_relative_path("not-a-uri", Path::new("/workspace"), "not-a-uri");
+        assert_eq!(result, "not-a-uri");
+    }
+
+    #[test]
+    fn test_resolve_relative_path_outside_workspace() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let outside = tempfile::tempdir().expect("temp dir 2");
+        let file_path = outside.path().join("lib.rs");
+        std::fs::write(&file_path, "").ok();
+
+        let uri = Url::from_file_path(&file_path).unwrap().to_string();
+        let result = resolve_relative_path(&uri, temp.path(), &uri);
+        assert!(
+            result.contains("lib.rs"),
+            "should fall back to full path when outside workspace"
+        );
     }
 }
