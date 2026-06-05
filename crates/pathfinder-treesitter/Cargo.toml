@@ -21,7 +21,7 @@ workspace = true
 pathfinder-common = { version = "0.6.2", path = "../pathfinder-common", package = "pathfinder-mcp-common" }
 
 # Tree-sitter core
-tree-sitter = "0.25"
+tree-sitter = "0.26"
 
 # Language grammars (Tier 1)
 tree-sitter-go = "0.25"
