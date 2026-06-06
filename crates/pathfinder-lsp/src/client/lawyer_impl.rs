@@ -135,7 +135,7 @@ impl Lawyer for LspClient {
                 language_id,
                 "textDocument/prepareCallHierarchy",
                 params,
-                Duration::from_secs(10),
+                Duration::from_secs(5),
             )
             .await
         {

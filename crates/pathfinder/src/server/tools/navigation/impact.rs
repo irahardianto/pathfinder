@@ -18,6 +18,13 @@ use rmcp::model::{CallToolResult, ErrorData};
 /// Prevents infinite loops if the LSP keeps returning more references.
 const BFS_TIMEOUT_SECS: u64 = 30;
 
+/// Maximum consecutive LSP failures before aborting BFS traversal.
+/// When the LSP is non-responsive, this provides a fast exit path
+/// without waiting for the full wall-clock timeout on each step.
+/// A responsive LSP may occasionally fail once (e.g., transient error),
+/// but 2 consecutive failures strongly indicate a hung/stuck LSP.
+const BFS_CONSECUTIVE_FAILURE_LIMIT: u32 = 2;
+
 /// Direction for call hierarchy BFS traversal in `analyze_impact`.
 ///
 /// `Incoming` traverses callers (who calls this symbol).
@@ -138,6 +145,7 @@ impl PathfinderServer {
 
         let mut references = Vec::new();
         let mut max_depth_reached = 0;
+        let mut consecutive_failures: u32 = 0;
 
         while let Some((item, current_depth)) = queue.pop_front() {
             max_depth_reached = std::cmp::max(max_depth_reached, current_depth);
@@ -158,6 +166,17 @@ impl PathfinderServer {
                 break;
             }
 
+            // Check consecutive failure limit — fast exit when LSP is hung
+            if consecutive_failures >= BFS_CONSECUTIVE_FAILURE_LIMIT {
+                tracing::warn!(
+                    direction = ?direction,
+                    consecutive_failures,
+                    limit = BFS_CONSECUTIVE_FAILURE_LIMIT,
+                    "BFS aborted: too many consecutive LSP failures, returning partial results"
+                );
+                break;
+            }
+
             let hierarchy_result = match direction {
                 CallDirection::Incoming => {
                     self.lawyer
@@ -173,6 +192,7 @@ impl PathfinderServer {
 
             match hierarchy_result {
                 Ok(calls) => {
+                    consecutive_failures = 0;
                     for call in calls {
                         if *remaining_references == 0 {
                             break;
@@ -222,6 +242,7 @@ impl PathfinderServer {
                     }
                 }
                 Err(e) => {
+                    consecutive_failures += 1;
                     let direction_name = match direction {
                         CallDirection::Incoming => "call_hierarchy_incoming",
                         CallDirection::Outgoing => "call_hierarchy_outgoing",
@@ -2445,5 +2466,70 @@ mod tests {
             "test_callers should be None when not found"
         );
         assert_eq!(val.test_coverage_status, Some("not_found".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_bfs_aborts_on_consecutive_failures() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        let caller_item = CallHierarchyItem {
+            name: "caller".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/caller.rs".into(),
+            line: 5,
+            column: 4,
+            data: None,
+        };
+
+        // Incoming: first call returns a caller (so BFS has something to traverse),
+        // then every subsequent call for deeper levels fails.
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: caller_item.clone(),
+            call_sites: vec![9],
+        }]));
+        // Next BFS step: incoming for caller fails
+        lawyer.push_incoming_call_result(Err(LspError::Protocol("hung".to_string())));
+        // Next BFS step: incoming fails again → 2 consecutive failures → abort
+        lawyer.push_incoming_call_result(Err(LspError::Protocol("still hung".to_string())));
+
+        // Outgoing: empty
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = AnalyzeImpactParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 4,
+            max_references: 50,
+            ..Default::default()
+        };
+        let result = server.analyze_impact_impl(params).await;
+        let call_res = result.expect("should succeed with partial results");
+        let val: crate::server::types::AnalyzeImpactMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        let incoming = val.incoming.as_ref().expect("must be Some");
+        assert_eq!(incoming.len(), 1, "should have 1 caller before abort");
+        assert_eq!(incoming[0].semantic_path, "src/caller.rs::caller");
     }
 }

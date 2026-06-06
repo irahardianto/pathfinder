@@ -468,13 +468,11 @@ impl PathfinderServer {
 
     /// Probe whether an LSP is actually ready by attempting a lightweight operation.
     async fn probe_language_readiness(&self, language_id: &str) -> bool {
-        // Find a well-known file in the workspace for this language
         let probe_file = self.find_probe_file(language_id);
         let Some(file_path) = probe_file else {
-            return false; // No file to probe with
+            return false;
         };
 
-        // Open the file, try goto_definition on line 1 column 1
         let content = tokio::fs::read_to_string(self.workspace_root.path().join(&file_path))
             .await
             .unwrap_or_default();
@@ -484,14 +482,65 @@ impl PathfinderServer {
             .open_document(self.workspace_root.path(), &file_path, &content)
             .await;
 
-        let result = self
-            .lawyer
-            .goto_definition(self.workspace_root.path(), &file_path, 1, 1)
-            .await;
+        // Wrap in a 5s budget — for a health probe we only need "does it respond",
+        // not real data. This caps worst-case probe time instead of inheriting
+        // the production goto_definition timeout (10s).
+        let probe_timeout = std::time::Duration::from_secs(5);
 
-        // Any response (even Ok(None)) means the LSP is alive and processing requests.
-        // Only Err means it's not ready.
-        result.is_ok()
+        let result = tokio::time::timeout(
+            probe_timeout,
+            self.lawyer
+                .goto_definition(self.workspace_root.path(), &file_path, 1, 1),
+        )
+        .await;
+
+        let Ok(result) = result else {
+            tracing::warn!(
+                language = %language_id,
+                timeout_secs = 5,
+                "probe: goto_definition timed out — LSP not responsive"
+            );
+            return false;
+        };
+
+        if result.is_err() {
+            return false;
+        }
+
+        let caps = self.lawyer.capability_status().await;
+        if let Some(status) = caps.get(language_id) {
+            if status.supports_call_hierarchy == Some(true) {
+                let call_hierarchy_result = tokio::time::timeout(
+                    probe_timeout,
+                    self.lawyer.call_hierarchy_prepare(
+                        self.workspace_root.path(),
+                        &file_path,
+                        1,
+                        1,
+                    ),
+                )
+                .await;
+
+                let Ok(call_hierarchy_result) = call_hierarchy_result else {
+                    tracing::warn!(
+                        language = %language_id,
+                        timeout_secs = 5,
+                        "probe: call_hierarchy_prepare timed out — LSP partially responsive"
+                    );
+                    return false;
+                };
+
+                if call_hierarchy_result.is_err() {
+                    tracing::warn!(
+                        language = %language_id,
+                        "probe: goto_definition succeeded but call_hierarchy_prepare failed — LSP may be partially responsive"
+                    );
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     /// Find a well-known file in the workspace for probing language readiness.
@@ -2028,5 +2077,79 @@ mod tests {
         // Should use cached result without probing
         assert!(val.languages[0].probe_verified);
         assert_eq!(lawyer.goto_definition_call_count(), call_count_before);
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_probe_downgrades_when_call_hierarchy_hangs() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/main.rs"),
+            r#"fn main() { println!("Hello"); }"#,
+        )
+        .unwrap();
+
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: Some(true),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(30),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+            },
+        )]));
+
+        // goto_definition succeeds (basic LSP works)
+        lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 0,
+            preview: "fn main()".to_string(),
+        })));
+
+        // call_hierarchy_prepare FAILS (LSP is hung for call hierarchy)
+        lawyer.push_prepare_call_hierarchy_result(Err(pathfinder_lsp::LspError::Timeout {
+            operation: "textDocument/prepareCallHierarchy".to_string(),
+            timeout_ms: 5000,
+        }));
+
+        let params = crate::server::types::LspHealthParams {
+            action: None,
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = unpack_health(call_res);
+
+        assert_eq!(
+            val.languages.len(),
+            1,
+            "should have exactly 1 language entry"
+        );
+        let rust_health = &val.languages[0];
+
+        // The LSP should be downgraded from "ready" to "degraded" because
+        // the call hierarchy probe failed even though goto_definition succeeded.
+        assert_eq!(
+            rust_health.status, "degraded",
+            "should be degraded when call_hierarchy probe fails despite goto_definition succeeding"
+        );
+        assert!(
+            !rust_health.probe_verified,
+            "probe_verified must be false when call hierarchy probe fails"
+        );
     }
 }

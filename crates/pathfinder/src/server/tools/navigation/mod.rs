@@ -499,10 +499,32 @@ impl PathfinderServer {
         {
             Ok(scope) => Ok(scope),
             Err(pathfinder_treesitter::SurgeonError::SymbolNotFound { path, did_you_mean }) => {
-                // Enrich the suggestions
                 let enriched = self
                     .enrich_did_you_mean(semantic_path_str, did_you_mean)
                     .await;
+
+                // Auto-retry: if the symbol part contains '::' (Rust impl method
+                // convention uses '.' not '::'), try the corrected path before
+                // returning the error. This eliminates the 3-step retry cycle
+                // agents currently experience.
+                if let Some(corrected) = Self::try_separator_correction(semantic_path_str) {
+                if let Some(corrected_path) =
+                    pathfinder_common::types::SemanticPath::parse(&corrected)
+                    {
+                        if let Ok(scope) = self
+                            .surgeon
+                            .read_symbol_scope(self.workspace_root.path(), &corrected_path)
+                            .await
+                        {
+                            tracing::info!(
+                                original = %semantic_path_str,
+                                corrected = %corrected,
+                                "read_symbol_scope: auto-corrected '::' to '.' in symbol path"
+                            );
+                            return Ok(scope);
+                        }
+                    }
+                }
 
                 Err(pathfinder_to_error_data(
                     &pathfinder_common::error::PathfinderError::SymbolNotFound {
@@ -514,6 +536,15 @@ impl PathfinderServer {
             }
             Err(e) => Err(treesitter_error_to_error_data(e)),
         }
+    }
+
+    fn try_separator_correction(semantic_path_str: &str) -> Option<String> {
+        let (file_part, symbol_part) = semantic_path_str.split_once("::")?;
+        if !symbol_part.contains("::") {
+            return None;
+        }
+        let corrected_symbol = symbol_part.replace("::", ".");
+        Some(format!("{file_part}::{corrected_symbol}"))
     }
 }
 
@@ -932,5 +963,25 @@ def process():
         assert!(kw.contains(&"for"), "default must contain 'for'");
         assert!(kw.contains(&"while"), "default must contain 'while'");
         assert!(kw.contains(&"return"), "default must contain 'return'");
+    }
+
+    #[test]
+    fn test_try_separator_correction_converts_double_colon_to_dot() {
+        assert_eq!(
+            super::PathfinderServer::try_separator_correction("cache.rs::AstCache::get_or_parse"),
+            Some("cache.rs::AstCache.get_or_parse".to_string())
+        );
+        assert_eq!(
+            super::PathfinderServer::try_separator_correction("file.rs::Struct::method::inner"),
+            Some("file.rs::Struct.method.inner".to_string())
+        );
+        assert_eq!(
+            super::PathfinderServer::try_separator_correction("file.rs::simple_symbol"),
+            None
+        );
+        assert_eq!(
+            super::PathfinderServer::try_separator_correction("file.rs"),
+            None
+        );
     }
 }

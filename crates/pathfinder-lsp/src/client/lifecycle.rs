@@ -279,7 +279,19 @@ impl super::LspClient {
             // to unblock any pending requests for this language.
             self.dispatcher.cancel_for_language(language_id);
             if let Some(ref lifecycle) = state.lifecycle {
-                let _ = lifecycle.child.lock().await.wait().await;
+                // Grace period: wait up to 3s for the process to exit after SIGTERM.
+                // If it doesn't exit, send SIGKILL and wait again.
+                let mut child = lifecycle.child.lock().await;
+                let wait_result = tokio::time::timeout(Duration::from_secs(3), child.wait())
+                    .await;
+                if wait_result.is_err() {
+                    tracing::warn!(
+                        language = %language_id,
+                        "LSP: process did not exit after SIGTERM within 3s — sending SIGKILL"
+                    );
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
             }
             // Clear stale doc_versions — new LSP instance won't know about them.
             self.doc_versions.clear();
@@ -791,7 +803,17 @@ impl super::LspClient {
                     )
                     .await;
                     if let Some(ref lc) = lifecycle {
-                        let _ = lc.child.lock().await.wait().await;
+                        let mut child = lc.child.lock().await;
+                        let wait_result =
+                            tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+                        if wait_result.is_err() {
+                            tracing::warn!(
+                                language = %language_id,
+                                "LSP: stale process did not exit after SIGTERM — sending SIGKILL"
+                            );
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                        }
                     }
                     tracing::warn!(
                         language = %language_id,
@@ -858,7 +880,17 @@ impl super::LspClient {
                 )
                 .await;
                 if let Some(ref lc) = lifecycle {
-                    let _ = lc.child.lock().await.wait().await;
+                    let mut child = lc.child.lock().await;
+                    let wait_result =
+                        tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+                    if wait_result.is_err() {
+                        tracing::warn!(
+                            language = %language_id,
+                            "LSP: stale process did not exit after SIGTERM in notify — sending SIGKILL"
+                        );
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                    }
                 }
                 tracing::warn!(
                     language = %language_id,
@@ -913,7 +945,7 @@ impl super::LspClient {
         let params = json!({ "item": lsp_item });
 
         let response = match self
-            .request(language_id, lsp_method, params, Duration::from_secs(30))
+            .request(language_id, lsp_method, params, Duration::from_secs(10))
             .await
         {
             Ok(res) => res,

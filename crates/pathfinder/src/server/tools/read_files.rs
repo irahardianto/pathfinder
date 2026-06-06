@@ -131,10 +131,25 @@ impl PathfinderServer {
             failed,
             duration_ms: Some(u64::try_from(duration_ms).unwrap_or(u64::MAX)),
         };
-        let mut result = CallToolResult::success(vec![rmcp::model::Content::text(format!(
-            "[completed in {}ms]",
-            u64::try_from(duration_ms).unwrap_or(u64::MAX)
-        ))]);
+
+        let mut text_parts: Vec<String> = Vec::new();
+        for file in &response.files {
+            if let Some(ref content) = file.content {
+                text_parts.push(format!("--- {} ---", file.path));
+                text_parts.push(content.clone());
+            } else if let Some(ref error) = file.error {
+                text_parts.push(format!("--- {} (error: {}) ---", file.path, error));
+            }
+        }
+        text_parts.push(format!(
+            "[completed in {}ms, {}/{} files read]",
+            u64::try_from(duration_ms).unwrap_or(u64::MAX),
+            response.succeeded,
+            response.succeeded + response.failed
+        ));
+
+        let mut result =
+            CallToolResult::success(vec![rmcp::model::Content::text(text_parts.join("\n"))]);
         result.structured_content = serialize_metadata(&response);
         Ok(result)
     }
@@ -1030,5 +1045,116 @@ mod tests {
         // Should NOT be truncated since content has exactly max_lines lines
         assert_eq!(file_result.content.as_deref(), Some(content));
         assert_eq!(file_result.total_lines, Some(5));
+    }
+
+    #[tokio::test]
+    async fn test_read_files_text_content_includes_file_data() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+        );
+
+        fs::write(ws_dir.path().join("hello.txt"), "hello world").expect("write");
+        fs::write(ws_dir.path().join("second.toml"), "[settings]\nkey = \"val\"")
+            .expect("write");
+
+        let params = ReadFilesParams {
+            paths: vec!["hello.txt".to_string(), "second.toml".to_string()],
+            detail_level: "source_only".to_string(),
+            max_lines_per_file: 500,
+        };
+
+        let result = server
+            .read_files_impl(params)
+            .await
+            .expect("should succeed");
+
+        let text = match result.content.first() {
+            Some(rmcp::model::Content {
+                raw: rmcp::model::RawContent::Text(t),
+                ..
+            }) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+
+        assert!(
+            text.contains("hello.txt"),
+            "text output must include file path, got: {text}"
+        );
+        assert!(
+            text.contains("hello world"),
+            "text output must include file content, got: {text}"
+        );
+        assert!(
+            text.contains("second.toml"),
+            "text output must include second file path, got: {text}"
+        );
+        assert!(
+            text.contains("key = \"val\""),
+            "text output must include second file content, got: {text}"
+        );
+
+        assert!(
+            !text.starts_with("[completed in"),
+            "text output must NOT be just the timing footer, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_files_text_content_shows_errors_for_missing() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+        );
+
+        fs::write(ws_dir.path().join("exists.txt"), "content").expect("write");
+
+        let params = ReadFilesParams {
+            paths: vec!["exists.txt".to_string(), "missing.txt".to_string()],
+            detail_level: "source_only".to_string(),
+            max_lines_per_file: 500,
+        };
+
+        let result = server
+            .read_files_impl(params)
+            .await
+            .expect("should succeed");
+
+        let text = match result.content.first() {
+            Some(rmcp::model::Content {
+                raw: rmcp::model::RawContent::Text(t),
+                ..
+            }) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+
+        assert!(
+            text.contains("exists.txt"),
+            "text must include successful file path"
+        );
+        assert!(
+            text.contains("missing.txt"),
+            "text must include failed file path"
+        );
+        assert!(
+            text.contains("error") || text.contains("failed") || text.contains("not found"),
+            "text must indicate the error for missing file, got: {text}"
+        );
     }
 }
