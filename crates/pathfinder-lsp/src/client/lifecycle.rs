@@ -282,8 +282,7 @@ impl super::LspClient {
                 // Grace period: wait up to 3s for the process to exit after SIGTERM.
                 // If it doesn't exit, send SIGKILL and wait again.
                 let mut child = lifecycle.child.lock().await;
-                let wait_result = tokio::time::timeout(Duration::from_secs(3), child.wait())
-                    .await;
+                let wait_result = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
                 if wait_result.is_err() {
                     tracing::warn!(
                         language = %language_id,

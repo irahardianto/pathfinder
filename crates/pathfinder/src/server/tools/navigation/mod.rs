@@ -508,8 +508,8 @@ impl PathfinderServer {
                 // returning the error. This eliminates the 3-step retry cycle
                 // agents currently experience.
                 if let Some(corrected) = Self::try_separator_correction(semantic_path_str) {
-                if let Some(corrected_path) =
-                    pathfinder_common::types::SemanticPath::parse(&corrected)
+                    if let Some(corrected_path) =
+                        pathfinder_common::types::SemanticPath::parse(&corrected)
                     {
                         if let Ok(scope) = self
                             .surgeon

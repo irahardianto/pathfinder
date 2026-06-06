@@ -1063,8 +1063,11 @@ mod tests {
         );
 
         fs::write(ws_dir.path().join("hello.txt"), "hello world").expect("write");
-        fs::write(ws_dir.path().join("second.toml"), "[settings]\nkey = \"val\"")
-            .expect("write");
+        fs::write(
+            ws_dir.path().join("second.toml"),
+            "[settings]\nkey = \"val\"",
+        )
+        .expect("write");
 
         let params = ReadFilesParams {
             paths: vec!["hello.txt".to_string(), "second.toml".to_string()],
