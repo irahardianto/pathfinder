@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/irahardianto/pathfinder/compare/v0.11.2...v0.12.0) - 2026-06-06
+
+### Fixed
+
+- *(agent-ux)* address LSP reliability and usability issues reported in 24-commit assessment
+- *(deps)* bump sha2 0.10 → 0.11 with digest 0.11 migration
+- *(deps)* bump tree-sitter 0.25 → 0.26 with parse_with_options migration
+
+### Other
+
+- *(deps)* bump serde_json, ignore, rmcp, and which
+- *(treesitter)* offload CPU-intensive parsing to blocking pool and optimize concurrency
+- *(lsp)* [**breaking**] replace blocking file reads with async tokio::fs and add benchmarks
+
 ## [0.11.2](https://github.com/irahardianto/pathfinder/compare/v0.11.1...v0.11.2) - 2026-06-03
 
 ### Fixed
