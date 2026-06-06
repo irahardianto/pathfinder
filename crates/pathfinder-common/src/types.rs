@@ -195,10 +195,8 @@ impl VersionHash {
     pub fn compute(content: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(content);
-        // "sha256:" (7 bytes) + 64 hex chars = 71 bytes total
-        let mut buf = String::with_capacity(Self::PREFIX.len() + 64);
-        let _ = std::fmt::write(&mut buf, std::format_args!("{}{:x}", Self::PREFIX, hash));
-        Self(buf)
+        let hash_bytes: [u8; 32] = hash.into();
+        Self::compute_from_raw(hash_bytes)
     }
 
     #[must_use]
