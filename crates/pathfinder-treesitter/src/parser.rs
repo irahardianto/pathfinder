@@ -1,8 +1,12 @@
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
 use std::cell::RefCell;
+use std::ops::ControlFlow;
+use std::time::Instant;
 use tracing::instrument;
-use tree_sitter::{Parser, Tree};
+use tree_sitter::{ParseOptions, Parser, Tree};
+
+const PARSE_TIMEOUT_MICROS: u64 = 500_000;
 
 thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
@@ -36,15 +40,36 @@ impl AstParser {
                     reason: format!("Failed to set language: {e}"),
                 })?;
 
-            #[allow(deprecated)]
-            parser.set_timeout_micros(500_000);
+            let start = Instant::now();
+            let timeout = std::time::Duration::from_micros(PARSE_TIMEOUT_MICROS);
+            let source_len = source.len();
 
-            parser
-                .parse(source, None)
-                .ok_or_else(|| SurgeonError::ParseError {
-                    path: path.to_path_buf(),
-                    reason: "Parser returned None or timed out".into(),
-                })
+            let mut progress_cb = |_state: &tree_sitter::ParseState| {
+                if start.elapsed() > timeout {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            };
+
+            let options = ParseOptions::new().progress_callback(&mut progress_cb);
+
+            let result = parser.parse_with_options(
+                &mut |i, _| {
+                    if i < source_len {
+                        &source[i..]
+                    } else {
+                        &[]
+                    }
+                },
+                None,
+                Some(options),
+            );
+
+            result.ok_or_else(|| SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: "Parser returned None (timed out or no language set)".into(),
+            })
         })
     }
 }
