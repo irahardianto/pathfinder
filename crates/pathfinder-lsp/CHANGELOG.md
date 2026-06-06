@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.10.1...pathfinder-mcp-lsp-v0.11.0) - 2026-06-06
+
+### Fixed
+
+- *(agent-ux)* address LSP reliability and usability issues reported in 24-commit assessment
+
+### Other
+
+- *(deps)* bump serde_json, ignore, rmcp, and which
+- *(lsp)* [**breaking**] replace blocking file reads with async tokio::fs and add benchmarks
+
 ## [0.10.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.10.0...pathfinder-mcp-lsp-v0.10.1) - 2026-06-03
 
 ### Other
