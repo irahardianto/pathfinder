@@ -299,7 +299,7 @@ pub struct SymbolScope {
     ///
     /// For `pub fn dedent(code: &str)`, this is the column of the `d` in `dedent`
     /// (not the `p` in `pub`). Used by LSP navigation tools (`get_definition`,
-    /// `analyze_impact`, `read_with_deep_context`) to position the cursor on the
+    /// `find_callers_callees`, `read_with_deep_context`) to position the cursor on the
     /// symbol name, which is required for rust-analyzer to resolve the symbol.
     pub name_column: usize,
     /// The language of the file.

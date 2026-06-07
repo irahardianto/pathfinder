@@ -248,9 +248,9 @@ pub struct GetDefinitionParams {
     pub semantic_path: String,
 }
 
-/// Parameters for `analyze_impact`.
+/// Parameters for `find_callers_callees` (formerly `analyze_impact`).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AnalyzeImpactParams {
+pub struct FindCallersCalleesParams {
     /// Semantic path to the target (e.g., `src/mod.rs::func`).
     pub semantic_path: String,
     /// Traversal depth (max: 5).
@@ -274,7 +274,7 @@ pub struct AnalyzeImpactParams {
     pub include_test_coverage: bool,
 }
 
-impl Default for AnalyzeImpactParams {
+impl Default for FindCallersCalleesParams {
     fn default() -> Self {
         Self {
             semantic_path: String::default(),
@@ -720,9 +720,9 @@ pub struct ImpactReference {
     pub depth: usize,
 }
 
-/// The metadata embedded in `structured_content` for `analyze_impact` / `find_callers_callees`.
+/// The metadata embedded in `structured_content` for `find_callers_callees`.
 #[derive(Debug, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct AnalyzeImpactMetadata {
+pub struct FindCallersCalleesMetadata {
     /// Symbols that call the target (caller graph).
     /// `null` when `degraded` is `true` — LSP was unavailable so callers are **unknown**.
     /// An empty array `[]` means LSP confirmed zero callers.
@@ -853,7 +853,7 @@ pub struct ReferenceLocation {
 /// format with machine-readable severity and human-readable descriptions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DegradedToolInfo {
-    /// Tool name (e.g., `"analyze_impact"`, `"get_definition"`, `"read_with_deep_context"`).
+    /// Tool name (e.g., `"find_callers_callees"`, `"get_definition"`, `"read_with_deep_context"`).
     pub tool: String,
     /// Severity of degradation:
     ///
@@ -917,7 +917,7 @@ pub struct LspLanguageHealth {
     /// How diagnostics work for this language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics_strategy: Option<String>,
-    /// Whether call hierarchy is supported (affects `analyze_impact`, `read_with_deep_context`).
+    /// Whether call hierarchy is supported (affects `find_callers_callees`, `read_with_deep_context`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_call_hierarchy: Option<bool>,
     /// Whether diagnostics are supported (affects LSP health quality).
@@ -936,7 +936,7 @@ pub struct LspLanguageHealth {
     pub indexing_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_duration_secs: Option<u64>,
-    /// Whether navigation (`get_definition`, `analyze_impact`) is functional.
+    /// Whether navigation (`get_definition`, `find_callers_callees`) is functional.
     ///
     /// `true` once the LSP initialize handshake completes with `definitionProvider: true`.
     /// Independent of `indexing_status` — navigation works during indexing but
@@ -1160,8 +1160,8 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_impact_params_default() {
-        let params = AnalyzeImpactParams::default();
+    fn test_find_callers_callees_params_default() {
+        let params = FindCallersCalleesParams::default();
         assert_eq!(params.semantic_path, "");
         assert_eq!(params.max_depth, 3);
         assert_eq!(params.project_only, Some(true));

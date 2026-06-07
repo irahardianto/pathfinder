@@ -16,7 +16,7 @@ const LIVENESS_PROBE_INTERVAL_SECS: u64 = 120;
 impl PathfinderServer {
     /// Check LSP health status.
     ///
-    /// Tests whether LSP navigation tools (`get_definition`, `analyze_impact`,
+    /// Tests whether LSP navigation tools (`get_definition`, `find_callers_callees`,
     /// `read_with_deep_context`) will return real data or degraded results.
     /// Agents should call this once at session start to choose their strategy.
     #[allow(clippy::too_many_lines)]
@@ -65,7 +65,7 @@ impl PathfinderServer {
             // indexing_complete is an ADDITIONAL signal, not a requirement.
             let (status_str, uptime) = if status.navigation_ready == Some(true) {
                 // Navigation is functional — report ready regardless of indexing status.
-                // This makes get_definition, analyze_impact available immediately after
+                // This makes get_definition, find_callers_callees available immediately after
                 // initialize completes, without waiting for WorkDoneProgressEnd.
                 ("ready", status.uptime_seconds.map(format_uptime))
             } else if status.navigation_ready == Some(false)
@@ -318,7 +318,7 @@ impl PathfinderServer {
                 indexing_progress_percent: None,
                 degraded_tools: vec![
                     crate::server::types::DegradedToolInfo {
-                        tool: "analyze_impact".to_owned(),
+                        tool: "find_callers_callees".to_owned(),
                         severity: "unavailable".to_owned(),
                         description:
                             "No LSP available. Use search_codebase for manual reference search."
@@ -359,7 +359,7 @@ impl PathfinderServer {
                 && lang_health.supports_definition == Some(true)
             {
                 known_limitations.push(format!(
-                    "{}: call hierarchy not supported — analyze_impact uses grep fallback (less accurate)",
+                    "{}: call hierarchy not supported — find_callers_callees uses grep fallback (less accurate)",
                     lang_health.language
                 ));
             }
@@ -711,7 +711,7 @@ pub(super) fn compute_degraded_tools(
 
     if status.supports_call_hierarchy != Some(true) {
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "analyze_impact".to_owned(),
+            tool: "find_callers_callees".to_owned(),
             severity: "grep_fallback".to_owned(),
             description:
                 "Uses text search instead of call hierarchy. May over/under-count references."
@@ -1481,23 +1481,23 @@ mod tests {
         let go_health = &val.languages[0];
         assert_eq!(go_health.language, "go");
 
-        // Check that degraded_tools contains analyze_impact with correct severity
-        let analyze_impact = go_health
+        // Check that degraded_tools contains find_callers_callees with correct severity
+        let find_callers_callees = go_health
             .degraded_tools
             .iter()
-            .find(|t| t.tool == "analyze_impact");
+            .find(|t| t.tool == "find_callers_callees");
         assert!(
-            analyze_impact.is_some(),
-            "degraded_tools should include analyze_impact when call hierarchy unsupported"
+            find_callers_callees.is_some(),
+            "degraded_tools should include find_callers_callees when call hierarchy unsupported"
         );
-        let ai = analyze_impact.unwrap();
+        let fc = find_callers_callees.unwrap();
         assert_eq!(
-            ai.severity, "grep_fallback",
-            "analyze_impact should have severity=grep_fallback"
+            fc.severity, "grep_fallback",
+            "find_callers_callees should have severity=grep_fallback"
         );
         assert!(
-            ai.description.contains("text search"),
-            "analyze_impact description should mention text search fallback"
+            fc.description.contains("text search"),
+            "find_callers_callees description should mention text search fallback"
         );
 
         // Check that degraded_tools contains read_with_deep_context with correct severity

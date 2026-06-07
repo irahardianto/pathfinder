@@ -199,9 +199,9 @@ impl PathfinderError {
             Self::LspError { message } => {
                 let hint = if message.contains("timed out") || message.contains("timeout") {
                     format!(
-                        "LSP timed out. The language server may still be indexing, under memory pressure, or deadlocked. \
-                         Workaround: use search_codebase + read_symbol_scope (tree-sitter) instead of \
-                         LSP-dependent tools (get_definition, analyze_impact, read_with_deep_context). \
+                         "LSP timed out. The language server may still be indexing, under memory pressure, or deadlocked. \
+                          Workaround: use search_codebase + read_symbol_scope (tree-sitter) instead of \
+                          LSP-dependent tools (get_definition, find_callers_callees, read_with_deep_context). \
                          Original error: {message}"
                     )
                 } else if message.contains("connection lost") || message.contains("crashed") {
@@ -218,10 +218,10 @@ impl PathfinderError {
                 };
                 Some(hint)
             }
-            Self::LspTimeout { timeout_ms } => Some(format!(
+             Self::LspTimeout { timeout_ms } => Some(format!(
                 "LSP timed out after {timeout_ms}ms. The language server may still be indexing, under memory pressure, or deadlocked. \
                  Workaround: use search_codebase + read_symbol_scope (tree-sitter) instead of \
-                 LSP-dependent tools (get_definition, analyze_impact, read_with_deep_context). \
+                 LSP-dependent tools (get_definition, find_callers_callees, read_with_deep_context). \
                  Check lsp_health for current status."
             )),
             Self::NoLspAvailable { language } => Some(format!(

@@ -17,7 +17,7 @@ impl PathfinderServer {
     /// Find all references to a symbol across the entire codebase.
     ///
     /// Uses the LSP `textDocument/references` capability to find all usages of
-    /// a given symbol. Unlike `analyze_impact`, this returns all references
+    /// a given symbol. Unlike `find_callers_callees`, this returns all references
     /// including those not in the call hierarchy (e.g., field accesses, imports).
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip(self, params))]

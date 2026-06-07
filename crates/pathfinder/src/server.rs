@@ -9,7 +9,7 @@
 //!   - [`tools::search`] — `search_codebase`
 //!   - [`tools::repo_map`] — `get_repo_map`
 //!   - [`tools::symbols`] — `read_symbol_scope`, `read_with_deep_context`
-//!   - [`tools::navigation`] — `get_definition`, `analyze_impact`
+//!   - [`tools::navigation`] — `get_definition`, `find_callers_callees`
 //!   - [`tools::file_ops`] — `read_file`
 //!   - [`tools::source_file`] — `read_source_file`
 
@@ -68,7 +68,7 @@ mod tools;
 pub mod types;
 
 use types::{
-    AnalyzeImpactParams, FindSymbolParams, GetDefinitionParams, GetRepoMapParams, ReadFileParams,
+    FindCallersCalleesParams, FindSymbolParams, GetDefinitionParams, GetRepoMapParams, ReadFileParams,
     ReadFilesParams, ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams,
     SearchCodebaseParams, SearchCodebaseResponse,
 };
@@ -426,9 +426,9 @@ Example: `find_callers_callees(semantic_path=\"src/auth.ts::AuthService.login\",
     )]
     async fn find_callers_callees(
         &self,
-        Parameters(params): Parameters<AnalyzeImpactParams>,
+        Parameters(params): Parameters<FindCallersCalleesParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.analyze_impact_impl(params).await
+        self.find_callers_callees_impl(params).await
     }
 
     #[tool(

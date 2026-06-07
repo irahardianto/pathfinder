@@ -1,7 +1,7 @@
 //! Symbol overview tool handler: `symbol_overview`.
 //!
 //! Composite tool that returns source + callers/callees + references in one call.
-//! Orchestrates `read_symbol_scope` + `analyze_impact` + `find_all_references`.
+//! Orchestrates `read_symbol_scope` + `find_callers_callees` + `find_all_references`.
 
 use crate::server::helpers::{
     format_degraded_notice, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
@@ -14,7 +14,7 @@ use rmcp::model::ErrorData;
 impl PathfinderServer {
     /// Composite tool: returns source + callers/callees + references in one call.
     ///
-    /// Orchestrates `read_symbol_scope` + `analyze_impact` + `find_all_references`.
+    /// Orchestrates `read_symbol_scope` + `find_callers_callees` + `find_all_references`.
     /// Uses depth=2 and capped references for bounded responses.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn symbol_overview_impl(
@@ -90,7 +90,7 @@ impl PathfinderServer {
             }
         };
 
-        let impact_params = crate::server::types::AnalyzeImpactParams {
+        let impact_params = crate::server::types::FindCallersCalleesParams {
             semantic_path: params.semantic_path.clone(),
             max_depth: 2,
             max_references: params.max_callers_callees,
@@ -98,20 +98,20 @@ impl PathfinderServer {
             include_test_coverage: false,
         };
 
-        let impact_result = self.analyze_impact_impl(impact_params).await;
+        let impact_result = self.find_callers_callees_impl(impact_params).await;
 
         let (impact, impact_degraded, impact_reason) = match impact_result {
             Ok(result) => {
                 let raw = result.structured_content.unwrap_or_default();
-                let meta: crate::server::types::AnalyzeImpactMetadata =
+                let meta: crate::server::types::FindCallersCalleesMetadata =
                     serde_json::from_value(raw).unwrap_or_else(|e| {
-                        debug_assert!(false, "analyze_impact metadata deserialization failed: {e}");
+                        debug_assert!(false, "find_callers_callees metadata deserialization failed: {e}");
                         tracing::warn!(
                             error = %e,
-                            "symbol_overview: analyze_impact metadata deserialization failed — using degraded default"
+                            "symbol_overview: find_callers_callees metadata deserialization failed — using degraded default"
                         );
                         // Item 11: Use degraded=true to avoid hiding the bug from consumers.
-                        crate::server::types::AnalyzeImpactMetadata {
+                        crate::server::types::FindCallersCalleesMetadata {
                             degraded: true,
                             degraded_reason: Some(DegradedReason::LspErrorGrepFallback),
                             ..Default::default()
@@ -154,7 +154,7 @@ impl PathfinderServer {
                 tracing::warn!(
                     tool = "symbol_overview",
                     error = %e,
-                    "analyze_impact_impl failed — impact will be unavailable"
+                    "find_callers_callees_impl failed — impact will be unavailable"
                 );
                 (None, true, Some(DegradedReason::LspErrorGrepFallback))
             }
@@ -353,7 +353,7 @@ mod tests {
 
         let lawyer = Arc::new(MockLawyer::default());
 
-        // Configure analyze_impact
+        // Configure find_callers_callees
         let item = CallHierarchyItem {
             name: "login".into(),
             kind: "function".into(),
@@ -890,9 +890,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_symbol_overview_impact_err_sets_degraded() {
-        // When analyze_impact_impl returns Ok with degraded=true (LSP error),
+        // When find_callers_callees_impl returns Ok with degraded=true (LSP error),
         // the overview should propagate the degraded state.
-        // Note: analyze_impact_impl returns Ok(degraded) on LSP errors, not Err.
+        // Note: find_callers_callees_impl returns Ok(degraded) on LSP errors, not Err.
         // The Err(_) branch in symbol_overview_impl is for unexpected failures.
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon.read_symbol_scope_results.lock().unwrap().extend([
@@ -903,7 +903,7 @@ mod tests {
 
         let lawyer = Arc::new(MockLawyer::default());
 
-        // Make call_hierarchy_prepare fail → analyze_impact_impl returns Ok(degraded)
+        // Make call_hierarchy_prepare fail → find_callers_callees_impl returns Ok(degraded)
         // with grep fallback (which also fails since no scout results configured)
         lawyer
             .push_prepare_call_hierarchy_result(Err(LspError::Protocol("LSP crashed".to_string())));
@@ -932,11 +932,11 @@ mod tests {
 
         // Verify degraded due to impact error
         assert!(val.degraded);
-        // analyze_impact_impl returns degraded_reason=NoLsp when LSP error occurs
+        // find_callers_callees_impl returns degraded_reason=NoLsp when LSP error occurs
         assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
 
-        // Impact is None because analyze_impact returns degraded metadata with None incoming/outgoing
+        // Impact is None because find_callers_callees returns degraded metadata with None incoming/outgoing
         assert!(val.impact.is_none());
 
         // References still available (partial degradation)

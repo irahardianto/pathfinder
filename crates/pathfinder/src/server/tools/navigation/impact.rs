@@ -1,4 +1,4 @@
-//! `analyze_impact` and `find_callers_callees` tool handlers.
+//! `find_callers_callees` tool handler (formerly `analyze_impact`).
 //!
 //! LSP-powered call-hierarchy BFS with grep-based fallback when no language
 //! server is available. Tool responses include `"degraded": true` and
@@ -8,13 +8,13 @@ use crate::server::helpers::{
     format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
     require_symbol_target, serialize_metadata,
 };
-use crate::server::types::AnalyzeImpactParams;
+use crate::server::types::FindCallersCalleesParams;
 use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
 use pathfinder_lsp::LspError;
 use rmcp::model::{CallToolResult, ErrorData};
 
-/// Wall-clock timeout for BFS traversal in `analyze_impact`.
+/// Wall-clock timeout for BFS traversal in `find_callers_callees`.
 /// Prevents infinite loops if the LSP keeps returning more references.
 const BFS_TIMEOUT_SECS: u64 = 30;
 
@@ -25,7 +25,7 @@ const BFS_TIMEOUT_SECS: u64 = 30;
 /// but 2 consecutive failures strongly indicate a hung/stuck LSP.
 const BFS_CONSECUTIVE_FAILURE_LIMIT: u32 = 2;
 
-/// Direction for call hierarchy BFS traversal in `analyze_impact`.
+/// Direction for call hierarchy BFS traversal in `find_callers_callees`.
 ///
 /// `Incoming` traverses callers (who calls this symbol).
 /// `Outgoing` traverses callees (what this symbol calls).
@@ -36,7 +36,7 @@ enum CallDirection {
 }
 
 impl PathfinderServer {
-    /// SPEC 001 + SPEC 008: Grep-based reference search fallback for `analyze_impact`.
+    /// SPEC 001 + SPEC 008: Grep-based reference search fallback for `find_callers_callees`.
     ///
     /// When LSP is unavailable, warming up, or timed out, use this helper to find
     /// symbol references using ripgrep with Tree-sitter enrichment (SPEC 008).
@@ -248,7 +248,7 @@ impl PathfinderServer {
                         CallDirection::Outgoing => "call_hierarchy_outgoing",
                     };
                     tracing::warn!(
-                        tool = "analyze_impact",
+                        tool = "find_callers_callees",
                         error = %e,
                         file = %item.file,
                         line = item.line,
@@ -262,7 +262,7 @@ impl PathfinderServer {
         (references, max_depth_reached)
     }
 
-    /// Core logic for the `analyze_impact` tool.
+    /// Core logic for the `find_callers_callees` tool.
     ///
     /// Returns callers (incoming) and callees (outgoing) for the target symbol.
     /// Degrades gracefully to empty results when no LSP is configured.
@@ -270,9 +270,9 @@ impl PathfinderServer {
         clippy::too_many_lines,
         reason = "Sequential pipeline (parse→sandbox→tree-sitter→LSP→BFS→version hash)."
     )]
-    pub(crate) async fn analyze_impact_impl(
+    pub(crate) async fn find_callers_callees_impl(
         &self,
-        params: AnalyzeImpactParams,
+        params: FindCallersCalleesParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
@@ -288,10 +288,10 @@ impl PathfinderServer {
         let mut remaining_outgoing = half;
 
         tracing::info!(
-            tool = "analyze_impact",
+            tool = "find_callers_callees",
             semantic_path = %params.semantic_path,
             max_depth = max_depth,
-            "analyze_impact: start"
+            "find_callers_callees: start"
         );
 
         // Parse and validate the semantic path
@@ -302,7 +302,7 @@ impl PathfinderServer {
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
             let duration_ms = start.elapsed().as_millis();
             tracing::warn!(
-                tool = "analyze_impact",
+                tool = "find_callers_callees",
                 error_code = e.error_code(),
                 duration_ms,
                 "sandbox check failed"
@@ -317,7 +317,7 @@ impl PathfinderServer {
                 path: abs_file.clone(),
             };
             tracing::warn!(
-                tool = "analyze_impact",
+                tool = "find_callers_callees",
                 path = %abs_file.display(),
                 "file not found"
             );
@@ -334,7 +334,7 @@ impl PathfinderServer {
             Err(e) => {
                 let duration_ms = start.elapsed().as_millis();
                 tracing::warn!(
-                    tool = "analyze_impact",
+                    tool = "find_callers_callees",
                     error = %e,
                     duration_ms,
                     "tree-sitter read failed"
@@ -350,7 +350,7 @@ impl PathfinderServer {
             Ok(content) => content,
             Err(e) => {
                 tracing::warn!(
-                    tool = "analyze_impact",
+                    tool = "find_callers_callees",
                     path = %file_path.display(),
                     error = %e,
                     "file read failed — LSP will receive empty content"
@@ -371,7 +371,7 @@ impl PathfinderServer {
             Ok(guard) => Some(guard),
             Err(e) => {
                 tracing::warn!(
-                    tool = "analyze_impact",
+                    tool = "find_callers_callees",
                     semantic_path = %semantic_path,
                     error = %e,
                     "open_document failed — LSP queries may return degraded results"
@@ -471,9 +471,9 @@ impl PathfinderServer {
                     // LSP likely still warming up — empty call hierarchy is not reliable.
                     // Degrade so agents know to verify before acting on "zero references".
                     tracing::info!(
-                        tool = "analyze_impact",
+                        tool = "find_callers_callees",
                         symbol = %semantic_path,
-                        "analyze_impact: call_hierarchy_prepare returned [] but goto_definition \
+                        "find_callers_callees: call_hierarchy_prepare returned [] but goto_definition \
                          probe returned no result — LSP likely warming up, attempting grep-based reference fallback"
                     );
                     engines.push("lsp");
@@ -493,9 +493,9 @@ impl PathfinderServer {
                         incoming = Some(refs);
                         degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
                         tracing::info!(
-                            tool = "analyze_impact",
+                            tool = "find_callers_callees",
                             references_found = incoming.as_ref().map_or(0, Vec::len),
-                            "analyze_impact: grep-based fallback references found during LSP warmup"
+                            "find_callers_callees: grep-based fallback references found during LSP warmup"
                         );
                     }
                 }
@@ -505,9 +505,9 @@ impl PathfinderServer {
                 // as a heuristic fallback. Results may over-count (string references)
                 // or under-count (indirect calls), but give the agent a starting point.
                 tracing::info!(
-                    tool = "analyze_impact",
+                    tool = "find_callers_callees",
                     symbol = %semantic_path,
-                    "analyze_impact: no LSP — attempting grep-based reference fallback"
+                    "find_callers_callees: no LSP — attempting grep-based reference fallback"
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
@@ -523,9 +523,9 @@ impl PathfinderServer {
                     incoming = Some(refs);
                     degraded_reason = Some(DegradedReason::NoLspGrepFallback);
                     tracing::info!(
-                        tool = "analyze_impact",
+                        tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
-                        "analyze_impact: grep-based fallback references found"
+                        "find_callers_callees: grep-based fallback references found"
                     );
                 }
                 // Keep degraded = true to signal this is heuristic data
@@ -533,9 +533,9 @@ impl PathfinderServer {
             Err(LspError::Timeout { .. }) => {
                 // LSP timed out — attempt grep-based reference fallback
                 tracing::info!(
-                    tool = "analyze_impact",
+                    tool = "find_callers_callees",
                     symbol = %semantic_path,
-                    "analyze_impact: LSP timed out — attempting grep-based reference fallback"
+                    "find_callers_callees: LSP timed out — attempting grep-based reference fallback"
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
@@ -551,9 +551,9 @@ impl PathfinderServer {
                     incoming = Some(refs);
                     degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
                     tracing::info!(
-                        tool = "analyze_impact",
+                        tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
-                        "analyze_impact: grep-based fallback references found after timeout"
+                        "find_callers_callees: grep-based fallback references found after timeout"
                     );
                 }
                 // Keep degraded = true to signal this is heuristic data
@@ -563,7 +563,7 @@ impl PathfinderServer {
                 degraded_reason = Some(DegradedReason::NoLsp);
 
                 tracing::warn!(
-                    tool = "analyze_impact",
+                    tool = "find_callers_callees",
                     error = %e,
                     "call_hierarchy_prepare failed"
                 );
@@ -581,9 +581,9 @@ impl PathfinderServer {
                     incoming = Some(refs);
                     degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
                     tracing::info!(
-                        tool = "analyze_impact",
+                        tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
-                        "analyze_impact: grep-based fallback references found after LSP error"
+                        "find_callers_callees: grep-based fallback references found after LSP error"
                     );
                 }
             }
@@ -616,7 +616,7 @@ impl PathfinderServer {
         };
 
         tracing::info!(
-            tool = "analyze_impact",
+            tool = "find_callers_callees",
             semantic_path = %params.semantic_path,
             tree_sitter_ms,
             lsp_ms,
@@ -624,7 +624,7 @@ impl PathfinderServer {
             degraded,
             degraded_reason = ?degraded_reason_str,
             engines_used = ?engines,
-            "analyze_impact: complete"
+            "find_callers_callees: complete"
         );
         // Item 2: Report truncation only when the total budget was actually exhausted,
         // not when a single direction hits its cap. Check total returned vs total budget.
@@ -700,7 +700,7 @@ impl PathfinderServer {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            tool = "analyze_impact",
+                            tool = "find_callers_callees",
                             error = %e,
                             "test coverage search failed"
                         );
@@ -712,7 +712,7 @@ impl PathfinderServer {
             (None, None)
         };
 
-        let metadata = crate::server::types::AnalyzeImpactMetadata {
+        let metadata = crate::server::types::FindCallersCalleesMetadata {
             incoming,
             outgoing,
             depth_reached: max_depth_reached,
@@ -834,7 +834,7 @@ impl PathfinderServer {
 mod tests {
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
     use super::*;
-    use crate::server::types::AnalyzeImpactParams;
+    use crate::server::types::FindCallersCalleesParams;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{DegradedReason, WorkspaceRoot};
@@ -844,10 +844,10 @@ mod tests {
     use pathfinder_treesitter::mock::MockSurgeon;
     use std::sync::Arc;
 
-    // ── analyze_impact ────────────────────────────────────────────────
+    // ── find_callers_callees ────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_returns_empty_degraded() {
+    async fn test_find_callers_callees_returns_empty_degraded() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -869,14 +869,14 @@ mod tests {
             lawyer,
         );
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(
@@ -892,7 +892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_lsp_populates_incoming_and_outgoing() {
+    async fn test_find_callers_callees_lsp_populates_incoming_and_outgoing() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -941,14 +941,14 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(!val.degraded);
@@ -969,10 +969,10 @@ mod tests {
         assert_eq!(outgoing[0].file, "src/token.rs");
     }
 
-    // ── analyze_impact with empty hierarchy (confirmed zero callers) ───────
+    // ── find_callers_callees with empty hierarchy (confirmed zero callers) ───────
 
     #[tokio::test]
-    async fn test_analyze_impact_empty_hierarchy_confirmed_zero() {
+    async fn test_find_callers_callees_empty_hierarchy_confirmed_zero() {
         // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(Some(...))
         // → LSP is warm, confirmed zero callers. Must NOT be degraded.
         let surgeon = Arc::new(MockSurgeon::new());
@@ -995,14 +995,14 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // NOT degraded — LSP warm, genuinely zero callers confirmed
@@ -1024,7 +1024,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_empty_hierarchy_warmup_degrades() {
+    async fn test_find_callers_callees_empty_hierarchy_warmup_degrades() {
         // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(None)
         // → LSP is warming up. Must be degraded with "lsp_warmup_empty_unverified".
         let surgeon = Arc::new(MockSurgeon::new());
@@ -1042,14 +1042,14 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // DEGRADED — LSP warmup detected
@@ -1073,10 +1073,10 @@ mod tests {
         );
     }
 
-    // ── analyze_impact with LSP error on call_hierarchy_prepare ────────────
+    // ── find_callers_callees with LSP error on call_hierarchy_prepare ────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_lsp_error_degrades() {
+    async fn test_find_callers_callees_lsp_error_degrades() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1091,14 +1091,14 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Degraded due to LSP error
@@ -1106,10 +1106,10 @@ mod tests {
         assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
     }
 
-    // ── analyze_impact BFS depth limiting ────────────────────────────────
+    // ── find_callers_callees BFS depth limiting ────────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_bfs_respects_max_depth() {
+    async fn test_find_callers_callees_bfs_respects_max_depth() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1163,14 +1163,14 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1, // Should stop after first level
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(!val.degraded);
@@ -1181,20 +1181,20 @@ mod tests {
         assert_eq!(val.depth_reached, 1);
     }
 
-    // ── CG-3: sandbox check error in analyze_impact ──────────────────────
+    // ── CG-3: sandbox check error in find_callers_callees ──────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_rejects_sandbox_denied_path() {
+    async fn test_find_callers_callees_rejects_sandbox_denied_path() {
         let surgeon = Arc::new(MockSurgeon::new());
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: ".git/objects/abc::def".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let Err(err) = result else {
             panic!("expected error but got Ok");
         };
@@ -1207,10 +1207,10 @@ mod tests {
         assert_eq!(code, "ACCESS_DENIED");
     }
 
-    // ── CG-4: Tree-sitter error in analyze_impact ──────────────────────────
+    // ── CG-4: Tree-sitter error in find_callers_callees ──────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_tree_sitter_error() {
+    async fn test_find_callers_callees_tree_sitter_error() {
         let surgeon = Arc::new(MockSurgeon::new());
         // Push an error result
         surgeon.read_symbol_scope_results.lock().unwrap().push(Err(
@@ -1223,19 +1223,19 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         assert!(result.is_err(), "tree-sitter error should propagate");
     }
 
     // ── CG-5: LSP error during BFS traversal ───────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_bfs_lsp_error_graceful_partial_graph() {
+    async fn test_find_callers_callees_bfs_lsp_error_graceful_partial_graph() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1274,14 +1274,14 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed despite partial failure");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // NOT degraded — prepare succeeded, incoming succeeded, only outgoing had error
@@ -1292,10 +1292,10 @@ mod tests {
         assert!(outgoing.is_empty(), "outgoing should be empty due to error");
     }
 
-    // ── CG-1: Grep fallback path in analyze_impact ─────────────────────────
+    // ── CG-1: Grep fallback path in find_callers_callees ─────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_grep_fallback_with_mock_scout() {
+    async fn test_find_callers_callees_grep_fallback_with_mock_scout() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1358,14 +1358,14 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded);
@@ -1380,7 +1380,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn test_analyze_impact_grep_fallback_filters_non_source_files() {
+    async fn test_find_callers_callees_grep_fallback_filters_non_source_files() {
         // Issue: grep fallback was returning matches from .md, .json, .txt, etc.
         // causing false positives. This test verifies that non-source files
         // are filtered out of the results.
@@ -1483,14 +1483,14 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded);
@@ -1518,7 +1518,7 @@ mod tests {
     // ── DS-1: DocumentGuard lifecycle tests ──────────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_closes_document_on_success() {
+    async fn test_find_callers_callees_closes_document_on_success() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1539,20 +1539,20 @@ mod tests {
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
         };
 
-        let _ = server.analyze_impact_impl(params).await;
+        let _ = server.find_callers_callees_impl(params).await;
 
         tokio::task::yield_now().await;
 
         assert_eq!(
             lawyer.did_open_call_count(),
             lawyer.did_close_call_count(),
-            "DS-1: did_open and did_close must be symmetric in analyze_impact"
+            "DS-1: did_open and did_close must be symmetric in find_callers_callees"
         );
     }
 
@@ -1561,7 +1561,7 @@ mod tests {
     /// With `project_only = false`, stdlib/absolute-path items should pass through
     /// the BFS filter and appear in the impact graph.
     #[tokio::test]
-    async fn test_analyze_impact_project_only_false_includes_external_refs() {
+    async fn test_find_callers_callees_project_only_false_includes_external_refs() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1613,17 +1613,17 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             project_only: Some(false), // key: include external
             ..Default::default()
         };
         let result = server
-            .analyze_impact_impl(params)
+            .find_callers_callees_impl(params)
             .await
             .expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
         let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
@@ -1641,7 +1641,7 @@ mod tests {
     /// With `project_only = true` (the default), absolute stdlib paths should be
     /// silently dropped from the BFS impact graph.
     #[tokio::test]
-    async fn test_analyze_impact_project_only_true_filters_stdlib_refs() {
+    async fn test_find_callers_callees_project_only_true_filters_stdlib_refs() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1681,17 +1681,17 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             // project_only defaults to true via Default::default()
             ..Default::default()
         };
         let result = server
-            .analyze_impact_impl(params)
+            .find_callers_callees_impl(params)
             .await
             .expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
         let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
@@ -1707,7 +1707,7 @@ mod tests {
     /// When the number of BFS-found references exceeds `max_references`, the
     /// result must be truncated and `references_truncated = true`.
     #[tokio::test]
-    async fn test_analyze_impact_max_references_truncates_results() {
+    async fn test_find_callers_callees_max_references_truncates_results() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1764,17 +1764,17 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             max_references: 2, // Budget split: incoming gets 1, outgoing gets 1. Total budget=2.
             ..Default::default()
         };
         let result = server
-            .analyze_impact_impl(params)
+            .find_callers_callees_impl(params)
             .await
             .expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
         let incoming = val.incoming.as_ref().expect("incoming must be Some");
@@ -1793,7 +1793,7 @@ mod tests {
     ///
     /// This ensures the plan's specified default wasn't accidentally changed.
     #[test]
-    fn test_analyze_impact_default_max_references_is_50() {
+    fn test_find_callers_callees_default_max_references_is_50() {
         use crate::server::types::default_max_references;
         assert_eq!(
             default_max_references(),
@@ -1805,7 +1805,7 @@ mod tests {
     // ── find_callers_callees edge cases ─────────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_handles_empty_incoming_and_outgoing() {
+    async fn test_find_callers_callees_handles_empty_incoming_and_outgoing() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1819,16 +1819,16 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 3,
             max_references: 50,
             project_only: Some(true),
             include_test_coverage: false,
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.incoming.is_none() || val.incoming.as_ref().unwrap().is_empty());
@@ -1836,7 +1836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_respects_max_depth() {
+    async fn test_find_callers_callees_respects_max_depth() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1871,16 +1871,16 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1, // Limit depth to 1
             max_references: 50,
             project_only: Some(true),
             include_test_coverage: false,
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Should have incoming call from main
@@ -1898,7 +1898,7 @@ mod tests {
     // ── Phase 4C: Navigation Residual Gaps ───────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_bfs_handles_cycle_in_call_graph() {
+    async fn test_find_callers_callees_bfs_handles_cycle_in_call_graph() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -1945,15 +1945,15 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 3,
             ..Default::default()
         };
 
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Should not hang or panic
@@ -1969,7 +1969,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_bfs_deduplicates_cross_referenced_symbols() {
+    async fn test_find_callers_callees_bfs_deduplicates_cross_referenced_symbols() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2016,15 +2016,15 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
 
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(!val.degraded);
@@ -2042,7 +2042,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_grep_fallback_provides_incoming_heuristic() {
+    async fn test_find_callers_callees_grep_fallback_provides_incoming_heuristic() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2105,15 +2105,15 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::AnalyzeImpactParams {
+        let params = crate::server::types::FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
 
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded);
@@ -2125,7 +2125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_grep_fallback_no_results_stays_none() {
+    async fn test_find_callers_callees_grep_fallback_no_results_stays_none() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2179,15 +2179,15 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::AnalyzeImpactParams {
+        let params = crate::server::types::FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
         };
 
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded);
@@ -2209,7 +2209,7 @@ mod tests {
     // ── BFS multi-node continuation after error ──────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_bfs_continues_after_single_node_error() {
+    async fn test_find_callers_callees_bfs_continues_after_single_node_error() {
         // When queue has items A, B and querying A fails, B should still be processed.
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
@@ -2249,15 +2249,15 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             max_references: 50,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed despite BFS error");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Not degraded — the LSP prepare succeeded, BFS errors are partial failures
@@ -2274,7 +2274,7 @@ mod tests {
     // ── BFS text output format ──────────────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_bfs_formats_response_correctly() {
+    async fn test_find_callers_callees_bfs_formats_response_correctly() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2312,12 +2312,12 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
 
         // Verify text output format
@@ -2335,7 +2335,7 @@ mod tests {
     // ── include_test_coverage=true path ──────────────────────────────
 
     #[tokio::test]
-    async fn test_analyze_impact_with_test_coverage() {
+    async fn test_find_callers_callees_with_test_coverage() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2386,15 +2386,15 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             include_test_coverage: true,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         // Verify test coverage results
@@ -2410,7 +2410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_test_coverage_not_found() {
+    async fn test_find_callers_callees_test_coverage_not_found() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2450,15 +2450,15 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             include_test_coverage: true,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(
@@ -2469,7 +2469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_analyze_impact_bfs_aborts_on_consecutive_failures() {
+    async fn test_find_callers_callees_bfs_aborts_on_consecutive_failures() {
         let surgeon = Arc::new(MockSurgeon::new());
         surgeon
             .read_symbol_scope_results
@@ -2516,15 +2516,15 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = AnalyzeImpactParams {
+        let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 4,
             max_references: 50,
             ..Default::default()
         };
-        let result = server.analyze_impact_impl(params).await;
+        let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed with partial results");
-        let val: crate::server::types::AnalyzeImpactMetadata =
+        let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(!val.degraded);

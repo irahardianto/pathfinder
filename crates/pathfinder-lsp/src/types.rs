@@ -22,7 +22,7 @@ pub struct LspLanguageStatus {
     pub validation: bool,
     /// Reason explaining the validation status.
     pub reason: String,
-    /// Whether the LSP is ready for navigation operations (`get_definition`, `analyze_impact`).
+    /// Whether the LSP is ready for navigation operations (`get_definition`, `find_callers_callees`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub navigation_ready: Option<bool>,
     /// Whether the LSP has completed initial workspace indexing.
@@ -37,7 +37,7 @@ pub struct LspLanguageStatus {
     /// LSP supports textDocument/definition (`get_definition`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_definition: Option<bool>,
-    /// LSP supports textDocument/prepareCallHierarchy (`analyze_impact`, `read_with_deep_context`).
+    /// LSP supports textDocument/prepareCallHierarchy (`find_callers_callees`, `read_with_deep_context`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_call_hierarchy: Option<bool>,
     /// LSP supports textDocument/diagnostic or publishDiagnostics (diagnostic health reporting).

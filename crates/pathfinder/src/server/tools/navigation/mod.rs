@@ -1,4 +1,4 @@
-//! Navigation tool handlers: `get_definition`, `analyze_impact`, and
+//! Navigation tool handlers: `get_definition`, `find_callers_callees`, and
 //! `read_with_deep_context`.
 //!
 //! All three tools are LSP-powered but degrade gracefully when no language
@@ -8,7 +8,7 @@
 //! # Degraded Mode
 //! When the `Lawyer` returns `LspError::NoLspAvailable`:
 //! - `get_definition` — returns an error response (`LSP_REQUIRED`)
-//! - `analyze_impact` — returns `null` caller/callee lists with `degraded: true`
+//! - `find_callers_callees` — returns `null` caller/callee lists with `degraded: true`
 //! - `read_with_deep_context` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{
@@ -211,7 +211,7 @@ fn extract_call_candidates(symbol_content: &str, language: &str) -> Vec<String> 
 /// Extract the last segment name from a semantic path's symbol chain.
 ///
 /// Returns `None` if the semantic path has no symbol chain or the chain is empty.
-/// Used by `analyze_impact` and `read_with_deep_context` to get the symbol name
+/// Used by `find_callers_callees` and `read_with_deep_context` to get the symbol name
 /// for grep-based fallback searches.
 pub(crate) fn last_symbol_name(
     semantic_path: &pathfinder_common::types::SemanticPath,

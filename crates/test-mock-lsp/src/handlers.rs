@@ -31,7 +31,7 @@ pub fn handle_initialize(_params: Option<Value>, config: &MockConfig) -> Value {
             } else {
                 json!(false)
             },
-            // callHierarchy — governs analyze_impact
+            // callHierarchy — governs find_callers_callees
             "callHierarchyProvider": config.call_hierarchy_provider,
             // textDocument/formatting
             "documentFormattingProvider": config.formatting_provider,

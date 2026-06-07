@@ -583,8 +583,8 @@ impl super::LspClient {
         if in_coexistence_mode {
             tracing::warn!(
                 language = %language_id,
-                "LSP: coexistence mode active — LSP validation disabled to prevent resource \
-                 contention. Navigation (goto_definition, analyze_impact) still works normally."
+                 "LSP: coexistence mode active — LSP validation disabled to prevent resource \
+                  contention. Navigation (goto_definition, find_callers_callees) still works normally."
             );
         }
 

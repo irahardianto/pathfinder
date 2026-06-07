@@ -53,7 +53,7 @@ pub struct DetectedCapabilities {
     /// `read_with_deep_context`). Falls back to Tree-sitter heuristic if false.
     pub definition_provider: bool,
     /// Server supports `callHierarchy/incomingCalls` + `outgoingCalls`
-    /// (`analyze_impact`). Falls back to Tree-sitter scan for outgoing only.
+    /// (`find_callers_callees`). Falls back to Tree-sitter scan for outgoing only.
     pub call_hierarchy_provider: bool,
     /// Server supports `textDocument/formatting` (edit tools refinement).
     /// Tree-sitter indentation baseline is always applied first.
