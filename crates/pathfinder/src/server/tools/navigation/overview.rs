@@ -651,10 +651,8 @@ mod tests {
 
         // Verify degraded on LSP error in find_all_references_impl
         assert!(val.degraded);
-        assert_eq!(
-            val.degraded_reason,
-            Some(DegradedReason::LspTimeoutGrepFallback)
-        );
+        // After BUG 2 fix: when grep fallback also finds nothing, we use NoLsp, not LspTimeoutGrepFallback
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         // Timeout maps to "unavailable", not "warming_up" — timeout != warmup.
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert_eq!(val.warm_start_in_progress, None);

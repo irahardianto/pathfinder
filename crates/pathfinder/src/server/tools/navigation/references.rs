@@ -14,6 +14,190 @@ use pathfinder_lsp::LspError;
 use rmcp::model::ErrorData;
 
 impl PathfinderServer {
+    /// DELIVERABLE B: Grep-based reference fallback for `find_all_references`.
+    ///
+    /// When LSP is unavailable, times out, or returns error, use ripgrep via
+    /// `search_codebase_impl` to find symbol references as a heuristic fallback.
+    ///
+    /// Filters (per spec B2):
+    /// - Only source files (via `is_source_file`)
+    /// - Excludes the definition site using line-number matching: if a same-file match
+    ///   is on the same line as `definition_scope.start_line`, exclude it.
+    /// - As a secondary safeguard: if line numbers don't match but content matches
+    ///   a definition pattern for that language -> also exclude.
+    ///
+    /// Pagination (per spec B2):
+    /// - Passes `max_results` and `offset` directly to `search_codebase_impl`
+    ///
+    /// Returns `Some((references, files_referenced))` if matches found after filtering,
+    /// `None` if no results or search failed.
+    async fn grep_references_fallback(
+        &self,
+        symbol_name: &str,
+        definition_path: &std::path::Path,
+        definition_scope: &pathfinder_common::types::SymbolScope,
+        params: &crate::server::types::FindAllReferencesParams,
+    ) -> Option<(Vec<crate::server::types::ReferenceLocation>, usize)> {
+        let query = format!(r"\b{}\b", regex::escape(symbol_name));
+
+        // Get file extension for definition_patterns (used as secondary filter only)
+        let def_ext = definition_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        // Get language-aware definition patterns (secondary fallback filter)
+        // Primary filter = line-number matching
+        let def_patterns = super::definition_patterns(def_ext, symbol_name);
+
+        // Check if we got ONLY the catch-all pattern \b{name}\b. If so, don't use regex filtering.
+        // The catch-all matches EVERY search result (since query is \b{name}\b), which would
+        // incorrectly exclude ALL same-file different-line references. This fixes BUG 1.
+        //
+        // Note: definition_patterns internally does regex::escape(symbol_name), so we must do
+        // the same here for the string comparison to work correctly with symbols containing
+        // regex-special characters like +, *, $, etc.
+        let escaped_name = regex::escape(symbol_name);
+        let catch_all_pattern = format!(r"\b{escaped_name}\b");
+        let has_real_definition_patterns =
+            !(def_patterns.len() == 1 && def_patterns[0] == catch_all_pattern);
+
+        let def_res: Result<Vec<regex::Regex>, _> = if has_real_definition_patterns {
+            def_patterns.iter().map(|p| regex::Regex::new(p)).collect()
+        } else {
+            // Skip regex filtering entirely for unknown languages - rely solely on line-number matching
+            Ok(Vec::new())
+        };
+
+        let def_res = match def_res {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "grep_references_fallback",
+                    symbol = %symbol_name,
+                    error = %e,
+                    "definition pattern compilation failed — proceeding with line-number-only filtering"
+                );
+                Vec::new()
+            }
+        };
+
+        // definition_scope.start_line is 0-indexed, convert to 1-indexed for comparison with search results
+        let definition_line_1indexed = (definition_scope.start_line + 1) as u64;
+
+        let search_params = crate::server::types::SearchCodebaseParams {
+            query,
+            is_regex: true,
+            path_glob: "**/*".to_string(),
+            filter_mode: pathfinder_common::types::FilterMode::CodeOnly,
+            max_results: params.max_results,
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            exclude_glob: String::new(),
+            offset: params.offset,
+        };
+
+        let result = match self.search_codebase_impl(search_params).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    tool = "grep_references_fallback",
+                    symbol = %symbol_name,
+                    error = %e,
+                    "search_codebase_impl failed during grep fallback"
+                );
+                return None;
+            }
+        };
+
+        if result.0.matches.is_empty() {
+            return None;
+        }
+
+        let mut files_referenced = std::collections::HashSet::new();
+
+        let references: Vec<crate::server::types::ReferenceLocation> = result
+            .0
+            .matches
+            .into_iter()
+            .filter(|m| {
+                // Filter 1: must be a source file
+                if !super::is_source_file(&m.file) {
+                    return false;
+                }
+
+                let m_path = std::path::Path::new(&m.file);
+
+                // Filter 2: if different file from definition, it's a reference -> KEEP
+                if m_path != definition_path {
+                    return true;
+                }
+
+                // Filter 3: same file - PRIMARY exclusion via line-number matching
+                // If match is on the exact definition line -> EXCLUDE
+                if m.line == definition_line_1indexed {
+                    return false;
+                }
+
+                // Filter 4: same file, different line - SECONDARY check via definition patterns
+                // Only exclude if line doesn't match but content looks like a definition
+                // This is a safeguard; most cases caught by line-number check above
+                if def_res.iter().any(|re| re.is_match(&m.content)) {
+                    return false;
+                }
+
+                // Same file, different line, not a definition pattern -> KEEP
+                true
+            })
+            .map(|m| {
+                files_referenced.insert(m.file.clone());
+
+                // Safe u64 -> u32 conversion with logging on overflow
+                let line = match u32::try_from(m.line) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = "grep_references_fallback",
+                            file = %m.file,
+                            line_u64 = %m.line,
+                            error = %e,
+                            "line number overflow u64->u32 — using line 1 as fallback"
+                        );
+                        1
+                    }
+                };
+
+                let column = match u32::try_from(m.column) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = "grep_references_fallback",
+                            file = %m.file,
+                            column_u64 = %m.column,
+                            error = %e,
+                            "column number overflow u64->u32 — using column 1 as fallback"
+                        );
+                        1
+                    }
+                };
+
+                crate::server::types::ReferenceLocation {
+                    file: m.file,
+                    line,
+                    column,
+                    snippet: m.content,
+                }
+            })
+            .collect();
+
+        if references.is_empty() {
+            None
+        } else {
+            Some((references, files_referenced.len()))
+        }
+    }
+
     /// Find all references to a symbol across the entire codebase.
     ///
     /// Uses the LSP `textDocument/references` capability to find all usages of
@@ -306,29 +490,90 @@ impl PathfinderServer {
                     tree_sitter_ms,
                     lsp_ms,
                     duration_ms,
-                    "find_all_references: no LSP — degraded"
+                    "find_all_references: no LSP — attempting grep fallback"
                 );
 
+                // DELIVERABLE B: Attempt grep-based reference fallback
+                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                let grep_result = if symbol_name.is_empty() {
+                    None
+                } else {
+                    self.grep_references_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &symbol_scope,
+                        &params,
+                    )
+                    .await
+                };
+
+                // Determine final state based on whether grep fallback succeeded
+                let (
+                    references,
+                    total_references,
+                    files_referenced,
+                    degraded_reason,
+                    resolution_strategy,
+                    text_body,
+                ) = if let Some((refs, file_count)) = grep_result {
+                    tracing::info!(
+                        tool = "find_all_references",
+                        references_found = refs.len(),
+                        "grep fallback found references"
+                    );
+                    let ref_count = refs.len();
+                    let items: Vec<_> = refs
+                        .iter()
+                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
+                        .collect();
+                    let text = format!(
+                            "Grep fallback: found {} references across {} files (heuristic only).\n\nReferences: {}\n{}\n",
+                            ref_count, file_count, ref_count, items.join("\n")
+                        );
+                    (
+                        Some(refs),
+                        Some(ref_count),
+                        file_count,
+                        DegradedReason::NoLspGrepFallback,
+                        "grep_file_scoped",
+                        text,
+                    )
+                } else {
+                    // Fallback unsuccessful - keep original behavior
+                    let text = format!(
+                        "References unknown. Use search_codebase to manually find usages of `{}`\n",
+                        params.semantic_path
+                    );
+                    (
+                        None,
+                        None,
+                        0,
+                        DegradedReason::NoLsp,
+                        "treesitter_fallback",
+                        text,
+                    )
+                };
+
                 let metadata = crate::server::types::FindAllReferencesMetadata {
-                    references: None,
-                    total_references: None,
+                    references,
+                    total_references,
                     truncated: false,
-                    files_referenced: 0,
+                    files_referenced,
                     degraded: true,
-                    degraded_reason: Some(DegradedReason::NoLsp),
-                    actionable_guidance: Some(DegradedReason::NoLsp.guidance()),
+                    degraded_reason: Some(degraded_reason),
+                    actionable_guidance: Some(degraded_reason.guidance()),
                     lsp_readiness: Some("unavailable".to_owned()),
                     warm_start_in_progress: None,
                     duration_ms: Some(millis_to_u64(duration_ms)),
-                    resolution_strategy: Some("treesitter_fallback".to_owned()),
+                    resolution_strategy: Some(resolution_strategy.to_owned()),
                 };
 
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                         format!(
-                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`\n[completed in {duration_ms}ms]",
-                            format_degraded_notice(&DegradedReason::NoLsp),
-                            params.semantic_path
+                            "{}\n{}[completed in {duration_ms}ms]",
+                            format_degraded_notice(&degraded_reason),
+                            text_body
                         ),
                     )]);
                 result.structured_content = serialize_metadata(&metadata);
@@ -341,16 +586,8 @@ impl PathfinderServer {
                     tree_sitter_ms,
                     lsp_ms,
                     duration_ms,
-                    "find_all_references: LSP error"
+                    "find_all_references: LSP error — attempting grep fallback"
                 );
-
-                let degraded_reason = match &e {
-                    LspError::Timeout { .. } => DegradedReason::LspTimeoutGrepFallback,
-                    LspError::Protocol(_) | LspError::ConnectionLost => {
-                        DegradedReason::LspErrorGrepFallback
-                    }
-                    _ => DegradedReason::LspErrorGrepFallback,
-                };
 
                 let is_timeout = matches!(&e, LspError::Timeout { .. });
                 let lsp_readiness = if is_timeout {
@@ -360,26 +597,93 @@ impl PathfinderServer {
                 };
                 let warm_start_in_progress = if is_timeout { Some(true) } else { None };
 
+                // DELIVERABLE B: Attempt grep-based reference fallback
+                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                let grep_result = if symbol_name.is_empty() {
+                    None
+                } else {
+                    self.grep_references_fallback(
+                        &symbol_name,
+                        &semantic_path.file_path,
+                        &symbol_scope,
+                        &params,
+                    )
+                    .await
+                };
+
+                // Determine final state based on whether grep fallback succeeded
+                // Pattern from impact.rs: default to NoLsp, upgrade to GrepFallback only if results found
+                let (
+                    references,
+                    total_references,
+                    files_referenced,
+                    degraded_reason,
+                    resolution_strategy,
+                    text_body,
+                ) = if let Some((refs, file_count)) = grep_result {
+                    tracing::info!(
+                        tool = "find_all_references",
+                        references_found = refs.len(),
+                        "grep fallback found references after LSP error"
+                    );
+                    let ref_count = refs.len();
+                    let items: Vec<_> = refs
+                        .iter()
+                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
+                        .collect();
+                    let text = format!(
+                        "Grep fallback: found {} references across {} files (heuristic only).\n\nReferences: {}\n{}\n",
+                        ref_count, file_count, ref_count, items.join("\n")
+                    );
+                    let grep_degraded_reason = if is_timeout {
+                        DegradedReason::LspTimeoutGrepFallback
+                    } else {
+                        DegradedReason::LspErrorGrepFallback
+                    };
+                    (
+                        Some(refs),
+                        Some(ref_count),
+                        file_count,
+                        grep_degraded_reason,
+                        "grep_file_scoped",
+                        text,
+                    )
+                } else {
+                    // Fallback unsuccessful - keep original behavior
+                    let text = format!(
+                        "References unknown. Use search_codebase to manually find usages of `{}`\n",
+                        params.semantic_path
+                    );
+                    (
+                        None,
+                        None,
+                        0,
+                        DegradedReason::NoLsp,
+                        "treesitter_fallback",
+                        text,
+                    )
+                };
+
                 let metadata = crate::server::types::FindAllReferencesMetadata {
-                    references: None,
-                    total_references: None,
+                    references,
+                    total_references,
                     truncated: false,
-                    files_referenced: 0,
+                    files_referenced,
                     degraded: true,
                     degraded_reason: Some(degraded_reason),
                     actionable_guidance: Some(degraded_reason.guidance()),
                     lsp_readiness: Some(lsp_readiness.to_owned()),
                     warm_start_in_progress,
                     duration_ms: Some(millis_to_u64(duration_ms)),
-                    resolution_strategy: Some("treesitter_fallback".to_owned()),
+                    resolution_strategy: Some(resolution_strategy.to_owned()),
                 };
 
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                         format!(
-                            "{}\nReferences unknown. Use search_codebase to manually find usages of `{}`\n[completed in {duration_ms}ms]",
+                            "{}\n{}[completed in {duration_ms}ms]",
                             format_degraded_notice(&degraded_reason),
-                            params.semantic_path
+                            text_body
                         ),
                     )]);
                 result.structured_content = serialize_metadata(&metadata);
@@ -530,6 +834,11 @@ mod tests {
         assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert!(val.references.is_none());
+        // GAP 5: verify resolution_strategy confirms the path taken
+        assert_eq!(
+            val.resolution_strategy,
+            Some("treesitter_fallback".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -558,12 +867,15 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded, "should be degraded on LSP error");
-        assert_eq!(
-            val.degraded_reason,
-            Some(DegradedReason::LspErrorGrepFallback)
-        );
+        // BUG 2 FIX: when grep fallback also finds nothing, we fall back to NoLsp, not LspErrorGrepFallback
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert!(val.references.is_none());
+        // GAP 5: verify resolution_strategy confirms the path taken
+        assert_eq!(
+            val.resolution_strategy,
+            Some("treesitter_fallback".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -592,12 +904,15 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded, "should be degraded on connection lost");
-        assert_eq!(
-            val.degraded_reason,
-            Some(DegradedReason::LspErrorGrepFallback)
-        );
+        // BUG 2 FIX: when grep fallback also finds nothing, we fall back to NoLsp, not LspErrorGrepFallback
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert!(val.references.is_none());
+        // GAP 5: verify resolution_strategy confirms the path taken
+        assert_eq!(
+            val.resolution_strategy,
+            Some("treesitter_fallback".to_owned())
+        );
     }
 
     // ── find_all_references pagination + implementations ────────────────────
@@ -1131,5 +1446,671 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].file, "src/auth_impl.rs"); // implementation
         assert_eq!(refs[1].file, "src/main.rs"); // unique reference
+    }
+
+    // ── DELIVERABLE B: Grep fallback tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_all_references_grep_fallback_returns_results_with_mock_scout() {
+        // DELIVERABLE B: When LSP is unavailable but search_codebase_impl returns matches,
+        // find_all_references should use grep fallback and return:
+        // - references: Some(Vec) (not None)
+        // - degraded_reason: NoLspGrepFallback (not NoLsp)
+        // - resolution_strategy: "grep_file_scoped"
+        // - definition site matches should be filtered out
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // SPEC 008: search_codebase_impl calls enclosing_symbol_detail for each match
+        // We have 2 matches, so push 2 results
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None)]);
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create the definition file
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // MockScout returns 2 matches:
+        // 1. src/auth.rs - the definition file (has "fn login" which matches def pattern -> FILTERED OUT)
+        // 2. src/main.rs - a different file calling login (-> KEPT as reference)
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![
+                pathfinder_search::SearchMatch {
+                    file: "src/auth.rs".to_string(), // DEFINITION FILE - will be excluded
+                    line: 1,
+                    column: 4,
+                    content: "fn login() -> bool { true }".to_string(), // Matches Rust fn pattern
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:a".to_string(),
+                    known: Some(false),
+                },
+                pathfinder_search::SearchMatch {
+                    file: "src/main.rs".to_string(), // REFERENCE FILE - will be kept
+                    line: 10,
+                    column: 8,
+                    content: "let _ = login();".to_string(), // Doesn't match fn pattern
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:b".to_string(),
+                    known: Some(false),
+                },
+            ],
+            total_matches: 2,
+            truncated: false,
+            files_searched: 2,
+            files_in_scope: 2,
+        }));
+
+        // Use NoOpLawyer to simulate LSP unavailable (forces grep fallback path)
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // DELIVERABLE B assertions:
+        assert!(val.degraded, "should still be degraded (grep is heuristic)");
+
+        // Key: degraded_reason should be the GrepFallback variant, not NoLsp
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::NoLspGrepFallback),
+            "degraded_reason should be NoLspGrepFallback when grep returns results"
+        );
+
+        // Key: references should be Some, not None
+        assert!(
+            val.references.is_some(),
+            "references should be Some when grep fallback finds results"
+        );
+
+        let refs = val.references.unwrap();
+        assert_eq!(
+            refs.len(),
+            1,
+            "should have exactly 1 reference (definition file excluded)"
+        );
+
+        // The remaining reference should be from main.rs, not auth.rs
+        assert_eq!(refs[0].file, "src/main.rs");
+        assert_eq!(refs[0].line, 10);
+
+        // Verify metadata fields
+        assert_eq!(val.files_referenced, 1);
+        assert_eq!(val.total_references, Some(1));
+        assert_eq!(val.resolution_strategy, Some("grep_file_scoped".to_owned()));
+        assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_find_all_references_grep_fallback_no_results_stays_none() {
+        // When grep fallback finds no results (or search fails):
+        // - references should stay None
+        // - degraded_reason should stay NoLsp (not GrepFallback variant)
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // 1 match -> need 1 enclosing_symbol_detail result
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // MockScout returns a match that's ONLY the definition itself
+        // - same file as definition
+        // - matches the definition pattern ("fn login...")
+        // After filtering, there are 0 references left
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/auth.rs".to_string(), // Definition file
+                line: 1,
+                column: 4,
+                content: "fn login() -> bool { true }".to_string(), // Matches def pattern
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:a".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        // Use NoOpLawyer to force grep fallback path
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        // When grep fallback has no valid references after filtering,
+        // we should fall back to the original behavior:
+        assert!(val.degraded);
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::NoLsp),
+            "should be NoLsp when grep finds no valid references"
+        );
+        assert!(
+            val.references.is_none(),
+            "references should be None when grep finds no valid refs"
+        );
+        assert_eq!(val.files_referenced, 0);
+        assert!(val.total_references.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_all_references_lsp_error_uses_grep_fallback() {
+        // DELIVERABLE B: Grep fallback should also work on LspError paths:
+        // - Timeout
+        // - Protocol error
+        // - ConnectionLost
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // 1 match -> need 1 enclosing_symbol_detail result
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // MockScout returns a reference from a different file
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/main.rs".to_string(), // NOT the definition file
+                line: 10,
+                column: 8,
+                content: "login();".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:test".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        // Use MockLawyer that returns ConnectionLost error (not just NoOpLawyer)
+        // This tests the Err(e) error path, not just NoLspAvailable
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_references_lsp_error(Err(LspError::ConnectionLost));
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+
+        // ConnectionLost should map to LspErrorGrepFallback
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
+
+        // Grep fallback should provide results
+        assert!(val.references.is_some());
+        let refs = val.references.unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].file, "src/main.rs");
+    }
+
+    #[tokio::test]
+    async fn test_find_all_references_lsp_timeout_uses_grep_fallback() {
+        // Finding 2: Test LspError::Timeout path with grep fallback results.
+        // Timeout produces distinct metadata from ConnectionLost:
+        // - lsp_readiness: "warming_up" (not "unavailable")
+        // - warm_start_in_progress: Some(true) (not None)
+        // - degraded_reason: LspTimeoutGrepFallback (not LspErrorGrepFallback)
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // 1 match -> need 1 enclosing_symbol_detail result
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/main.rs".to_string(),
+                line: 10,
+                column: 8,
+                content: "login();".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:test".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        // Use MockLawyer that returns Timeout error (not ConnectionLost)
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_references_lsp_error(Err(LspError::Timeout {
+            operation: "references".to_string(),
+            timeout_ms: 5000,
+        }));
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+
+        // Timeout-specific assertions (Finding 2: distinct from ConnectionLost)
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspTimeoutGrepFallback)
+        );
+        assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
+        assert_eq!(val.warm_start_in_progress, Some(true));
+        assert_eq!(val.resolution_strategy, Some("grep_file_scoped".to_owned()));
+
+        // Grep fallback should provide results
+        assert!(val.references.is_some());
+        let refs = val.references.unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].file, "src/main.rs");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Intentionally testing multiple file type filtering
+    async fn test_find_all_references_grep_filters_non_source_files() {
+        // Grep fallback should only return matches from actual source files,
+        // not from docs (.md), configs (.json, .toml, .yaml), etc.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        // 4 matches -> 4 enclosing_symbol_detail results
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None), Ok(None), Ok(None)]);
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // Return mix of source and non-source files
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![
+                // Rust source - KEPT
+                pathfinder_search::SearchMatch {
+                    file: "src/main.rs".to_string(),
+                    line: 10,
+                    column: 8,
+                    content: "login();".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:a".to_string(),
+                    known: Some(false),
+                },
+                // TypeScript source - KEPT
+                pathfinder_search::SearchMatch {
+                    file: "web/auth.ts".to_string(),
+                    line: 5,
+                    column: 4,
+                    content: "import { login }".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:b".to_string(),
+                    known: Some(false),
+                },
+                // Markdown doc - FILTERED OUT
+                pathfinder_search::SearchMatch {
+                    file: "docs/README.md".to_string(),
+                    line: 20,
+                    column: 1,
+                    content: "call login()".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:c".to_string(),
+                    known: Some(false),
+                },
+                // JSON config - FILTERED OUT
+                pathfinder_search::SearchMatch {
+                    file: "config.json".to_string(),
+                    line: 3,
+                    column: 1,
+                    content: "\"login\": true".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:d".to_string(),
+                    known: Some(false),
+                },
+            ],
+            total_matches: 4,
+            truncated: false,
+            files_searched: 4,
+            files_in_scope: 4,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
+        assert!(val.references.is_some());
+
+        let refs = val.references.unwrap();
+        assert_eq!(
+            refs.len(),
+            2,
+            "should filter out non-source files (.md, .json)"
+        );
+
+        let files: std::collections::HashSet<_> = refs.iter().map(|r| r.file.as_str()).collect();
+        assert!(files.contains("src/main.rs"));
+        assert!(files.contains("web/auth.ts"));
+        assert!(!files.contains("docs/README.md"));
+        assert!(!files.contains("config.json"));
+    }
+
+    #[tokio::test]
+    async fn test_find_all_references_grep_fallback_unsupported_ext_uses_line_number() {
+        // GAP 6 + BUG 1 test:
+        // For unsupported extensions (.vue, .mjs, .cjs, .pyi):
+        // - definition_patterns returns catch-all \b{name}\b which matches EVERYTHING
+        // - OLD BUG: all same-file references were incorrectly excluded
+        // - FIX: line-number matching is primary; catch-all regex is skipped
+        //
+        // This test uses a .vue file (unsupported extension) and verifies:
+        // 1. Same-file definition line is excluded (via line-number)
+        // 2. Same-file different-line reference is KEPT (not excluded by catch-all)
+
+        let surgeon = Arc::new(MockSurgeon::new());
+
+        // Custom SymbolScope for a Vue component
+        // start_line = 4 (0-indexed) -> definition_line_1indexed = 5
+        let vue_scope = pathfinder_common::types::SymbolScope {
+            content: "<script setup>const useAuth = () => {}</script>".to_owned(),
+            start_line: 4, // 0-indexed, means line 5 in 1-indexed
+            end_line: 4,
+            name_column: 20, // column of 'u' in useAuth
+            language: "vue".to_owned(),
+        };
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(vue_scope));
+
+        // 2 matches -> 2 enclosing_symbol_detail results
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(None)]);
+
+        let ws_dir = tempfile::tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a .vue file for testing
+        let components_dir = ws_dir.path().join("src/components");
+        std::fs::create_dir_all(&components_dir).unwrap();
+        std::fs::write(
+            components_dir.join("Auth.vue"),
+            "<script setup>\nconst useAuth = () => {}\n</script>\n<template>\n  <div @click=\"useAuth()\">Login</div>\n</template>",
+        ).unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        // Return 2 matches in the same .vue file:
+        // - Line 5: definition site ("const useAuth = ...") -> should be EXCLUDED via line-number check
+        // - Line 8: reference site ("useAuth()") -> should be KEPT (different line from definition)
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![
+                // Match at line 5 (1-indexed) = definition_scope.start_line + 1 = 4 + 1 = 5
+                // This is the DEFINITION SITE -> should be EXCLUDED
+                pathfinder_search::SearchMatch {
+                    file: "src/components/Auth.vue".to_string(),
+                    line: 5, // matches definition line
+                    column: 20,
+                    content: "const useAuth = () => {}".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:a".to_string(),
+                    known: Some(false),
+                },
+                // Match at line 8 (1-indexed) = different line
+                // This is a SAME-FILE REFERENCE -> should be KEPT (BUG 1 would have excluded it)
+                pathfinder_search::SearchMatch {
+                    file: "src/components/Auth.vue".to_string(),
+                    line: 8, // DIFFERENT line from definition
+                    column: 15,
+                    content: "<div @click=\"useAuth()\">Login</div>".to_string(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:b".to_string(),
+                    known: Some(false),
+                },
+            ],
+            total_matches: 2,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+        }));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/components/Auth.vue::useAuth".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
+        assert_eq!(val.resolution_strategy, Some("grep_file_scoped".to_owned()));
+
+        // KEY ASSERTION for BUG 1 fix:
+        // Before fix: catch-all \b{useAuth}\b would match BOTH lines,
+        //             excluding ALL same-file references -> 0 results
+        // After fix: line 5 matches definition line -> excluded
+        //            line 8 is different -> KEPT
+        //            So we should have 1 result
+        assert!(
+            val.references.is_some(),
+            "should have references - same-file different-line refs should be kept"
+        );
+
+        let refs = val.references.unwrap();
+        assert_eq!(
+            refs.len(),
+            1,
+            "BUG 1: expected exactly 1 reference (def site excluded, same-file diff-line ref kept)"
+        );
+
+        assert_eq!(refs[0].file, "src/components/Auth.vue");
+        assert_eq!(
+            refs[0].line, 8,
+            "should be the reference at line 8, not the definition at line 5"
+        );
     }
 }
