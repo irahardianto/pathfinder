@@ -66,7 +66,7 @@ pub fn install_hint(language_id: &str) -> String {
                 .to_string()
         }
         "python" => {
-            "Install pyright: npm install -g pyright\nOr install pylsp: pip install python-lsp-server"
+            "Install pyright-langserver: npm install -g pyright\nOr install pylsp: pip install python-lsp-server"
                 .to_string()
         }
         "java" => {
@@ -684,14 +684,16 @@ pub async fn detect_languages(
     };
     if let Some(root) = py_root {
         // Try Python LSP servers in order of preference.
-        // pyright: Fast, strict type checking, most popular for modern Python
+        // pyright-langserver: Fast, strict type checking, most popular for modern Python (best quality)
+        // pyright: npm package binary, pyright-langserver alternative
         // pylsp: Community standard, plugin ecosystem, good all-rounder
-        // ruff-lsp: Extremely fast, new, growing adoption
+        // ruff: Extremely fast linter with built-in LSP server (ruff-lsp deprecated since 0.4.0)
         // jedi-language-server: Mature, lightweight, pure Python
         let python_lsp_candidates = [
             ("pyright-langserver", vec!["--stdio".to_owned()]),
+            ("pyright", vec!["--stdio".to_owned()]),
             ("pylsp", vec![]),
-            ("ruff-lsp", vec![]),
+            ("ruff", vec!["server".to_owned(), "--stdio".to_owned()]),
             ("jedi-language-server", vec![]),
         ];
 
@@ -1451,6 +1453,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_detects_python_fallback_to_pyright() {
+        test_with_fake_python_binaries(&["pyright"], || async {
+            let dir = tempdir().expect("temp dir");
+            std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+
+            let result = detect_languages(dir.path(), &make_ts_config())
+                .await
+                .expect("detect");
+
+            if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
+                // pyright uses --stdio args
+                assert_eq!(py.args.len(), 1);
+                assert!(py.args[0].contains("--stdio"));
+                assert!(py.command.contains("pyright"));
+            } else {
+                panic!("Python should be detected with pyright");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_detects_python_fallback_to_pylsp() {
         test_with_fake_python_binaries(&["pylsp"], || async {
             let dir = tempdir().expect("temp dir");
@@ -1473,7 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_detects_python_fallback_to_ruff() {
-        test_with_fake_python_binaries(&["ruff-lsp"], || async {
+        test_with_fake_python_binaries(&["ruff"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
@@ -1482,11 +1506,13 @@ mod tests {
                 .expect("detect");
 
             if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
-                // ruff-lsp uses empty args
-                assert!(py.args.is_empty());
-                assert!(py.command.contains("ruff-lsp"));
+                // ruff uses "server --stdio" args
+                assert_eq!(py.args.len(), 2);
+                assert!(py.args[0].contains("server"));
+                assert!(py.args[1].contains("--stdio"));
+                assert!(py.command.contains("ruff"));
             } else {
-                panic!("Python should be detected with ruff-lsp");
+                panic!("Python should be detected with ruff");
             }
         })
         .await;

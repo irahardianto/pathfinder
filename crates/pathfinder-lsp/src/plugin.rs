@@ -56,8 +56,8 @@ pub trait LanguagePlugin: Send + Sync {
     /// LSP binary candidates in preference order.
     ///
     /// Detection tries each candidate via `which` and uses the first found.
-    /// Example: Rust has one (`rust-analyzer`), Python has four
-    /// (`pyright-langserver`, `pylsp`, `ruff-lsp`, `jedi-language-server`).
+    /// Example: Rust has one (`rust-analyzer`), Python has five
+    /// (`pyright-langserver`, `pyright`, `pylsp`, `ruff`, `jedi-language-server`).
     fn lsp_candidates(&self) -> &[LspCandidate];
 
     /// Human-readable install guidance when no LSP binary is found.
@@ -162,7 +162,7 @@ impl LanguagePlugin for TypeScriptPlugin {
     }
 }
 
-/// Python language plugin — `pyright-langserver` / `pylsp` / `ruff-lsp` / `jedi-language-server`.
+/// Python language plugin — `pyright-langserver` / `pyright` / `pylsp` / `ruff` / `jedi-language-server`.
 pub struct PythonPlugin;
 
 /// Java language plugin — jdtls (Eclipse JDT Language Server).
@@ -196,12 +196,16 @@ impl LanguagePlugin for PythonPlugin {
                 default_args: &["--stdio"],
             },
             LspCandidate {
+                binary: "pyright",
+                default_args: &["--stdio"],
+            },
+            LspCandidate {
                 binary: "pylsp",
                 default_args: &[],
             },
             LspCandidate {
-                binary: "ruff-lsp",
-                default_args: &[],
+                binary: "ruff",
+                default_args: &["server", "--stdio"],
             },
             LspCandidate {
                 binary: "jedi-language-server",
@@ -211,7 +215,7 @@ impl LanguagePlugin for PythonPlugin {
     }
 
     fn install_hint(&self) -> &'static str {
-        "Install pyright: npm install -g pyright\nOr install pylsp: pip install python-lsp-server"
+        "Install pyright-langserver: npm install -g pyright\nOr install pylsp: pip install python-lsp-server"
     }
 }
 
@@ -446,12 +450,15 @@ mod tests {
     #[test]
     fn test_python_plugin_lsp_candidates() {
         let candidates = PythonPlugin.lsp_candidates();
-        assert_eq!(candidates.len(), 4);
+        assert_eq!(candidates.len(), 5);
         assert_eq!(candidates[0].binary, "pyright-langserver");
         assert_eq!(candidates[0].default_args, &["--stdio"]);
-        assert_eq!(candidates[1].binary, "pylsp");
-        assert_eq!(candidates[2].binary, "ruff-lsp");
-        assert_eq!(candidates[3].binary, "jedi-language-server");
+        assert_eq!(candidates[1].binary, "pyright");
+        assert_eq!(candidates[1].default_args, &["--stdio"]);
+        assert_eq!(candidates[2].binary, "pylsp");
+        assert_eq!(candidates[3].binary, "ruff");
+        assert_eq!(candidates[3].default_args, &["server", "--stdio"]);
+        assert_eq!(candidates[4].binary, "jedi-language-server");
     }
 
     #[test]

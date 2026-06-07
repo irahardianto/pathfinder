@@ -377,7 +377,7 @@ fn spawn_lsp_child(
     }
 
     // Python cache isolation: isolate __pycache__ output to avoid conflicts
-    // between concurrent pyright/ruff-lsp instances.
+    // between concurrent pyright/ruff instances.
     if isolate_target_dir && language_id == "python" {
         let isolated_cache = project_root.join(".pathfinder").join("python-cache");
         // L-1: Pre-create isolation directory to prevent first-write race.

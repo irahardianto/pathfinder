@@ -199,9 +199,9 @@ impl PathfinderServer {
         let pattern = match language {
             "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{candidate}\b"),
             "go" => format!(r"func\s+{candidate}\b"),
-            "typescript" | "javascript" => {
+            "typescript" | "javascript" | "vue" => {
                 format!(
-                    r"(?:(?:export\s+(?:default\s*)?)?function\s+{candidate}\b|(?:{candidate}\s*:\s*)[^{{]*\([^)]*\)\s*=>)"
+                    r"(?:(?:export\s+(?:default\s*)?)?function\s+{candidate}\b|(?:export\s+)?(?:const|let|var)\s+{candidate}\s*[=:]|(?:{candidate}\s*:\s*)[^{{]*\([^)]*\)\s*=>)"
                 )
             }
             "python" => format!(r"(?:async\s+)?def\s+{candidate}\b"),

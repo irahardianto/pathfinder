@@ -185,7 +185,7 @@ fn call_pattern_simple() -> &'static regex::Regex {
 /// Filters out language keywords and caps at 20 candidates.
 fn extract_call_candidates(symbol_content: &str, language: &str) -> Vec<String> {
     let re = match language {
-        "typescript" | "javascript" | "python" => call_pattern_full(),
+        "typescript" | "javascript" | "python" | "vue" => call_pattern_full(),
         _ => call_pattern_simple(),
     };
 
@@ -341,6 +341,65 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
             "synchronized",
             "native",
         ],
+        "vue" => &[
+            "if",
+            "else",
+            "for",
+            "while",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "return",
+            "function",
+            "class",
+            "interface",
+            "type",
+            "const",
+            "let",
+            "var",
+            "new",
+            "this",
+            "super",
+            "static",
+            "async",
+            "await",
+            "import",
+            "export",
+            "from",
+            "as",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "yield",
+            "typeof",
+            "instanceof",
+            "in",
+            "defineProps",
+            "defineEmits",
+            "defineExpose",
+            "defineModel",
+            "withDefaults",
+            "ref",
+            "reactive",
+            "computed",
+            "watch",
+            "watchEffect",
+            "onMounted",
+            "onUnmounted",
+            "provide",
+            "inject",
+            "toRef",
+            "toRefs",
+            "useSlots",
+            "useAttrs",
+            "useTemplateRef",
+            "template",
+            "script",
+            "style",
+            "setup",
+        ],
         _ => &["if", "else", "for", "while", "return", "break", "continue"],
     }
 }
@@ -356,7 +415,7 @@ fn language_to_file_glob(language: &str) -> &str {
         "javascript" => "**/*.{js,jsx}",
         "python" => "**/*.py",
         "go" => "**/*.go",
-        "vue" => "**/*.vue",
+        "vue" => "**/*.{vue,ts,tsx,js,jsx,mjs,cjs}",
         "java" => "**/*.java",
         _ => "**/*",
     }
@@ -416,6 +475,19 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
             ),
             format!(
                 r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{name}\s*\("
+            ),
+        ],
+        "vue" => vec![
+            format!(r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{name}\b"),
+            format!(
+                r"(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+{name}\b"
+            ),
+            format!(r"(?:export\s+)?(?:const|let|var)\s+{name}\s*[=:]"),
+            format!(
+                r"(?:export\s+)?(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?\s*=>"
+            ),
+            format!(
+                r"(?:const|let)\s+{name}\s*=\s*(?:defineProps|defineEmits|defineExpose|defineModel|withDefaults)[(<]"
             ),
         ],
         _ => vec![format!(r"\b{name}\b")],
@@ -586,7 +658,10 @@ mod tests {
 
     #[test]
     fn test_language_to_file_glob_vue() {
-        assert_eq!(super::language_to_file_glob("vue"), "**/*.vue");
+        assert_eq!(
+            super::language_to_file_glob("vue"),
+            "**/*.{vue,ts,tsx,js,jsx,mjs,cjs}"
+        );
     }
 
     #[test]
@@ -650,6 +725,82 @@ mod tests {
         assert!(
             re.is_match("export interface AuthService {"),
             "must match 'export interface AuthService {{'"
+        );
+    }
+
+    // ── Vue definition_patterns tests (DELIVERABLE C) ─────────────────────
+
+    #[test]
+    fn test_definition_patterns_vue_function() {
+        let patterns = super::definition_patterns("vue", "handleClick");
+        assert!(!patterns.is_empty(), "vue must have definition patterns");
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        assert!(
+            re.is_match("export async function handleClick("),
+            "must match 'export async function handleClick('"
+        );
+        assert!(
+            re.is_match("function handleClick("),
+            "must match bare 'function handleClick('"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_vue_const_assignment() {
+        let patterns = super::definition_patterns("vue", "handleClick");
+        assert!(patterns.len() >= 3);
+        let re = regex::Regex::new(&patterns[2]).expect("valid regex");
+        assert!(
+            re.is_match("const handleClick = () => {}"),
+            "must match 'const handleClick = () => {{}}'"
+        );
+        assert!(
+            re.is_match("export const handleClick = () => {}"),
+            "must match 'export const handleClick = () => {{}}'"
+        );
+        assert!(
+            re.is_match("let handleClick: Handler = () => {}"),
+            "must match typed assignment 'let handleClick: Handler ='"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_vue_ref() {
+        let patterns = super::definition_patterns("vue", "count");
+        assert!(patterns.len() >= 3);
+        let re = regex::Regex::new(&patterns[2]).expect("valid regex");
+        assert!(
+            re.is_match("const count = ref(0)"),
+            "must match 'const count = ref(0)'"
+        );
+        assert!(
+            re.is_match("const count = reactive({ value: 0 })"),
+            "must match 'const count = reactive(...)'"
+        );
+        assert!(
+            re.is_match("const count = computed(() => 0)"),
+            "must match 'const count = computed(...)'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_vue_define_macros() {
+        let patterns_props = super::definition_patterns("vue", "props");
+        let patterns_emit = super::definition_patterns("vue", "emit");
+        assert!(patterns_props.len() >= 5);
+        let re_props = regex::Regex::new(&patterns_props[4]).expect("valid regex");
+        let re_emit = regex::Regex::new(&patterns_emit[4]).expect("valid regex");
+        assert!(
+            re_props.is_match("const props = defineProps<{ id: string }>()"),
+            "must match 'const props = defineProps(...)'"
+        );
+        assert!(
+            re_emit.is_match("const emit = defineEmits<{ (e: 'save'): void }>()"),
+            "must match 'const emit = defineEmits(...)'"
+        );
+        assert!(
+            re_props.is_match("const props = withDefaults(defineProps<{ }>(), {})"),
+            "must match 'const props = withDefaults(...)'"
         );
     }
 
@@ -741,7 +892,9 @@ mod tests {
     #[test]
     fn test_definition_patterns_all_languages_compile() {
         // Verify every extension returns valid regex patterns
-        let extensions = ["rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "xyz"];
+        let extensions = [
+            "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "vue", "xyz",
+        ];
         for ext in &extensions {
             let patterns = super::definition_patterns(ext, "TestSymbol");
             for (i, pattern) in patterns.iter().enumerate() {
@@ -894,6 +1047,34 @@ def process():
         assert!(candidates.contains(&"validate".to_string()));
     }
 
+    // ── Vue extract_call_candidates test (DELIVERABLE C) ──────────────────
+
+    #[test]
+    fn test_extract_call_candidates_vue_method_calls() {
+        // Vue <script setup> uses same patterns as TypeScript
+        let code = r"
+            const handleSubmit = () => {
+                userService.login(credentials);
+                router.push('/dashboard');
+                toast.showSuccess();
+            }
+        ";
+        let candidates = super::extract_call_candidates(code, "vue");
+        // Method calls (obj.method()) should also be extracted for Vue
+        assert!(
+            candidates.contains(&"login".to_string()),
+            "expected 'login' in {candidates:?}"
+        );
+        assert!(
+            candidates.contains(&"push".to_string()),
+            "expected 'push' in {candidates:?}"
+        );
+        assert!(
+            candidates.contains(&"showSuccess".to_string()),
+            "expected 'showSuccess' in {candidates:?}"
+        );
+    }
+
     #[test]
     fn test_extract_call_candidates_empty_input() {
         let candidates = super::extract_call_candidates("", "rust");
@@ -954,6 +1135,25 @@ def process():
         assert!(kw.contains(&"class"), "must contain 'class'");
         assert!(kw.contains(&"interface"), "must contain 'interface'");
         assert!(kw.contains(&"extends"), "must contain 'extends'");
+    }
+
+    // ── Vue keywords_for_language test (DELIVERABLE C) ────────────────────
+
+    #[test]
+    fn test_keywords_for_language_vue() {
+        let kw = super::keywords_for_language("vue");
+        // TS/JS base keywords
+        assert!(kw.contains(&"function"), "must contain 'function'");
+        assert!(kw.contains(&"const"), "must contain 'const'");
+        // Vue-specific composables
+        assert!(kw.contains(&"ref"), "must contain 'ref'");
+        assert!(kw.contains(&"reactive"), "must contain 'reactive'");
+        assert!(kw.contains(&"computed"), "must contain 'computed'");
+        assert!(kw.contains(&"watch"), "must contain 'watch'");
+        assert!(kw.contains(&"onMounted"), "must contain 'onMounted'");
+        // Vue compiler macros
+        assert!(kw.contains(&"defineProps"), "must contain 'defineProps'");
+        assert!(kw.contains(&"defineEmits"), "must contain 'defineEmits'");
     }
 
     #[test]

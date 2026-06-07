@@ -1351,8 +1351,14 @@ mod tests {
             pathfinder_lsp::client::MissingLanguage {
                 language_id: "python".to_string(),
                 marker_file: "pyproject.toml".to_string(),
-                tried_binaries: vec!["pyright".to_string(), "pylsp".to_string()],
-                install_hint: "Install pyright: npm install -g pyright".to_string(),
+                tried_binaries: vec![
+                    "pyright-langserver".to_string(),
+                    "pyright".to_string(),
+                    "pylsp".to_string(),
+                    "ruff".to_string(),
+                    "jedi-language-server".to_string(),
+                ],
+                install_hint: "Install pyright-langserver: npm install -g pyright".to_string(),
             },
             pathfinder_lsp::client::MissingLanguage {
                 language_id: "go".to_string(),
@@ -1385,7 +1391,7 @@ mod tests {
         assert_eq!(python_health.unwrap().status, "unavailable");
         assert_eq!(
             python_health.unwrap().install_hint,
-            Some("Install pyright: npm install -g pyright".to_string())
+            Some("Install pyright-langserver: npm install -g pyright".to_string())
         );
 
         assert!(go_health.is_some());
