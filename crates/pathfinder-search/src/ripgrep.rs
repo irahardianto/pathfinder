@@ -19,6 +19,21 @@ use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "tiff", "tif", "mp3", "mp4", "wav",
+    "avi", "mov", "mkv", "flv", "wmv", "webm", "ogg", "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
+    "tgz", "zst", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "exe",
+    "dll", "so", "dylib", "o", "a", "lib", "obj", "wasm", "class", "jar", "pyc", "pyo", "o",
+    "woff", "woff2", "ttf", "otf", "eot", "sqlite", "db", "mdb", "node", "bin", "dat", "idx",
+    "pack",
+];
+
+fn is_binary_extension(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| BINARY_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
 struct TeeHasher<R> {
     reader: R,
     hasher: Sha256,
@@ -349,8 +364,13 @@ impl RipgrepScout {
     /// Applies `path_glob` (include filter) and `exclude_glob` (exclude filter)
     /// before searching — so excluded files are never read at all.
     ///
-    /// Returns tuples of `(absolute_path, relative_path_string)`.
-    fn walk_files(params: &SearchParams) -> Result<Vec<(PathBuf, String)>, SearchError> {
+    /// Returns `(files, binary_skipped, gitignored_skipped)` — tuples of `(absolute_path, relative_path_string)`
+    /// plus the count of files skipped because they matched known binary extensions, and the count of
+    /// gitignored files that matched the glob but were excluded by gitignore.
+    #[allow(clippy::type_complexity)]
+    fn walk_files(
+        params: &SearchParams,
+    ) -> Result<(Vec<(PathBuf, String)>, usize, usize), SearchError> {
         let glob = &params.path_glob;
         let exclude_glob = &params.exclude_glob;
 
@@ -377,13 +397,59 @@ impl RipgrepScout {
         };
 
         let walker = WalkBuilder::new(&params.workspace_root)
-            .hidden(false) // include dot-files unless .gitignore excludes them
+            .hidden(false)
             .git_ignore(true)
             .git_global(false)
             .git_exclude(false)
             .build();
 
+        let walker_no_ignore = WalkBuilder::new(&params.workspace_root)
+            .hidden(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .build();
+
         let mut files = Vec::new();
+        let mut binary_skipped: usize = 0;
+        let mut total_files_without_gitignore: usize = 0;
+
+        for entry in walker_no_ignore.flatten() {
+            let path = entry.path().to_path_buf();
+            if !path.is_file() {
+                continue;
+            }
+
+            let relative = match path.strip_prefix(&params.workspace_root) {
+                Ok(r) => r.to_string_lossy().to_string(),
+                Err(_) => continue,
+            };
+
+            if ALWAYS_EXCLUDED_DIRS.iter().any(|dir| {
+                let unix_dir = *dir;
+                let win_dir = &unix_dir[..unix_dir.len() - 1];
+                relative.starts_with(unix_dir) || relative.starts_with(win_dir)
+            }) {
+                continue;
+            }
+
+            let matches: bool = glob_matcher.is_match(&relative);
+            if !matches && glob != "**/*" {
+                continue;
+            }
+
+            if let Some(ref excl_set) = exclude_matcher {
+                if excl_set.is_match(&relative) {
+                    continue;
+                }
+            }
+
+            if is_binary_extension(&path) {
+                continue;
+            }
+
+            total_files_without_gitignore += 1;
+        }
 
         for entry in walker.flatten() {
             let path = entry.path().to_path_buf();
@@ -423,11 +489,21 @@ impl RipgrepScout {
                 }
             }
 
+            // Skip known binary files before adding to search list.
+            if is_binary_extension(&path) {
+                binary_skipped += 1;
+                continue;
+            }
+
             files.push((path, relative));
         }
 
         files.sort_by(|a, b| a.1.cmp(&b.1));
-        Ok(files)
+
+        let gitignored_skipped = total_files_without_gitignore
+            .saturating_sub(files.len())
+            .saturating_sub(binary_skipped);
+        Ok((files, binary_skipped, gitignored_skipped))
     }
 }
 
@@ -446,8 +522,8 @@ impl Scout for RipgrepScout {
             );
 
             let matcher = Self::build_matcher(params)?;
-            let files = Self::walk_files(params)?;
-            let files_in_scope = files.len();
+            let (files, binary_skipped, gitignored_skipped) = Self::walk_files(params)?;
+            let files_in_scope = files.len() + gitignored_skipped + binary_skipped;
 
             let mut match_buf: Vec<SearchMatch> =
                 Vec::with_capacity(params.max_results.min(256));
@@ -455,6 +531,7 @@ impl Scout for RipgrepScout {
             let mut skipped_count: usize = 0;
             let mut truncated = false;
             let mut files_searched: usize = 0;
+            let mut other_skipped: usize = 0;
 
             let mut searcher = SearcherBuilder::new()
                 .line_number(true)
@@ -463,13 +540,13 @@ impl Scout for RipgrepScout {
                 .build();
 
             for (abs_path, relative) in &files {
-                files_searched += 1;
                 let matches_before = match_buf.len();
 
                 let file = match std::fs::File::open(abs_path) {
                     Ok(f) => f,
                     Err(e) => {
                         tracing::warn!(file = %relative, error = %e, "Scout: failed to open file; skipping");
+                        other_skipped += 1;
                         continue;
                     }
                 };
@@ -488,8 +565,10 @@ impl Scout for RipgrepScout {
 
                 if let Err(e) = searcher.search_reader(&matcher, &mut tee, &mut sink) {
                     tracing::warn!(file = %relative, error = %e, "Scout: failed to search file; skipping");
+                    other_skipped += 1;
                     continue;
                 }
+                files_searched += 1;
 
                 let matches_after = sink.current_match_count();
                 let is_truncated = sink.truncated;
@@ -528,6 +607,9 @@ impl Scout for RipgrepScout {
                 truncated,
                 files_searched,
                 files_in_scope,
+                binary_skipped,
+                gitignored_skipped,
+                other_skipped,
             })
         })
         .await
@@ -1334,5 +1416,75 @@ mod missing_coverage_tests {
 
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].context_before, vec!["line2", "line3"]);
+    }
+
+    #[test]
+    fn test_is_binary_extension() {
+        assert!(is_binary_extension(std::path::Path::new("image.png")));
+        assert!(is_binary_extension(std::path::Path::new("archive.ZIP")));
+        assert!(is_binary_extension(std::path::Path::new("lib/data.sqlite")));
+        assert!(!is_binary_extension(std::path::Path::new("main.rs")));
+        assert!(!is_binary_extension(std::path::Path::new("app.tsx")));
+        assert!(!is_binary_extension(std::path::Path::new("config.toml")));
+    }
+
+    #[tokio::test]
+    async fn test_search_skips_binary_files() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::fs::write(dir.path().join("main.rs"), "fn main() { findme(); }").unwrap();
+        std::fs::write(dir.path().join("image.png"), "PNG binary data").unwrap();
+        std::fs::write(dir.path().join("data.pdf"), "PDF binary data").unwrap();
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(
+            result.binary_skipped, 2,
+            "png and pdf should be skipped as binary"
+        );
+        assert_eq!(result.files_searched, 1, "only main.rs should be searched");
+        assert_eq!(
+            result.files_in_scope, 3,
+            "all 3 files in scope (main.rs + 2 binary)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_counts_gitignored_files() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init should succeed");
+
+        std::fs::write(dir.path().join("main.rs"), "fn main() { findme(); }").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.path().join("ignored.rs"), "fn ignored() { findme(); }").unwrap();
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(
+            result.gitignored_skipped, 1,
+            "ignored.rs should be counted as gitignored"
+        );
+        assert_eq!(result.files_searched, 1, "only main.rs should be searched");
+        assert_eq!(
+            result.files_in_scope, 2,
+            "both main.rs and ignored.rs should be in scope (files matched glob)"
+        );
     }
 }

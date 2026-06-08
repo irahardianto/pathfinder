@@ -104,4 +104,11 @@ pub struct SearchResult {
     /// When `files_searched < files_in_scope`, some files were skipped
     /// (binary, .gitignored, or permission issues).
     pub files_in_scope: usize,
+    /// Files skipped because they matched known binary extensions
+    /// (e.g. `.png`, `.exe`, `.so`).
+    pub binary_skipped: usize,
+    /// Files skipped because they were excluded by `.gitignore` rules.
+    pub gitignored_skipped: usize,
+    /// Files skipped for other reasons (permission denied, I/O error, etc.).
+    pub other_skipped: usize,
 }

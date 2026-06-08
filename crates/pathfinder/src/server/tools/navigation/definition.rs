@@ -999,6 +999,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         // Lawyer returns a generic LSP error (not NoLspAvailable)
@@ -1068,6 +1071,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let lawyer = Arc::new(MockLawyer::default());
@@ -1173,6 +1179,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(
@@ -1397,6 +1406,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let ws_dir = make_temp_workspace();
@@ -1450,6 +1462,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let ws_dir = make_temp_workspace();
@@ -1512,6 +1527,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let lawyer = Arc::new(MockLawyer::default());
@@ -1577,6 +1595,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             // Strategy 3 returns match (global search)
             Ok(pathfinder_search::SearchResult {
@@ -1596,6 +1617,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
         ]);
 
@@ -1717,6 +1741,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let ws_dir = make_temp_workspace();
@@ -1810,6 +1837,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             // Strategy 1 pattern 2: struct|enum|trait|type|mod\s+check\b — empty
             Ok(pathfinder_search::SearchResult {
@@ -1818,6 +1848,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             // Strategy 1 pattern 3: const|static\s+check\b — empty
             Ok(pathfinder_search::SearchResult {
@@ -1826,6 +1859,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             // Strategy 1 pattern 4: \bcheck\b — empty
             Ok(pathfinder_search::SearchResult {
@@ -1834,6 +1870,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             // Strategy 2 step 1: impl block search finds src/sandbox.rs
             Ok(pathfinder_search::SearchResult {
@@ -1853,6 +1892,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             // Strategy 2 step 2: method search finds fn check in src/sandbox.rs
             Ok(pathfinder_search::SearchResult {
@@ -1872,6 +1914,9 @@ mod tests {
                 truncated: false,
                 files_searched: 1,
                 files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
         ]);
 

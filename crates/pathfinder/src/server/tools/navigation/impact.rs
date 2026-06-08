@@ -1570,6 +1570,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(
@@ -1695,6 +1698,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(
@@ -2316,6 +2322,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         // Use NoOpLawyer to force grep fallback
@@ -2390,6 +2399,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         // Use NoOpLawyer to force grep fallback
@@ -2586,6 +2598,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         });
         let validate_result = Ok(pathfinder_search::SearchResult {
             matches: vec![validate_match],
@@ -2593,6 +2608,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         });
 
         // Queue: 1st = incoming search (empty), then enough for outgoing candidates
@@ -2684,6 +2702,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         });
         let run_result = Ok(pathfinder_search::SearchResult {
             matches: vec![run_match],
@@ -2691,6 +2712,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         });
 
         // Candidates: "process" + "run" (deduped by HashSet in extract_call_candidates)
@@ -2800,6 +2824,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         });
         // Candidates: {"do_work", "validate"} — order unknown
         // For "do_work": search gets the two-match result (neither is a valid fn do_work)
@@ -2811,6 +2838,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         });
 
         scout.set_results(vec![
@@ -3025,6 +3055,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let ws_dir = make_temp_workspace();
@@ -3089,6 +3122,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let ws_dir = make_temp_workspace();

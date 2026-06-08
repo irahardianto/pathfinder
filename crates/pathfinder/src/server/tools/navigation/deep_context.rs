@@ -1028,6 +1028,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(

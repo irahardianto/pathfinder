@@ -119,6 +119,9 @@ impl Scout for MockScout {
                 truncated: false,
                 files_searched: 0,
                 files_in_scope: 0,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
         }
     }
@@ -155,6 +158,9 @@ mod tests {
             truncated: true,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
         let result = mock.search(&params()).await.expect("should succeed");
         assert_eq!(result.total_matches, 42);
@@ -187,6 +193,9 @@ mod tests {
                 truncated: false,
                 files_searched: 0,
                 files_in_scope: 0,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             Ok(SearchResult {
                 matches: vec![],
@@ -194,6 +203,9 @@ mod tests {
                 truncated: false,
                 files_searched: 0,
                 files_in_scope: 0,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
             Ok(SearchResult {
                 matches: vec![],
@@ -201,6 +213,9 @@ mod tests {
                 truncated: false,
                 files_searched: 0,
                 files_in_scope: 0,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
             }),
         ]);
 

@@ -584,6 +584,7 @@ mod tests {
                 tech_stack: vec!["TypeScript".to_string()],
                 files_scanned: 1,
                 files_truncated: 0,
+                truncated_paths: vec![],
                 files_in_scope: 1,
                 coverage_percent: 100,
                 version_hashes: std::collections::HashMap::default(),
@@ -648,6 +649,7 @@ mod tests {
                 tech_stack: vec![],
                 files_scanned: 0,
                 files_truncated: 0,
+                truncated_paths: vec![],
                 files_in_scope: 0,
                 coverage_percent: 100,
                 version_hashes: std::collections::HashMap::default(),
@@ -728,6 +730,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -854,6 +859,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -925,6 +933,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -987,6 +998,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::default());
@@ -1264,6 +1278,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -1360,6 +1377,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -1453,6 +1473,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let mock_surgeon = Arc::new(MockSurgeon::new());
@@ -1525,6 +1548,9 @@ mod tests {
             truncated: false,
             files_searched: 0,
             files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let server = PathfinderServer::with_engines(

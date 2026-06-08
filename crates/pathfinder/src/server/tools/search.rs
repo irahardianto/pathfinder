@@ -219,6 +219,9 @@ impl PathfinderServer {
                         None
                     },
                     duration_ms: Some(millis_to_u64(duration_ms)),
+                    binary_skipped: result.binary_skipped,
+                    gitignored_skipped: result.gitignored_skipped,
+                    other_skipped: result.other_skipped,
                 }))
             }
             Err(err) => {
@@ -1002,6 +1005,69 @@ mod tests {
         assert_eq!(
             next_offset, 2,
             "next_offset should be offset + returned_count"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_binary_skipped_counted() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(ws_dir.path().join("src/main.rs"), "fn findme() {}\n").unwrap();
+        std::fs::write(ws_dir.path().join("src/image.png"), "binary data").unwrap();
+        std::fs::write(ws_dir.path().join("src/archive.zip"), "zip data").unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .enclosing_symbol_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+        surgeon
+            .node_type_at_position_results
+            .lock()
+            .unwrap()
+            .push(Ok("code".to_string()));
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = SearchCodebaseParams {
+            query: "findme".to_owned(),
+            is_regex: false,
+            path_glob: "**/*".to_owned(),
+            exclude_glob: String::default(),
+            offset: 0,
+            max_results: 10,
+            context_lines: 0,
+            known_files: vec![],
+            group_by_file: false,
+            filter_mode: pathfinder_common::types::FilterMode::All,
+        };
+        let result = server.search_codebase_impl(params).await;
+        let response = result.expect("search should succeed");
+
+        assert_eq!(
+            response.0.binary_skipped, 2,
+            "binary_skipped should count .png and .zip files"
+        );
+        assert_eq!(
+            response.0.gitignored_skipped, 0,
+            "gitignored_skipped should be 0 when no .gitignore rules apply"
+        );
+        assert_eq!(
+            response.0.other_skipped, 0,
+            "other_skipped should be 0 when no I/O errors occur"
         );
     }
 }

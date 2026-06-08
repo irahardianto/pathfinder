@@ -389,6 +389,12 @@ pub struct SearchCodebaseResponse {
     /// Wall-clock time in milliseconds that this tool call took to complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Files skipped because they matched known binary extensions.
+    pub binary_skipped: usize,
+    /// Files skipped because they were excluded by `.gitignore` rules.
+    pub gitignored_skipped: usize,
+    /// Files skipped for other reasons (permission denied, I/O error, etc.).
+    pub other_skipped: usize,
 }
 
 /// A minimal match entry for files already in the agent's context (`known_files`)
@@ -477,6 +483,9 @@ pub struct GetRepoMapMetadata {
     pub files_scanned: usize,
     /// Number of files truncated.
     pub files_truncated: usize,
+    /// File paths that were truncated due to token budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub truncated_paths: Vec<String>,
     /// Number of files within the configured scope.
     pub files_in_scope: usize,
     /// Percentage of files covered by the search.

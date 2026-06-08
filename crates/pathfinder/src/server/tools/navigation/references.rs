@@ -1521,6 +1521,9 @@ mod tests {
             truncated: false,
             files_searched: 2,
             files_in_scope: 2,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         // Use NoOpLawyer to simulate LSP unavailable (forces grep fallback path)
@@ -1630,6 +1633,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         // Use NoOpLawyer to force grep fallback path
@@ -1719,6 +1725,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         // Use MockLawyer that returns ConnectionLost error (not just NoOpLawyer)
@@ -1805,6 +1814,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         // Use MockLawyer that returns Timeout error (not ConnectionLost)
@@ -1937,6 +1949,9 @@ mod tests {
             truncated: false,
             files_searched: 4,
             files_in_scope: 4,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(
@@ -2064,6 +2079,9 @@ mod tests {
             truncated: false,
             files_searched: 1,
             files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
         }));
 
         let server = PathfinderServer::with_all_engines(

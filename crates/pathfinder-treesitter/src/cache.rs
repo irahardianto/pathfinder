@@ -119,6 +119,10 @@ impl AstCache {
     /// # Errors
     /// Returns `SurgeonError` if I/O fails or parsing fails.
     #[instrument(skip(self), fields(cache_hit = false))]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "content-hash fallback adds medium-path between fast-path and singleflight"
+    )]
     pub async fn get_or_parse(
         &self,
         path: &Path,
@@ -130,17 +134,40 @@ impl AstCache {
             .map_err(|e| io_err(e, path))?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-        // Check cache while holding the lock; release before any async I/O.
-        {
+        let needs_hash_check = {
             let mut lock = self.entries.lock();
-
             if let Some(entry) = lock.get(path) {
                 if entry.mtime == current_mtime && entry.lang == lang {
                     tracing::Span::current().record("cache_hit", true);
                     return Ok((entry.tree.clone(), entry.source.clone()));
                 }
+                entry.lang == lang
+            } else {
+                false
             }
-        } // lock released here — safe to await below
+        };
+
+        if needs_hash_check {
+            let content = match tokio::fs::read(path).await {
+                Ok(c) => c,
+                Err(e) => return Err(io_err(e, path)),
+            };
+            let current_hash = tokio::task::spawn_blocking(move || VersionHash::compute(&content))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("spawn_blocking hash panicked: {e}");
+                    VersionHash::compute(&[])
+                });
+
+            let mut lock = self.entries.lock();
+            if let Some(entry) = lock.get_mut(path) {
+                if entry.content_hash == current_hash && entry.lang == lang {
+                    entry.mtime = current_mtime;
+                    tracing::Span::current().record("cache_hit", true);
+                    return Ok((entry.tree.clone(), entry.source.clone()));
+                }
+            }
+        }
 
         // --- Singleflight: check if another request is already parsing this file ---
         let cell = {
@@ -244,11 +271,33 @@ impl AstCache {
         content: Arc<[u8]>,
         mtime: SystemTime,
     ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
-        {
-            let mut lock = self.entries.lock();
-
-            if let Some(entry) = lock.get(path) {
+        let needs_hash_check = {
+            let lock = self.entries.lock();
+            if let Some(entry) = lock.peek(path) {
                 if entry.mtime == mtime && entry.lang == lang {
+                    tracing::Span::current().record("cache_hit", true);
+                    return Ok((entry.tree.clone(), entry.source.clone()));
+                }
+                entry.lang == lang
+            } else {
+                false
+            }
+        };
+
+        if needs_hash_check {
+            let content_clone = content.clone();
+            let current_hash =
+                tokio::task::spawn_blocking(move || VersionHash::compute(&content_clone))
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("spawn_blocking hash panicked: {e}");
+                        VersionHash::compute(&[])
+                    });
+
+            let mut lock = self.entries.lock();
+            if let Some(entry) = lock.get_mut(path) {
+                if entry.content_hash == current_hash && entry.lang == lang {
+                    entry.mtime = mtime;
                     tracing::Span::current().record("cache_hit", true);
                     return Ok((entry.tree.clone(), entry.source.clone()));
                 }
@@ -342,27 +391,54 @@ impl AstCache {
     /// Template/style parse failures set `MultiZoneTree::degraded = true` but
     /// are non-fatal.
     #[instrument(skip(self), fields(cache_hit = false))]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "content-hash fallback adds medium-path between fast-path and singleflight"
+    )]
     pub async fn get_or_parse_vue(
         &self,
         path: &Path,
     ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
-        // --- Fast-path guard ---
         let meta = tokio::fs::metadata(path)
             .await
             .map_err(|e| io_err(e, path))?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-        {
-            let mut lock = self.vue_entries.lock();
+        let needs_hash_check = self
+            .vue_entries
+            .lock()
+            .peek(path)
+            .is_some_and(|entry| entry.mtime != current_mtime);
 
-            if let Some(entry) = lock.get(path) {
+        if needs_hash_check {
+            let content = tokio::fs::read(path).await.map_err(|e| io_err(e, path))?;
+
+            let current_hash = tokio::task::spawn_blocking(move || VersionHash::compute(&content))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("spawn_blocking hash panicked: {e}");
+                    VersionHash::compute(&[])
+                });
+
+            let mut lock = self.vue_entries.lock();
+            if let Some(entry) = lock.get_mut(path) {
+                if entry.content_hash == current_hash {
+                    entry.mtime = current_mtime;
+                    tracing::Span::current().record("cache_hit", true);
+                    let multi = (*entry.multi).clone();
+                    return Ok((multi, entry.content_hash.clone()));
+                }
+            }
+        } else {
+            let lock = self.vue_entries.lock();
+            if let Some(entry) = lock.peek(path) {
                 if entry.mtime == current_mtime {
                     tracing::Span::current().record("cache_hit", true);
                     let multi = (*entry.multi).clone();
                     return Ok((multi, entry.content_hash.clone()));
                 }
             }
-        } // lock released
+        }
 
         // --- Singleflight: check if another request is already parsing this Vue file ---
         let cell = {
@@ -466,16 +542,44 @@ impl AstCache {
     /// # Errors
     /// Returns `SurgeonError` if the script zone fails to parse.
     #[instrument(skip(self, content), fields(cache_hit = false))]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "content-hash fallback adds medium-path between fast-path and singleflight"
+    )]
     pub async fn get_or_parse_vue_preloaded(
         &self,
         path: &Path,
         content: &[u8],
         mtime: SystemTime,
     ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
-        {
-            let mut lock = self.vue_entries.lock();
+        let needs_hash_check = self
+            .vue_entries
+            .lock()
+            .peek(path)
+            .is_some_and(|entry| entry.mtime != mtime);
 
-            if let Some(entry) = lock.get(path) {
+        if needs_hash_check {
+            let owned_content = content.to_vec();
+            let current_hash =
+                tokio::task::spawn_blocking(move || VersionHash::compute(&owned_content))
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("spawn_blocking hash panicked: {e}");
+                        VersionHash::compute(&[])
+                    });
+
+            let mut lock = self.vue_entries.lock();
+            if let Some(entry) = lock.get_mut(path) {
+                if entry.content_hash == current_hash {
+                    entry.mtime = mtime;
+                    tracing::Span::current().record("cache_hit", true);
+                    let multi = (*entry.multi).clone();
+                    return Ok((multi, entry.content_hash.clone()));
+                }
+            }
+        } else {
+            let lock = self.vue_entries.lock();
+            if let Some(entry) = lock.peek(path) {
                 if entry.mtime == mtime {
                     tracing::Span::current().record("cache_hit", true);
                     let multi = (*entry.multi).clone();
@@ -980,6 +1084,178 @@ mod tests {
         assert!(
             matches!(err, SurgeonError::FileNotFound(_)),
             "expected FileNotFound, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vue_cache_hit_when_mtime_changes_but_content_unchanged() {
+        let cache = AstCache::new(2);
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "<template><div>Hello</div></template>").unwrap();
+        writeln!(file, "<script>const a = 1;</script>").unwrap();
+        let path = file.path().to_path_buf();
+
+        let (multi1, hash1) = cache.get_or_parse_vue(&path).await.unwrap();
+        let original_script_has_tree = multi1.script_tree.is_some();
+
+        let original_content_hash = {
+            let lock = cache.vue_entries.lock();
+            let entry = lock.peek(&path).unwrap();
+            entry.content_hash.clone()
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        file.as_file_mut()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
+
+        let (multi2, hash2) = cache.get_or_parse_vue(&path).await.unwrap();
+
+        assert_eq!(
+            hash1, hash2,
+            "hash should match — cache hit via content hash"
+        );
+        assert_eq!(
+            multi2.script_tree.is_some(),
+            original_script_has_tree,
+            "tree presence should match — no re-parse"
+        );
+
+        let updated_content_hash = {
+            let lock = cache.vue_entries.lock();
+            let entry = lock.peek(&path).unwrap();
+            entry.content_hash.clone()
+        };
+        assert_eq!(
+            original_content_hash, updated_content_hash,
+            "content hash should be unchanged"
+        );
+
+        let meta = std::fs::metadata(&path).unwrap();
+        {
+            let lock = cache.vue_entries.lock();
+            let entry = lock.peek(&path).unwrap();
+            assert_eq!(
+                entry.mtime,
+                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                "stored mtime should be updated to current file mtime"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vue_cache_miss_when_content_changes() {
+        let cache = AstCache::new(2);
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "<template><div>Hello</div></template>").unwrap();
+        writeln!(file, "<script>const a = 1;</script>").unwrap();
+        let path = file.path().to_path_buf();
+
+        let (_multi1, hash1) = cache.get_or_parse_vue(&path).await.unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        writeln!(file, "<script>const b = 2;</script>").unwrap();
+
+        let (_multi2, hash2) = cache.get_or_parse_vue(&path).await.unwrap();
+
+        assert_ne!(
+            hash1, hash2,
+            "hash should differ — cache miss with content change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cache_hit_when_mtime_changes_but_content_unchanged() {
+        let cache = AstCache::new(2);
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "package main\nfunc A() {{}}").unwrap();
+        let path = file.path().to_path_buf();
+
+        let (tree1, src1) = cache
+            .get_or_parse(&path, SupportedLanguage::Go)
+            .await
+            .unwrap();
+        let original_node_count = tree1.root_node().child_count();
+
+        let original_content_hash = {
+            let lock = cache.entries.lock();
+            let entry = lock.peek(&path).unwrap();
+            entry.content_hash.clone()
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        file.as_file_mut()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
+
+        let (tree2, src2) = cache
+            .get_or_parse(&path, SupportedLanguage::Go)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            src1.len(),
+            src2.len(),
+            "source length should match — cache hit via content hash"
+        );
+        assert_eq!(
+            tree2.root_node().child_count(),
+            original_node_count,
+            "tree structure should match — no re-parse"
+        );
+
+        let updated_content_hash = {
+            let lock = cache.entries.lock();
+            let entry = lock.peek(&path).unwrap();
+            entry.content_hash.clone()
+        };
+        assert_eq!(
+            original_content_hash, updated_content_hash,
+            "content hash should be unchanged"
+        );
+
+        let meta = std::fs::metadata(&path).unwrap();
+        {
+            let lock = cache.entries.lock();
+            let entry = lock.peek(&path).unwrap();
+            assert_eq!(
+                entry.mtime,
+                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                "stored mtime should be updated to current file mtime"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cache_miss_when_content_changes() {
+        let cache = AstCache::new(2);
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "package main\nfunc A() {{}}").unwrap();
+        let path = file.path().to_path_buf();
+
+        let (_tree1, src1) = cache
+            .get_or_parse(&path, SupportedLanguage::Go)
+            .await
+            .unwrap();
+        let original_len = src1.len();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        writeln!(file, "func B() {{}}").unwrap();
+
+        let (_tree2, src2) = cache
+            .get_or_parse(&path, SupportedLanguage::Go)
+            .await
+            .unwrap();
+
+        assert!(
+            src2.len() > original_len,
+            "source should be re-parsed with new content: got {} vs original {}",
+            src2.len(),
+            original_len
         );
     }
 }

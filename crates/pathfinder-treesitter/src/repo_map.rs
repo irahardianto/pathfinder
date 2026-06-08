@@ -89,6 +89,8 @@ pub struct RepoMapResult {
     pub files_scanned: usize,
     /// Number of files truncated during processing.
     pub files_truncated: usize,
+    /// File paths that were truncated due to token budget.
+    pub truncated_paths: Vec<String>,
     /// Number of files considered in scope.
     pub files_in_scope: usize,
     /// Percentage of files covered in the mapping process.
@@ -180,16 +182,19 @@ fn filter_by_visibility(
 /// counts. Pass [`MAX_TOKENS_PER_FILE`] as the default when no caller override
 /// is available.
 #[must_use]
-pub fn render_file_skeleton(symbols: &[ExtractedSymbol], max_tokens_per_file: u32) -> String {
+pub fn render_file_skeleton(
+    symbols: &[ExtractedSymbol],
+    max_tokens_per_file: u32,
+) -> (String, bool) {
     let mut out = String::default();
     render_symbols_recursive(symbols, 0, &mut out);
 
     // Check if the file is too large
     if estimate_tokens(&out) > max_tokens_per_file {
-        return render_truncated_file_skeleton(symbols);
+        return (render_truncated_file_skeleton(symbols), true);
     }
 
-    out
+    (out, false)
 }
 
 fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut String) {
@@ -393,6 +398,7 @@ pub async fn generate_skeleton_text(
         processed: Option<ProcessedFile>,
         version_entry: Option<(String, String)>,
         has_symbols: bool,
+        truncated: bool,
     }
 
     let visibility = config.visibility.to_string();
@@ -428,6 +434,7 @@ pub async fn generate_skeleton_text(
                         processed: None,
                         version_entry: None,
                         has_symbols: false,
+                        truncated: false,
                     };
                 }
             };
@@ -453,6 +460,7 @@ pub async fn generate_skeleton_text(
                         processed: None,
                         version_entry: Some((path_str, hash_short)),
                         has_symbols: false,
+                        truncated: false,
                     };
                 }
             };
@@ -464,10 +472,11 @@ pub async fn generate_skeleton_text(
                     processed: None,
                     version_entry: Some((path_str, hash_short)),
                     has_symbols: false,
+                    truncated: false,
                 };
             }
 
-            let file_skeleton = render_file_skeleton(&symbols, max_tokens_per_file);
+            let (file_skeleton, truncated) = render_file_skeleton(&symbols, max_tokens_per_file);
             let file_skeleton_tokens = estimate_tokens(&file_skeleton);
 
             FileProcessOutput {
@@ -478,6 +487,7 @@ pub async fn generate_skeleton_text(
                 }),
                 version_entry: Some((path_str, hash_short)),
                 has_symbols: true,
+                truncated,
             }
         }
     });
@@ -490,6 +500,7 @@ pub async fn generate_skeleton_text(
     let mut processed: Vec<ProcessedFile> = Vec::new();
     let mut files_with_symbols = 0;
     let mut version_hashes = HashMap::default();
+    let mut per_file_truncated_paths: Vec<String> = Vec::new();
 
     for output in process_results {
         if let Some((path, hash)) = output.version_entry {
@@ -497,6 +508,11 @@ pub async fn generate_skeleton_text(
         }
         if output.has_symbols {
             files_with_symbols += 1;
+        }
+        if output.truncated {
+            if let Some(ref pf) = output.processed {
+                per_file_truncated_paths.push(pf.rel_path.display().to_string());
+            }
         }
         if let Some(pf) = output.processed {
             processed.push(pf);
@@ -509,6 +525,7 @@ pub async fn generate_skeleton_text(
     let mut current_tokens: u32 = 0;
     let mut files_rendered: usize = 0;
     let mut files_truncated: usize = 0;
+    let mut truncated_paths: Vec<String> = Vec::new();
 
     for pf in &processed {
         if current_tokens + pf.skeleton_tokens > config.max_tokens {
@@ -522,6 +539,7 @@ pub async fn generate_skeleton_text(
                 current_tokens += 50;
             }
             files_truncated += 1;
+            truncated_paths.push(pf.rel_path.display().to_string());
             continue;
         }
 
@@ -537,6 +555,10 @@ pub async fn generate_skeleton_text(
         skeleton_out.push_str(&path_header);
         skeleton_out.push_str(&pf.skeleton);
     }
+
+    truncated_paths.extend(per_file_truncated_paths);
+    truncated_paths.sort();
+    truncated_paths.dedup();
 
     let coverage_percent = if files_in_scope > 0 {
         #[allow(
@@ -555,6 +577,7 @@ pub async fn generate_skeleton_text(
         tech_stack: tech_stack.iter().map(|l| format!("{l:?}")).collect(),
         files_scanned: files_rendered,
         files_truncated,
+        truncated_paths,
         files_in_scope,
         coverage_percent,
         version_hashes,
@@ -726,7 +749,8 @@ mod tests {
             }],
         }];
 
-        let output = render_file_skeleton(&symbols, MAX_TOKENS_PER_FILE);
+        let (output, truncated) = render_file_skeleton(&symbols, MAX_TOKENS_PER_FILE);
+        assert!(!truncated, "should not truncate simple symbol tree");
         assert!(output.contains("class MyClass // MyClass"));
         assert!(output.contains("  method my_method // MyClass.my_method"));
     }
@@ -765,8 +789,8 @@ mod tests {
         }];
 
         render_symbols_recursive(&symbols, 0, &mut String::default());
-        // To properly test, let's call `render_file_skeleton` which calls the truncated version internally
-        let output = render_file_skeleton(&symbols, MAX_TOKENS_PER_FILE);
+        let (output, truncated) = render_file_skeleton(&symbols, MAX_TOKENS_PER_FILE);
+        assert!(truncated, "should truncate massive symbol tree");
         assert!(output.contains("[TRUNCATED DUE TO SIZE]"));
         assert!(output.contains("class MyGiganticClass // MyGiganticClass"));
         assert!(output.contains("200 methods omitted"));
@@ -916,6 +940,7 @@ mod tests {
                 skeleton: "lib.rs skeleton".to_owned(),
                 files_in_scope: 1,
                 files_truncated: 0,
+                truncated_paths: vec![],
                 files_scanned: 1,
                 coverage_percent: 100,
                 version_hashes: std::collections::HashMap::default(),
@@ -951,6 +976,7 @@ mod tests {
                 skeleton: "lib.rs skeleton".to_owned(),
                 files_in_scope: 1,
                 files_truncated: 0,
+                truncated_paths: vec![],
                 files_scanned: 1,
                 coverage_percent: 100,
                 version_hashes: std::collections::HashMap::default(),
@@ -1108,6 +1134,124 @@ mod tests {
         assert!(
             filtered_off.is_empty(),
             "mod tests should be hidden in public map when include_tests=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_truncated_paths_collected() {
+        use crate::mock::MockSurgeon;
+        use crate::surgeon::{ExtractedSymbol, SymbolKind};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws_root = dir.path();
+
+        let mock = MockSurgeon::new();
+        for name in &["a.rs", "b.rs", "c.rs", "d.rs"] {
+            let path = ws_root.join(name);
+            std::fs::write(&path, "fn main() {}").unwrap();
+            mock.extract_symbols_results
+                .lock()
+                .expect("mutex")
+                .push(Ok(vec![ExtractedSymbol {
+                    name: "main".to_string(),
+                    semantic_path: "main".to_string(),
+                    kind: SymbolKind::Function,
+                    byte_range: 0..13,
+                    start_line: 0,
+                    end_line: 0,
+                    name_column: 0,
+                    access_level: crate::surgeon::AccessLevel::Public,
+                    children: vec![],
+                }]));
+        }
+
+        let surgeon = Arc::new(mock);
+
+        let config = SkeletonConfig::new(20, 5, "all", 50).with_include_tests(true);
+
+        let result = generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config)
+            .await
+            .unwrap();
+
+        assert!(
+            result.files_truncated > 0,
+            "at least one file should be truncated with very low max_tokens"
+        );
+        assert_eq!(
+            result.truncated_paths.len(),
+            result.files_truncated,
+            "truncated_paths length should match files_truncated count"
+        );
+        for path_str in &result.truncated_paths {
+            assert!(
+                path_str.ends_with(".rs"),
+                "truncated path should be an .rs file: {path_str}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_per_file_truncated_paths_collected() {
+        use crate::mock::MockSurgeon;
+        use crate::surgeon::{ExtractedSymbol, SymbolKind};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws_root = dir.path();
+
+        let mock = MockSurgeon::new();
+
+        let mut massive_methods = Vec::default();
+        for i in 0..200 {
+            massive_methods.push(ExtractedSymbol {
+                name: format!("massive_method_{i}"),
+                semantic_path: format!("MyGiganticClass.massive_method_{i}"),
+                kind: SymbolKind::Method,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            });
+        }
+
+        let path = ws_root.join("large.rs");
+        std::fs::write(&path, "struct MyGiganticClass {}").unwrap();
+        mock.extract_symbols_results
+            .lock()
+            .expect("mutex")
+            .push(Ok(vec![ExtractedSymbol {
+                name: "MyGiganticClass".to_string(),
+                semantic_path: "MyGiganticClass".to_string(),
+                kind: SymbolKind::Struct,
+                byte_range: 0..100,
+                start_line: 0,
+                end_line: 100,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: massive_methods,
+            }]));
+
+        let surgeon = Arc::new(mock);
+
+        let config = SkeletonConfig::new(5000, 500, "all", 50).with_include_tests(true);
+
+        let result = generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config)
+            .await
+            .unwrap();
+
+        assert!(
+            result.skeleton.contains("[TRUNCATED DUE TO SIZE]"),
+            "skeleton should contain truncation marker for per-file truncation"
+        );
+        assert!(
+            result
+                .truncated_paths
+                .iter()
+                .any(|p| p.ends_with("large.rs")),
+            "truncated_paths should contain large.rs (per-file truncated)"
         );
     }
 }
