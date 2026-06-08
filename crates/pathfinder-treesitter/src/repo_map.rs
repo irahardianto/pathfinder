@@ -1143,13 +1143,13 @@ mod tests {
         use crate::surgeon::{ExtractedSymbol, SymbolKind};
         use std::sync::Arc;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create tempdir");
         let ws_root = dir.path();
 
         let mock = MockSurgeon::new();
         for name in &["a.rs", "b.rs", "c.rs", "d.rs"] {
             let path = ws_root.join(name);
-            std::fs::write(&path, "fn main() {}").unwrap();
+            std::fs::write(&path, "fn main() {}").expect("write test file");
             mock.extract_symbols_results
                 .lock()
                 .expect("mutex")
@@ -1172,7 +1172,7 @@ mod tests {
 
         let result = generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config)
             .await
-            .unwrap();
+            .expect("generate skeleton text");
 
         assert!(
             result.files_truncated > 0,
@@ -1185,7 +1185,9 @@ mod tests {
         );
         for path_str in &result.truncated_paths {
             assert!(
-                path_str.ends_with(".rs"),
+                std::path::Path::new(path_str)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("rs")),
                 "truncated path should be an .rs file: {path_str}"
             );
         }
@@ -1197,7 +1199,7 @@ mod tests {
         use crate::surgeon::{ExtractedSymbol, SymbolKind};
         use std::sync::Arc;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create tempdir");
         let ws_root = dir.path();
 
         let mock = MockSurgeon::new();
@@ -1218,7 +1220,7 @@ mod tests {
         }
 
         let path = ws_root.join("large.rs");
-        std::fs::write(&path, "struct MyGiganticClass {}").unwrap();
+        std::fs::write(&path, "struct MyGiganticClass {}").expect("write test file");
         mock.extract_symbols_results
             .lock()
             .expect("mutex")
@@ -1240,7 +1242,7 @@ mod tests {
 
         let result = generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config)
             .await
-            .unwrap();
+            .expect("generate skeleton text");
 
         assert!(
             result.skeleton.contains("[TRUNCATED DUE TO SIZE]"),
