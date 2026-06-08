@@ -579,6 +579,10 @@ pub struct ReadSourceFileMetadata {
     /// Wall-clock time in milliseconds that this tool call took to complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Whether this file's language is not supported for AST parsing.
+    /// When true, content is raw file content and symbols is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_language: Option<bool>,
 }
 
 /// The metadata embedded in `structured_content` for `read_file`.

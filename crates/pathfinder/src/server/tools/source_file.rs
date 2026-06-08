@@ -137,110 +137,199 @@ impl PathfinderServer {
         params: ReadSourceFileParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
-
         tracing::info!(tool = "read_source_file", "read_source_file: start");
 
         let file_path = std::path::Path::new(&params.filepath);
 
-        // Sandbox check on the file path
         if let Err(e) = self.sandbox.check(file_path) {
             tracing::warn!(tool = "read_source_file", error = %e, "sandbox check failed");
             return Err(pathfinder_to_error_data(&e));
         }
 
-        // Delegate to surgeon
         let ts_start = std::time::Instant::now();
         match self
             .surgeon
             .read_source_file(self.workspace_root.path(), file_path)
             .await
         {
-            Ok((mut content, language, mut symbols)) => {
+            Ok((content, language, symbols)) => {
                 let tree_sitter_ms = ts_start.elapsed().as_millis();
-
-                // Line filtering
-                let start_idx = params.start_line.saturating_sub(1) as usize;
-                if params.start_line > 1 || params.end_line.is_some() {
-                    content = truncate_content(&content, params.start_line, params.end_line);
-
-                    let end_line_0 = params
-                        .end_line
-                        .map_or(usize::MAX, |l| l.saturating_sub(1) as usize);
-                    symbols = filter_symbols(symbols, start_idx, end_line_0);
-                }
-
-                // Detail level
-                let (final_content, final_symbols) = match params.detail_level.as_str() {
-                    "source_only" => (Some(content), vec![]),
-                    "symbols" => {
-                        let syms = map_symbols(symbols);
-                        let tree_text = render_symbol_tree(&syms, &params.filepath);
-                        (Some(tree_text), syms)
-                    }
-                    "full" => (Some(content), map_symbols(symbols)),
-                    _ => (Some(content), map_symbols_compact(symbols)), // "compact"
-                };
-
                 let duration_ms = start.elapsed().as_millis();
-                tracing::info!(
-                    tool = "read_source_file",
-                    tree_sitter_ms,
-                    duration_ms,
-                    engines_used = ?["tree-sitter"],
-                    "read_source_file: complete"
-                );
+                self.lawyer_touch_language_for_file(file_path);
 
-                // LT-4: Extend idle timer for the language matching this file.
-                // This prevents the LSP from timing out while the agent is
-                // actively reading source files.
-                if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
-                    let lang_id = match ext {
-                        "rs" => Some("rust"),
-                        "go" => Some("go"),
-                        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Some("typescript"),
-                        "py" | "pyi" => Some("python"),
-                        "java" => Some("java"),
-                        _ => None,
-                    };
-                    if let Some(lang) = lang_id {
-                        self.lawyer.touch_language(lang);
-                    }
-                }
-
-                let metadata = ReadSourceFileMetadata {
+                Ok(build_supported_response(
+                    content,
                     language,
-                    content: final_content.clone(),
-                    symbols: final_symbols,
-                    duration_ms: Some(millis_to_u64(duration_ms)),
-                };
-
-                let mut contents = Vec::new();
-                if let Some(text) = final_content {
-                    contents.push(Content::text(format!(
-                        "{text}\n[completed in {duration_ms}ms]"
-                    )));
-                }
-
-                let mut result = CallToolResult::success(contents);
-                result.structured_content = serialize_metadata(&metadata);
-
-                Ok(result)
+                    symbols,
+                    &params,
+                    duration_ms,
+                    tree_sitter_ms,
+                ))
             }
             Err(e) => {
                 let tree_sitter_ms = ts_start.elapsed().as_millis();
                 let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "read_source_file",
-                    error = %e,
-                    tree_sitter_ms,
-                    duration_ms,
-                    engines_used = ?["tree-sitter"],
-                    "read_source_file: failed"
-                );
-                Err(treesitter_error_to_error_data(e))
+
+                if let pathfinder_treesitter::error::SurgeonError::UnsupportedLanguage(_) = e {
+                    self.handle_unsupported_language_fallback(
+                        file_path,
+                        &params,
+                        tree_sitter_ms,
+                        start,
+                    )
+                    .await
+                } else {
+                    tracing::warn!(
+                        tool = "read_source_file",
+                        error = %e,
+                        tree_sitter_ms,
+                        duration_ms,
+                        engines_used = ?["tree-sitter"],
+                        "read_source_file: failed"
+                    );
+                    Err(treesitter_error_to_error_data(e))
+                }
             }
         }
     }
+
+    /// LT-4: Touch LSP idle timer for supported languages.
+    fn lawyer_touch_language_for_file(&self, file_path: &std::path::Path) {
+        if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+            let lang_id = match ext {
+                "rs" => Some("rust"),
+                "go" => Some("go"),
+                "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Some("typescript"),
+                "py" | "pyi" => Some("python"),
+                "java" => Some("java"),
+                _ => None,
+            };
+            if let Some(lang) = lang_id {
+                self.lawyer.touch_language(lang);
+            }
+        }
+    }
+
+    /// Graceful fallback: read raw file content without AST parsing.
+    #[tracing::instrument(skip(self, params, start), fields(file = %params.filepath))]
+    async fn handle_unsupported_language_fallback(
+        &self,
+        file_path: &std::path::Path,
+        params: &ReadSourceFileParams,
+        tree_sitter_ms: u128,
+        start: std::time::Instant,
+    ) -> Result<CallToolResult, ErrorData> {
+        let abs_path = self.workspace_root.path().join(file_path);
+        let language = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("unknown")
+            .to_lowercase();
+
+        let raw_content = match tokio::fs::read_to_string(&abs_path).await {
+            Ok(c) => c,
+            Err(io_err) => {
+                let duration_ms = start.elapsed().as_millis();
+                tracing::warn!(
+                    tool = "read_source_file",
+                    error = %io_err,
+                    tree_sitter_ms,
+                    duration_ms,
+                    "read_source_file: unsupported language + failed to read raw"
+                );
+                return Err(treesitter_error_to_error_data(
+                    pathfinder_treesitter::error::SurgeonError::Io(io_err),
+                ));
+            }
+        };
+
+        let content = truncate_content(&raw_content, params.start_line, params.end_line);
+        let duration_ms = start.elapsed().as_millis();
+
+        tracing::info!(
+            tool = "read_source_file",
+            tree_sitter_ms,
+            duration_ms,
+            %language,
+            engines_used = ?["raw_file"],
+            "read_source_file: graceful fallback for unsupported language"
+        );
+
+        let metadata = ReadSourceFileMetadata {
+            language,
+            content: Some(content.clone()),
+            symbols: vec![],
+            duration_ms: Some(millis_to_u64(duration_ms)),
+            unsupported_language: Some(true),
+        };
+
+        let text = format!(
+            "{content}\n[completed in {duration_ms}ms; unsupported language: raw content only]"
+        );
+
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = serialize_metadata(&metadata);
+
+        Ok(result)
+    }
+}
+
+/// Build response for successfully-parsed file with AST symbols.
+fn build_supported_response(
+    mut content: String,
+    language: String,
+    mut symbols: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>,
+    params: &ReadSourceFileParams,
+    duration_ms: u128,
+    tree_sitter_ms: u128,
+) -> CallToolResult {
+    tracing::info!(
+        tool = "read_source_file",
+        tree_sitter_ms,
+        duration_ms,
+        engines_used = ?["tree-sitter"],
+        "read_source_file: complete"
+    );
+
+    let start_idx = params.start_line.saturating_sub(1) as usize;
+    if params.start_line > 1 || params.end_line.is_some() {
+        content = truncate_content(&content, params.start_line, params.end_line);
+        let end_line_0 = params
+            .end_line
+            .map_or(usize::MAX, |l| l.saturating_sub(1) as usize);
+        symbols = filter_symbols(symbols, start_idx, end_line_0);
+    }
+
+    let (final_content, final_symbols) = match params.detail_level.as_str() {
+        "source_only" => (Some(content), vec![]),
+        "symbols" => {
+            let syms = map_symbols(symbols);
+            let tree_text = render_symbol_tree(&syms, &params.filepath);
+            (Some(tree_text), syms)
+        }
+        "full" => (Some(content), map_symbols(symbols)),
+        _ => (Some(content), map_symbols_compact(symbols)),
+    };
+
+    let metadata = ReadSourceFileMetadata {
+        language,
+        content: final_content.clone(),
+        symbols: final_symbols,
+        duration_ms: Some(millis_to_u64(duration_ms)),
+        unsupported_language: None,
+    };
+
+    let mut contents = Vec::new();
+    if let Some(text) = final_content {
+        contents.push(Content::text(format!(
+            "{text}\n[completed in {duration_ms}ms]"
+        )));
+    }
+
+    let mut result = CallToolResult::success(contents);
+    result.structured_content = serialize_metadata(&metadata);
+
+    result
 }
 
 #[cfg(test)]
@@ -546,5 +635,354 @@ mod tests {
             result.is_ok(),
             "read_source_file should succeed with touch_language"
         );
+    }
+
+    // ── GFB-001-G: Unsupported language graceful fallback ───────────────────
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn test_read_source_file_unsupported_language_graceful_fallback() {
+        use pathfinder_common::config::PathfinderConfig;
+        use pathfinder_common::sandbox::Sandbox;
+        use pathfinder_common::types::WorkspaceRoot;
+        use pathfinder_search::MockScout;
+        use pathfinder_treesitter::error::SurgeonError;
+        use pathfinder_treesitter::mock::MockSurgeon;
+
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let sql_content = "SELECT * FROM users WHERE active = 1;\n";
+        let file_path = ws.path().join("query.sql");
+        tokio::fs::write(&file_path, sql_content).await.unwrap();
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .read_source_file_results
+            .lock()
+            .unwrap()
+            .push(Err(SurgeonError::UnsupportedLanguage("query.sql".into())));
+
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon),
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = ReadSourceFileParams {
+            filepath: "query.sql".to_owned(),
+            start_line: 1,
+            end_line: None,
+            detail_level: "full".to_owned(),
+        };
+
+        let result = server.read_source_file_impl(params).await;
+
+        // With graceful fallback: should be Ok, not Err
+        assert!(
+            result.is_ok(),
+            "read_source_file should return Ok with raw content on unsupported language, got Err: {:?}",
+            result.err()
+        );
+
+        let call_result = result.unwrap();
+
+        // Verify text output contains the SQL content
+        if let Some(content) = call_result.content.first() {
+            if let rmcp::model::RawContent::Text(text_content) = &content.raw {
+                assert!(
+                    text_content.text.contains("SELECT * FROM users"),
+                    "Text output should contain SQL content. Got: {}",
+                    text_content.text
+                );
+            } else {
+                panic!("Expected text content");
+            }
+        } else {
+            panic!("Expected content");
+        }
+
+        // Verify structured_content: unsupported_language = true
+        if let Some(metadata) = call_result.structured_content {
+            assert_eq!(
+                metadata.get("unsupported_language"),
+                Some(&serde_json::Value::Bool(true)),
+                "metadata should have unsupported_language: true"
+            );
+            assert_eq!(
+                metadata.get("language"),
+                Some(&serde_json::Value::String("sql".to_owned())),
+                "language should be file extension"
+            );
+
+            // content field should have the raw content
+            if let Some(content_val) = metadata.get("content") {
+                assert!(
+                    content_val
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("SELECT * FROM users"),
+                    "content field should have SQL"
+                );
+            } else {
+                panic!("content field missing from metadata");
+            }
+
+            // symbols should be empty array or missing
+            let symbols = metadata.get("symbols").and_then(|v| v.as_array());
+            assert!(
+                symbols.is_none_or(std::vec::Vec::is_empty),
+                "symbols should be empty for unsupported language"
+            );
+        } else {
+            panic!("Expected structured_content");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn test_read_source_file_unsupported_language_line_range() {
+        use pathfinder_common::config::PathfinderConfig;
+        use pathfinder_common::sandbox::Sandbox;
+        use pathfinder_common::types::WorkspaceRoot;
+        use pathfinder_search::MockScout;
+        use pathfinder_treesitter::error::SurgeonError;
+        use pathfinder_treesitter::mock::MockSurgeon;
+
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let yaml_content = "line1: first\nline2: second\nline3: third\nline4: fourth\n";
+        let file_path = ws.path().join("config.yaml");
+        tokio::fs::write(&file_path, yaml_content).await.unwrap();
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .read_source_file_results
+            .lock()
+            .unwrap()
+            .push(Err(SurgeonError::UnsupportedLanguage("config.yaml".into())));
+
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon),
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = ReadSourceFileParams {
+            filepath: "config.yaml".to_owned(),
+            start_line: 2,
+            end_line: Some(3),
+            detail_level: "full".to_owned(),
+        };
+
+        let result = server.read_source_file_impl(params).await;
+        assert!(result.is_ok(), "should be Ok");
+
+        let call_result = result.unwrap();
+
+        if let Some(metadata) = call_result.structured_content {
+            assert_eq!(
+                metadata.get("unsupported_language"),
+                Some(&serde_json::Value::Bool(true))
+            );
+            assert_eq!(
+                metadata.get("language"),
+                Some(&serde_json::Value::String("yaml".to_owned()))
+            );
+
+            if let Some(content_val) = metadata.get("content") {
+                let content = content_val.as_str().unwrap_or("");
+                assert!(content.contains("line2: second"), "should contain line 2");
+                assert!(content.contains("line3: third"), "should contain line 3");
+                assert!(
+                    !content.contains("line1: first"),
+                    "should NOT contain line 1 (before start_line)"
+                );
+                assert!(
+                    !content.contains("line4: fourth"),
+                    "should NOT contain line 4 (after end_line)"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn test_read_source_file_unsupported_language_yaml_toml() {
+        use pathfinder_common::config::PathfinderConfig;
+        use pathfinder_common::sandbox::Sandbox;
+        use pathfinder_common::types::WorkspaceRoot;
+        use pathfinder_search::MockScout;
+        use pathfinder_treesitter::error::SurgeonError;
+        use pathfinder_treesitter::mock::MockSurgeon;
+
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Test .yaml
+        let yaml_content = "apiVersion: v1\nkind: ConfigMap\n";
+        let yaml_path = ws.path().join("app.yaml");
+        tokio::fs::write(&yaml_path, yaml_content).await.unwrap();
+
+        // Test .toml
+        let toml_content = "[package]\nname = \"test\"\nversion = \"0.1.0\"\n";
+        let toml_path = ws.path().join("Cargo.toml");
+        tokio::fs::write(&toml_path, toml_content).await.unwrap();
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .read_source_file_results
+            .lock()
+            .unwrap()
+            .push(Err(SurgeonError::UnsupportedLanguage("app.yaml".into())));
+        mock_surgeon
+            .read_source_file_results
+            .lock()
+            .unwrap()
+            .push(Err(SurgeonError::UnsupportedLanguage("Cargo.toml".into())));
+
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon),
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        // Verify YAML
+        let yaml_params = ReadSourceFileParams {
+            filepath: "app.yaml".to_owned(),
+            start_line: 1,
+            end_line: None,
+            detail_level: "full".to_owned(),
+        };
+        let yaml_result = server.read_source_file_impl(yaml_params).await;
+        assert!(yaml_result.is_ok());
+        let call_result_yaml = yaml_result.unwrap();
+        if let Some(meta) = call_result_yaml.structured_content {
+            assert_eq!(
+                meta.get("language"),
+                Some(&serde_json::Value::String("yaml".to_owned()))
+            );
+            assert_eq!(
+                meta.get("unsupported_language"),
+                Some(&serde_json::Value::Bool(true))
+            );
+        }
+
+        // Verify TOML
+        let toml_params = ReadSourceFileParams {
+            filepath: "Cargo.toml".to_owned(),
+            start_line: 1,
+            end_line: None,
+            detail_level: "full".to_owned(),
+        };
+        let toml_result = server.read_source_file_impl(toml_params).await;
+        assert!(toml_result.is_ok());
+        let call_result_toml = toml_result.unwrap();
+        if let Some(meta) = call_result_toml.structured_content {
+            assert_eq!(
+                meta.get("language"),
+                Some(&serde_json::Value::String("toml".to_owned()))
+            );
+            assert_eq!(
+                meta.get("unsupported_language"),
+                Some(&serde_json::Value::Bool(true))
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn test_read_source_file_unsupported_language_empty_file() {
+        use pathfinder_common::config::PathfinderConfig;
+        use pathfinder_common::sandbox::Sandbox;
+        use pathfinder_common::types::WorkspaceRoot;
+        use pathfinder_search::MockScout;
+        use pathfinder_treesitter::error::SurgeonError;
+        use pathfinder_treesitter::mock::MockSurgeon;
+
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let empty_path = ws.path().join("empty.sql");
+        tokio::fs::write(&empty_path, "").await.unwrap();
+
+        let mock_surgeon = MockSurgeon::new();
+        mock_surgeon
+            .read_source_file_results
+            .lock()
+            .unwrap()
+            .push(Err(SurgeonError::UnsupportedLanguage("empty.sql".into())));
+
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(mock_surgeon),
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = ReadSourceFileParams {
+            filepath: "empty.sql".to_owned(),
+            start_line: 1,
+            end_line: None,
+            detail_level: "full".to_owned(),
+        };
+
+        let result = server.read_source_file_impl(params).await;
+        assert!(
+            result.is_ok(),
+            "empty unsupported file should return Ok, not Err"
+        );
+
+        let call_result = result.unwrap();
+        if let Some(meta) = call_result.structured_content {
+            assert_eq!(
+                meta.get("language"),
+                Some(&serde_json::Value::String("sql".to_owned()))
+            );
+            assert_eq!(
+                meta.get("unsupported_language"),
+                Some(&serde_json::Value::Bool(true))
+            );
+
+            if let Some(content_val) = meta.get("content") {
+                assert_eq!(
+                    content_val.as_str().unwrap_or("non-empty"),
+                    "",
+                    "content should be empty string"
+                );
+            }
+        }
     }
 }

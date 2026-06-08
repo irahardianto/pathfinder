@@ -300,16 +300,16 @@ Common issues:
 
     #[tool(
         name = "read_source_file",
-        description = "Read an entire source file with its full AST symbol hierarchy. Returns source, language, and a nested symbol tree with semantic paths.
+        description = "Read an entire file with optional AST symbol hierarchy. For supported languages, returns source, language, and nested symbol tree with semantic paths. For unsupported languages (.sql, .yaml, .toml, etc.), gracefully returns raw content with `unsupported_language: true` in metadata.
 
-Use when: You need to explore a file's structure, find symbols in a file, or read a large file efficiently.
-Alternative: Use `read_symbol_scope` for a single symbol, or `read_file` for config/docs files.
+Use when: You need to explore a file's structure, find symbols in a file, or read a large file efficiently. Also works for config files and non-source types when you want consistent response format.
+Alternative: Use `read_symbol_scope` for a single symbol, or `read_file` for raw config-only reading with line counts.
 
-AST-only — only for source files (.rs, .ts, .tsx, .go, .py, .vue, .jsx, .js).
+Supported languages for AST parsing: .rs, .ts, .tsx, .go, .py, .vue, .jsx, .js. Other file types return raw content only.
 
 Parameter guidance:
-- `detail_level`: \"source_only\" (lowest tokens), \"compact\" (default, source + flat symbols), \"symbols\" (tree only), \"full\" (source + nested AST).
-- `start_line`/`end_line`: Restrict output to a line range.
+- `detail_level`: \"source_only\" (lowest tokens), \"compact\" (default, source + flat symbols when available), \"symbols\" (tree only), \"full\" (source + nested AST when available).
+- `start_line`/`end_line`: Restrict output to a line range. Works for both supported and unsupported languages.
 
 Example: `read_source_file(filepath=\"src/auth.ts\", detail_level=\"compact\")`"
     )]
