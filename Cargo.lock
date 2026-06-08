@@ -1143,7 +1143,7 @@ checksum = "c5a797f0e07bdf071d15742978fc3128ec6c22891c31a3a931513263904c982a"
 
 [[package]]
 name = "pathfinder-mcp"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "pathfinder-mcp-lsp"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "async-trait",
  "command-group",
