@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0](https://github.com/irahardianto/pathfinder/compare/v0.12.0...v0.13.0) - 2026-06-08
+
+### Added
+
+- Implement batch 4 deliverables for GFB-001 - search coverage, repo map truncation, cache invalidation
+- *(GFB-001-G)* add graceful fallback for unsupported languages in read_source_file
+- *(navigation)* add outgoing deps to grep fallback (DELIVERABLE F)
+- *(navigation)* implement DELIVERABLE B - grep fallback for find_all_references
+- *(search)* Add compiled regex caching for improved performance
+
+### Fixed
+
+- *(lsp)* implement DELIVERABLE D - Python LSP detection fix and audit resolutions
+- complete tool rename from analyze_impact to find_callers_callees
+- *(search)* Remove flaky cache hit counter from regex cache test
+- *(treesitter)* Replace unwrap() with expect() for better error messages
+
 ## [0.12.0](https://github.com/irahardianto/pathfinder/compare/v0.11.2...v0.12.0) - 2026-06-06
 
 ### Fixed
