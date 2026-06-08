@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.6.3...pathfinder-mcp-common-v0.6.4) - 2026-06-08
+
+### Fixed
+
+- complete tool rename from analyze_impact to find_callers_callees
+
 ## [0.6.3](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.6.2...pathfinder-mcp-common-v0.6.3) - 2026-06-06
 
 ### Fixed

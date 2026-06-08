@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.9.1...pathfinder-mcp-treesitter-v0.10.0) - 2026-06-08
+
+### Added
+
+- Implement batch 4 deliverables for GFB-001 - search coverage, repo map truncation, cache invalidation
+- *(navigation)* add outgoing deps to grep fallback (DELIVERABLE F)
+
+### Fixed
+
+- *(treesitter)* Replace unwrap() with expect() for better error messages
+
 ## [0.9.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.9.0...pathfinder-mcp-treesitter-v0.9.1) - 2026-06-06
 
 ### Fixed
