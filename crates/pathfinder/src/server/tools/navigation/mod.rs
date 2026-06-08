@@ -161,7 +161,6 @@ struct LspResolution {
 }
 
 static CALL_PATTERN_FULL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-static CALL_PATTERN_SIMPLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
 #[allow(clippy::expect_used)]
 fn call_pattern_full() -> &'static regex::Regex {
@@ -171,23 +170,16 @@ fn call_pattern_full() -> &'static regex::Regex {
     })
 }
 
-#[allow(clippy::expect_used)]
-fn call_pattern_simple() -> &'static regex::Regex {
-    CALL_PATTERN_SIMPLE.get_or_init(|| {
-        regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
-            .expect("call pattern simple is valid regex")
-    })
-}
-
 /// PATCH-005: Extract function call patterns from symbol body using language-aware regex.
 ///
 /// Returns candidate function names that might be called by this symbol.
 /// Filters out language keywords and caps at 20 candidates.
+///
+/// GAP 3 FIX: Uses `call_pattern_full()` for ALL languages to capture method calls
+/// like `self.validate()`, `s.HandleRequest()`, `service.process()` in Rust/Go/Java.
+/// Previously only TS/JS/Python/Vue used the full pattern.
 fn extract_call_candidates(symbol_content: &str, language: &str) -> Vec<String> {
-    let re = match language {
-        "typescript" | "javascript" | "python" | "vue" => call_pattern_full(),
-        _ => call_pattern_simple(),
-    };
+    let re = call_pattern_full();
 
     let keywords = keywords_for_language(language);
 
@@ -340,6 +332,9 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
             "static",
             "synchronized",
             "native",
+            "this",
+            "super",
+            "assert",
         ],
         "vue" => &[
             "if",
@@ -410,14 +405,44 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
 fn language_to_file_glob(language: &str) -> &str {
     match language {
         "rust" => "**/*.rs",
-        "typescript" => "**/*.ts",
-        "tsx" => "**/*.tsx",
+        "typescript" => "**/*.{ts,tsx}",
         "javascript" => "**/*.{js,jsx}",
         "python" => "**/*.py",
         "go" => "**/*.go",
         "vue" => "**/*.{vue,ts,tsx,js,jsx,mjs,cjs}",
         "java" => "**/*.java",
         _ => "**/*",
+    }
+}
+
+/// DELIVERABLE F: Java-specific regex pattern for resolving candidate definitions.
+///
+/// Matches Java method definitions, constructors, records, and class/interface declarations.
+/// Used by grep fallback for outgoing dependency discovery.
+fn java_resolve_pattern(candidate: &str) -> String {
+    let escaped = regex::escape(candidate);
+    format!(
+        r"(?:^[ \t]*(?:(?:public|private|protected)\s+)?(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?{escaped}\s*\(|^[ \t]*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?(?:(?:void|boolean|int|long|double|float|short|byte|char)|[A-Z][a-zA-Z0-9_]*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>)?)(?:\[\])*\s+{escaped}\s*\(|^[ \t]*(?:(?:public|private|protected|static|final)\s+)*record\s+{escaped}\s*[<(]|(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+|sealed\s+|non-sealed\s+|strictfp\s+)*(?:class|interface|enum|@interface)\s+{escaped}\b)"
+    )
+}
+
+/// DELIVERABLE F: Build a regex pattern to find a candidate function's definition.
+///
+/// Used by grep fallback for outgoing dependency discovery in both
+/// `read_with_deep_context` and `find_callers_callees`.
+fn candidate_definition_pattern(language: &str, candidate: &str) -> String {
+    let escaped = regex::escape(candidate);
+    match language {
+        "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{escaped}\b"),
+        "go" => format!(r"func\s+{escaped}\b"),
+        "typescript" | "tsx" | "javascript" | "vue" => {
+            format!(
+                r"(?:(?:export\s+(?:default\s*)?)?function\s+{escaped}\b|(?:export\s+)?(?:const|let|var)\s+{escaped}\s*[=:]|(?:{escaped}\s*:\s*)[^{{]*\([^)]*\)\s*=>)"
+            )
+        }
+        "python" => format!(r"(?:async\s+)?def\s+{escaped}\b"),
+        "java" => java_resolve_pattern(candidate),
+        _ => format!(r"\b(?:fn|def|function|class|struct|type|interface)\s+{escaped}\b"),
     }
 }
 
@@ -469,14 +494,29 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
             format!(r"type\s+{name}\s*\["),
             format!(r"(?:const|var)\s+{name}\b"),
         ],
-        "java" => vec![
-            format!(
-                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:class|interface|enum|@interface)\s+{name}\b"
-            ),
-            format!(
-                r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{name}\s*\("
-            ),
-        ],
+        "java" => {
+            let parent = name.clone();
+            vec![
+                // P0: Class/interface/enum definitions (sealed, non-sealed, strictfp handled via modifier)
+                format!(
+                    r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+|sealed\s+|non-sealed\s+|strictfp\s+)*(?:class|interface|enum|@interface)\s+{name}\b"
+                ),
+                // P1: Constructor — no return type, only modifiers + optional type-params before name.
+                // Line-anchored (^) prevents matching `throw new MyClass(` or `return new MyClass(`.
+                format!(
+                    r"^[ \t]*(?:(?:public|private|protected)\s+)?(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?{parent}\s*\("
+                ),
+                // P2: Record type — keyword `record` prevents false positives.
+                format!(
+                    r"^[ \t]*(?:(?:public|private|protected|static|final)\s+)*record\s+{name}\s*[<(]"
+                ),
+                // P3: Method — return type must be primitive keyword or start uppercase.
+                // `new`/`throw` are lowercase non-primitives → rejected. No \s in type token.
+                format!(
+                    r"^[ \t]*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?(?:(?:void|boolean|int|long|double|float|short|byte|char)|[A-Z][a-zA-Z0-9_]*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>)?)(?:\[\])*\s+{name}\s*\("
+                ),
+            ]
+        }
         "vue" => vec![
             format!(r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{name}\b"),
             format!(
@@ -633,12 +673,7 @@ mod tests {
 
     #[test]
     fn test_language_to_file_glob_typescript() {
-        assert_eq!(super::language_to_file_glob("typescript"), "**/*.ts");
-    }
-
-    #[test]
-    fn test_language_to_file_glob_tsx() {
-        assert_eq!(super::language_to_file_glob("tsx"), "**/*.tsx");
+        assert_eq!(super::language_to_file_glob("typescript"), "**/*.{ts,tsx}");
     }
 
     #[test]
@@ -904,6 +939,418 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Java definition_patterns tests (DELIVERABLE E) ───────────────────
+
+    #[test]
+    fn test_definition_patterns_java_class() {
+        let patterns = super::definition_patterns("java", "MyClass");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        let re = regex::Regex::new(&patterns[0]).expect("valid regex");
+        assert!(
+            re.is_match("public class MyClass {"),
+            "must match 'public class MyClass {{'"
+        );
+        assert!(
+            re.is_match("private static final class MyClass {"),
+            "must match 'private static final class MyClass {{'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_constructor() {
+        let patterns = super::definition_patterns("java", "MyClass");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        // Look for a pattern that matches constructors
+        let constructor_pattern = patterns.iter().find(|p| p.contains("MyClass\\s*\\("));
+        assert!(
+            constructor_pattern.is_some(),
+            "java must have a constructor pattern"
+        );
+        let re = regex::Regex::new(constructor_pattern.unwrap()).expect("valid regex");
+        assert!(
+            re.is_match("public MyClass(String name) {"),
+            "must match 'public MyClass(String name) {{'"
+        );
+        assert!(
+            re.is_match("MyClass(String name, int age) {"),
+            "must match bare 'MyClass(String name, int age) {{'"
+        );
+        assert!(
+            re.is_match("private MyClass() {"),
+            "must match 'private MyClass() {{'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_record() {
+        let patterns = super::definition_patterns("java", "Person");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        // Look for a pattern that matches records
+        let record_pattern = patterns.iter().find(|p| p.contains("record"));
+        assert!(record_pattern.is_some(), "java must have a record pattern");
+        let re = regex::Regex::new(record_pattern.unwrap()).expect("valid regex");
+        assert!(
+            re.is_match("public record Person(String name) {"),
+            "must match 'public record Person(String name) {{'"
+        );
+        assert!(
+            re.is_match("record Person(String name, int age) {"),
+            "must match bare 'record Person(String name, int age) {{'"
+        );
+        assert!(
+            re.is_match("private final record Person(String name) {"),
+            "must match 'private final record Person(String name) {{'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_sealed_class() {
+        let patterns = super::definition_patterns("java", "Shape");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        // Look for a pattern that matches sealed classes
+        let sealed_pattern = patterns.iter().find(|p| p.contains("sealed"));
+        assert!(
+            sealed_pattern.is_some(),
+            "java must have a sealed class/interface pattern"
+        );
+        let re = regex::Regex::new(sealed_pattern.unwrap()).expect("valid regex");
+        assert!(
+            re.is_match("public sealed class Shape permits Circle, Square {"),
+            "must match 'public sealed class Shape permits Circle, Square {{'"
+        );
+        assert!(
+            re.is_match("sealed interface Shape permits Circle {"),
+            "must match 'sealed interface Shape permits Circle {{'"
+        );
+        assert!(
+            re.is_match("private sealed abstract class Shape {"),
+            "must match 'private sealed abstract class Shape {{'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_annotated_method() {
+        let patterns = super::definition_patterns("java", "myService");
+        // The last pattern is for methods with annotations
+        let method_pattern = patterns.last().expect("java should have patterns");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("@Bean public MyService myService()"),
+            "must match '@Bean public MyService myService()'"
+        );
+        assert!(
+            re.is_match("@Override public void myService()"),
+            "must match '@Override public void myService()'"
+        );
+        assert!(
+            re.is_match("@GetMapping public Response myService()"),
+            "must match '@GetMapping public Response myService()'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_primitive_return() {
+        let patterns = super::definition_patterns("java", "process");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        // The last pattern matches methods with any return type
+        let method_pattern = patterns.last().expect("java should have patterns");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(re.is_match("void process()"), "must match 'void process()'");
+        assert!(
+            re.is_match("public boolean process()"),
+            "must match 'public boolean process()'"
+        );
+        assert!(
+            re.is_match("private int process()"),
+            "must match 'private int process()'"
+        );
+        assert!(
+            re.is_match("protected String process()"),
+            "must match 'protected String process()'"
+        );
+        assert!(
+            re.is_match("static final double process()"),
+            "must match 'static final double process()'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_generic_return() {
+        let patterns = super::definition_patterns("java", "process");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        // The last pattern matches methods with generic return types
+        let method_pattern = patterns.last().expect("java should have patterns");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public List<String> process()"),
+            "must match 'public List<String> process()'"
+        );
+        assert!(
+            re.is_match("Map<String, Integer> process()"),
+            "must match 'Map<String, Integer> process()'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_array_return() {
+        let patterns = super::definition_patterns("java", "process");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        let method_pattern = patterns.last().expect("java should have patterns");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public String[] process()"),
+            "must match 'public String[] process()'"
+        );
+        assert!(
+            re.is_match("int[] process()"),
+            "must match 'int[] process()'"
+        );
+        assert!(
+            re.is_match("public int[][] process()"),
+            "must match 'public int[][] process()' — multi-dimensional array"
+        );
+        assert!(
+            re.is_match("String[][][] process()"),
+            "must match 'String[][][] process()' — 3D array"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_method_with_type_params() {
+        let patterns = super::definition_patterns("java", "process");
+        assert!(!patterns.is_empty(), "java must have definition patterns");
+        // The last pattern matches methods with type parameters
+        let method_pattern = patterns.last().expect("java should have patterns");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public <T> T process()"),
+            "must match 'public <T> T process()'"
+        );
+        assert!(
+            re.is_match("<T, U> Map<T, U> process()"),
+            "must match '<T, U> Map<T, U> process()'"
+        );
+    }
+
+    // ── Java negative test cases (Deliverable E fixes) ─────────────────────
+
+    #[test]
+    fn test_definition_patterns_java_constructor_rejects_return_types() {
+        // CRITICAL-2: Pattern 1 (constructor) must not match methods with return types
+        let patterns = super::definition_patterns("java", "MyClass");
+        let constructor_pattern = patterns
+            .get(1)
+            .expect("java should have constructor pattern");
+        let re = regex::Regex::new(constructor_pattern).expect("valid regex");
+        assert!(
+            !re.is_match("public void MyClass()"),
+            "must NOT match 'public void MyClass()' - this is a method, not a constructor"
+        );
+        assert!(
+            !re.is_match("private String MyClass()"),
+            "must NOT match 'private String MyClass()' - this is a method, not a constructor"
+        );
+        assert!(
+            !re.is_match("protected int MyClass()"),
+            "must NOT match 'protected int MyClass()' - this is a method, not a constructor"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_method_pattern_rejects_new_and_throw() {
+        // CRITICAL-1: Pattern 4 must NOT match new ClassName() or throw new MyError()
+        let patterns = super::definition_patterns("java", "MyError");
+        let method_pattern = patterns.last().expect("java should have method pattern");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            !re.is_match("throw new MyError(msg)"),
+            "must NOT match 'throw new MyError(msg)' - false positive"
+        );
+        assert!(
+            !re.is_match("return new MyError()"),
+            "must NOT match 'return new MyError()' - false positive"
+        );
+        assert!(
+            !re.is_match("new MyError().getMessage()"),
+            "must NOT match 'new MyError().getMessage()' - false positive"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_constructor_rejects_new_keyword() {
+        let patterns = super::definition_patterns("java", "MyClass");
+        let constructor_pattern = patterns
+            .get(1)
+            .expect("java should have constructor pattern");
+        let re = regex::Regex::new(constructor_pattern).expect("valid regex");
+        assert!(
+            !re.is_match("new MyClass()"),
+            "must NOT match 'new MyClass()' - this is a call, not a definition"
+        );
+        assert!(
+            !re.is_match("return new MyClass()"),
+            "must NOT match 'return new MyClass()' - this is a call, not a definition"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_generic_constructor() {
+        // MEDIUM-4: Support generic constructors like public <E> MyClass(E item)
+        let patterns = super::definition_patterns("java", "MyClass");
+        let constructor_pattern = patterns
+            .get(1)
+            .expect("java should have constructor pattern");
+        let re = regex::Regex::new(constructor_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public <E> MyClass(E item)"),
+            "must match 'public <E> MyClass(E item)'"
+        );
+        assert!(
+            re.is_match("<T, U> MyClass(T a, U b)"),
+            "must match '<T, U> MyClass(T a, U b)'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_nested_generics() {
+        // MEDIUM-2: Support nested generics like Map<String, List<Integer>>
+        let patterns = super::definition_patterns("java", "process");
+        let method_pattern = patterns.last().expect("java should have method pattern");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public Map<String, List<Integer>> process()"),
+            "must match 'public Map<String, List<Integer>> process()'"
+        );
+        assert!(
+            re.is_match("Map<String, Map<String, Integer>> process()"),
+            "must match 'Map<String, Map<String, Integer>> process()'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_sealed_no_trailing_whitespace() {
+        // MAJOR-2: Pattern should match sealed class at end-of-line (no trailing whitespace)
+        let patterns = super::definition_patterns("java", "Shape");
+        let class_pattern = patterns.first().expect("java should have class pattern");
+        let re = regex::Regex::new(class_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public sealed class Shape"),
+            "must match 'public sealed class Shape' at end-of-line"
+        );
+        assert!(
+            re.is_match("sealed class Shape{"),
+            "must match 'sealed class Shape{{' without space before brace"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_strictfp_method() {
+        let patterns = super::definition_patterns("java", "calculate");
+        let method_pattern = patterns.last().expect("java should have method pattern");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public strictfp void calculate()"),
+            "must match 'public strictfp void calculate()'"
+        );
+        assert!(
+            re.is_match("strictfp double calculate(int x)"),
+            "must match 'strictfp double calculate(int x)'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_strictfp_class() {
+        let patterns = super::definition_patterns("java", "MathUtils");
+        let class_pattern = patterns.first().expect("java should have class pattern");
+        let re = regex::Regex::new(class_pattern).expect("valid regex");
+        assert!(
+            re.is_match("strictfp class MathUtils"),
+            "must match 'strictfp class MathUtils'"
+        );
+        assert!(
+            re.is_match("public strictfp class MathUtils"),
+            "must match 'public strictfp class MathUtils'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_non_sealed_class() {
+        let patterns = super::definition_patterns("java", "Shape");
+        let class_pattern = patterns.first().expect("java should have class pattern");
+        let re = regex::Regex::new(class_pattern).expect("valid regex");
+        assert!(
+            re.is_match("non-sealed class Shape"),
+            "must match 'non-sealed class Shape'"
+        );
+        assert!(
+            re.is_match("public non-sealed class Shape"),
+            "must match 'public non-sealed class Shape'"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_multi_dimensional_array_return() {
+        let patterns = super::definition_patterns("java", "getData");
+        let method_pattern = patterns.last().expect("java should have method pattern");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public int[][] getData()"),
+            "must match 'public int[][] getData()' — 2D array"
+        );
+        assert!(
+            re.is_match("String[][][] getData()"),
+            "must match 'String[][][] getData()' — 3D array"
+        );
+        assert!(
+            re.is_match("Map<String, Integer>[][] getData()"),
+            "must match 'Map<String, Integer>[][] getData()' — generic 2D array"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_bounded_generics() {
+        let patterns = super::definition_patterns("java", "sort");
+        let method_pattern = patterns.last().expect("java should have method pattern");
+        let re = regex::Regex::new(method_pattern).expect("valid regex");
+        assert!(
+            re.is_match("public <T extends Comparable<T>> void sort(List<T> list)"),
+            "must match 'public <T extends Comparable<T>> void sort(List<T> list)' — bounded generics"
+        );
+        let patterns_get = super::definition_patterns("java", "get");
+        let method_pattern_get = patterns_get
+            .last()
+            .expect("java should have method pattern");
+        let re_get = regex::Regex::new(method_pattern_get).expect("valid regex");
+        assert!(
+            re_get.is_match("<K, V extends Serializable> V get(K key)"),
+            "must match '<K, V extends Serializable> V get(K key)' — multiple bounded params"
+        );
+        let patterns2 = super::definition_patterns("java", "MyClass");
+        let constructor_pattern = patterns2
+            .get(1)
+            .expect("java should have constructor pattern");
+        let re2 = regex::Regex::new(constructor_pattern).expect("valid regex");
+        assert!(
+            re2.is_match("public <T extends Comparable<T>> MyClass(T item)"),
+            "must match 'public <T extends Comparable<T>> MyClass(T item)' — generic constructor with bounds"
+        );
+    }
+
+    #[test]
+    fn test_definition_patterns_java_static_record() {
+        let patterns = super::definition_patterns("java", "Inner");
+        let record_pattern = patterns.get(2).expect("java should have record pattern");
+        let re = regex::Regex::new(record_pattern).expect("valid regex");
+        assert!(
+            re.is_match("static record Inner(String name, int value)"),
+            "must match 'static record Inner(String name, int value)' — nested static record"
+        );
+        assert!(
+            re.is_match("public static final record Inner(String name)"),
+            "must match 'public static final record Inner(String name)' — full modifiers"
+        );
     }
 
     // ── extract_call_candidates tests ──────────────────────────────────────

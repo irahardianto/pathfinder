@@ -15,8 +15,8 @@ use pathfinder_lsp::LspError;
 use rmcp::model::{CallToolResult, ErrorData};
 
 use super::{
-    extract_call_candidates, is_source_file, is_workspace_file, language_to_file_glob,
-    LspResolution,
+    candidate_definition_pattern, extract_call_candidates, is_source_file, is_workspace_file,
+    language_to_file_glob, LspResolution,
 };
 
 impl PathfinderServer {
@@ -196,22 +196,7 @@ impl PathfinderServer {
         language: &str,
         max_results_per_candidate: usize,
     ) -> Option<(String, u32, String)> {
-        let pattern = match language {
-            "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{candidate}\b"),
-            "go" => format!(r"func\s+{candidate}\b"),
-            "typescript" | "javascript" | "vue" => {
-                format!(
-                    r"(?:(?:export\s+(?:default\s*)?)?function\s+{candidate}\b|(?:export\s+)?(?:const|let|var)\s+{candidate}\s*[=:]|(?:{candidate}\s*:\s*)[^{{]*\([^)]*\)\s*=>)"
-                )
-            }
-            "python" => format!(r"(?:async\s+)?def\s+{candidate}\b"),
-            "java" => {
-                format!(
-                    r"(?:(?:public|private|protected|static|final|synchronized|native|abstract|transient)\s+)*[A-Z][a-zA-Z0-9_]*\s+{candidate}\b"
-                )
-            }
-            _ => format!(r"\b(?:fn|def|function|class|struct|type|interface)\s+{candidate}\b"),
-        };
+        let pattern = candidate_definition_pattern(language, candidate);
 
         self.scout
             .search(&pathfinder_search::SearchParams {
@@ -1344,6 +1329,96 @@ mod tests {
             1,
             "duplicate callees should be deduped, got {}",
             val.dependencies.len()
+        );
+    }
+
+    // ── java_resolve_pattern tests ─────────────────────────────────────────
+
+    fn make_java_re(candidate: &str) -> regex::Regex {
+        let pattern = super::super::java_resolve_pattern(candidate);
+        regex::Regex::new(&pattern).expect("valid regex")
+    }
+
+    #[test]
+    fn test_java_resolve_pattern_constructor() {
+        let re = make_java_re("MyClass");
+        assert!(re.is_match("public MyClass(String name)"));
+        assert!(re.is_match("  private MyClass()"));
+        assert!(
+            re.is_match("public void MyClass()"),
+            "method arm correctly matches 'public void MyClass()' as a method definition"
+        );
+        assert!(!re.is_match("new MyClass()"));
+    }
+
+    #[test]
+    fn test_java_resolve_pattern_method() {
+        let re = make_java_re("process");
+        assert!(re.is_match("public void process()"));
+        assert!(re.is_match("int[] process()"));
+        assert!(re.is_match("public int[][] process()"));
+        assert!(re.is_match("public <T> T process()"));
+        assert!(re.is_match("public strictfp void process()"));
+        assert!(!re.is_match("new process()"));
+    }
+
+    #[test]
+    fn test_java_resolve_pattern_record() {
+        let re = make_java_re("Point");
+        assert!(re.is_match("public record Point(int x, int y)"));
+        assert!(re.is_match("record Point(String name)"));
+    }
+
+    #[test]
+    fn test_java_resolve_pattern_class() {
+        let re = make_java_re("MyClass");
+        assert!(re.is_match("public class MyClass"));
+        assert!(re.is_match("sealed class MyClass"));
+        assert!(re.is_match("non-sealed class MyClass"));
+        assert!(re.is_match("public strictfp class MyClass"));
+    }
+
+    #[test]
+    fn test_java_resolve_pattern_rejects_false_positives() {
+        let re = make_java_re("MyError");
+        assert!(!re.is_match("throw new MyError(\"msg\")"));
+        assert!(!re.is_match("return new MyError()"));
+        let re2 = make_java_re("MyClass");
+        assert!(
+            !re2.is_match("new MyClass()"),
+            "constructor call 'new MyClass()' must not match"
+        );
+    }
+
+    #[test]
+    fn test_java_resolve_pattern_bounded_generics() {
+        let re = make_java_re("sort");
+        assert!(
+            re.is_match("public <T extends Comparable<T>> void sort(List<T> list)"),
+            "must match bounded generics in method type params"
+        );
+        let re2 = make_java_re("MyClass");
+        assert!(
+            re2.is_match("public <T extends Comparable<T>> MyClass(T item)"),
+            "must match bounded generics in constructor type params"
+        );
+    }
+
+    #[test]
+    fn test_java_resolve_pattern_static_record_and_strictfp_class() {
+        let re = make_java_re("Inner");
+        assert!(
+            re.is_match("static record Inner(String name)"),
+            "must match 'static record Inner(String name)'"
+        );
+        let re2 = make_java_re("MathUtils");
+        assert!(
+            re2.is_match("strictfp class MathUtils"),
+            "must match 'strictfp class MathUtils'"
+        );
+        assert!(
+            re2.is_match("public strictfp class MathUtils"),
+            "must match 'public strictfp class MathUtils'"
         );
     }
 }

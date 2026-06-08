@@ -115,6 +115,130 @@ impl PathfinderServer {
         }
     }
 
+    /// DELIVERABLE F: Grep-based outgoing dependency discovery for `find_callers_callees`.
+    ///
+    /// When LSP is unavailable, extract call candidates from the symbol's source code
+    /// and resolve each candidate to its definition using grep search.
+    ///
+    /// Returns `Some(refs)` if outgoing dependencies found, `None` if none found.
+    /// Updates `files_referenced` with the files containing matches.
+    async fn grep_outgoing_fallback(
+        &self,
+        scope_content: &str,
+        scope_language: &str,
+        definition_path: &std::path::Path,
+        max_results: u32,
+        project_only: bool,
+        files_referenced: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<crate::server::types::ImpactReference>> {
+        let candidates = super::extract_call_candidates(scope_content, scope_language);
+
+        if candidates.is_empty() {
+            tracing::info!(
+                tool = "grep_outgoing_fallback",
+                language = %scope_language,
+                "no call candidates found in symbol body"
+            );
+            return None;
+        }
+
+        tracing::info!(
+            tool = "grep_outgoing_fallback",
+            candidate_count = candidates.len(),
+            language = %scope_language,
+            "resolving {} outgoing candidates",
+            candidates.len()
+        );
+
+        let max_deps = max_results as usize;
+        let mut refs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for candidate in candidates {
+            if refs.len() >= max_deps {
+                break;
+            }
+
+            let pattern = super::candidate_definition_pattern(scope_language, &candidate);
+            let path_glob = super::language_to_file_glob(scope_language);
+
+            let result = self
+                .scout
+                .search(&pathfinder_search::SearchParams {
+                    workspace_root: self.workspace_root.path().to_path_buf(),
+                    query: pattern,
+                    is_regex: true,
+                    max_results: 4,
+                    path_glob: path_glob.to_string(),
+                    exclude_glob: String::default(),
+                    context_lines: 0,
+                    offset: 0,
+                })
+                .await;
+
+            match result {
+                Ok(search_result) => {
+                    let mut found = false;
+                    for m in &search_result.matches {
+                        if found {
+                            break;
+                        }
+                        if project_only
+                            && (!super::is_source_file(&m.file)
+                                || !super::is_workspace_file(&m.file))
+                        {
+                            continue;
+                        }
+
+                        let m_path = std::path::Path::new(&m.file);
+                        if m_path == definition_path {
+                            continue;
+                        }
+
+                        let semantic_path = format!("{}::{}", m.file, candidate);
+
+                        if seen.contains(&semantic_path) {
+                            continue;
+                        }
+                        seen.insert(semantic_path.clone());
+
+                        files_referenced.insert(m.file.clone());
+
+                        refs.push(crate::server::types::ImpactReference {
+                            semantic_path,
+                            file: m.file.clone(),
+                            line: usize::try_from(m.line).unwrap_or(usize::MAX),
+                            snippet: m.content.clone(),
+                            direction: "outgoing_heuristic".to_string(),
+                            depth: 0,
+                        });
+                        found = true;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tool = "grep_outgoing_fallback",
+                        candidate = %candidate,
+                        error = %e,
+                        "search failed for candidate"
+                    );
+                }
+            }
+        }
+
+        if refs.is_empty() {
+            None
+        } else {
+            tracing::info!(
+                tool = "grep_outgoing_fallback",
+                resolved_count = refs.len(),
+                "resolved {} outgoing dependencies",
+                refs.len()
+            );
+            Some(refs)
+        }
+    }
+
     /// Performs BFS traversal of the call hierarchy in the specified direction.
     ///
     /// Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
@@ -482,6 +606,8 @@ impl PathfinderServer {
 
                     let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
+                    let mut grep_fallback_found = false;
+
                     if let Some(refs) = self
                         .grep_reference_fallback(
                             &symbol_name,
@@ -491,12 +617,36 @@ impl PathfinderServer {
                         .await
                     {
                         incoming = Some(refs);
-                        degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                        grep_fallback_found = true;
                         tracing::info!(
                             tool = "find_callers_callees",
                             references_found = incoming.as_ref().map_or(0, Vec::len),
                             "find_callers_callees: grep-based fallback references found during LSP warmup"
                         );
+                    }
+
+                    if let Some(refs) = self
+                        .grep_outgoing_fallback(
+                            &scope.content,
+                            &scope.language,
+                            &semantic_path.file_path,
+                            remaining_outgoing,
+                            project_only,
+                            &mut files_referenced,
+                        )
+                        .await
+                    {
+                        outgoing = Some(refs);
+                        grep_fallback_found = true;
+                        tracing::info!(
+                            tool = "find_callers_callees",
+                            outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
+                            "find_callers_callees: grep-based outgoing deps found during LSP warmup"
+                        );
+                    }
+
+                    if grep_fallback_found {
+                        degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
                     }
                 }
             }
@@ -511,6 +661,7 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                let mut grep_fallback_found = false;
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -521,14 +672,37 @@ impl PathfinderServer {
                     .await
                 {
                     incoming = Some(refs);
-                    degraded_reason = Some(DegradedReason::NoLspGrepFallback);
+                    grep_fallback_found = true;
                     tracing::info!(
                         tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
                         "find_callers_callees: grep-based fallback references found"
                     );
                 }
-                // Keep degraded = true to signal this is heuristic data
+
+                if let Some(refs) = self
+                    .grep_outgoing_fallback(
+                        &scope.content,
+                        &scope.language,
+                        &semantic_path.file_path,
+                        remaining_outgoing,
+                        project_only,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    outgoing = Some(refs);
+                    grep_fallback_found = true;
+                    tracing::info!(
+                        tool = "find_callers_callees",
+                        outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
+                        "find_callers_callees: grep-based outgoing deps found"
+                    );
+                }
+
+                if grep_fallback_found {
+                    degraded_reason = Some(DegradedReason::NoLspGrepFallback);
+                }
             }
             Err(LspError::Timeout { .. }) => {
                 // LSP timed out — attempt grep-based reference fallback
@@ -539,6 +713,7 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                let mut grep_fallback_found = false;
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -549,14 +724,37 @@ impl PathfinderServer {
                     .await
                 {
                     incoming = Some(refs);
-                    degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                    grep_fallback_found = true;
                     tracing::info!(
                         tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
                         "find_callers_callees: grep-based fallback references found after timeout"
                     );
                 }
-                // Keep degraded = true to signal this is heuristic data
+
+                if let Some(refs) = self
+                    .grep_outgoing_fallback(
+                        &scope.content,
+                        &scope.language,
+                        &semantic_path.file_path,
+                        remaining_outgoing,
+                        project_only,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    outgoing = Some(refs);
+                    grep_fallback_found = true;
+                    tracing::info!(
+                        tool = "find_callers_callees",
+                        outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
+                        "find_callers_callees: grep-based outgoing deps found after timeout"
+                    );
+                }
+
+                if grep_fallback_found {
+                    degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                }
             }
             Err(e) => {
                 degraded = true;
@@ -569,6 +767,7 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                let mut grep_fallback_found = false;
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -579,12 +778,36 @@ impl PathfinderServer {
                     .await
                 {
                     incoming = Some(refs);
-                    degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
+                    grep_fallback_found = true;
                     tracing::info!(
                         tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
                         "find_callers_callees: grep-based fallback references found after LSP error"
                     );
+                }
+
+                if let Some(refs) = self
+                    .grep_outgoing_fallback(
+                        &scope.content,
+                        &scope.language,
+                        &semantic_path.file_path,
+                        remaining_outgoing,
+                        project_only,
+                        &mut files_referenced,
+                    )
+                    .await
+                {
+                    outgoing = Some(refs);
+                    grep_fallback_found = true;
+                    tracing::info!(
+                        tool = "find_callers_callees",
+                        outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
+                        "find_callers_callees: grep-based outgoing deps found after LSP error"
+                    );
+                }
+
+                if grep_fallback_found {
+                    degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
                 }
             }
         }
@@ -2193,16 +2416,441 @@ mod tests {
         assert!(val.degraded);
         // When grep fallback returns no results, degraded_reason stays at default NoLsp
         assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
-        // Grep fallback only provides incoming references (who calls this symbol).
-        // Outgoing (what this symbol calls) requires call hierarchy which needs LSP.
+        // make_scope() returns "fn login() { }" with empty body — no function calls
+        // to extract. Grep outgoing fallback exists but finds zero candidates.
         assert!(
             val.outgoing.is_none(),
-            "outgoing should be None — grep fallback cannot determine what this symbol calls"
+            "outgoing should be None — empty function body has no call candidates"
         );
         // No search results means no incoming either
         assert!(
             val.incoming.is_none(),
             "incoming should be None when search returns no matches"
+        );
+    }
+
+    // ── GAP 3: method call extraction for Rust/Go/Java ──────────────────────
+
+    #[tokio::test]
+    async fn test_extract_call_candidates_captures_method_calls() {
+        // Verify that call_pattern_full() now used for ALL languages captures
+        // method calls like self.validate(), s.HandleRequest(), service.process().
+        use super::super::extract_call_candidates;
+
+        // Rust method call
+        let rust_code = "fn login(&self) { self.validate_token(); self.hash_password(); }";
+        let rust_candidates = extract_call_candidates(rust_code, "rust");
+        assert!(
+            rust_candidates.contains(&"validate_token".to_string()),
+            "should capture self.validate_token() in Rust"
+        );
+        assert!(
+            rust_candidates.contains(&"hash_password".to_string()),
+            "should capture self.hash_password() in Rust"
+        );
+
+        // Go method call
+        let go_code = "func (h *Handler) Login() { h.service.Validate(); }";
+        let go_candidates = extract_call_candidates(go_code, "go");
+        assert!(
+            go_candidates.contains(&"Validate".to_string()),
+            "should capture h.service.Validate() in Go"
+        );
+
+        // Java method call
+        let java_code = "public void login() { this.service.process(); }";
+        let java_candidates = extract_call_candidates(java_code, "java");
+        assert!(
+            java_candidates.contains(&"process".to_string()),
+            "should capture this.service.process() in Java"
+        );
+    }
+
+    // ── GAP 6: per-language method call extraction tests ──────────────────────
+
+    #[tokio::test]
+    async fn test_extract_call_candidates_rust_method_calls() {
+        use super::super::extract_call_candidates;
+
+        let code = "fn login(&self) { self.validate(); self.hash_password(); self.save(); }";
+        let candidates = extract_call_candidates(code, "rust");
+        assert!(
+            candidates.contains(&"validate".to_string()),
+            "should capture self.validate() in Rust"
+        );
+        assert!(
+            candidates.contains(&"hash_password".to_string()),
+            "should capture self.hash_password() in Rust"
+        );
+        assert!(
+            candidates.contains(&"save".to_string()),
+            "should capture self.save() in Rust"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_call_candidates_go_method_calls() {
+        use super::super::extract_call_candidates;
+
+        let code = "func (s *Server) Handle() { s.Validate(); s.Process(); }";
+        let candidates = extract_call_candidates(code, "go");
+        assert!(
+            candidates.contains(&"Validate".to_string()),
+            "should capture s.Validate() in Go"
+        );
+        assert!(
+            candidates.contains(&"Process".to_string()),
+            "should capture s.Process() in Go"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_call_candidates_java_method_calls() {
+        use super::super::extract_call_candidates;
+
+        let code = "public void login() { this.service.process(); this.dao.save(); }";
+        let candidates = extract_call_candidates(code, "java");
+        assert!(
+            candidates.contains(&"process".to_string()),
+            "should capture this.service.process() in Java"
+        );
+        assert!(
+            candidates.contains(&"save".to_string()),
+            "should capture this.dao.save() in Java"
+        );
+    }
+
+    // ── GAP 7: outgoing fallback end-to-end tests ──────────────────────────
+    //
+    // Strategy for handling non-deterministic HashSet iteration:
+    // extract_call_candidates extracts both the fn name from the signature and
+    // body calls. With set_results, we queue enough results so that regardless
+    // of candidate ordering, the correct matches are returned.
+    //
+    // For the happy-path test with scope "fn handle(&self) { self.validate(); }":
+    //   Candidates: {"handle", "validate"} (HashSet, order varies)
+    //   We queue results where EVERY search returns the "validate" match from
+    //   token.rs. The "handle" candidate search gets a match in token.rs which
+    //   won't form a valid fn definition but still gets added as outgoing_heuristic.
+    //   We verify outgoing is Some with at least one entry having the right direction.
+
+    #[tokio::test]
+    async fn test_outgoing_fallback_happy_path() {
+        // When LSP is unavailable and the function body has calls,
+        // outgoing should be Some with direction "outgoing_heuristic".
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+            pathfinder_common::types::SymbolScope {
+                content: "fn handle(&self) { self.validate(); }".to_string(),
+                start_line: 9,
+                end_line: 9,
+                name_column: 0,
+                language: "rust".to_string(),
+            },
+        ));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/handler.rs"),
+            "fn handle(&self) { self.validate(); }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/validator.rs"),
+            "fn validate() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+
+        let validate_match = pathfinder_search::SearchMatch {
+            file: "src/validator.rs".to_string(),
+            line: 1,
+            column: 0,
+            content: "fn validate() -> bool { true }".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "sha256:abc".to_string(),
+            known: Some(false),
+        };
+        let empty_result = Ok(pathfinder_search::SearchResult {
+            matches: vec![],
+            total_matches: 0,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        });
+        let validate_result = Ok(pathfinder_search::SearchResult {
+            matches: vec![validate_match],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        });
+
+        // Queue: 1st = incoming search (empty), then enough for outgoing candidates
+        // Candidates from HashSet: "handle" + "validate" in unknown order.
+        // Both get validate_result so we don't depend on order.
+        scout.set_results(vec![
+            empty_result.clone(),    // incoming search
+            validate_result.clone(), // 1st outgoing candidate (handle or validate)
+            validate_result.clone(), // 2nd outgoing candidate (the other)
+        ]);
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::FindCallersCalleesParams {
+            semantic_path: "src/handler.rs::handle".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        assert!(
+            !outgoing.is_empty(),
+            "should have at least one outgoing ref"
+        );
+        assert_eq!(
+            outgoing[0].direction, "outgoing_heuristic",
+            "direction must be outgoing_heuristic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_outgoing_fallback_dedup_by_semantic_path() {
+        // Same function called multiple times should appear once in outgoing.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+            pathfinder_common::types::SymbolScope {
+                content: "fn process(&self) { self.run(); self.run(); self.run(); }".to_string(),
+                start_line: 5,
+                end_line: 5,
+                name_column: 0,
+                language: "rust".to_string(),
+            },
+        ));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/worker.rs"),
+            "fn process(&self) { self.run(); }",
+        )
+        .unwrap();
+        std::fs::write(ws_dir.path().join("src/runner.rs"), "fn run() { }").unwrap();
+
+        let scout = Arc::new(MockScout::default());
+
+        let run_match = pathfinder_search::SearchMatch {
+            file: "src/runner.rs".to_string(),
+            line: 1,
+            column: 0,
+            content: "fn run() { }".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "sha256:abc".to_string(),
+            known: Some(false),
+        };
+        let empty_result = Ok(pathfinder_search::SearchResult {
+            matches: vec![],
+            total_matches: 0,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        });
+        let run_result = Ok(pathfinder_search::SearchResult {
+            matches: vec![run_match],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        });
+
+        // Candidates: "process" + "run" (deduped by HashSet in extract_call_candidates)
+        // But grep_outgoing_fallback also deduplicates by semantic_path.
+        // Both candidates get run_result, but only the "run" match adds
+        // "src/runner.rs::run" (the "process" candidate search also gets run_result
+        // but forms "src/runner.rs::process" which is a different semantic_path).
+        // The seen set ensures no dupes regardless.
+        scout.set_results(vec![
+            empty_result.clone(), // incoming
+            run_result.clone(),   // 1st outgoing candidate
+            run_result.clone(),   // 2nd outgoing candidate
+        ]);
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::FindCallersCalleesParams {
+            semantic_path: "src/worker.rs::process".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        // All outgoing refs should have unique semantic_paths
+        let paths: std::collections::HashSet<&str> =
+            outgoing.iter().map(|r| r.semantic_path.as_str()).collect();
+        assert_eq!(
+            paths.len(),
+            outgoing.len(),
+            "all outgoing refs must have unique semantic_paths"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_outgoing_fallback_definition_file_exclusion() {
+        // When a candidate resolves to the definition file, it should be excluded.
+        // Test uses scope with only one candidate (validate) and sets up search
+        // to return a match in the definition file, which gets skipped.
+        // With GAP 5 fix, the 2nd match (in another file) should be used instead.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+            pathfinder_common::types::SymbolScope {
+                content: "fn do_work() { validate(); }".to_string(),
+                start_line: 10,
+                end_line: 10,
+                name_column: 0,
+                language: "rust".to_string(),
+            },
+        ));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/worker.rs"),
+            "fn do_work() { validate(); }\nfn validate() { }",
+        )
+        .unwrap();
+        std::fs::write(ws_dir.path().join("src/lib.rs"), "fn validate() { }").unwrap();
+
+        let scout = Arc::new(MockScout::default());
+
+        // GAP 5 scenario: first match is in definition file (skipped),
+        // second match is in another file (should be used).
+        let local_match = pathfinder_search::SearchMatch {
+            file: "src/worker.rs".to_string(),
+            line: 2,
+            column: 0,
+            content: "fn validate() { }".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "sha256:abc".to_string(),
+            known: Some(false),
+        };
+        let external_match = pathfinder_search::SearchMatch {
+            file: "src/lib.rs".to_string(),
+            line: 1,
+            column: 0,
+            content: "fn validate() { }".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "sha256:def".to_string(),
+            known: Some(false),
+        };
+        let empty_result = Ok(pathfinder_search::SearchResult {
+            matches: vec![],
+            total_matches: 0,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        });
+        // Candidates: {"do_work", "validate"} — order unknown
+        // For "do_work": search gets the two-match result (neither is a valid fn do_work)
+        // For "validate": search gets the two-match result (first=definition, second=external)
+        // With GAP 5 fix, the second match (src/lib.rs) is used.
+        let two_match_result = Ok(pathfinder_search::SearchResult {
+            matches: vec![local_match, external_match],
+            total_matches: 2,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+        });
+
+        scout.set_results(vec![
+            empty_result,             // incoming
+            two_match_result.clone(), // 1st outgoing candidate
+            two_match_result,         // 2nd outgoing candidate
+        ]);
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            Arc::new(pathfinder_lsp::NoOpLawyer),
+        );
+
+        let params = crate::server::types::FindCallersCalleesParams {
+            semantic_path: "src/worker.rs::do_work".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+        // No outgoing ref should be in the definition file (src/worker.rs)
+        for reference in outgoing {
+            assert_ne!(
+                reference.file, "src/worker.rs",
+                "outgoing refs should exclude the definition file"
+            );
+        }
+        // Should have at least one outgoing ref (src/lib.rs::validate)
+        assert!(
+            outgoing.iter().any(|r| r.file == "src/lib.rs"),
+            "should have resolved validate to src/lib.rs"
         );
     }
 

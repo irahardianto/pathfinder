@@ -66,9 +66,8 @@ impl SupportedLanguage {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Go => "go",
-            Self::TypeScript => "typescript",
+            Self::TypeScript | Self::Tsx => "typescript",
             Self::Vue => "vue",
-            Self::Tsx => "tsx",
             Self::JavaScript => "javascript",
             Self::Python => "python",
             Self::Rust => "rust",
