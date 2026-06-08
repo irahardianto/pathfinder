@@ -202,6 +202,29 @@ fn bench_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_repeated_pattern(c: &mut Criterion) {
+    let fixture = create_workspace(200, 40);
+    let scout = RipgrepScout;
+    let mut group = c.benchmark_group("repeated_pattern");
+
+    group.bench_function("cold_compile_200files", |b| {
+        b.iter(|| black_box(run_search(&scout, &fixture.params)));
+    });
+
+    let warmup = run_search(&scout, &fixture.params);
+    let _ = black_box(&warmup);
+
+    group.bench_function("warm_cache_5x_same_pattern", |b| {
+        b.iter(|| {
+            for _ in 0..5 {
+                black_box(run_search(&scout, &fixture.params));
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_literal_small,
@@ -211,5 +234,6 @@ criterion_group!(
     bench_truncation,
     bench_path_glob,
     bench_scaling,
+    bench_repeated_pattern,
 );
 criterion_main!(benches);

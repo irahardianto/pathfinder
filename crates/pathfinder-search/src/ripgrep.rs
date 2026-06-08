@@ -12,12 +12,27 @@ use crate::types::{SearchMatch, SearchParams, SearchResult};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch};
 use ignore::WalkBuilder;
+use lru::LruCache;
 use pathfinder_common::types::{VersionHash, ALWAYS_EXCLUDED_DIRS};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, BufReader, Read};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static REGEX_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    #[allow(clippy::expect_used)]
+    static REGEX_CACHE: RefCell<LruCache<String, RegexMatcher>> =
+        RefCell::new(LruCache::new(NonZeroUsize::new(32).expect("32 > 0")));
+}
 
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "tiff", "tif", "mp3", "mp4", "wav",
@@ -343,20 +358,35 @@ pub struct RipgrepScout;
 
 impl RipgrepScout {
     /// Build a `RegexMatcher` from `params`, respecting `is_regex`.
+    /// Uses thread-local cache to avoid re-compiling the same pattern.
     fn build_matcher(params: &SearchParams) -> Result<RegexMatcher, SearchError> {
-        let mut builder = RegexMatcherBuilder::new();
-        builder.case_insensitive(false);
-
         let pattern = if params.is_regex {
             params.query.clone()
         } else {
-            // Escape special regex characters for literal search.
             regex::escape(&params.query)
         };
 
-        builder
-            .build(&pattern)
-            .map_err(|e| SearchError::InvalidPattern(e.to_string()))
+        let cache_key = format!("{pattern}\0ci=false");
+
+        REGEX_CACHE.with_borrow_mut(|cache| {
+            #[cfg(test)]
+            let was_hit = cache.contains(&cache_key);
+
+            let matcher = cache.try_get_or_insert(cache_key, || {
+                let mut builder = RegexMatcherBuilder::new();
+                builder.case_insensitive(false);
+                builder
+                    .build(&pattern)
+                    .map_err(|e| SearchError::InvalidPattern(e.to_string()))
+            })?;
+
+            #[cfg(test)]
+            if was_hit {
+                REGEX_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+
+            Ok(matcher.clone())
+        })
     }
 
     /// Walk workspace files filtered by the globs in `params`.
@@ -521,7 +551,7 @@ impl Scout for RipgrepScout {
                 "Scout: starting search"
             );
 
-            let matcher = Self::build_matcher(params)?;
+            let matcher = RipgrepScout::build_matcher(params)?;
             let (files, binary_skipped, gitignored_skipped) = Self::walk_files(params)?;
             let files_in_scope = files.len() + gitignored_skipped + binary_skipped;
 
@@ -848,6 +878,58 @@ mod tests {
         assert!(
             result.matches[0].enclosing_semantic_path.is_none(),
             "should be None until Tree-sitter is implemented in Epic 3"
+        );
+    }
+
+    // ── Red-Green: regex cache test ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_regex_cache_same_pattern() {
+        let unique_marker = format!("CACHE_TEST_MARKER_{}", std::process::id());
+
+        let ws = make_workspace(&[
+            ("src/main.rs", &format!("fn {unique_marker}() {{}}")),
+            ("src/lib.rs", &format!("fn {unique_marker}() {{}}")),
+            ("src/auth.rs", &format!("fn {unique_marker}() {{}}")),
+        ]);
+
+        let scout = RipgrepScout;
+        let pattern = regex::escape(&unique_marker);
+
+        let params1 = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: pattern.clone(),
+            is_regex: false,
+            path_glob: "src/main.rs".to_owned(),
+            ..Default::default()
+        };
+
+        let params2 = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: pattern.clone(),
+            is_regex: false,
+            path_glob: "src/lib.rs".to_owned(),
+            ..Default::default()
+        };
+
+        let params3 = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: pattern,
+            is_regex: false,
+            path_glob: "src/auth.rs".to_owned(),
+            ..Default::default()
+        };
+
+        REGEX_CACHE_HITS.store(0, Ordering::SeqCst);
+        let _ = scout.search(&params1).await.expect("search should succeed");
+        let hits_after_first = REGEX_CACHE_HITS.load(Ordering::SeqCst);
+
+        let _ = scout.search(&params2).await.expect("search should succeed");
+        let _ = scout.search(&params3).await.expect("search should succeed");
+        let hits_after_all = REGEX_CACHE_HITS.load(Ordering::SeqCst);
+        assert!(
+            hits_after_all > hits_after_first,
+            "subsequent searches with same pattern should hit cache, got {hits_after_all} hits total, {hits_after_first} after first"
         );
     }
 
