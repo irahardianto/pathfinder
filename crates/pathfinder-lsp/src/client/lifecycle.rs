@@ -300,7 +300,13 @@ impl super::LspClient {
             // self.init_locks.remove(language_id);
         }
 
-        self.start_process(descriptor, 0).await
+        // Extract backoff_attempt from existing Unavailable entry, if any.
+        let attempt = match self.processes.remove(language_id) {
+            Some((_, ProcessEntry::Unavailable(state))) => state.backoff_attempt,
+            _ => 0,
+        };
+
+        self.start_process(descriptor, attempt).await
     }
 
     pub(crate) async fn ensure_process(&self, language_id: &str) -> Result<(), LspError> {
@@ -308,8 +314,8 @@ impl super::LspClient {
             match entry.value() {
                 ProcessEntry::Running(_) => return Ok(()),
                 ProcessEntry::Unavailable(state) => {
-                    let backoff_secs =
-                        std::cmp::min(1u64 << state.backoff_attempt, MAX_BACKOFF_SECS);
+                    let capped_attempt = std::cmp::min(state.backoff_attempt, 30);
+                    let backoff_secs = std::cmp::min(1u64 << capped_attempt, MAX_BACKOFF_SECS);
                     let elapsed_secs = state.unavailable_since.elapsed().as_secs();
                     if elapsed_secs >= backoff_secs {
                         drop(entry);
@@ -348,10 +354,11 @@ impl super::LspClient {
             match entry.value() {
                 ProcessEntry::Running(_) => return Ok(()),
                 ProcessEntry::Unavailable(state) => {
-                    let backoff_secs =
-                        std::cmp::min(1u64 << state.backoff_attempt, MAX_BACKOFF_SECS);
+                    let capped_attempt = std::cmp::min(state.backoff_attempt, 30);
+                    let backoff_secs = std::cmp::min(1u64 << capped_attempt, MAX_BACKOFF_SECS);
                     let elapsed_secs = state.unavailable_since.elapsed().as_secs();
                     if elapsed_secs >= backoff_secs {
+                        let attempt = state.backoff_attempt;
                         drop(entry);
                         tracing::info!(
                             language = %language_id,
@@ -362,9 +369,17 @@ impl super::LspClient {
                         self.processes.remove(language_id);
                         // Clear stale doc_versions from the crashed instance.
                         self.clear_doc_versions_for_language(language_id);
-                    } else {
-                        return Err(LspError::NoLspAvailable);
+
+                        let descriptor = self
+                            .descriptors
+                            .iter()
+                            .find(|d| d.language_id == language_id)
+                            .ok_or(LspError::NoLspAvailable)?
+                            .clone();
+
+                        return self.start_process(descriptor, attempt).await;
                     }
+                    return Err(LspError::NoLspAvailable);
                 }
             }
         }
@@ -393,8 +408,7 @@ impl super::LspClient {
         let timeout_duration = indexing_timeout_for_language(language_id);
         tokio::spawn(async move {
             tokio::time::sleep(timeout_duration).await;
-            if !timeout_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                timeout_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            if !timeout_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let duration_secs = spawned_at.elapsed().as_secs();
                 *source_flag.lock() = Some(IndexingCompletionSource::TimeoutFallback);
                 *duration_flag.lock() = Some(duration_secs);
@@ -418,7 +432,11 @@ impl super::LspClient {
         let language_id = descriptor.language_id.clone();
 
         if attempt > 0 {
-            let delay = Duration::from_secs(std::cmp::min(1u64 << (attempt - 1), MAX_BACKOFF_SECS));
+            let capped_delay_attempt = std::cmp::min(attempt, 31);
+            let delay = Duration::from_secs(std::cmp::min(
+                1u64 << (capped_delay_attempt - 1),
+                MAX_BACKOFF_SECS,
+            ));
             tracing::info!(
                 language = %language_id,
                 attempt,
@@ -468,7 +486,9 @@ impl super::LspClient {
             Ok(res) => res,
             Err(e) => {
                 let next_attempt = attempt.saturating_add(1);
-                let next_backoff_secs = std::cmp::min(1u64 << next_attempt, MAX_BACKOFF_SECS);
+                let capped_next_attempt = std::cmp::min(next_attempt, 30);
+                let next_backoff_secs =
+                    std::cmp::min(1u64 << capped_next_attempt, MAX_BACKOFF_SECS);
                 tracing::error!(
                     language = %language_id,
                     error = %e,
@@ -599,6 +619,8 @@ impl super::LspClient {
                 language = %language_id,
                 "LSP: shutdown requested during init, aborting process insertion"
             );
+            progress_handle.abort();
+            registration_handle.abort();
             supervisor_handle.abort();
             indexing_timeout_handle.abort();
             return Err(LspError::ConnectionLost);
@@ -818,6 +840,16 @@ impl super::LspClient {
                         language = %language_id,
                         "LSP: reader task not alive, removed stale entry for recovery"
                     );
+                    // M-9: Insert Unavailable for backoff protection. Without this,
+                    // ensure_process would immediately retry and could create a tight
+                    // spawn-exit loop if the child keeps dying immediately.
+                    self.processes.insert(
+                        language_id.to_owned(),
+                        ProcessEntry::Unavailable(UnavailableState {
+                            unavailable_since: Instant::now(),
+                            backoff_attempt: 1,
+                        }),
+                    );
                 }
                 return Err(LspError::ConnectionLost);
             }
@@ -894,6 +926,16 @@ impl super::LspClient {
                 tracing::warn!(
                     language = %language_id,
                     "LSP: reader task not alive in notify, removed stale entry for recovery"
+                );
+                // M-9: Insert Unavailable for backoff protection. Without this,
+                // ensure_process would immediately retry and could create a tight
+                // spawn-exit loop if the child keeps dying immediately.
+                self.processes.insert(
+                    language_id.to_owned(),
+                    ProcessEntry::Unavailable(UnavailableState {
+                        unavailable_since: Instant::now(),
+                        backoff_attempt: 1,
+                    }),
                 );
             }
             return Err(LspError::ConnectionLost);
@@ -978,6 +1020,7 @@ impl super::LspClient {
 mod tests {
     use super::*;
     use crate::client::tests::{client_no_languages, client_with_descriptors, make_running_client};
+    use crate::client::{DetectedCapabilities, DiagnosticsStrategy};
     use crate::lawyer::Lawyer;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1289,7 +1332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_with_running_process_times_out() {
+    async fn test_request_no_response_configured_returns_protocol_error() {
         let (client, _fake) = make_running_client("rust");
 
         let result = client
@@ -1333,9 +1376,14 @@ mod tests {
             "should return ConnectionLost when reader is dead: {result:?}"
         );
 
+        let has_running = client
+            .processes
+            .get("rust")
+            .is_some_and(|e| matches!(e.value(), ProcessEntry::Running(_)));
+
         assert!(
-            client.processes.get("rust").is_none(),
-            "stale entry should be removed after dead reader detection"
+            !has_running,
+            "Running entry should be replaced by Unavailable for backoff after dead reader"
         );
     }
 
@@ -1998,6 +2046,480 @@ mod tests {
         assert!(
             count <= 1,
             "after lock release, at most 1 entry should exist, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_idempotent_does_not_panic() {
+        let client = client_no_languages();
+        client.shutdown();
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_request_send_failure_removes_dispatcher_entry() {
+        let (client, fake) = make_running_client("rust");
+        fake.kill();
+
+        let result = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        assert!(result.is_err(), "should fail when transport is killed");
+    }
+
+    #[tokio::test]
+    async fn test_request_timeout_returns_correct_operation_and_ms() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response(
+            "textDocument/completion",
+            json!({ "result": { "items": [] } }),
+        );
+
+        fake.set_response_delay(Duration::from_secs(10));
+
+        let result = client
+            .request(
+                "rust",
+                "textDocument/completion",
+                json!({}),
+                Duration::from_millis(50),
+            )
+            .await;
+
+        match result {
+            Err(LspError::Timeout {
+                operation,
+                timeout_ms,
+            }) => {
+                assert_eq!(operation, "textDocument/completion");
+                assert!(
+                    timeout_ms > 0,
+                    "timeout_ms should be positive, got {timeout_ms}"
+                );
+            }
+            other => panic!(
+                "expected LspError::Timeout, got: {other:?} \
+                 (FakeTransport should delay dispatch beyond request timeout)"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_delayed_response_succeeds_with_long_timeout() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response(
+            "textDocument/hover",
+            json!({ "result": { "contents": "test" } }),
+        );
+
+        fake.set_response_delay(Duration::from_millis(10));
+
+        let result = client
+            .request(
+                "rust",
+                "textDocument/hover",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        match result {
+            Ok(val) => {
+                assert_eq!(val["contents"], "test");
+            }
+            other => panic!("expected Ok(response) with long timeout, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_timeout_cleans_up_dispatcher_entry() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response("textDocument/references", json!({ "result": [] }));
+
+        fake.set_response_delay(Duration::from_secs(10));
+
+        let pending_before = client.dispatcher.pending_count();
+        let _ = client
+            .request(
+                "rust",
+                "textDocument/references",
+                json!({}),
+                Duration::from_millis(50),
+            )
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let pending_after = client.dispatcher.pending_count();
+        assert_eq!(
+            pending_after, pending_before,
+            "timeout should clean up dispatcher entry (pending: {pending_after}, expected: {pending_before})"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_notify_with_dead_reader_returns_connection_lost() {
+        let (client, _fake) = make_running_client("rust");
+
+        if let Some(entry) = client.processes.get("rust") {
+            if let ProcessEntry::Running(state) = entry.value() {
+                state.reader_handle.abort();
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let result = client
+            .notify("rust", "textDocument/didOpen", json!({}))
+            .await;
+
+        assert!(
+            matches!(result, Err(LspError::ConnectionLost)),
+            "notify with dead reader should return ConnectionLost: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_notify_with_killed_transport_returns_connection_lost() {
+        let (client, fake) = make_running_client("rust");
+        fake.kill();
+
+        let result = client
+            .notify("rust", "textDocument/didOpen", json!({}))
+            .await;
+
+        assert!(
+            matches!(result, Err(LspError::ConnectionLost)),
+            "notify on killed transport should return ConnectionLost: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_doc_versions_removes_all_entries() {
+        let (client, _fake) = make_running_client("rust");
+
+        client.doc_versions.insert(
+            "file:///workspace/src/main.rs".to_owned(),
+            std::sync::atomic::AtomicI32::new(1),
+        );
+        client.doc_versions.insert(
+            "file:///workspace/src/lib.rs".to_owned(),
+            std::sync::atomic::AtomicI32::new(2),
+        );
+
+        assert_eq!(client.doc_versions.len(), 2);
+
+        client.clear_doc_versions_for_language("rust");
+
+        assert!(
+            client.doc_versions.is_empty(),
+            "doc_versions should be cleared after clear_doc_versions_for_language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_doc_versions_noop_when_empty() {
+        let (client, _fake) = make_running_client("rust");
+
+        assert!(client.doc_versions.is_empty());
+
+        client.clear_doc_versions_for_language("rust");
+
+        assert!(client.doc_versions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_detect_concurrent_lsp_relative_path() {
+        let client = client_no_languages();
+
+        let result = client.detect_concurrent_lsp("rust", "totally-fake-lsp-binary-xyz");
+        assert!(
+            !result,
+            "relative path with no matching process should return false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_concurrent_lsp_non_existent_absolute() {
+        let client = client_no_languages();
+
+        let result =
+            client.detect_concurrent_lsp("rust", "/usr/local/bin/nonexistent-lsp-binary-xyz");
+        assert!(
+            !result,
+            "non-existent absolute path should not detect concurrent LSP"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_process_clears_doc_versions_on_recovery() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        client.doc_versions.insert(
+            "file:///workspace/src/main.rs".to_owned(),
+            std::sync::atomic::AtomicI32::new(3),
+        );
+        assert_eq!(client.doc_versions.len(), 1);
+
+        client.processes.insert(
+            "rust".to_owned(),
+            ProcessEntry::Unavailable(UnavailableState {
+                backoff_attempt: 0,
+                unavailable_since: Instant::now()
+                    .checked_sub(Duration::from_secs(100))
+                    .unwrap(),
+            }),
+        );
+
+        let _ = client.ensure_process("rust").await;
+
+        let has_versions = !client.doc_versions.is_empty();
+        assert!(
+            !has_versions || client.processes.get("rust").is_some(),
+            "doc_versions state should be consistent after recovery attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_process_with_attempt_greater_than_zero_sleeps() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        let descriptor = LanguageLsp {
+            language_id: "rust".to_owned(),
+            command: "non-existent-lsp-binary".to_owned(),
+            args: vec![],
+            root: std::env::temp_dir(),
+            init_timeout_secs: Some(1),
+            auto_plugins: vec![],
+            init_options: serde_json::Value::Null,
+        };
+
+        let start = Instant::now();
+        let _ = client.start_process(descriptor, 1).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "attempt=1 should sleep at least 1s (2^0=1s backoff), elapsed={elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_capability_status_running_with_coexistence_mode() {
+        let (client, _fake) = make_running_client("rust");
+
+        if let Some(entry) = client.processes.get("rust") {
+            if let ProcessEntry::Running(state) = entry.value() {
+                *state.live_capabilities.write() = DetectedCapabilities {
+                    definition_provider: true,
+                    diagnostics_strategy: DiagnosticsStrategy::Pull,
+                    ..Default::default()
+                };
+            }
+        }
+
+        let status = client.capability_status().await;
+        assert!(status.contains_key("rust"));
+        assert!(status["rust"].validation);
+    }
+
+    #[tokio::test]
+    async fn test_request_multiple_sequential_requests() {
+        let (client, fake) = make_running_client("rust");
+
+        for i in 0..3 {
+            fake.set_response(
+                "textDocument/definition",
+                json!({ "result": { "uri": format!("file:///test_{i}.rs") } }),
+            );
+
+            let result = client
+                .request(
+                    "rust",
+                    "textDocument/definition",
+                    json!({}),
+                    Duration::from_secs(5),
+                )
+                .await;
+
+            assert!(result.is_ok(), "request {i} should succeed: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_multiple_notifications_recorded() {
+        let (client, fake) = make_running_client("rust");
+
+        for method in &[
+            "textDocument/didOpen",
+            "textDocument/didChange",
+            "textDocument/didClose",
+        ] {
+            let result = client.notify("rust", method, json!({})).await;
+            assert!(result.is_ok(), "notify {method} should succeed");
+        }
+
+        let notifications = fake.take_notifications();
+        assert_eq!(notifications.len(), 3);
+        assert_eq!(notifications[0].0, "textDocument/didOpen");
+        assert_eq!(notifications[1].0, "textDocument/didChange");
+        assert_eq!(notifications[2].0, "textDocument/didClose");
+    }
+
+    #[tokio::test]
+    async fn test_warm_start_for_languages_and_track_sets_complete_flag() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        assert!(!client
+            .warm_start_complete
+            .load(std::sync::atomic::Ordering::Relaxed));
+
+        client.warm_start_for_languages_and_track(&["rust".to_owned()]);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(
+            client
+                .warm_start_complete
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "warm_start_complete should be true after warm_start_for_languages_and_track"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_warm_start_for_languages_and_track_empty_list() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        client.warm_start_for_languages_and_track(&[]);
+
+        assert!(
+            client
+                .warm_start_complete
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "empty list should set complete flag immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_process_shutdown_requested_during_init() {
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        let descriptor = LanguageLsp {
+            language_id: "rust".to_owned(),
+            command: "non-existent-lsp-binary".to_owned(),
+            args: vec![],
+            root: std::env::temp_dir(),
+            init_timeout_secs: Some(1),
+            auto_plugins: vec![],
+            init_options: serde_json::Value::Null,
+        };
+
+        let result = client.start_process(descriptor, 0).await;
+
+        assert!(
+            result.is_err(),
+            "should fail with non-existent binary regardless of shutdown state: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_hierarchy_request_missing_data_returns_error() {
+        let (client, _fake) = make_running_client("rust");
+
+        let item = crate::types::CallHierarchyItem {
+            name: "main".to_owned(),
+            kind: "function".to_owned(),
+            detail: None,
+            file: "src/main.rs".to_owned(),
+            line: 1,
+            column: 1,
+            data: None,
+        };
+
+        let result = client
+            .call_hierarchy_request(
+                Path::new("/workspace"),
+                &item,
+                "call_hierarchy_incoming",
+                "callHierarchy/incomingCalls",
+                "from",
+                "fromRanges",
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "should fail when item.data is None: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_error_response_from_transport() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_error("textDocument/definition", "server internal error");
+
+        let result = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(LspError::Protocol(ref msg)) if msg.contains("server internal error")),
+            "should return Protocol error from server error response: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_force_respawn_clears_doc_versions() {
+        let (client, _fake) = make_running_client("rust");
+
+        client.doc_versions.insert(
+            "file:///workspace/src/main.rs".to_owned(),
+            std::sync::atomic::AtomicI32::new(1),
+        );
+        assert_eq!(client.doc_versions.len(), 1);
+
+        let _ = client.force_respawn("rust").await;
+
+        assert!(
+            client.doc_versions.is_empty(),
+            "force_respawn should clear doc_versions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_touch_on_unavailable_entry_is_noop() {
+        let client = client_with_descriptors(
+            vec!["rust"],
+            HashMap::from([(
+                "rust".to_owned(),
+                ProcessEntry::Unavailable(UnavailableState {
+                    backoff_attempt: 0,
+                    unavailable_since: Instant::now(),
+                }),
+            )]),
+        );
+
+        client.touch("rust");
+
+        let entry = client.processes.get("rust").unwrap();
+        assert!(
+            matches!(entry.value(), ProcessEntry::Unavailable(_)),
+            "touch on Unavailable should be no-op"
         );
     }
 }

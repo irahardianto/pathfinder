@@ -113,6 +113,73 @@ pub struct LanguageLsp {
 // ST-2: Manifest pre-flight validation
 // ---------------------------------------------------------------------------
 
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut in_block_comment = false;
+    let mut in_line_comment = false;
+    let mut is_escaping = false;
+
+    while let Some(c) = chars.next() {
+        if in_block_comment {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+
+        if in_line_comment {
+            if c == '\n' {
+                in_line_comment = false;
+                result.push(c);
+            }
+            continue;
+        }
+
+        if in_string {
+            if is_escaping {
+                is_escaping = false;
+                result.push(c);
+                continue;
+            }
+            if c == '\\' {
+                is_escaping = true;
+                result.push(c);
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            result.push(c);
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            result.push(c);
+            continue;
+        }
+
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
+            continue;
+        }
+
+        if c == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            in_line_comment = true;
+            continue;
+        }
+
+        result.push(c);
+    }
+
+    result
+}
+
 /// Validate a marker file before starting an LSP process.
 ///
 /// Returns `Ok(())` when the file is structurally valid. Returns `Err(reason)`
@@ -122,7 +189,7 @@ pub struct LanguageLsp {
 /// # Supported languages
 /// - **Rust**: Cargo.toml must be parseable TOML and contain `[package]` or `[workspace]`
 /// - **Go**: go.mod must start with the `module` keyword
-/// - **TypeScript**: tsconfig.json must be parseable JSON
+/// - **TypeScript**: tsconfig.json must be parseable JSON (supports JSONC comments)
 /// - **Python**: pyproject.toml (if present) must be parseable TOML
 /// - **Java**: pom.xml must contain `<project`; build.gradle[.kts] must be non-empty
 pub(crate) fn validate_marker_file(
@@ -161,9 +228,15 @@ pub(crate) fn validate_marker_file(
             }
         }
         ("typescript", "tsconfig.json") => {
-            match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("tsconfig.json is not valid JSON: {e}")),
+            // Many real-world tsconfig.json files use JSONC (JavaScript-style comments).
+            // First try parsing the raw JSON, then fall back to stripping comments.
+            if serde_json::from_str::<serde_json::Value>(&contents).is_ok() {
+                Ok(())
+            } else {
+                let stripped = strip_jsonc_comments(&contents);
+                serde_json::from_str::<serde_json::Value>(&stripped)
+                    .map(|_| ())
+                    .map_err(|e| format!("tsconfig.json is not valid JSON: {e}"))
             }
         }
         ("python", "pyproject.toml") => match toml::from_str::<toml::Value>(&contents) {
@@ -377,6 +450,22 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
 ///
 /// Avoids loading `@vue/typescript-plugin` unnecessarily in pure TS projects.
 async fn workspace_has_vue_files(workspace_root: &Path) -> bool {
+    fn should_exclude_dir(name: &std::ffi::OsStr) -> bool {
+        matches!(
+            name.to_str(),
+            Some(
+                "node_modules"
+                    | ".git"
+                    | "target"
+                    | ".pnpm"
+                    | ".venv"
+                    | "__pycache__"
+                    | "dist"
+                    | "build"
+            )
+        )
+    }
+
     fn has_vue_recursive(
         dir: &Path,
         depth: usize,
@@ -395,8 +484,15 @@ async fn workspace_has_vue_files(workspace_root: &Path) -> bool {
                         return true;
                     }
                 }
-                if path.is_dir() && has_vue_recursive(&path, depth + 1).await {
-                    return true;
+                if path.is_dir() {
+                    if let Some(dir_name) = path.file_name() {
+                        if should_exclude_dir(dir_name) {
+                            continue;
+                        }
+                    }
+                    if has_vue_recursive(&path, depth + 1).await {
+                        return true;
+                    }
                 }
             }
             false
@@ -1959,5 +2055,300 @@ mod tests {
                 .unwrap_or(false),
             "Maven import should be enabled"
         );
+    }
+
+    #[test]
+    fn test_language_id_for_extension_covers_all_known() {
+        assert_eq!(language_id_for_extension("rs"), Some("rust"));
+        assert_eq!(language_id_for_extension("go"), Some("go"));
+        assert_eq!(language_id_for_extension("ts"), Some("typescript"));
+        assert_eq!(language_id_for_extension("tsx"), Some("typescript"));
+        assert_eq!(language_id_for_extension("js"), Some("typescript"));
+        assert_eq!(language_id_for_extension("jsx"), Some("typescript"));
+        assert_eq!(language_id_for_extension("mjs"), Some("typescript"));
+        assert_eq!(language_id_for_extension("cjs"), Some("typescript"));
+        assert_eq!(language_id_for_extension("vue"), Some("typescript"));
+        assert_eq!(language_id_for_extension("py"), Some("python"));
+        assert_eq!(language_id_for_extension("pyi"), Some("python"));
+        assert_eq!(language_id_for_extension("java"), Some("java"));
+    }
+
+    #[test]
+    fn test_language_id_for_extension_unknown() {
+        assert_eq!(language_id_for_extension("txt"), None);
+        assert_eq!(language_id_for_extension("html"), None);
+        assert_eq!(language_id_for_extension("css"), None);
+        assert_eq!(language_id_for_extension("json"), None);
+        assert_eq!(language_id_for_extension(""), None);
+    }
+
+    #[test]
+    fn test_install_hint_all_languages() {
+        assert!(install_hint("rust").contains("rust-analyzer"));
+        assert!(install_hint("go").contains("gopls"));
+        assert!(install_hint("typescript").contains("typescript-language-server"));
+        assert!(install_hint("python").contains("pyright"));
+        assert!(install_hint("java").contains("jdtls"));
+        assert!(install_hint("unknown_lang").contains("unknown_lang"));
+    }
+
+    #[test]
+    fn test_detect_venv_env_var() {
+        let dir = tempdir().expect("temp dir");
+        let venv_dir = dir.path().join("custom_venv").join("bin");
+        std::fs::create_dir_all(&venv_dir).expect("create venv bin");
+        let venv_python = venv_dir.join("python");
+        std::fs::write(&venv_python, "#!/bin/sh").expect("write python");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&venv_python, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let orig = std::env::var("VIRTUAL_ENV").ok();
+        std::env::set_var("VIRTUAL_ENV", dir.path().join("custom_venv"));
+
+        let result = detect_venv(dir.path());
+
+        if let Some(orig_val) = orig {
+            std::env::set_var("VIRTUAL_ENV", orig_val);
+        } else {
+            std::env::remove_var("VIRTUAL_ENV");
+        }
+
+        assert!(
+            result.is_some(),
+            "should detect venv from VIRTUAL_ENV env var"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_typescript_with_args_override() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("write");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config.lsp.insert(
+            "typescript".to_string(),
+            pathfinder_common::config::LspConfig {
+                command: String::new(),
+                args: vec!["--stdio".to_owned(), "--log-level".to_owned()],
+                idle_timeout_minutes: 15,
+                settings: serde_json::Value::Null,
+                root_override: None,
+                typescript_plugins: vec![],
+            },
+        );
+
+        let result = detect_languages(dir.path(), &config).await.expect("detect");
+
+        if let Some(ts) = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript")
+        {
+            assert_eq!(
+                ts.args,
+                vec!["--stdio".to_owned(), "--log-level".to_owned()],
+                "args should match config override"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detect_java_via_settings_gradle_kts() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("settings.gradle"),
+            "rootProject.name = \"test\"",
+        )
+        .expect("write");
+
+        let result = detect_languages(dir.path(), &make_ts_config()).await;
+
+        assert!(
+            result.is_ok(),
+            "detect_languages should not error: {result:?}"
+        );
+
+        let r = result.expect("detect_languages result should be Ok");
+        let has_java = r.detected.iter().any(|l| l.language_id == "java")
+            || r.missing.iter().any(|l| l.language_id == "java");
+        assert!(
+            has_java,
+            "settings.gradle should trigger Java detection (or missing report)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_python_via_requirements_txt() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("requirements.txt"), "flask==2.0").expect("write");
+
+        let result = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+
+        let has_python = result.detected.iter().any(|l| l.language_id == "python")
+            || result.missing.iter().any(|l| l.language_id == "python");
+        assert!(
+            has_python,
+            "should detect or report Python missing with requirements.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_python_via_setup_py() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup; setup()",
+        )
+        .expect("write");
+
+        let result = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+
+        let has_python = result.detected.iter().any(|l| l.language_id == "python")
+            || result.missing.iter().any(|l| l.language_id == "python");
+        assert!(
+            has_python,
+            "should detect or report Python missing with setup.py"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_vue_files_in_shallow_nested_dirs() {
+        let dir = tempdir().expect("temp dir");
+        let nested = dir.path().join("src").join("components");
+        std::fs::create_dir_all(&nested).expect("create dirs");
+        std::fs::write(nested.join("Widget.vue"), "<template/>").expect("write");
+
+        assert!(
+            workspace_has_vue_files(dir.path()).await,
+            "should find .vue files in shallow nested directories"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_marker_file_unsupported_marker() {
+        let dir = tempdir().expect("temp dir");
+        let marker = dir.path().join("package.json");
+        std::fs::write(&marker, "{}").expect("write");
+
+        let result = validate_marker_file(&marker, "rust");
+        assert!(
+            result.is_ok(),
+            "unsupported marker file name should return Ok by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_at_root() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("write");
+
+        let found = find_marker(dir.path(), "Cargo.toml", 0).await;
+        assert_eq!(found.as_deref(), Some(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_at_depth_1() {
+        let dir = tempdir().expect("temp dir");
+        let sub = dir.path().join("backend");
+        std::fs::create_dir_all(&sub).expect("create dir");
+        std::fs::write(sub.join("go.mod"), "module backend").expect("write");
+
+        let found = find_marker(dir.path(), "go.mod", 2).await;
+        assert_eq!(found.as_deref(), Some(sub.as_path()));
+    }
+
+    #[tokio::test]
+    async fn test_detect_command_override_skips_which() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("go.mod"), "module test").expect("write");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config.lsp.insert(
+            "go".to_string(),
+            pathfinder_common::config::LspConfig {
+                command: "/usr/local/bin/custom-gopls".to_string(),
+                args: vec![],
+                idle_timeout_minutes: 15,
+                settings: serde_json::Value::Null,
+                root_override: None,
+                typescript_plugins: vec![],
+            },
+        );
+
+        let result = detect_languages(dir.path(), &config).await.expect("detect");
+
+        if let Some(go) = result.detected.iter().find(|l| l.language_id == "go") {
+            assert_eq!(
+                go.command, "/usr/local/bin/custom-gopls",
+                "should use config command override"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detect_ignores_build_artifact_paths() {
+        let dir = tempdir().expect("temp dir");
+        let target_dir = dir.path().join("target").join("debug");
+        std::fs::create_dir_all(&target_dir).expect("create target dir");
+
+        let result = detect_languages(dir.path(), &make_ts_config()).await;
+        assert!(result.is_ok(), "should handle missing markers gracefully");
+    }
+
+    #[test]
+    fn test_detect_python_init_options_no_venv_returns_null() {
+        let dir = tempdir().expect("temp dir");
+        let opts = detect_python_init_options(dir.path());
+        assert!(
+            opts.is_null(),
+            "should return Null when no venv found: {opts:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_venv_conda_prefix() {
+        let dir = tempdir().expect("temp dir");
+        let conda_bin = dir.path().join("bin");
+        std::fs::create_dir_all(&conda_bin).expect("create bin");
+
+        let python_path = conda_bin.join("python");
+        std::fs::write(&python_path, "#!/bin/sh").expect("write python");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let orig = std::env::var("CONDA_PREFIX").ok();
+        std::env::set_var("CONDA_PREFIX", dir.path().to_string_lossy().as_ref());
+
+        let result = detect_venv(dir.path());
+
+        if let Some(orig_val) = orig {
+            std::env::set_var("CONDA_PREFIX", orig_val);
+        } else {
+            std::env::remove_var("CONDA_PREFIX");
+        }
+
+        assert!(result.is_some(), "should detect Python from CONDA_PREFIX");
     }
 }

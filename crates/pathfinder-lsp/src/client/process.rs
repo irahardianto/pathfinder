@@ -316,6 +316,7 @@ pub(super) async fn spawn_and_initialize(
 /// See module-level doc for the rationale of each hardening measure (stderr null,
 /// prctl PDEATHSIG, process group, absolute binary path).
 #[allow(unsafe_code)]
+#[allow(clippy::too_many_lines)]
 fn spawn_lsp_child(
     command: &str,
     args: &[String],
@@ -338,7 +339,14 @@ fn spawn_lsp_child(
     if isolate_target_dir && language_id == "rust" {
         let isolated_target = project_root.join("target").join("pathfinder-lsp");
         // L-1: Pre-create isolation directory to prevent first-write race.
-        let _ = std::fs::create_dir_all(&isolated_target);
+        if let Err(e) = std::fs::create_dir_all(&isolated_target) {
+            tracing::warn!(
+                language = language_id,
+                directory = %isolated_target.display(),
+                error = %e,
+                "LSP: failed to create isolated target directory — cache contention may occur"
+            );
+        }
         cmd.env("CARGO_TARGET_DIR", isolated_target);
         tracing::info!(
             language = language_id,
@@ -352,10 +360,26 @@ fn spawn_lsp_child(
     if isolate_target_dir && language_id == "go" {
         let isolated_cache = project_root.join(".pathfinder").join("gopls-cache");
         // L-1: Pre-create isolation directories to prevent first-write race.
-        let _ = std::fs::create_dir_all(isolated_cache.join("build"));
-        let _ = std::fs::create_dir_all(isolated_cache.join("mod"));
-        cmd.env("GOCACHE", isolated_cache.join("build"));
-        cmd.env("GOMODCACHE", isolated_cache.join("mod"));
+        let build_cache = isolated_cache.join("build");
+        let mod_cache = isolated_cache.join("mod");
+        if let Err(e) = std::fs::create_dir_all(&build_cache) {
+            tracing::warn!(
+                language = language_id,
+                directory = %build_cache.display(),
+                error = %e,
+                "LSP: failed to create isolated gopls build cache — cache contention may occur"
+            );
+        }
+        if let Err(e) = std::fs::create_dir_all(&mod_cache) {
+            tracing::warn!(
+                language = language_id,
+                directory = %mod_cache.display(),
+                error = %e,
+                "LSP: failed to create isolated gopls mod cache — cache contention may occur"
+            );
+        }
+        cmd.env("GOCACHE", build_cache);
+        cmd.env("GOMODCACHE", mod_cache);
         tracing::info!(
             language = language_id,
             "LSP: set isolated GOCACHE/GOMODCACHE for gopls to avoid cache contention"
@@ -368,7 +392,14 @@ fn spawn_lsp_child(
     if isolate_target_dir && language_id == "typescript" {
         let isolated_tmp = project_root.join(".pathfinder").join("tsserver-tmp");
         // L-1: Pre-create isolation directory to prevent first-write race.
-        let _ = std::fs::create_dir_all(&isolated_tmp);
+        if let Err(e) = std::fs::create_dir_all(&isolated_tmp) {
+            tracing::warn!(
+                language = language_id,
+                directory = %isolated_tmp.display(),
+                error = %e,
+                "LSP: failed to create isolated tsserver TMPDIR — .tsbuildinfo contention may occur"
+            );
+        }
         cmd.env("TMPDIR", &isolated_tmp);
         tracing::info!(
             language = language_id,
@@ -380,9 +411,17 @@ fn spawn_lsp_child(
     // between concurrent pyright/ruff instances.
     if isolate_target_dir && language_id == "python" {
         let isolated_cache = project_root.join(".pathfinder").join("python-cache");
+        let pyc_dir = isolated_cache.join("pyc");
         // L-1: Pre-create isolation directory to prevent first-write race.
-        let _ = std::fs::create_dir_all(isolated_cache.join("pyc"));
-        cmd.env("PYTHONPYCACHEPREFIX", isolated_cache.join("pyc"));
+        if let Err(e) = std::fs::create_dir_all(&pyc_dir) {
+            tracing::warn!(
+                language = language_id,
+                directory = %pyc_dir.display(),
+                error = %e,
+                "LSP: failed to create isolated Python pycache — cache contention may occur"
+            );
+        }
+        cmd.env("PYTHONPYCACHEPREFIX", &pyc_dir);
         tracing::info!(
             language = language_id,
             "LSP: set isolated PYTHONPYCACHEPREFIX for Python LSP to avoid cache contention"
@@ -1164,5 +1203,225 @@ mod process_tests {
             Some("/home/user/.venv/bin/python"),
             "pythonPath should be passed through to initialize request"
         );
+    }
+
+    #[test]
+    fn test_revalidate_python_init_options_valid_path_preserved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake_python = dir.path().join("fake_python");
+        std::fs::write(&fake_python, "#!/bin/sh").expect("write");
+        let path_str = fake_python.to_string_lossy().into_owned();
+
+        let init_opts = serde_json::json!({
+            "python": { "pythonPath": path_str }
+        });
+
+        let result = revalidate_python_init_options(init_opts.clone(), dir.path());
+
+        assert_eq!(
+            result["python"]["pythonPath"].as_str(),
+            Some(path_str.as_str()),
+            "should preserve valid pythonPath"
+        );
+    }
+
+    #[test]
+    fn test_revalidate_python_init_options_invalid_path_redetects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let venv_dir = dir.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&venv_dir).expect("create venv bin");
+        let venv_python = venv_dir.join("python");
+        std::fs::write(&venv_python, "#!/bin/sh").expect("write python");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&venv_python, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let init_opts = serde_json::json!({
+            "python": { "pythonPath": "/nonexistent/path/bin/python" }
+        });
+
+        let result = revalidate_python_init_options(init_opts, dir.path());
+
+        assert!(
+            !result.is_null(),
+            "should re-detect venv when old path is invalid"
+        );
+        assert!(
+            result["python"]["pythonPath"]
+                .as_str()
+                .is_some_and(|p| p.contains(".venv")),
+            "should contain re-detected venv path"
+        );
+    }
+
+    #[test]
+    fn test_revalidate_python_init_options_no_existing_path_no_venv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let init_opts = serde_json::json!({});
+        let result = revalidate_python_init_options(init_opts, dir.path());
+
+        assert!(result.is_null(), "should return Null when no venv found");
+    }
+
+    #[test]
+    fn test_revalidate_python_init_options_invalid_path_no_venv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let init_opts = serde_json::json!({
+            "python": { "pythonPath": "/old/venv/bin/python" }
+        });
+
+        let result = revalidate_python_init_options(init_opts, dir.path());
+
+        assert!(
+            result.is_null(),
+            "should return Null when old path invalid and no new venv"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_initialize_request_null_init_options() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+            .await
+            .expect("ok");
+
+        let init_opts = &request["params"]["initializationOptions"];
+        assert!(
+            init_opts.is_null() || init_opts.as_object().is_none_or(serde_json::Map::is_empty),
+            "initializationOptions should be null or empty when init_options is Null and no plugins"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_initialize_request_with_plugins_overrides_init_options() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let plugins = vec!["@vue/typescript-plugin".to_owned()];
+        let init_opts = serde_json::json!({"custom": "value"});
+
+        let request = build_initialize_request(1, dir.path(), &plugins, init_opts)
+            .await
+            .expect("ok");
+
+        let opts = &request["params"]["initializationOptions"];
+        assert!(
+            opts["plugins"].is_array(),
+            "plugins should take precedence over init_options"
+        );
+        assert!(
+            opts.get("custom").is_none(),
+            "custom init_options should NOT be merged when plugins present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_path_to_file_uri_with_spaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("my file.rs");
+        std::fs::write(&file_path, "fn main() {}").expect("write");
+
+        let uri = path_to_file_uri(&file_path).await.expect("ok");
+        assert!(
+            uri.contains("my%20file.rs"),
+            "should percent-encode spaces in file URI"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_managed_process_last_used_tracking() {
+        let process = make_managed_process("10");
+
+        let before = process.last_used();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        process.set_last_used(std::time::Instant::now());
+        let after = process.last_used();
+
+        assert!(after > before, "set_last_used should update the timestamp");
+    }
+
+    #[tokio::test]
+    async fn test_managed_process_capabilities_default() {
+        let process = make_managed_process("10");
+
+        let caps = process.capabilities();
+        assert!(
+            !caps.definition_provider,
+            "default capabilities should have definition_provider=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_managed_process_in_flight_default() {
+        let process = make_managed_process("10");
+
+        assert_eq!(
+            process
+                .in_flight()
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "in_flight should start at 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_pathfinder_in_gitignore_no_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        ensure_pathfinder_in_gitignore(dir.path());
+
+        let gitignore = dir.path().join(".gitignore");
+        assert!(gitignore.exists(), "should create .gitignore");
+        let content = std::fs::read_to_string(gitignore).expect("read");
+        assert!(content.contains(".pathfinder/"));
+    }
+
+    #[test]
+    fn test_spawn_lsp_child_nonexistent_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = spawn_lsp_child(
+            "/absolutely/nonexistent/binary",
+            &[],
+            dir.path(),
+            "rust",
+            false,
+        );
+
+        assert!(result.is_err(), "should fail with non-existent binary");
+        match result {
+            Err(LspError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected Io error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_lsp_child_env_isolation_rust() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake_bin = which::which("sh").unwrap_or_else(|_| std::path::PathBuf::from("/bin/sh"));
+
+        let target_dir = dir.path().join("target").join("pathfinder-lsp");
+
+        let result = spawn_lsp_child(
+            fake_bin.to_str().unwrap_or("/bin/sh"),
+            &["-c".to_owned(), "echo $CARGO_TARGET_DIR".to_owned()],
+            dir.path(),
+            "rust",
+            true,
+        );
+
+        if result.is_ok() {
+            assert!(
+                target_dir.exists(),
+                "CARGO_TARGET_DIR directory should be created for rust isolation"
+            );
+        }
     }
 }

@@ -83,8 +83,16 @@ pub async fn parse_definition_response(
     let location = if response.is_array() {
         response
             .as_array()
-            .and_then(|arr| arr.first())
-            .cloned()
+            .and_then(|arr| {
+                let len = arr.len();
+                if len > 1 {
+                    tracing::debug!(
+                        count = len,
+                        "LSP: definition response has multiple locations, returning first (use parse_definition_response_multi for all)"
+                    );
+                }
+                arr.first().cloned()
+            })
             .unwrap_or(serde_json::Value::Null)
     } else {
         response
@@ -110,8 +118,8 @@ pub async fn parse_definition_response(
 
     Ok(Some(DefinitionLocation {
         file,
-        line: u32::try_from(start_line + 1).unwrap_or(1),
-        column: u32::try_from(start_char + 1).unwrap_or(1),
+        line: u32::try_from(start_line.saturating_add(1)).unwrap_or(1),
+        column: u32::try_from(start_char.saturating_add(1)).unwrap_or(1),
         preview,
     }))
 }
@@ -139,8 +147,8 @@ pub async fn parse_single_definition_location(
 
     Some(DefinitionLocation {
         file,
-        line: u32::try_from(start_line + 1).unwrap_or(1),
-        column: u32::try_from(start_char + 1).unwrap_or(1),
+        line: u32::try_from(start_line.saturating_add(1)).unwrap_or(1),
+        column: u32::try_from(start_char.saturating_add(1)).unwrap_or(1),
         preview,
     })
 }
@@ -194,17 +202,17 @@ pub fn parse_call_hierarchy_prepare_response(
         let line = u32::try_from(
             item["selectionRange"]["start"]["line"]
                 .as_u64()
-                .unwrap_or(0),
+                .unwrap_or(0)
+                .saturating_add(1),
         )
-        .unwrap_or(0)
-            + 1;
+        .unwrap_or(1);
         let column = u32::try_from(
             item["selectionRange"]["start"]["character"]
                 .as_u64()
-                .unwrap_or(0),
+                .unwrap_or(0)
+                .saturating_add(1),
         )
-        .unwrap_or(0)
-            + 1;
+        .unwrap_or(1);
 
         let kind_int = item["kind"].as_u64().unwrap_or(0);
         let kind = match kind_int {
@@ -274,7 +282,7 @@ pub fn parse_call_hierarchy_calls_response(
                     .and_then(|s| s.get("line"))
                     .and_then(serde_json::Value::as_u64)
                 {
-                    call_sites.push(u32::try_from(line).unwrap_or(0) + 1);
+                    call_sites.push(u32::try_from(line.saturating_add(1)).unwrap_or(1));
                 }
             }
         }
@@ -321,19 +329,17 @@ pub async fn parse_references_response(
             .get("range")
             .ok_or_else(|| LspError::Protocol("missing range".to_owned()))?;
 
-        #[allow(clippy::cast_possible_truncation)]
         let line = range
             .get("start")
             .and_then(|s| s.get("line"))
             .and_then(serde_json::Value::as_u64)
-            .map_or(1, |l| (l as u32) + 1);
+            .map_or(1, |l| u32::try_from(l.saturating_add(1)).unwrap_or(1));
 
-        #[allow(clippy::cast_possible_truncation)]
         let column = range
             .get("start")
             .and_then(|s| s.get("character"))
             .and_then(serde_json::Value::as_u64)
-            .map_or(1, |c| (c as u32) + 1);
+            .map_or(1, |c| u32::try_from(c.saturating_add(1)).unwrap_or(1));
 
         let snippet = read_preview_line(
             &workspace_root.join(&relative_path),

@@ -287,30 +287,40 @@ pub async fn idle_timeout_task(
                     .collect();
 
                 for lang in dead_languages {
-                    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
-                        tracing::error!(
-                            language = %lang,
-                            "LSP: zombie reap — process died outside reader task, \
-                             removing entry so recovery can proceed"
-                        );
-                        state.reader_handle.abort();
-                        state.abort_watchers();
-                        // Zombie reap: reader may or may not have called cancel_for_language.
-                        // Call it again to ensure pending requests are unblocked.
-                        dispatcher.cancel_for_language(&lang);
-                        if let Some(ref lifecycle) = state.lifecycle {
-                            let _ = lifecycle.child.lock().await.wait().await;
+                    if let Some((key, entry)) = processes.remove(&lang) {
+                        if let ProcessEntry::Running(state) = entry {
+                            if state.transport.is_alive() {
+                                // Race: process is now alive. Restore the entry.
+                                processes.insert(key, ProcessEntry::Running(state));
+                            } else {
+                                tracing::error!(
+                                    language = %lang,
+                                    "LSP: zombie reap — process died outside reader task, \
+                                     removing entry so recovery can proceed"
+                                );
+                                state.reader_handle.abort();
+                                state.abort_watchers();
+                                // Zombie reap: reader may or may not have called cancel_for_language.
+                                // Call it again to ensure pending requests are unblocked.
+                                dispatcher.cancel_for_language(&lang);
+                                if let Some(ref lifecycle) = state.lifecycle {
+                                    let _ = lifecycle.child.lock().await.wait().await;
+                                }
+                                // M-9: Insert Unavailable for backoff protection. Without this,
+                                // ensure_process would immediately retry and could create a tight
+                                // spawn-exit loop if the child keeps dying.
+                                processes.insert(
+                                    key,
+                                    ProcessEntry::Unavailable(super::UnavailableState {
+                                        unavailable_since: std::time::Instant::now(),
+                                        backoff_attempt: 1,
+                                    }),
+                                );
+                            }
+                        } else {
+                            // Race: entry is now Unavailable instead of Running. Restore it.
+                            processes.insert(key, entry);
                         }
-                        // M-9: Insert Unavailable for backoff protection. Without this,
-                        // ensure_process would immediately retry and could create a tight
-                        // spawn-exit loop if the child keeps dying.
-                        processes.insert(
-                            lang,
-                            ProcessEntry::Unavailable(super::UnavailableState {
-                                unavailable_since: std::time::Instant::now(),
-                                backoff_attempt: 1,
-                            }),
-                        );
                     }
                 }
 
@@ -846,5 +856,279 @@ mod tests {
         assert_eq!(action.registrations.len(), 0);
         assert_eq!(action.unregistrations.len(), 1);
         assert_eq!(action.unregistrations[0], "reg-1");
+    }
+
+    #[test]
+    fn test_extract_progress_action_begin_is_none() {
+        let msg = json!({
+            "method": "$/progress",
+            "params": {
+                "token": "test",
+                "value": { "kind": "begin", "title": "Indexing" }
+            }
+        });
+        let action = extract_progress_action(&msg);
+        assert_eq!(action, ProgressAction::None);
+    }
+
+    #[test]
+    fn test_extract_progress_action_report_zero_percentage() {
+        let msg = json!({
+            "method": "$/progress",
+            "params": {
+                "token": "test",
+                "value": { "kind": "report", "percentage": 0 }
+            }
+        });
+        let action = extract_progress_action(&msg);
+        assert_eq!(action, ProgressAction::Report { percentage: 0 });
+    }
+
+    #[test]
+    fn test_extract_progress_action_report_with_message() {
+        let msg = json!({
+            "method": "$/progress",
+            "params": {
+                "token": "test",
+                "value": { "kind": "report", "message": "50/100 files" }
+            }
+        });
+        let action = extract_progress_action(&msg);
+        assert_eq!(
+            action,
+            ProgressAction::Report { percentage: 0 },
+            "missing percentage should default to 0"
+        );
+    }
+
+    #[test]
+    fn test_apply_progress_action_report_updates_percentage() {
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indexing_source = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_duration = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_progress = Arc::new(parking_lot::Mutex::new(None));
+        let spawned_at = Instant::now();
+
+        apply_progress_action(
+            ProgressAction::Report { percentage: 42 },
+            &indexing_complete,
+            &indexing_source,
+            &indexing_duration,
+            &indexing_progress,
+            spawned_at,
+        );
+
+        assert_eq!(*indexing_progress.lock(), Some(42));
+        assert!(
+            !indexing_complete.load(std::sync::atomic::Ordering::SeqCst),
+            "report should not set indexing_complete"
+        );
+    }
+
+    #[test]
+    fn test_apply_progress_action_end_sets_complete() {
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indexing_source = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_duration = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_progress = Arc::new(parking_lot::Mutex::new(Some(50)));
+        let spawned_at = Instant::now();
+
+        apply_progress_action(
+            ProgressAction::End {
+                duration_secs: None,
+            },
+            &indexing_complete,
+            &indexing_source,
+            &indexing_duration,
+            &indexing_progress,
+            spawned_at,
+        );
+
+        assert!(
+            indexing_complete.load(std::sync::atomic::Ordering::SeqCst),
+            "end should set indexing_complete"
+        );
+        assert_eq!(
+            *indexing_source.lock(),
+            Some(IndexingCompletionSource::Progress)
+        );
+        assert!(indexing_duration.lock().is_some());
+        assert_eq!(
+            *indexing_progress.lock(),
+            None,
+            "end should clear progress percentage"
+        );
+    }
+
+    #[test]
+    fn test_apply_progress_action_end_idempotent() {
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let indexing_source = Arc::new(parking_lot::Mutex::new(Some(
+            IndexingCompletionSource::TimeoutFallback,
+        )));
+        let indexing_duration = Arc::new(parking_lot::Mutex::new(Some(99)));
+        let indexing_progress = Arc::new(parking_lot::Mutex::new(None));
+        let spawned_at = Instant::now();
+
+        apply_progress_action(
+            ProgressAction::End {
+                duration_secs: None,
+            },
+            &indexing_complete,
+            &indexing_source,
+            &indexing_duration,
+            &indexing_progress,
+            spawned_at,
+        );
+
+        assert_eq!(
+            *indexing_source.lock(),
+            Some(IndexingCompletionSource::TimeoutFallback),
+            "should not overwrite existing source"
+        );
+        assert_eq!(
+            *indexing_duration.lock(),
+            Some(99),
+            "should not overwrite existing duration"
+        );
+    }
+
+    #[test]
+    fn test_apply_progress_action_none_is_noop() {
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indexing_source = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_duration = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_progress = Arc::new(parking_lot::Mutex::new(None));
+        let spawned_at = Instant::now();
+
+        apply_progress_action(
+            ProgressAction::None,
+            &indexing_complete,
+            &indexing_source,
+            &indexing_duration,
+            &indexing_progress,
+            spawned_at,
+        );
+
+        assert!(!indexing_complete.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(indexing_source.lock().is_none());
+        assert!(indexing_duration.lock().is_none());
+        assert!(indexing_progress.lock().is_none());
+    }
+
+    #[test]
+    fn test_build_registration_response_structure() {
+        let id_val = json!(42);
+        let response = build_registration_response(&id_val);
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 42);
+        assert_eq!(response["result"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_build_registration_response_string_id() {
+        let id_val = json!("reg-001");
+        let response = build_registration_response(&id_val);
+        assert_eq!(response["id"], "reg-001");
+    }
+
+    #[test]
+    fn test_extract_registration_action_unknown_method() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "window/logMessage",
+            "params": {}
+        });
+        let action = extract_registration_action(&msg);
+        assert!(action.registrations.is_empty());
+        assert!(action.unregistrations.is_empty());
+    }
+
+    #[test]
+    fn test_extract_registration_action_no_params() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "client/registerCapability"
+        });
+        let action = extract_registration_action(&msg);
+        assert!(action.registrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_reader_supervisor_normal_exit_removes_entry() {
+        let processes = Arc::new(DashMap::new());
+        let dispatcher = Arc::new(RequestDispatcher::new());
+
+        let reader_handle = tokio::spawn(async {});
+        let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+        let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+        fake_transport.set_dispatcher(Arc::clone(&dispatcher));
+
+        processes.insert(
+            "rust".to_owned(),
+            ProcessEntry::Running(Box::new(crate::client::LanguageState {
+                transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
+                lifecycle: None,
+                reader_handle: tokio::spawn(async {}),
+                reader_alive: Arc::clone(&reader_alive),
+                restart_count: 0,
+                spawned_at: Instant::now(),
+                indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+                indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+                indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+                live_capabilities: Arc::new(parking_lot::RwLock::new(
+                    crate::client::DetectedCapabilities::default(),
+                )),
+                in_coexistence_mode: false,
+                watcher_handles: vec![],
+            })),
+        );
+
+        reader_supervisor_task(
+            "rust".to_owned(),
+            reader_handle,
+            reader_alive,
+            Arc::clone(&processes),
+            dispatcher,
+        )
+        .await;
+
+        let entry = processes.get("rust");
+        if let Some(e) = entry {
+            assert!(
+                matches!(e.value(), ProcessEntry::Unavailable(_)),
+                "supervisor should insert Unavailable after normal exit"
+            );
+        }
+        let _ = shutdown_tx;
+    }
+
+    #[tokio::test]
+    async fn test_progress_watcher_lagged_continues() {
+        let (tx, rx) = broadcast::channel::<serde_json::Value>(1);
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indexing_source = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_duration = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_progress = Arc::new(parking_lot::Mutex::new(None));
+
+        let handle = tokio::spawn(progress_watcher_task(
+            "rust".to_owned(),
+            rx,
+            Arc::clone(&indexing_complete),
+            Arc::clone(&indexing_source),
+            Arc::clone(&indexing_duration),
+            Arc::clone(&indexing_progress),
+            Instant::now(),
+        ));
+
+        drop(tx);
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), handle).await;
     }
 }

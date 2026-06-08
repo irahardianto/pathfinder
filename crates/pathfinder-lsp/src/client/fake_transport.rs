@@ -19,7 +19,13 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+pub(crate) struct FailingBehavior {
+    pub fail_after_n_requests: Option<usize>,
+    pub fail_on_method: Option<String>,
+    pub send_error_after_response: bool,
+}
 
 pub(crate) struct FakeTransport {
     responses: Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
@@ -30,6 +36,9 @@ pub(crate) struct FakeTransport {
     capabilities: parking_lot::Mutex<DetectedCapabilities>,
     dispatcher: parking_lot::Mutex<Option<Arc<RequestDispatcher>>>,
     language_id: String,
+    failing_behavior: parking_lot::Mutex<Option<FailingBehavior>>,
+    request_count: Arc<AtomicU32>,
+    response_delay: parking_lot::Mutex<Option<Duration>>,
 }
 
 impl FakeTransport {
@@ -43,6 +52,9 @@ impl FakeTransport {
             capabilities: parking_lot::Mutex::new(DetectedCapabilities::default()),
             dispatcher: parking_lot::Mutex::new(None),
             language_id: "test".to_owned(),
+            failing_behavior: parking_lot::Mutex::new(None),
+            request_count: Arc::new(AtomicU32::new(0)),
+            response_delay: parking_lot::Mutex::new(None),
         }
     }
 
@@ -93,6 +105,25 @@ impl FakeTransport {
     pub fn is_killed(&self) -> bool {
         !self.alive.load(Ordering::SeqCst)
     }
+
+    pub fn set_failing_behavior(&self, behavior: FailingBehavior) {
+        *self.failing_behavior.lock() = Some(behavior);
+    }
+
+    pub fn request_count(&self) -> u32 {
+        self.request_count.load(Ordering::SeqCst)
+    }
+
+    pub fn notification_count(&self) -> usize {
+        self.notifications_sent
+            .lock()
+            .expect("notifications lock")
+            .len()
+    }
+
+    pub fn set_response_delay(&self, delay: Duration) {
+        *self.response_delay.lock() = Some(delay);
+    }
 }
 
 #[async_trait]
@@ -107,6 +138,26 @@ impl LspTransport for FakeTransport {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
+
+        let is_request = message.get("id").is_some();
+        if is_request {
+            let count = self.request_count.fetch_add(1, Ordering::SeqCst) + 1;
+
+            if let Some(ref behavior) = *self.failing_behavior.lock() {
+                if let Some(fail_after) = behavior.fail_after_n_requests {
+                    if count >= u32::try_from(fail_after).unwrap_or(u32::MAX) {
+                        self.alive.store(false, Ordering::SeqCst);
+                        return Err(LspError::ConnectionLost);
+                    }
+                }
+                if let Some(ref fail_method) = behavior.fail_on_method {
+                    if method == *fail_method {
+                        self.alive.store(false, Ordering::SeqCst);
+                        return Err(LspError::ConnectionLost);
+                    }
+                }
+            }
+        }
 
         if let Some(id) = message.get("id") {
             let response = {
@@ -135,19 +186,29 @@ impl LspTransport for FakeTransport {
                 obj.insert("id".to_owned(), id.clone());
             }
 
-            // FIX-8: Use dispatch_response_for_language to exercise per-language
-            // dispatch routing in tests. The legacy dispatch_response always used
-            // "test" as the source language, which didn't exercise per-language
-            // notification/server-request routing.
-            if let Some(ref dispatcher) = *self.dispatcher.lock() {
-                dispatcher.dispatch_response_for_language(&self.language_id, &response);
-            }
+            let delay = *self.response_delay.lock();
+            let is_error = response.get("error").is_some();
 
-            if response.get("error").is_some() {
-                let msg = response["error"]["message"]
-                    .as_str()
-                    .unwrap_or("fake error");
-                return Err(LspError::Protocol(msg.to_owned()));
+            if let Some(delay) = delay {
+                let dispatcher = self.dispatcher.lock().clone();
+                let language_id = self.language_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if let Some(dispatcher) = dispatcher {
+                        dispatcher.dispatch_response_for_language(&language_id, &response);
+                    }
+                });
+            } else {
+                if let Some(ref dispatcher) = *self.dispatcher.lock() {
+                    dispatcher.dispatch_response_for_language(&self.language_id, &response);
+                }
+
+                if is_error {
+                    let msg = response["error"]["message"]
+                        .as_str()
+                        .unwrap_or("fake error");
+                    return Err(LspError::Protocol(msg.to_owned()));
+                }
             }
             Ok(())
         } else {

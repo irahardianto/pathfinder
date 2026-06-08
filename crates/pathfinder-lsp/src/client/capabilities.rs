@@ -52,6 +52,12 @@ pub struct DetectedCapabilities {
     /// Server supports `textDocument/definition` (`get_definition`,
     /// `read_with_deep_context`). Falls back to Tree-sitter heuristic if false.
     pub definition_provider: bool,
+    /// Server supports `textDocument/references` (`find_callers_callees`).
+    /// Falls back to Tree-sitter heuristic if false.
+    pub references_provider: bool,
+    /// Server supports `textDocument/implementation` (`goto_implementation`).
+    /// Falls back to Tree-sitter heuristic if false.
+    pub implementation_provider: bool,
     /// Server supports `callHierarchy/incomingCalls` + `outgoingCalls`
     /// (`find_callers_callees`). Falls back to Tree-sitter scan for outgoing only.
     pub call_hierarchy_provider: bool,
@@ -85,6 +91,10 @@ pub struct DetectedCapabilities {
     /// that was statically advertised by the server.
     #[serde(skip)]
     pub(crate) static_definition_provider: bool,
+    #[serde(skip)]
+    pub(crate) static_references_provider: bool,
+    #[serde(skip)]
+    pub(crate) static_implementation_provider: bool,
     #[serde(skip)]
     pub(crate) static_call_hierarchy_provider: bool,
     #[serde(skip)]
@@ -124,10 +134,12 @@ impl DetectedCapabilities {
         // Push diagnostics: check if textDocumentSync is advertised.
         // Most LSPs that support document sync also push diagnostics.
         // Don't check this if pull is available (pull is preferred).
+        // Per LSP spec, textDocumentSync: false means "no sync".
         let has_push = if has_pull {
             false
         } else {
-            caps.get("textDocumentSync").is_some_and(|v| !v.is_null())
+            caps.get("textDocumentSync")
+                .is_some_and(|v| v.as_bool().unwrap_or_else(|| !v.is_null()))
         };
 
         let diagnostics_strategy = if has_pull {
@@ -146,11 +158,15 @@ impl DetectedCapabilities {
             .map(ToOwned::to_owned);
 
         let definition_provider = is_cap("definitionProvider");
+        let references_provider = is_cap("referencesProvider");
+        let implementation_provider = is_cap("implementationProvider");
         let call_hierarchy_provider = is_cap("callHierarchyProvider");
         let formatting_provider = is_cap("documentFormattingProvider");
 
         Self {
             definition_provider,
+            references_provider,
+            implementation_provider,
             call_hierarchy_provider,
             formatting_provider,
             diagnostics_strategy,
@@ -160,6 +176,8 @@ impl DetectedCapabilities {
             dynamic_registrations: std::collections::HashMap::new(),
             // M-7: Snapshot static capabilities for safe unregistration.
             static_definition_provider: definition_provider,
+            static_references_provider: references_provider,
+            static_implementation_provider: implementation_provider,
             static_call_hierarchy_provider: call_hierarchy_provider,
             static_formatting_provider: formatting_provider,
             static_diagnostics_strategy: diagnostics_strategy,
@@ -206,6 +224,14 @@ impl DetectedCapabilities {
             }
             "textDocument/definition" => {
                 self.definition_provider = true;
+                true
+            }
+            "textDocument/references" => {
+                self.references_provider = true;
+                true
+            }
+            "textDocument/implementation" => {
+                self.implementation_provider = true;
                 true
             }
             "callHierarchy/incomingCalls"
@@ -258,12 +284,18 @@ impl DetectedCapabilities {
                 if !has_other_diag
                     && !matches!(self.static_diagnostics_strategy, DiagnosticsStrategy::Pull)
                 {
-                    self.diagnostics_strategy = DiagnosticsStrategy::None;
+                    self.diagnostics_strategy = self.static_diagnostics_strategy;
                     self.workspace_diagnostic_provider = false;
                 }
             }
             "textDocument/definition" if !self.static_definition_provider => {
                 self.definition_provider = false;
+            }
+            "textDocument/references" if !self.static_references_provider => {
+                self.references_provider = false;
+            }
+            "textDocument/implementation" if !self.static_implementation_provider => {
+                self.implementation_provider = false;
             }
             "callHierarchy/incomingCalls"
             | "callHierarchy/outgoingCalls"
@@ -631,5 +663,227 @@ mod tests {
             !changed,
             "re-applying same registration id must be idempotent (no change)"
         );
+    }
+
+    #[test]
+    fn test_from_response_json_definition_provider_object() {
+        let response = json!({
+            "capabilities": {
+                "definitionProvider": { "workDoneProgress": false }
+            }
+        });
+        let detected = DetectedCapabilities::from_response_json(&response);
+        assert!(
+            detected.definition_provider,
+            "object form definitionProvider should be treated as true"
+        );
+    }
+
+    #[test]
+    fn test_from_response_json_all_capabilities_enabled() {
+        let response = json!({
+            "capabilities": {
+                "definitionProvider": true,
+                "callHierarchyProvider": true,
+                "documentFormattingProvider": true,
+                "diagnosticProvider": {
+                    "interFileDependencies": true,
+                    "workspaceDiagnostics": true
+                }
+            },
+            "serverInfo": { "name": "test-server" }
+        });
+        let detected = DetectedCapabilities::from_response_json(&response);
+        assert!(detected.definition_provider);
+        assert!(detected.call_hierarchy_provider);
+        assert!(detected.formatting_provider);
+        assert!(matches!(
+            detected.diagnostics_strategy,
+            DiagnosticsStrategy::Pull
+        ));
+        assert!(detected.workspace_diagnostic_provider);
+        assert_eq!(detected.server_name.as_deref(), Some("test-server"));
+    }
+
+    #[test]
+    fn test_from_response_json_null_capabilities() {
+        let response = json!({ "capabilities": { "definitionProvider": null } });
+        let detected = DetectedCapabilities::from_response_json(&response);
+        assert!(
+            !detected.definition_provider,
+            "null definitionProvider should be false"
+        );
+    }
+
+    #[test]
+    fn test_apply_unregistration_reverts_definition_provider_dynamic_only() {
+        let mut caps = DetectedCapabilities::default();
+        caps.apply_registration("textDocument/definition", "reg-def-001", &json!({}));
+        assert!(caps.definition_provider);
+
+        caps.apply_unregistration("reg-def-001");
+        assert!(
+            !caps.definition_provider,
+            "dynamic definition registration should be reverted"
+        );
+    }
+
+    #[test]
+    fn test_apply_unregistration_does_not_revert_static_capability() {
+        let mut caps = DetectedCapabilities {
+            definition_provider: true,
+            static_definition_provider: true,
+            ..Default::default()
+        };
+        caps.apply_registration("textDocument/definition", "reg-static-001", &json!({}));
+        assert!(caps.definition_provider);
+
+        caps.apply_unregistration("reg-static-001");
+        assert!(
+            caps.definition_provider,
+            "should NOT revert static definition_provider"
+        );
+    }
+
+    #[test]
+    fn test_apply_unregistration_reverts_call_hierarchy_dynamic_only() {
+        let mut caps = DetectedCapabilities::default();
+        caps.apply_registration("callHierarchy/incomingCalls", "reg-ch-001", &json!({}));
+        assert!(caps.call_hierarchy_provider);
+
+        caps.apply_unregistration("reg-ch-001");
+        assert!(
+            !caps.call_hierarchy_provider,
+            "dynamic call hierarchy registration should be reverted"
+        );
+    }
+
+    #[test]
+    fn test_apply_unregistration_reverts_formatting_dynamic_only() {
+        let mut caps = DetectedCapabilities::default();
+        caps.apply_registration("textDocument/formatting", "reg-fmt-001", &json!({}));
+        assert!(caps.formatting_provider);
+
+        caps.apply_unregistration("reg-fmt-001");
+        assert!(
+            !caps.formatting_provider,
+            "dynamic formatting registration should be reverted"
+        );
+    }
+
+    #[test]
+    fn test_multiple_dynamic_registrations_same_method() {
+        let mut caps = DetectedCapabilities::default();
+        caps.apply_registration("textDocument/diagnostic", "reg-d1", &json!({}));
+        caps.apply_registration("textDocument/diagnostic", "reg-d2", &json!({}));
+
+        caps.apply_unregistration("reg-d1");
+        assert!(
+            matches!(caps.diagnostics_strategy, DiagnosticsStrategy::Pull),
+            "should remain Pull because reg-d2 still active"
+        );
+
+        caps.apply_unregistration("reg-d2");
+        assert!(
+            matches!(caps.diagnostics_strategy, DiagnosticsStrategy::None),
+            "should revert to None when all registrations removed (static was None)"
+        );
+    }
+
+    #[test]
+    fn test_apply_unregistration_restore_static_push_after_dynamic_pull() {
+        let response = json!({
+            "capabilities": {
+                "textDocumentSync": 1
+            }
+        });
+        let mut caps = DetectedCapabilities::from_response_json(&response);
+        assert!(
+            matches!(caps.static_diagnostics_strategy, DiagnosticsStrategy::Push),
+            "textDocumentSync=1 means static Push diagnostics"
+        );
+        assert!(
+            matches!(caps.diagnostics_strategy, DiagnosticsStrategy::Push),
+            "diagnostics_strategy starts as Push"
+        );
+
+        caps.apply_registration(
+            "textDocument/diagnostic",
+            "reg-pull",
+            &json!({ "workspaceDiagnostics": true }),
+        );
+        assert!(
+            matches!(caps.diagnostics_strategy, DiagnosticsStrategy::Pull),
+            "dynamic registration should set Pull"
+        );
+        assert!(caps.workspace_diagnostic_provider);
+
+        caps.apply_unregistration("reg-pull");
+        assert!(
+            matches!(caps.diagnostics_strategy, DiagnosticsStrategy::Push),
+            "should revert to static Push after unregistering dynamic Pull"
+        );
+        assert!(
+            !caps.workspace_diagnostic_provider,
+            "workspace_diagnostic_provider should be cleared on unregistration"
+        );
+    }
+
+    #[test]
+    fn test_text_document_sync_false_does_not_enable_push_diagnostics() {
+        let response = json!({
+            "capabilities": {
+                "textDocumentSync": false,
+                "definitionProvider": true
+            }
+        });
+        let detected = DetectedCapabilities::from_response_json(&response);
+        assert!(
+            matches!(detected.diagnostics_strategy, DiagnosticsStrategy::None),
+            "textDocumentSync: false should NOT enable Push diagnostics (per LSP spec)"
+        );
+        assert!(matches!(
+            detected.static_diagnostics_strategy,
+            DiagnosticsStrategy::None
+        ));
+    }
+
+    #[test]
+    fn test_from_response_json_static_capabilities_snapshot() {
+        let response = json!({
+            "capabilities": {
+                "definitionProvider": true,
+                "callHierarchyProvider": true,
+                "documentFormattingProvider": false,
+                "textDocumentSync": 1
+            }
+        });
+        let detected = DetectedCapabilities::from_response_json(&response);
+        assert!(detected.static_definition_provider);
+        assert!(detected.static_call_hierarchy_provider);
+        assert!(!detected.static_formatting_provider);
+        assert!(matches!(
+            detected.static_diagnostics_strategy,
+            DiagnosticsStrategy::Push
+        ));
+    }
+
+    #[test]
+    fn test_diagnostics_strategy_default_is_none() {
+        assert!(matches!(
+            DiagnosticsStrategy::default(),
+            DiagnosticsStrategy::None
+        ));
+    }
+
+    #[test]
+    fn test_detected_capabilities_default() {
+        let caps = DetectedCapabilities::default();
+        assert!(!caps.definition_provider);
+        assert!(!caps.call_hierarchy_provider);
+        assert!(!caps.formatting_provider);
+        assert!(!caps.workspace_diagnostic_provider);
+        assert!(caps.server_name.is_none());
+        assert!(caps.dynamic_registrations.is_empty());
     }
 }

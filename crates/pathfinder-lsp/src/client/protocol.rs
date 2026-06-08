@@ -268,6 +268,11 @@ impl RequestDispatcher {
         self.pending.remove(&id);
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Cancel all pending requests with `LspError::ConnectionLost`.
     ///
     /// Called during shutdown to unblock all waiting callers across all languages.

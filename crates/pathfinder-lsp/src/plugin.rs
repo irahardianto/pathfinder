@@ -631,4 +631,103 @@ mod tests {
         assert!(hint.contains("jdtls"));
         assert!(hint.contains("JDK 21"));
     }
+
+    #[test]
+    fn test_plugin_for_language_returns_correct_type() {
+        let rust_plugin = plugin_for_language("rust").unwrap();
+        assert!(rust_plugin.file_extensions().contains(&"rs"));
+        assert!(!rust_plugin.file_extensions().contains(&"go"));
+    }
+
+    #[test]
+    fn test_plugin_for_extension_returns_correct_type() {
+        let py_plugin = plugin_for_extension("py").unwrap();
+        assert_eq!(py_plugin.language_id(), "python");
+
+        let stub_plugin = plugin_for_extension("pyi").unwrap();
+        assert_eq!(stub_plugin.language_id(), "python");
+    }
+
+    #[test]
+    fn test_all_plugins_marker_files_non_empty() {
+        for plugin in all_plugins() {
+            assert!(
+                !plugin.marker_files().is_empty(),
+                "{} should have at least one marker file",
+                plugin.language_id()
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_plugins_file_extensions_non_empty() {
+        for plugin in all_plugins() {
+            assert!(
+                !plugin.file_extensions().is_empty(),
+                "{} should have at least one file extension",
+                plugin.language_id()
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_plugins_lsp_candidates_non_empty() {
+        for plugin in all_plugins() {
+            assert!(
+                !plugin.lsp_candidates().is_empty(),
+                "{} should have at least one LSP candidate",
+                plugin.language_id()
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_plugins_install_hints_non_empty() {
+        for plugin in all_plugins() {
+            assert!(
+                !plugin.install_hint().is_empty(),
+                "{} should have non-empty install hint",
+                plugin.language_id()
+            );
+        }
+    }
+
+    #[test]
+    fn test_lsp_candidate_binary_names_non_empty() {
+        for plugin in all_plugins() {
+            for candidate in plugin.lsp_candidates() {
+                assert!(
+                    !candidate.binary.is_empty(),
+                    "{} should have non-empty binary name",
+                    plugin.language_id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_typescript_plugin_includes_vue_extension() {
+        let exts = TypeScriptPlugin.file_extensions();
+        assert!(
+            exts.contains(&"vue"),
+            "TypeScript plugin should handle .vue files"
+        );
+    }
+
+    #[test]
+    fn test_python_plugin_multiple_candidates() {
+        let candidates = PythonPlugin.lsp_candidates();
+        assert!(
+            candidates.len() >= 5,
+            "Python should have at least 5 LSP candidates"
+        );
+    }
+
+    #[test]
+    fn test_java_marker_search_depth_supports_monorepo() {
+        assert!(
+            JavaPlugin.marker_search_depth() >= 2,
+            "Java should search at least depth 2 for monorepo support"
+        );
+    }
 }

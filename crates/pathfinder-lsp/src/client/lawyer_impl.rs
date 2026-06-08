@@ -208,11 +208,10 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        // M-10: references uses the same definitionProvider capability.
         let caps = self.capabilities_for(language_id)?;
-        if !caps.definition_provider {
+        if !caps.references_provider {
             return Err(LspError::UnsupportedCapability {
-                capability: "definitionProvider (required for references)".to_owned(),
+                capability: "referencesProvider".to_owned(),
             });
         }
 
@@ -272,11 +271,10 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        // M-10: implementation uses definitionProvider capability.
         let caps = self.capabilities_for(language_id)?;
-        if !caps.definition_provider {
+        if !caps.implementation_provider {
             return Err(LspError::UnsupportedCapability {
-                capability: "definitionProvider (required for goto_implementation)".to_owned(),
+                capability: "implementationProvider".to_owned(),
             });
         }
 
@@ -389,6 +387,8 @@ mod tests {
                 let mut caps = state.live_capabilities.write();
                 caps.call_hierarchy_provider = true;
                 caps.definition_provider = true;
+                caps.references_provider = true;
+                caps.implementation_provider = true;
             }
         }
 

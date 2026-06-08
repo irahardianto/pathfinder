@@ -35,9 +35,34 @@ impl Drop for DocumentGuard {
         let client = self.client.clone();
         let workspace = self.workspace_root.clone();
         let path = self.file_path.clone();
-        tokio::spawn(async move {
-            let _ = client.did_close(&workspace, &path).await;
-        });
+
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let Some(language_id) = language_id_for_extension(ext) else {
+            return;
+        };
+
+        let Ok(file_uri) = Url::from_file_path(workspace.join(&path)) else {
+            return;
+        };
+
+        client.doc_versions.remove(file_uri.as_str());
+
+        let has_running = client
+            .processes
+            .get(language_id)
+            .is_some_and(|e| matches!(e.value(), ProcessEntry::Running(_)));
+
+        if has_running {
+            let params = json!({
+                "textDocument": { "uri": file_uri.as_str() }
+            });
+            let language_id = language_id.to_owned();
+            tokio::spawn(async move {
+                let _ = client
+                    .notify(&language_id, "textDocument/didClose", params)
+                    .await;
+            });
+        }
     }
 }
 
@@ -106,6 +131,7 @@ impl LspClient {
         Ok(())
     }
 
+    #[allow(dead_code)] // Used by tests and available as pub(crate) API
     pub(crate) async fn did_close(
         &self,
         workspace_root: &std::path::Path,

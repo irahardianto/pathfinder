@@ -589,6 +589,8 @@ mod tests {
             indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
             live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities {
                 definition_provider: true,
+                references_provider: true,
+                implementation_provider: true,
                 ..DetectedCapabilities::default()
             })),
             in_coexistence_mode: false,
