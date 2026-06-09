@@ -195,7 +195,17 @@ fn validation_status_from_parts(
         };
     }
 
-    let navigation_ready = Some(supports_definition);
+    // Grace period for dynamic registration: jdtls and similar LSPs register
+    // capabilities dynamically *after* initialize (they don't statically
+    // advertise definitionProvider in the handshake). Under 5s uptime with
+    // definition_provider=false likely means registrations haven't arrived yet —
+    // return None (indeterminate) instead of Some(false) to avoid prematurely
+    // reporting warming_up and causing agents to add unnecessary retry delays.
+    let navigation_ready = if !supports_definition && uptime_seconds < 5 {
+        None // Indeterminate — too early to tell, registrations may be in flight
+    } else {
+        Some(supports_definition)
+    };
 
     match diagnostics_strategy {
         DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
@@ -497,6 +507,80 @@ mod tests {
         assert_eq!(status.navigation_ready, None);
         assert_eq!(status.indexing_complete, None);
         assert!(!status.validation);
+    }
+
+    #[test]
+    fn test_navigation_ready_none_during_grace_period_without_definition() {
+        // jdtls scenario: LSP just started (2s), dynamic registration hasn't
+        // arrived yet so supports_definition=false. Should return None
+        // (indeterminate) instead of Some(false) to avoid premature warming_up.
+        let status = validation_status_from_parts(
+            "jdtls",
+            true,
+            DiagnosticsStrategy::None,
+            false, // no definition yet — dynamic registration in flight
+            false,
+            false,
+            false,
+            2,    // under 5s — grace period active
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            status.navigation_ready, None,
+            "under 5s with no definition should be indeterminate, not false"
+        );
+    }
+
+    #[test]
+    fn test_navigation_ready_false_after_grace_period() {
+        // After 5s, if definition is still not supported, it's conclusive.
+        let status = validation_status_from_parts(
+            "jdtls",
+            true,
+            DiagnosticsStrategy::None,
+            false, // still no definition after grace period
+            false,
+            false,
+            false,
+            5,    // at 5s — grace period over
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            status.navigation_ready,
+            Some(false),
+            "at/after 5s with no definition should be conclusively false"
+        );
+    }
+
+    #[test]
+    fn test_navigation_ready_true_during_grace_period_with_definition() {
+        // If supports_definition is true (even under 5s), return Some(true).
+        // Grace period only applies when definition is false.
+        let status = validation_status_from_parts(
+            "gopls",
+            true,
+            DiagnosticsStrategy::Push,
+            true, // definition available
+            true,
+            false,
+            false,
+            1,    // under 5s
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            status.navigation_ready,
+            Some(true),
+            "definition available during grace period should be true"
+        );
     }
 
     // ── WP-1: LspClient Test Harness ──────────────────────────────
