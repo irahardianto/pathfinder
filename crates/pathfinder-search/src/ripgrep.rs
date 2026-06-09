@@ -1584,8 +1584,12 @@ mod batch03c_tests {
             ..Default::default()
         };
         let result = scout.search(&params).await.expect("search should succeed");
-        assert_eq!(result.total_matches, 2, "multi-pattern regex should match both alternatives");
-        let files: std::collections::HashSet<_> = result.matches.iter().map(|m| m.file.clone()).collect();
+        assert_eq!(
+            result.total_matches, 2,
+            "multi-pattern regex should match both alternatives"
+        );
+        let files: std::collections::HashSet<_> =
+            result.matches.iter().map(|m| m.file.clone()).collect();
         assert!(files.iter().any(|f| f.contains("alpha")));
         assert!(files.iter().any(|f| f.contains("beta")));
     }
@@ -1683,8 +1687,16 @@ mod batch03c_tests {
         };
         let result = scout.search(&params).await.expect("search should succeed");
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].context_before.len(), 0, "no before context at start of file");
-        assert_eq!(result.matches[0].context_after.len(), 2, "only 2 lines exist after match");
+        assert_eq!(
+            result.matches[0].context_before.len(),
+            0,
+            "no before context at start of file"
+        );
+        assert_eq!(
+            result.matches[0].context_after.len(),
+            2,
+            "only 2 lines exist after match"
+        );
     }
 
     // ── Gitignore toggle ──────────────────────────────────────────────────
@@ -1710,7 +1722,10 @@ mod batch03c_tests {
         let result = scout.search(&params).await.expect("search should succeed");
         assert_eq!(result.total_matches, 1, "gitignored file must be excluded");
         assert_eq!(result.matches[0].file, "main.rs");
-        assert_eq!(result.gitignored_skipped, 1, "gitignored_skipped should count the ignored file");
+        assert_eq!(
+            result.gitignored_skipped, 1,
+            "gitignored_skipped should count the ignored file"
+        );
     }
 
     // ── Result deduplication ──────────────────────────────────────────────
@@ -1726,7 +1741,10 @@ mod batch03c_tests {
             ..Default::default()
         };
         let result = scout.search(&params).await.expect("search should succeed");
-        assert_eq!(result.total_matches, 2, "two different lines must not be deduplicated");
+        assert_eq!(
+            result.total_matches, 2,
+            "two different lines must not be deduplicated"
+        );
     }
 
     #[tokio::test]
@@ -1763,7 +1781,11 @@ mod batch03c_tests {
         };
         let result = scout.search(&params).await.expect("search should succeed");
         assert_eq!(result.matches.len(), 10, "should cap at max_results=10");
-        assert!(result.total_matches >= 10, "total_matches must be at least 10: {}", result.total_matches);
+        assert!(
+            result.total_matches >= 10,
+            "total_matches must be at least 10: {}",
+            result.total_matches
+        );
         assert!(result.truncated, "must be marked truncated");
     }
 
@@ -1803,8 +1825,15 @@ mod batch03c_tests {
         let result = scout.search(&params).await.expect("search should succeed");
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.files_searched, 1, "only app.rs is searched");
-        assert!(result.files_in_scope >= 2, "files_in_scope must count both files: {}", result.files_in_scope);
-        assert!(result.binary_skipped >= 1, "logo.png must be counted as binary skipped");
+        assert!(
+            result.files_in_scope >= 2,
+            "files_in_scope must count both files: {}",
+            result.files_in_scope
+        );
+        assert!(
+            result.binary_skipped >= 1,
+            "logo.png must be counted as binary skipped"
+        );
     }
 
     // ── safe_truncate_bytes unit tests ────────────────────────────────────
@@ -1868,8 +1897,14 @@ mod batch03c_tests {
         let long = "a".repeat(1500);
         let long_bytes = format!("{long}\n");
         let result = decode_line(long_bytes.as_bytes());
-        assert!(result.ends_with("... [TRUNCATED]"), "long line must be truncated");
-        assert!(result.len() < 1050, "truncated result must be under 1050 chars");
+        assert!(
+            result.ends_with("... [TRUNCATED]"),
+            "long line must be truncated"
+        );
+        assert!(
+            result.len() < 1050,
+            "truncated result must be under 1050 chars"
+        );
     }
 
     #[test]

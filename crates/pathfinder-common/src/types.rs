@@ -963,7 +963,10 @@ mod tests {
     fn test_visibility_display_and_from_str() {
         let v_pub = Visibility::Public;
         assert_eq!(v_pub.to_string(), "public");
-        assert_eq!("public".parse::<Visibility>().expect("valid"), Visibility::Public);
+        assert_eq!(
+            "public".parse::<Visibility>().expect("valid"),
+            Visibility::Public
+        );
 
         let v_all = Visibility::All;
         assert_eq!(v_all.to_string(), "all");
@@ -986,7 +989,8 @@ mod tests {
         assert!(SemanticPath::parse("src/auth.ts::.").is_none());
 
         // Line 155: empty segment in symbol chain is skipped, but chain can still parse if other segments exist
-        let sp = SemanticPath::parse("src/auth.ts::a..b").expect("should parse a..b by skipping empty segment");
+        let sp = SemanticPath::parse("src/auth.ts::a..b")
+            .expect("should parse a..b by skipping empty segment");
         let chain = sp.symbol_chain.expect("should have symbol chain");
         assert_eq!(chain.segments.len(), 2);
         assert_eq!(chain.segments[0].name, "a");
