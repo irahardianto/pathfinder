@@ -140,6 +140,12 @@ fn is_workspace_file(file: &str) -> bool {
     if file.starts_with("std/")
         || file.starts_with("core/")
         || file.starts_with("alloc/")
+        || file.starts_with("library/std/")
+        || file.starts_with("library/core/")
+        || file.starts_with("library/alloc/")
+        || file.starts_with("library\\std\\")
+        || file.starts_with("library\\core\\")
+        || file.starts_with("library\\alloc\\")
         || file == "std"
         || file == "core"
         || file == "alloc"
@@ -1676,8 +1682,12 @@ def process():
         // Dependency directories are not workspace files
         assert!(!super::is_workspace_file("node_modules/lodash/index.js"));
         assert!(!super::is_workspace_file("node_modules\\lodash\\index.js"));
-        assert!(!super::is_workspace_file("vendor/github.com/pkg/errors/errors.go"));
-        assert!(!super::is_workspace_file("vendor\\github.com\\pkg\\errors\\errors.go"));
+        assert!(!super::is_workspace_file(
+            "vendor/github.com/pkg/errors/errors.go"
+        ));
+        assert!(!super::is_workspace_file(
+            "vendor\\github.com\\pkg\\errors\\errors.go"
+        ));
 
         // Rust stdlib paths are not workspace files
         assert!(!super::is_workspace_file("std/src/lib.rs"));
@@ -1686,6 +1696,12 @@ def process():
         assert!(!super::is_workspace_file("std"));
         assert!(!super::is_workspace_file("core"));
         assert!(!super::is_workspace_file("alloc"));
+        assert!(!super::is_workspace_file("library/std/src/path.rs"));
+        assert!(!super::is_workspace_file("library/core/src/lib.rs"));
+        assert!(!super::is_workspace_file("library/alloc/src/lib.rs"));
+        assert!(!super::is_workspace_file("library\\std\\src\\path.rs"));
+        assert!(!super::is_workspace_file("library\\core\\src\\lib.rs"));
+        assert!(!super::is_workspace_file("library\\alloc\\src\\lib.rs"));
 
         // Regular relative source files are workspace files
         assert!(super::is_workspace_file("src/main.rs"));
@@ -1699,25 +1715,33 @@ def process():
     #[tokio::test]
     async fn test_enrich_did_you_mean_all_cases() {
         use super::test_helpers::{make_server_with_lawyer, make_temp_workspace};
-        use pathfinder_common::types::WorkspaceRoot;
         use pathfinder_common::config::PathfinderConfig;
         use pathfinder_common::sandbox::Sandbox;
+        use pathfinder_common::types::WorkspaceRoot;
         use pathfinder_treesitter::mock::MockSurgeon;
 
         let mock_surgeon = std::sync::Arc::new(MockSurgeon::new());
         let mock_lawyer = std::sync::Arc::new(pathfinder_lsp::MockLawyer::default());
-        let (server, _temp_dir) = make_server_with_lawyer(mock_surgeon.clone(), mock_lawyer.clone());
+        let (server, _temp_dir) =
+            make_server_with_lawyer(mock_surgeon.clone(), mock_lawyer.clone());
 
         // Case 1: Separator confusion correction: corrected path not already in suggestions
         let original_suggestions = vec!["src/auth.rs::AuthService".to_string()];
-        let enriched = server.enrich_did_you_mean("src/auth.rs::AuthService::login", original_suggestions).await;
+        let enriched = server
+            .enrich_did_you_mean("src/auth.rs::AuthService::login", original_suggestions)
+            .await;
         assert_eq!(enriched.len(), 2);
         assert_eq!(enriched[0], "src/auth.rs::AuthService.login");
         assert_eq!(enriched[1], "src/auth.rs::AuthService");
 
         // Case 2: Separator confusion correction: corrected path IS already in suggestions (should not duplicate)
-        let original_suggestions = vec!["src/auth.rs::AuthService.login".to_string(), "src/auth.rs::AuthService".to_string()];
-        let enriched = server.enrich_did_you_mean("src/auth.rs::AuthService::login", original_suggestions).await;
+        let original_suggestions = vec![
+            "src/auth.rs::AuthService.login".to_string(),
+            "src/auth.rs::AuthService".to_string(),
+        ];
+        let enriched = server
+            .enrich_did_you_mean("src/auth.rs::AuthService::login", original_suggestions)
+            .await;
         assert_eq!(enriched.len(), 2);
         assert_eq!(enriched[0], "src/auth.rs::AuthService.login");
         assert_eq!(enriched[1], "src/auth.rs::AuthService");
@@ -1749,7 +1773,11 @@ def process():
         // Enclosing symbol calls: we need to push Ok(None) to mock_surgeon enclosing_symbol_results.
         // Let's push 100 times to be safe since find_symbol_impl will run parallel searches.
         for _ in 0..100 {
-            mock_surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+            mock_surgeon
+                .enclosing_symbol_results
+                .lock()
+                .unwrap()
+                .push(Ok(None));
         }
 
         let ws_dir = make_temp_workspace();
@@ -1765,11 +1793,15 @@ def process():
             mock_lawyer.clone(),
         );
 
-        let enriched = server_with_scout.enrich_did_you_mean("src/auth.rs::login", vec![]).await;
+        let enriched = server_with_scout
+            .enrich_did_you_mean("src/auth.rs::login", vec![])
+            .await;
         assert!(enriched.contains(&"src/auth.rs::login".to_string()));
 
         // Case 4: Empty suggestions -> calls cross-file search find_symbol_impl which returns error (path separator in symbol name)
-        let enriched_err = server_with_scout.enrich_did_you_mean("src/auth.rs::login/error", vec![]).await;
+        let enriched_err = server_with_scout
+            .enrich_did_you_mean("src/auth.rs::login/error", vec![])
+            .await;
         assert!(enriched_err.is_empty());
     }
 
@@ -1780,44 +1812,70 @@ def process():
 
         let mock_surgeon = std::sync::Arc::new(MockSurgeon::new());
         let mock_lawyer = std::sync::Arc::new(pathfinder_lsp::MockLawyer::default());
-        let (server, _temp_dir) = make_server_with_lawyer(mock_surgeon.clone(), mock_lawyer.clone());
+        let (server, _temp_dir) =
+            make_server_with_lawyer(mock_surgeon.clone(), mock_lawyer.clone());
 
         // Case 1: Surgeon returns Ok(scope) -> read_symbol_scope_enriched returns Ok(scope)
         let scope = make_scope();
-        mock_surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(scope.clone()));
-        let semantic_path = pathfinder_common::types::SemanticPath::parse("src/auth.rs::login").unwrap();
-        let res = server.read_symbol_scope_enriched(&semantic_path, "src/auth.rs::login").await;
+        mock_surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(scope.clone()));
+        let semantic_path =
+            pathfinder_common::types::SemanticPath::parse("src/auth.rs::login").unwrap();
+        let res = server
+            .read_symbol_scope_enriched(&semantic_path, "src/auth.rs::login")
+            .await;
         assert!(res.is_ok());
         assert_eq!(res.unwrap().content, scope.content);
 
         // Case 2: Surgeon returns SymbolNotFound error with original suggestions,
         // and semantic path has NO double colons in the symbol chain.
         // It should enrich did_you_mean and return Err(SymbolNotFound).
-        mock_surgeon.read_symbol_scope_results.lock().unwrap().push(Err(
-            pathfinder_treesitter::SurgeonError::SymbolNotFound {
+        mock_surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Err(pathfinder_treesitter::SurgeonError::SymbolNotFound {
                 path: "src/auth.rs::login".to_owned(),
                 did_you_mean: vec![],
-            }
-        ));
-        let res = server.read_symbol_scope_enriched(&semantic_path, "src/auth.rs::login").await;
+            }));
+        let res = server
+            .read_symbol_scope_enriched(&semantic_path, "src/auth.rs::login")
+            .await;
         assert!(res.is_err());
         let err = res.unwrap_err();
-        assert_eq!(err.message, "SYMBOL_NOT_FOUND");
+        let data = err.data.as_ref().expect("error should contain JSON data");
+        assert_eq!(data["error"], "SYMBOL_NOT_FOUND");
 
         // Case 3: Surgeon returns SymbolNotFound error, and semantic path HAS double colons in symbol chain.
         // First try fails with SymbolNotFound.
         // Auto-retry corrects the path (:: -> .) and calls surgeon again, which succeeds.
         let corrected_scope = make_scope();
-        mock_surgeon.read_symbol_scope_results.lock().unwrap().push(Err(
-            pathfinder_treesitter::SurgeonError::SymbolNotFound {
+        mock_surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Err(pathfinder_treesitter::SurgeonError::SymbolNotFound {
                 path: "src/auth.rs::AuthService::login".to_owned(),
                 did_you_mean: vec![],
-            }
-        ));
-        mock_surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(corrected_scope.clone()));
+            }));
+        mock_surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(corrected_scope.clone()));
 
-        let semantic_path_with_confusion = pathfinder_common::types::SemanticPath::parse("src/auth.rs::AuthService::login").unwrap();
-        let res = server.read_symbol_scope_enriched(&semantic_path_with_confusion, "src/auth.rs::AuthService::login").await;
+        let semantic_path_with_confusion =
+            pathfinder_common::types::SemanticPath::parse("src/auth.rs::AuthService::login")
+                .unwrap();
+        let res = server
+            .read_symbol_scope_enriched(
+                &semantic_path_with_confusion,
+                "src/auth.rs::AuthService::login",
+            )
+            .await;
         assert!(res.is_ok());
         assert_eq!(res.unwrap().content, corrected_scope.content);
     }
