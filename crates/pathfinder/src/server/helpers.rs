@@ -6,6 +6,7 @@
 use pathfinder_common::error::PathfinderError;
 use pathfinder_common::types::SemanticPath;
 use rmcp::model::{ErrorCode, ErrorData};
+use std::fmt::Write;
 use std::path::Path;
 
 /// Spec 5.1: Convert a `Duration::as_millis()` (u128) to u64 for JSON responses.
@@ -22,7 +23,8 @@ pub fn millis_to_u64(millis: u128) -> u64 {
 /// inspect. The structured error JSON is embedded in the `data` field so
 /// agents can parse `error` (code) and `message` without extra round-trips.
 pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
-    let data = match serde_json::to_value(err.to_error_response()) {
+    let err_resp = err.to_error_response();
+    let data = match serde_json::to_value(&err_resp) {
         Ok(v) => Some(v),
         Err(e) => {
             tracing::warn!(
@@ -63,7 +65,50 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
         }
     };
 
-    ErrorData::new(error_code, err.error_code(), data)
+    let mut detailed_message = format!("{}: {}", err_resp.error, err_resp.message);
+    if let Some(ref hint) = err_resp.hint {
+        let _ = write!(detailed_message, " Hint: {hint}");
+    }
+
+    // Include did_you_mean suggestions if present
+    if let Some(did_you_mean) = err_resp.details.get("did_you_mean") {
+        if let Some(arr) = did_you_mean.as_array() {
+            if !arr.is_empty() {
+                let suggestions: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                    .collect();
+                if !suggestions.is_empty() {
+                    let _ = write!(
+                        detailed_message,
+                        " Did you mean: {}?",
+                        suggestions.join(", ")
+                    );
+                }
+            }
+        }
+    }
+
+    // Include matches if present (for AmbiguousSymbol)
+    if let Some(matches) = err_resp.details.get("matches") {
+        if let Some(arr) = matches.as_array() {
+            if !arr.is_empty() {
+                let match_list: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                    .collect();
+                if !match_list.is_empty() {
+                    let _ = write!(
+                        detailed_message,
+                        " Matches found: {}",
+                        match_list.join(", ")
+                    );
+                }
+            }
+        }
+    }
+
+    ErrorData::new(error_code, detailed_message, data)
 }
 
 /// Convert a `SurgeonError` into a `PathfinderError` and then to an [`ErrorData`].
@@ -516,5 +561,20 @@ mod tests {
         // The path might be nested differently depending on the error response structure
         // Just verify the structure exists
         assert!(data.is_object());
+    }
+
+    #[test]
+    fn test_pathfinder_to_error_data_message_formatting() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/auth.ts::login".into(),
+            did_you_mean: vec!["logout".to_owned(), "log_in".to_owned()],
+            retry_after_seconds: Some(5),
+        };
+        let error_data = pathfinder_to_error_data(&err);
+
+        // Assert that the message has the detailed info
+        assert!(error_data.message.contains("SYMBOL_NOT_FOUND"));
+        assert!(error_data.message.contains("Did you mean: logout, log_in?"));
+        assert!(error_data.message.contains("Hint:"));
     }
 }
