@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0](https://github.com/irahardianto/pathfinder/compare/v0.13.2...v0.14.0) - 2026-06-09
+
+### Added
+
+- *(references)* implement grep fallback for find_all_references false negatives
+- *(impact)* implement grep fallback and test coverage extraction for find_callers_callees
+- *(health)* surface call_hierarchy_verified from live probe in lsp_health
+- *(server)* add deserialize_params! macro for structured deserialization errors on all 13 tools
+- *(types)* add 'path' alias for 'filepath' params + call_hierarchy_verified field
+- *(treesitter)* cap native HTML element depth in Vue template AST to depth < 3
+
+### Fixed
+
+- resolve clippy warnings for doc markdown and case-sensitive extension comparison
+- *(navigation)* expand Java probe candidate filenames and search depth
+- *(overview)* correct line count calculation and embed source snippet for small symbols
+- *(navigation)* filter Rust stdlib sysroot paths in is_workspace_file
+- *(helpers)* embed full error metadata into ErrorData message string
+- *(search)* replace buffer_unordered with buffered for ordered enrichment
+- *(lsp)* prevent duplicate didOpen and multiple didClose protocol violations
+- *(lsp)* introduce client startup grace period for dynamic capability registration
+
+### Other
+
+- *(common,lsp,server)* BATCH-05 add pathfinder-common types, plugin, and server types coverage
+- *(navigation)* BATCH-04 add navigation tool coverage + fix degraded reason handling
+- minor formatting and doc cleanup in common types and ripgrep
+- run cargo fmt --all
+- *(lsp-client)* fix cargo fmt violations in lifecycle.rs tests
+- *(lsp-client)* fix bugs and add coverage for idle timeout, error paths, and DI chain
+- *(treesitter,search)* BATCH-03 add comprehensive repo_map and ripgrep coverage
+
 ## [0.13.2](https://github.com/irahardianto/pathfinder/compare/v0.13.1...v0.13.2) - 2026-06-09
 
 ### Added
