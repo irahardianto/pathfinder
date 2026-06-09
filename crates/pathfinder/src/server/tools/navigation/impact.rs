@@ -564,6 +564,53 @@ impl PathfinderServer {
                     .await;
                 outgoing = Some(outgoing_refs);
                 max_depth_reached = std::cmp::max(max_depth_reached, depth_out);
+
+                // Check for false negatives when BFS call hierarchy traversal returns 0 callers/callees
+                if incoming.as_ref().is_none_or(Vec::is_empty)
+                    && outgoing.as_ref().is_none_or(Vec::is_empty)
+                {
+                    let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                    let mut grep_incoming = None;
+                    let mut grep_outgoing = None;
+
+                    if let Some(refs) = self
+                        .grep_reference_fallback(
+                            &symbol_name,
+                            &semantic_path.file_path,
+                            &mut files_referenced,
+                        )
+                        .await
+                    {
+                        if !refs.is_empty() {
+                            grep_incoming = Some(refs);
+                        }
+                    }
+
+                    if let Some(refs) = self
+                        .grep_outgoing_fallback(
+                            &scope.content,
+                            &scope.language,
+                            &semantic_path.file_path,
+                            remaining_outgoing,
+                            project_only,
+                            &mut files_referenced,
+                        )
+                        .await
+                    {
+                        if !refs.is_empty() {
+                            grep_outgoing = Some(refs);
+                        }
+                    }
+
+                    degraded = true;
+                    degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                    if grep_incoming.is_some() {
+                        incoming = grep_incoming;
+                    }
+                    if grep_outgoing.is_some() {
+                        outgoing = grep_outgoing;
+                    }
+                }
             }
             Ok(_) => {
                 // LSP responded with empty items — but this is ambiguous:
@@ -585,12 +632,46 @@ impl PathfinderServer {
                     .await;
 
                 if matches!(probe, Ok(Some(_))) {
-                    // LSP is warm — definition resolved → confirmed zero callers/callees
+                    // LSP is warm — definition resolved. But let's check for false negatives (indexing incomplete, etc.)
+                    // by running grep fallback.
+                    let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                    let mut grep_incoming = None;
+                    let mut grep_outgoing = None;
+
+                    if let Some(refs) = self
+                        .grep_reference_fallback(
+                            &symbol_name,
+                            &semantic_path.file_path,
+                            &mut files_referenced,
+                        )
+                        .await
+                    {
+                        if !refs.is_empty() {
+                            grep_incoming = Some(refs);
+                        }
+                    }
+
+                    if let Some(refs) = self
+                        .grep_outgoing_fallback(
+                            &scope.content,
+                            &scope.language,
+                            &semantic_path.file_path,
+                            remaining_outgoing,
+                            project_only,
+                            &mut files_referenced,
+                        )
+                        .await
+                    {
+                        if !refs.is_empty() {
+                            grep_outgoing = Some(refs);
+                        }
+                    }
+
                     engines.push("lsp");
-                    degraded = false;
-                    degraded_reason = None;
-                    incoming = Some(Vec::new());
-                    outgoing = Some(Vec::new());
+                    degraded = true;
+                    degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                    incoming = grep_incoming.or(Some(Vec::new()));
+                    outgoing = grep_outgoing.or(Some(Vec::new()));
                 } else {
                     // LSP likely still warming up — empty call hierarchy is not reliable.
                     // Degrade so agents know to verify before acting on "zero references".
@@ -875,7 +956,28 @@ impl PathfinderServer {
             if symbol_name.is_empty() {
                 (None, Some("not_found".to_owned()))
             } else {
-                // Search for the symbol name in test files.
+                let mut test_refs = Vec::new();
+                let mut seen_test_positions = std::collections::HashSet::new();
+
+                // 1. Extract from incoming callers
+                if let Some(incoming_refs) = &incoming {
+                    for r in incoming_refs {
+                        if super::is_test_file(&r.file)
+                            && seen_test_positions.insert((r.file.clone(), r.line))
+                        {
+                            test_refs.push(crate::server::types::ImpactReference {
+                                semantic_path: r.semantic_path.clone(),
+                                file: r.file.clone(),
+                                line: r.line,
+                                snippet: r.snippet.clone(),
+                                direction: "test_coverage".to_owned(),
+                                depth: 0,
+                            });
+                        }
+                    }
+                }
+
+                // 2. Search for the symbol name in test files.
                 // Broad glob covers test, spec, __tests__ directories and
                 // files like foo_test.rs, foo.test.ts, foo_spec.rb, test_foo.py.
                 let search_params = pathfinder_search::SearchParams {
@@ -891,25 +993,27 @@ impl PathfinderServer {
 
                 match self.scout.search(&search_params).await {
                     Ok(results) => {
-                        let test_refs: Vec<crate::server::types::ImpactReference> = results
-                            .matches
-                            .into_iter()
-                            .filter(|m| super::is_test_file(&m.file))
-                            .take(20) // cap test references
-                            .map(|m| {
-                                let fallback_path = format!("{}:{}", m.file, m.line);
-                                crate::server::types::ImpactReference {
-                                    semantic_path: m
-                                        .enclosing_semantic_path
-                                        .unwrap_or(fallback_path),
-                                    file: m.file.clone(),
-                                    line: usize::try_from(m.line).unwrap_or(0),
-                                    snippet: m.content,
-                                    direction: "test_coverage".to_owned(),
-                                    depth: 0,
+                        for m in results.matches {
+                            if super::is_test_file(&m.file) {
+                                let line = usize::try_from(m.line).unwrap_or(0);
+                                if seen_test_positions.insert((m.file.clone(), line)) {
+                                    let fallback_path = format!("{}:{}", m.file, m.line);
+                                    test_refs.push(crate::server::types::ImpactReference {
+                                        semantic_path: m
+                                            .enclosing_semantic_path
+                                            .unwrap_or(fallback_path),
+                                        file: m.file,
+                                        line,
+                                        snippet: m.content,
+                                        direction: "test_coverage".to_owned(),
+                                        depth: 0,
+                                    });
                                 }
-                            })
-                            .collect();
+                            }
+                        }
+
+                        // Cap test references at 20 (just like original logic)
+                        test_refs.truncate(20);
 
                         if test_refs.is_empty() {
                             (None, Some("not_found".to_owned()))
@@ -923,7 +1027,12 @@ impl PathfinderServer {
                             error = %e,
                             "test coverage search failed"
                         );
-                        (None, Some("unknown_degraded".to_owned()))
+                        if test_refs.is_empty() {
+                            (None, Some("unknown_degraded".to_owned()))
+                        } else {
+                            test_refs.truncate(20);
+                            (Some(test_refs), Some("found".to_owned()))
+                        }
                     }
                 }
             }
@@ -1224,20 +1333,17 @@ mod tests {
         let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        // NOT degraded — LSP warm, genuinely zero callers confirmed
+        // DEGRADED — LSP warm but call hierarchy empty
         assert!(
-            !val.degraded,
-            "must not be degraded when probe confirms LSP is warm"
+            val.degraded,
+            "must be degraded when call hierarchy is empty"
         );
-        assert_eq!(val.degraded_reason, None);
-        let incoming = val
-            .incoming
-            .as_ref()
-            .expect("must be Some when confirmed-zero");
-        let outgoing = val
-            .outgoing
-            .as_ref()
-            .expect("must be Some when confirmed-zero");
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspWarmupGrepFallback)
+        );
+        let incoming = val.incoming.as_ref().expect("must be Some when degraded");
+        let outgoing = val.outgoing.as_ref().expect("must be Some when degraded");
         assert!(incoming.is_empty(), "confirmed zero callers");
         assert!(outgoing.is_empty(), "confirmed zero callees");
     }
@@ -1323,7 +1429,10 @@ mod tests {
         // Degraded due to LSP error — must report LspErrorGrepFallback, not NoLsp.
         // NoLsp would mislead agents into "install LSP" when the real cause is a transient error.
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
     }
 
     // ── find_callers_callees BFS depth limiting ────────────────────────────────
@@ -3017,6 +3126,11 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(make_scope()));
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
 
         let lawyer = Arc::new(MockLawyer::default());
 
@@ -3469,14 +3583,8 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         lawyer.push_prepare_call_hierarchy_result(Err(LspError::Protocol("LSP error".to_string())));
 
-        let server = PathfinderServer::with_all_engines(
-            ws,
-            config,
-            sandbox,
-            scout,
-            surgeon,
-            lawyer,
-        );
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
         let params = FindCallersCalleesParams {
             semantic_path: "src/auth.rs::login".to_owned(),
@@ -3490,7 +3598,10 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
         let incoming = val.incoming.as_ref().expect("must be Some from grep");
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0].file, "src/caller.rs");
@@ -3541,7 +3652,18 @@ mod tests {
             data: None,
         };
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
-        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "caller".into(),
+                kind: "function".into(),
+                detail: Some("fn caller()".into()),
+                file: "src/caller.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
         lawyer.push_outgoing_call_result(Ok(vec![]));
 
         let (server, _ws) = make_server_with_lawyer(surgeon.clone(), lawyer.clone());
@@ -3551,7 +3673,10 @@ mod tests {
             max_depth: 0,
             ..Default::default()
         };
-        let zero_depth_res = server.find_callers_callees_impl(zero_depth_params).await.expect("success");
+        let zero_depth_res = server
+            .find_callers_callees_impl(zero_depth_params)
+            .await
+            .expect("success");
         let zero_depth_val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(zero_depth_res.structured_content.unwrap()).unwrap();
         assert!(!zero_depth_val.degraded);
@@ -3562,7 +3687,18 @@ mod tests {
             .unwrap()
             .push(Ok(make_scope()));
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
-        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "caller".into(),
+                kind: "function".into(),
+                detail: Some("fn caller()".into()),
+                file: "src/caller.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
         lawyer.push_outgoing_call_result(Ok(vec![]));
 
         let large_depth_params = FindCallersCalleesParams {
@@ -3570,7 +3706,10 @@ mod tests {
             max_depth: 10,
             ..Default::default()
         };
-        let large_depth_res = server.find_callers_callees_impl(large_depth_params).await.expect("success");
+        let large_depth_res = server
+            .find_callers_callees_impl(large_depth_params)
+            .await
+            .expect("success");
         let large_depth_val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(large_depth_res.structured_content.unwrap()).unwrap();
         assert!(!large_depth_val.degraded);
@@ -3612,10 +3751,13 @@ mod tests {
             ..Default::default()
         };
 
-        let result = server.find_callers_callees_impl(params).await.expect("success");
+        let result = server
+            .find_callers_callees_impl(params)
+            .await
+            .expect("success");
         let text = result.content[0].as_text().expect("must be text");
         assert!(
-            text.text.contains("LSP confirmed: zero callers/callees for this symbol."),
+            text.text.contains("DEGRADED (lsp_warmup_grep_fallback)"),
             "Text output did not format zero results correctly: {}",
             text.text
         );
@@ -3678,7 +3820,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = server.find_callers_callees_impl(params).await.expect("success");
+        let result = server
+            .find_callers_callees_impl(params)
+            .await
+            .expect("success");
         let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
@@ -3727,7 +3872,10 @@ mod tests {
             ..Default::default()
         };
         let result_trait = server.find_callers_callees_impl(params_trait).await;
-        assert!(result_trait.is_ok(), "Trait impl symbol type should succeed");
+        assert!(
+            result_trait.is_ok(),
+            "Trait impl symbol type should succeed"
+        );
     }
 
     // ── Regression: degraded_reason must reflect actual failure cause ────────
@@ -3765,7 +3913,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = server.find_callers_callees_impl(params).await.expect("should succeed degraded");
+        let result = server
+            .find_callers_callees_impl(params)
+            .await
+            .expect("should succeed degraded");
         let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
@@ -3806,7 +3957,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = server.find_callers_callees_impl(params).await.expect("should succeed degraded");
+        let result = server
+            .find_callers_callees_impl(params)
+            .await
+            .expect("should succeed degraded");
         let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
