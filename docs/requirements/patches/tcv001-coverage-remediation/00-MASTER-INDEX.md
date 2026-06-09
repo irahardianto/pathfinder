@@ -21,6 +21,7 @@ This plan is file-grouped, batched by dependency chain and complexity. Each batc
 | Batch | Crate | Files | Est. Uncovered Lines | Complexity | Depends On |
 |---|---|---|---|---|---|
 | [BATCH-01](./BATCH-01-lsp-client-coverage.md) | pathfinder-lsp | lifecycle.rs, detect.rs, process.rs, capabilities.rs, plugin.rs | ~134 | HIGH | None (biggest offender, start here) |
+| [BATCH-01 Design Gaps](./BATCH-01-DESIGN-GAP-REMEDATION.md) | pathfinder-lsp | mod.rs, lifecycle.rs, fake_transport.rs | 0 (testability) | MEDIUM | BATCH-01 (DI improvement for integration testing) |
 | [BATCH-02](./BATCH-02-navigation-impact-coverage.md) | pathfinder | impact.rs | ~30 | HIGH | None (largest single navigation file) |
 | [BATCH-03](./BATCH-03-treesitter-search-coverage.md) | pathfinder-treesitter, pathfinder-search | repo_map.rs, ripgrep.rs | ~31 | MEDIUM | None |
 | [BATCH-04](./BATCH-04-navigation-remaining-coverage.md) | pathfinder | health.rs, references.rs, overview.rs, mod.rs | ~49 | MEDIUM | BATCH-02 (shared test helpers) |
