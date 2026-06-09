@@ -359,6 +359,113 @@ impl PathfinderServer {
                     .filter(|r| !impl_keys.contains(&(r.file.clone(), r.line, r.column)))
                     .collect();
 
+                if references.is_empty() && implementations.is_empty() {
+                    let probe = self
+                        .lawyer
+                        .goto_definition(
+                            self.workspace_root.path(),
+                            &semantic_path.file_path,
+                            u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
+                            u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
+                        )
+                        .await;
+
+                    if matches!(probe, Ok(Some(_))) {
+                        let symbol_name =
+                            super::last_symbol_name(&semantic_path).unwrap_or_default();
+                        let grep_result = if symbol_name.is_empty() {
+                            None
+                        } else {
+                            self.grep_references_fallback(
+                                &symbol_name,
+                                &semantic_path.file_path,
+                                &symbol_scope,
+                                &params,
+                            )
+                            .await
+                        };
+
+                        let offset = usize::try_from(params.offset).unwrap_or(0);
+                        let max_results = usize::try_from(params.max_results).unwrap_or(50).max(1);
+
+                        let (paginated_refs, files_referenced, total_references) =
+                            if let Some((refs, file_count)) = grep_result {
+                                let ref_count = refs.len();
+                                let paginated = refs
+                                    .into_iter()
+                                    .skip(offset)
+                                    .take(max_results)
+                                    .collect::<Vec<_>>();
+                                (paginated, file_count, ref_count)
+                            } else {
+                                (Vec::new(), 0, 0)
+                            };
+
+                        let truncated = total_references > offset.saturating_add(max_results);
+                        let paginated_len = paginated_refs.len();
+
+                        let summary = if total_references > 0 {
+                            format!("Found {total_references} references across {files_referenced} files (grep fallback).\n\n")
+                        } else {
+                            "LSP confirmed: zero references or implementations for this symbol.\n"
+                                .to_string()
+                        };
+
+                        let references_text = if paginated_refs.is_empty() {
+                            String::new()
+                        } else {
+                            let header = format!("References: {total_references} found\n");
+                            let items: Vec<_> = paginated_refs
+                                .iter()
+                                .map(|r| {
+                                    format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet)
+                                })
+                                .collect();
+                            format!("{}{}", header, items.join("\n"))
+                        };
+
+                        let pagination_note = if truncated {
+                            format!(
+                                "\n[showing {} of {} total — use offset={} for next page]\n",
+                                paginated_len,
+                                total_references,
+                                offset.saturating_add(max_results),
+                            )
+                        } else {
+                            String::new()
+                        };
+
+                        let metadata = crate::server::types::FindAllReferencesMetadata {
+                            references: Some(paginated_refs),
+                            total_references: Some(total_references),
+                            truncated,
+                            files_referenced,
+                            degraded: true,
+                            degraded_reason: Some(DegradedReason::LspWarmupGrepFallback),
+                            actionable_guidance: Some(
+                                DegradedReason::LspWarmupGrepFallback.guidance(),
+                            ),
+                            lsp_readiness: Some("warming_up".to_owned()),
+                            warm_start_in_progress: Some(true),
+                            duration_ms: Some(millis_to_u64(duration_ms)),
+                            resolution_strategy: Some("grep_file_scoped".to_owned()),
+                        };
+
+                        let mut result =
+                            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+                                format!(
+                                    "{}\n{}{}{}\n[completed in {duration_ms}ms]",
+                                    format_degraded_notice(&DegradedReason::LspWarmupGrepFallback),
+                                    summary,
+                                    references_text,
+                                    pagination_note
+                                ),
+                            )]);
+                        result.structured_content = serialize_metadata(&metadata);
+                        return Ok(result);
+                    }
+                }
+
                 // Spec 4.4: Apply pagination to each list separately
                 let total_references = references.len() + implementations.len();
                 let offset = usize::try_from(params.offset).unwrap_or(0);
@@ -867,7 +974,10 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded, "should be degraded on LSP error");
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert!(val.references.is_none());
         // GAP 5: verify resolution_strategy confirms the path taken
@@ -903,7 +1013,10 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded, "should be degraded on connection lost");
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert!(val.references.is_none());
         // GAP 5: verify resolution_strategy confirms the path taken
@@ -2194,7 +2307,11 @@ mod tests {
         }));
 
         // search_codebase_impl will call enclosing_symbol_detail, queue a result for it.
-        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
 
         let definition_path = std::path::Path::new("src/main.rs");
         let definition_scope = super::super::test_helpers::make_scope();
@@ -2207,7 +2324,7 @@ mod tests {
         let fallback_res = server
             .grep_references_fallback("test_symbol", definition_path, &definition_scope, &params)
             .await;
-        
+
         assert!(fallback_res.is_some());
         let (refs, files_count) = fallback_res.unwrap();
         assert_eq!(files_count, 1);
@@ -2220,8 +2337,12 @@ mod tests {
     async fn test_find_all_references_file_read_failure_and_open_doc_failure() {
         let surgeon = Arc::new(MockSurgeon::default());
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
-        
-        lawyer.did_open_error.lock().unwrap().replace(pathfinder_lsp::LspError::ConnectionLost);
+
+        lawyer
+            .did_open_error
+            .lock()
+            .unwrap()
+            .replace(pathfinder_lsp::LspError::ConnectionLost);
 
         let ws_dir = crate::server::tools::navigation::test_helpers::make_temp_workspace();
         let ws = pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).expect("valid root");
@@ -2236,9 +2357,11 @@ mod tests {
             lawyer.clone(),
         );
 
-        surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
-            super::super::test_helpers::make_scope()
-        ));
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(super::super::test_helpers::make_scope()));
 
         let file_path = ws_dir.path().join("src/main.rs");
         #[cfg(unix)]
@@ -2259,13 +2382,17 @@ mod tests {
                 line: 2,
                 column: 1,
                 snippet: "use main;".to_string(),
-            }
+            },
         ]));
 
-        lawyer.goto_implementation_result.lock().unwrap().replace(Err(pathfinder_lsp::LspError::ConnectionLost));
+        lawyer
+            .goto_implementation_result
+            .lock()
+            .unwrap()
+            .replace(Err(pathfinder_lsp::LspError::ConnectionLost));
 
         let call_res = server.find_all_references_impl(params).await;
-        
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2275,8 +2402,95 @@ mod tests {
         let call_res_unwrapped = call_res.expect("should succeed despite warnings");
         let val: crate::server::types::FindAllReferencesMetadata =
             serde_json::from_value(call_res_unwrapped.structured_content.unwrap()).unwrap();
-        
+
         assert!(!val.degraded);
         assert_eq!(val.references.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_all_references_zero_results_but_resolvable_definition_triggers_grep_fallback(
+    ) {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/main.rs".to_string(),
+                line: 10,
+                column: 8,
+                content: "login();".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:test".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
+        }));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Empty references/implementations results
+        lawyer.set_references_result(Ok(vec![]));
+        lawyer.set_goto_implementation_result(Ok(vec![]));
+
+        // Resolvable definition probe
+        lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".into(),
+            line: 1,
+            column: 4,
+            preview: "fn login() -> bool { true }".into(),
+        })));
+
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_results: 50,
+            offset: 0,
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspWarmupGrepFallback)
+        );
+        let refs = val.references.unwrap_or_default();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].file, "src/main.rs");
     }
 }
