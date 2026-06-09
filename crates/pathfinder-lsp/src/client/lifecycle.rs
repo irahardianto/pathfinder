@@ -3165,7 +3165,9 @@ mod tests {
         assert!(caps.call_hierarchy_provider);
     }
 
-    fn make_multi_lang_entry(fake: Arc<crate::client::fake_transport::FakeTransport>) -> ProcessEntry {
+    fn make_multi_lang_entry(
+        fake: Arc<crate::client::fake_transport::FakeTransport>,
+    ) -> ProcessEntry {
         let reader_handle = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
@@ -3219,7 +3221,10 @@ mod tests {
         );
 
         let processes = DashMap::new();
-        processes.insert("rust".to_owned(), make_multi_lang_entry(Arc::clone(&rust_fake)));
+        processes.insert(
+            "rust".to_owned(),
+            make_multi_lang_entry(Arc::clone(&rust_fake)),
+        );
         processes.insert("go".to_owned(), make_multi_lang_entry(Arc::clone(&go_fake)));
 
         let descriptors = vec![
