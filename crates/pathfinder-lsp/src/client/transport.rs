@@ -88,6 +88,47 @@ where
     Ok(body_value)
 }
 
+/// Mock stdout that implements AsyncRead for testing malformed responses.
+///
+/// Allows injecting raw byte sequences to test protocol error handling.
+#[cfg(test)]
+struct MockStdout {
+    data: std::io::Cursor<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl MockStdout {
+    fn write_lsp_message(content: &str) -> Self {
+        let body = content.as_bytes();
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut data = header.into_bytes();
+        data.extend_from_slice(body);
+        Self {
+            data: std::io::Cursor::new(data),
+        }
+    }
+
+    fn write_raw(bytes: &[u8]) -> Self {
+        Self {
+            data: std::io::Cursor::new(bytes.to_vec()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl tokio::io::AsyncRead for MockStdout {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::io::Read as StdRead;
+        let n = StdRead::read(&mut self.data, buf.initialize_unfilled())?;
+        buf.advance(n);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
 /// Write one JSON-RPC message to `writer`.
 ///
 /// Serialises `message` to JSON, prepends the `Content-Length` header,
@@ -289,12 +330,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_body() {
-        // Content-Length: 0 is valid (empty JSON object or similar)
         let framed = b"Content-Length: 2\r\n\r\n{}";
         let mut reader = BufReader::new(framed.as_slice());
         let result = read_message(&mut reader).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_content_length_zero_returns_protocol_error() {
+        let framed = b"Content-Length: 0\r\n\r\n";
+        let mut reader = BufReader::new(framed.as_slice());
+        let result = read_message(&mut reader).await;
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("invalid JSON"),
+                    "expected 'invalid JSON' in error, got: {msg}"
+                );
+            }
+            other => panic!("expected Protocol error for zero-length body, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -309,8 +366,12 @@ mod tests {
 
         let mut reader = BufReader::new(buf.as_slice());
         let result = read_message(&mut reader).await;
-        // Leading space means it's not a valid Content-Length header
-        assert!(result.is_err());
+        match result {
+            Err(LspError::Protocol(msg)) => {
+                assert!(msg.contains("Content-Length"), "expected 'Content-Length' in error, got: {msg}");
+            }
+            other => panic!("expected Protocol error for missing Content-Length due to leading space, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -395,8 +456,164 @@ mod tests {
         assert!(result.is_err());
         // Should be an Io error since read_exact fails
         match result {
-            Err(LspError::Io(_)) => {} // Expected
+            Err(LspError::Io(_)) => {}
             other => panic!("expected Io error, got: {other:?}"),
+        }
+    }
+
+    // D-3: MockStdout tests for malformed responses
+
+    #[tokio::test]
+    async fn test_mock_stdout_valid_message() {
+        let mock = MockStdout::write_lsp_message(r#"{"jsonrpc":"2.0","result":42}"#);
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["result"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_invalid_utf8_in_header() {
+        // Create a header with invalid UTF-8
+        let mut data = vec![];
+        // Header line with invalid UTF-8 sequence
+        data.extend_from_slice(b"Content-Length: 10\r\n");
+        data.extend_from_slice(&[0xFF, 0xFE, 0xFD]); // Invalid UTF-8
+        data.extend_from_slice(b"\r\n\r\n");
+        data.extend_from_slice(b"0123456789");
+
+        let mock = MockStdout::write_raw(&data);
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        // Should fail as Io error because read_line can't decode UTF-8
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Io(_)) => {}
+            other => panic!("expected Io error for invalid UTF-8, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_body_shorter_than_content_length() {
+        // Content-Length claims 100 bytes but only provides 20
+        let mut data = vec![];
+        data.extend_from_slice(b"Content-Length: 100\r\n\r\n");
+        data.extend_from_slice(b"short body only 20");
+
+        let mock = MockStdout::write_raw(&data);
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        // Should fail with Io error since read_exact can't read 100 bytes
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Io(_)) => {}
+            other => panic!("expected Io error for short body, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_invalid_json_body() {
+        let body = b"not valid json";
+        let mut data = vec![];
+        data.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+        data.extend_from_slice(body);
+
+        let mock = MockStdout::write_raw(&data);
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Protocol(msg)) => {
+                assert!(msg.contains("invalid JSON") || msg.contains("expected value"));
+            }
+            other => panic!("expected Protocol error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_empty_body_with_nonzero_length() {
+        // Content-Length says 5 bytes but body is empty
+        let mock = MockStdout::write_raw(b"Content-Length: 5\r\n\r\n");
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Io(_)) => {}
+            other => panic!("expected Io error for empty body with nonzero length, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_header_without_blank_line() {
+        let mock = MockStdout::write_raw(b"Content-Length: 10\r\n{}{}{}{}{}{}{}{}{}{}");
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        match result {
+            Err(LspError::ConnectionLost) => {}
+            Err(LspError::Protocol(_)) => {}
+            other => panic!(
+                "expected ConnectionLost or Protocol for no blank-line separator, got: {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_negative_content_length() {
+        // Negative Content-Length should be rejected
+        let mock = MockStdout::write_raw(b"Content-Length: -10\r\n\r\n{}");
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Protocol(msg)) => {
+                assert!(msg.contains("invalid Content-Length") || msg.contains("parse"));
+            }
+            other => panic!("expected Protocol error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_multiple_blank_lines() {
+        // Extra blank lines before Content-Length header - parser should
+        // treat them as blank header lines until it hits the real header
+        let body = b"{}";
+        let mut data = vec![];
+        data.extend_from_slice(b"\r\nContent-Length: 2\r\n\r\n");
+        data.extend_from_slice(body);
+
+        let mock = MockStdout::write_raw(&data);
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        match result {
+            Err(LspError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("Content-Length"),
+                    "expected 'Content-Length' in error, got: {msg}"
+                );
+            }
+            other => panic!("expected Protocol error for premature blank line, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_stdout_only_headers_no_body() {
+        // Valid headers but EOF before body
+        let mock = MockStdout::write_raw(b"Content-Length: 10\r\n\r\n");
+        let mut reader = BufReader::new(mock);
+        let result = read_message(&mut reader).await;
+
+        // Should fail with Io error since body is incomplete
+        assert!(result.is_err());
+        match result {
+            Err(LspError::Io(_)) => {}
+            other => panic!("expected Io error for missing body, got: {other:?}"),
         }
     }
 }

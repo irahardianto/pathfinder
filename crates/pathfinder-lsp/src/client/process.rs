@@ -89,6 +89,39 @@ pub(crate) trait LspTransport: Send + Sync {
     async fn shutdown(&self, dispatcher: &RequestDispatcher, language_id: &str);
 }
 
+/// Abstraction over process spawning for testability.
+///
+/// Production uses [`RealProcessSpawner`] which calls `tokio::process::Command`.
+/// Tests can provide a mock that validates argument construction without
+/// spawning real processes.
+#[async_trait]
+pub(crate) trait ProcessSpawner: Send + Sync {
+    fn spawn(
+        &self,
+        command: &str,
+        args: &[String],
+        project_root: &Path,
+        language_id: &str,
+        isolate_target_dir: bool,
+    ) -> Result<(Child, ChildStdin, ChildStdout), LspError>;
+}
+
+pub(crate) struct RealProcessSpawner;
+
+#[async_trait]
+impl ProcessSpawner for RealProcessSpawner {
+    fn spawn(
+        &self,
+        command: &str,
+        args: &[String],
+        project_root: &Path,
+        language_id: &str,
+        isolate_target_dir: bool,
+    ) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
+        spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)
+    }
+}
+
 /// A running LSP child process with its I/O handles.
 pub(super) struct ManagedProcess {
     /// The child process handle — kept alive until explicitly dropped.
@@ -240,6 +273,7 @@ const INIT_TIMEOUT_SECS: u64 = 120;
 #[allow(clippy::too_many_arguments)]
 #[allow(unsafe_code)]
 pub(super) async fn spawn_and_initialize(
+    spawner: &dyn ProcessSpawner,
     command: &str,
     args: &[String],
     project_root: &Path,
@@ -259,7 +293,7 @@ pub(super) async fn spawn_and_initialize(
     };
 
     let (child, stdin, stdout) =
-        spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)?;
+        spawner.spawn(command, args, project_root, language_id, isolate_target_dir)?;
     let mut writer = tokio::io::BufWriter::new(stdin);
 
     // Start the reader task BEFORE writing the initialize request.
@@ -630,6 +664,78 @@ async fn build_initialize_request(
 /// are the server's fault, not a broken pipe.
 const MAX_CONSECUTIVE_READER_ERRORS: u32 = 5;
 
+/// Action to take after processing a reader result.
+#[derive(Debug, PartialEq, Eq)]
+enum ReaderAction {
+    /// Continue reading messages.
+    Continue,
+    /// Cancel pending requests and break out of the read loop.
+    CancelAndBreak,
+}
+
+/// Process the result of `read_message()` and determine the next action.
+///
+/// This function encapsulates the reader task error handling logic:
+/// - Reset `consecutive_io_errors` on successful reads
+/// - Increment `malformed_message_count` on protocol errors
+/// - Count IO errors toward the consecutive limit
+/// - Cancel and break after too many consecutive IO errors
+///
+/// Returns the action to take in the reader loop.
+fn handle_reader_result(
+    result: Result<&serde_json::Value, &LspError>,
+    consecutive_io_errors: &mut u32,
+    malformed_message_count: &mut u32,
+    language_id: &str,
+) -> ReaderAction {
+    match result {
+        Ok(_) => {
+            *consecutive_io_errors = 0;
+            ReaderAction::Continue
+        }
+        Err(LspError::ConnectionLost) => {
+            tracing::info!(
+                language = %language_id,
+                malformed_messages = *malformed_message_count,
+                "LSP stdout EOF — cancelling pending requests for language"
+            );
+            ReaderAction::CancelAndBreak
+        }
+        Err(LspError::Protocol(msg)) => {
+            *malformed_message_count += 1;
+            tracing::warn!(
+                error = %msg,
+                language = %language_id,
+                malformed_message_count = *malformed_message_count,
+                error_category = "malformed_message",
+                "LSP reader: malformed message from server (protocol violation)"
+            );
+            ReaderAction::Continue
+        }
+        Err(e) => {
+            *consecutive_io_errors += 1;
+            tracing::warn!(
+                error = %e,
+                language = %language_id,
+                consecutive_io_errors = *consecutive_io_errors,
+                error_category = "io_error",
+                "LSP reader: IO error"
+            );
+            if *consecutive_io_errors >= MAX_CONSECUTIVE_READER_ERRORS {
+                tracing::error!(
+                    language = %language_id,
+                    consecutive_io_errors = *consecutive_io_errors,
+                    malformed_messages = *malformed_message_count,
+                    "LSP: too many consecutive IO errors, aborting reader"
+                );
+                ReaderAction::CancelAndBreak
+            } else {
+                ReaderAction::Continue
+            }
+        }
+    }
+}
+
 pub(super) fn start_reader_task(
     stdout: ChildStdout,
     dispatcher: Arc<RequestDispatcher>,
@@ -640,60 +746,23 @@ pub(super) fn start_reader_task(
         let mut consecutive_io_errors: u32 = 0;
         let mut malformed_message_count: u32 = 0;
         loop {
-            match read_message(&mut reader).await {
-                Ok(msg) => {
-                    consecutive_io_errors = 0;
-                    dispatcher.dispatch_response_for_language(&language_id, &msg);
+            let result = read_message(&mut reader).await;
+            let action = handle_reader_result(
+                result.as_ref(),
+                &mut consecutive_io_errors,
+                &mut malformed_message_count,
+                &language_id,
+            );
+
+            match action {
+                ReaderAction::Continue => {
+                    if let Ok(msg) = result {
+                        dispatcher.dispatch_response_for_language(&language_id, &msg);
+                    }
                 }
-                Err(LspError::ConnectionLost) => {
-                    tracing::info!(
-                        language = %language_id,
-                        malformed_messages = malformed_message_count,
-                        "LSP stdout EOF — cancelling pending requests for language"
-                    );
+                ReaderAction::CancelAndBreak => {
                     dispatcher.cancel_for_language(&language_id);
                     break;
-                }
-                Err(LspError::Protocol(msg)) => {
-                    // L-8: Protocol errors = malformed messages (bad Content-Length,
-                    // invalid JSON, missing header). These are the server's fault.
-                    // Log with categorization and increment counter. Do NOT count
-                    // toward consecutive IO errors — a malformed message doesn't
-                    // mean the pipe is broken.
-                    malformed_message_count += 1;
-                    tracing::warn!(
-                        error = %msg,
-                        language = %language_id,
-                        malformed_message_count,
-                        error_category = "malformed_message",
-                        "LSP reader: malformed message from server (protocol violation)"
-                    );
-                }
-                Err(e) => {
-                    // IO errors (broken pipe, etc.) — these indicate the process
-                    // may be dead. Count toward consecutive error limit.
-                    consecutive_io_errors += 1;
-                    tracing::warn!(
-                        error = %e,
-                        language = %language_id,
-                        consecutive_io_errors,
-                        error_category = "io_error",
-                        "LSP reader: IO error"
-                    );
-                    // H-3: Break after N consecutive IO errors.
-                    // Without this, a persistent IO error (e.g., EBADF after child
-                    // exits) creates a tight CPU-spin loop with log spam and no
-                    // crash recovery triggered.
-                    if consecutive_io_errors >= MAX_CONSECUTIVE_READER_ERRORS {
-                        tracing::error!(
-                            language = %language_id,
-                            consecutive_io_errors,
-                            malformed_messages = malformed_message_count,
-                            "LSP: too many consecutive IO errors, aborting reader"
-                        );
-                        dispatcher.cancel_for_language(&language_id);
-                        break;
-                    }
                 }
             }
         }
@@ -1389,16 +1458,16 @@ mod process_tests {
             "/absolutely/nonexistent/binary",
             &[],
             dir.path(),
-            "rust",
+            "test",
             false,
         );
 
-        assert!(result.is_err(), "should fail with non-existent binary");
+        assert!(result.is_err(), "should fail for nonexistent binary");
         match result {
             Err(LspError::Io(e)) => {
                 assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
             }
-            other => panic!("expected Io error, got: {other:?}"),
+            _ => panic!("expected Io(NotFound) error"),
         }
     }
 
@@ -1423,5 +1492,389 @@ mod process_tests {
                 "CARGO_TARGET_DIR directory should be created for rust isolation"
             );
         }
+    }
+
+    // D-4: Tests for handle_reader_result
+
+    #[test]
+    fn test_handle_reader_result_success_resets_io_errors() {
+        let mut consecutive_io_errors = 3;
+        let mut malformed_message_count = 5;
+        let result = Ok(&serde_json::json!({"result": "ok"}));
+
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+
+        assert_eq!(action, ReaderAction::Continue);
+        assert_eq!(
+            consecutive_io_errors, 0,
+            "should reset consecutive_io_errors on success"
+        );
+        assert_eq!(
+            malformed_message_count, 5,
+            "should not change malformed_message_count"
+        );
+    }
+
+    #[test]
+    fn test_handle_reader_result_connection_lost_cancels() {
+        let mut consecutive_io_errors = 3;
+        let mut malformed_message_count = 5;
+        let result = Err(&LspError::ConnectionLost);
+
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+
+        assert_eq!(action, ReaderAction::CancelAndBreak);
+        assert_eq!(consecutive_io_errors, 3, "should not change counters");
+        assert_eq!(malformed_message_count, 5);
+    }
+
+    #[test]
+    fn test_handle_reader_result_protocol_error_increments_malformed() {
+        let mut consecutive_io_errors = 2;
+        let mut malformed_message_count = 0;
+        let result = Err(&LspError::Protocol("bad JSON".to_owned()));
+
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+
+        assert_eq!(
+            action,
+            ReaderAction::Continue,
+            "protocol errors should continue reading"
+        );
+        assert_eq!(
+            consecutive_io_errors, 2,
+            "protocol errors should not count toward consecutive_io_errors"
+        );
+        assert_eq!(
+            malformed_message_count, 1,
+            "should increment malformed_message_count"
+        );
+    }
+
+    #[test]
+    fn test_handle_reader_result_io_error_increments_counter() {
+        let mut consecutive_io_errors = 0;
+        let mut malformed_message_count = 0;
+        let result = Err(&LspError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        )));
+
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+
+        assert_eq!(
+            action,
+            ReaderAction::Continue,
+            "below threshold should continue"
+        );
+        assert_eq!(
+            consecutive_io_errors, 1,
+            "should increment io error counter"
+        );
+        assert_eq!(malformed_message_count, 0);
+    }
+
+    #[test]
+    fn test_handle_reader_result_io_error_at_threshold_cancels() {
+        let mut consecutive_io_errors = MAX_CONSECUTIVE_READER_ERRORS - 1;
+        let mut malformed_message_count = 0;
+        let result = Err(&LspError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        )));
+
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+
+        assert_eq!(
+            action,
+            ReaderAction::CancelAndBreak,
+            "at threshold should cancel"
+        );
+        assert_eq!(consecutive_io_errors, MAX_CONSECUTIVE_READER_ERRORS);
+        assert_eq!(malformed_message_count, 0);
+    }
+
+    #[test]
+    fn test_handle_reader_result_io_error_above_threshold_cancels() {
+        let mut consecutive_io_errors = MAX_CONSECUTIVE_READER_ERRORS;
+        let mut malformed_message_count = 0;
+        let result = Err(&LspError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        )));
+
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+
+        assert_eq!(
+            action,
+            ReaderAction::CancelAndBreak,
+            "above threshold should cancel"
+        );
+        assert_eq!(consecutive_io_errors, MAX_CONSECUTIVE_READER_ERRORS + 1);
+    }
+
+    #[test]
+    fn test_handle_reader_result_mixed_errors() {
+        let mut consecutive_io_errors = 2;
+        let mut malformed_message_count = 1;
+
+        let result = Err(&LspError::Protocol("invalid JSON".to_owned()));
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+        assert_eq!(action, ReaderAction::Continue);
+        assert_eq!(
+            consecutive_io_errors, 2,
+            "protocol error doesn't affect IO counter"
+        );
+        assert_eq!(malformed_message_count, 2);
+
+        let result = Err(&LspError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        )));
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+        assert_eq!(action, ReaderAction::Continue);
+        assert_eq!(consecutive_io_errors, 3);
+        assert_eq!(malformed_message_count, 2);
+
+        let result = Ok(&serde_json::json!({"result": "ok"}));
+        let action = handle_reader_result(
+            result,
+            &mut consecutive_io_errors,
+            &mut malformed_message_count,
+            "test",
+        );
+        assert_eq!(action, ReaderAction::Continue);
+        assert_eq!(consecutive_io_errors, 0, "success resets IO counter");
+        assert_eq!(malformed_message_count, 2);
+    }
+
+    // D-1: ProcessSpawner trait tests
+
+    struct MockProcessSpawner {
+        spawn_calls: std::sync::Mutex<Vec<SpawnCall>>,
+        should_fail: std::sync::atomic::AtomicBool,
+    }
+
+    struct SpawnCall {
+        command: String,
+        args: Vec<String>,
+        project_root: std::path::PathBuf,
+        language_id: String,
+        isolate_target_dir: bool,
+    }
+
+    impl MockProcessSpawner {
+        fn new() -> Self {
+            Self {
+                spawn_calls: std::sync::Mutex::new(Vec::new()),
+                should_fail: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                spawn_calls: std::sync::Mutex::new(Vec::new()),
+                should_fail: std::sync::atomic::AtomicBool::new(true),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.spawn_calls.lock().expect("lock").len()
+        }
+
+        fn last_call(&self) -> Option<SpawnCall> {
+            self.spawn_calls.lock().expect("lock").last().cloned()
+        }
+    }
+
+    impl Clone for SpawnCall {
+        fn clone(&self) -> Self {
+            Self {
+                command: self.command.clone(),
+                args: self.args.clone(),
+                project_root: self.project_root.clone(),
+                language_id: self.language_id.clone(),
+                isolate_target_dir: self.isolate_target_dir,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProcessSpawner for MockProcessSpawner {
+        fn spawn(
+            &self,
+            command: &str,
+            args: &[String],
+            project_root: &Path,
+            language_id: &str,
+            isolate_target_dir: bool,
+        ) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
+            self.spawn_calls.lock().expect("lock").push(SpawnCall {
+                command: command.to_owned(),
+                args: args.to_vec(),
+                project_root: project_root.to_owned(),
+                language_id: language_id.to_owned(),
+                isolate_target_dir,
+            });
+
+            if self.should_fail.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(LspError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "mock spawner configured to fail",
+                )));
+            }
+
+            // INFO-1 fix: Delegate to RealProcessSpawner for successful spawns.
+            // This allows tests to use MockProcessSpawner with real processes
+            // while still recording spawn calls.
+            let real_spawner = RealProcessSpawner;
+            real_spawner.spawn(command, args, project_root, language_id, isolate_target_dir)
+        }
+    }
+
+    #[test]
+    fn test_process_spawner_trait_real_spawner_nonexistent_binary() {
+        let spawner = RealProcessSpawner;
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = spawner.spawn("/nonexistent/binary", &[], dir.path(), "test", false);
+
+        assert!(result.is_err(), "should fail for nonexistent binary");
+        match result {
+            Err(LspError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected Io error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_spawner_trait_mock_records_calls() {
+        let mock = MockProcessSpawner::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Use "true" which should exist on all Unix systems
+        let result = mock.spawn("true", &["--arg1".to_owned()], dir.path(), "rust", true);
+
+        // Should succeed with real spawn
+        assert!(result.is_ok());
+        let (mut child, _, _) = result.unwrap();
+        let _ = child.wait();
+
+        assert_eq!(mock.call_count(), 1);
+        let call = mock.last_call().expect("should have a call");
+        assert_eq!(call.command, "true");
+        assert_eq!(call.args, vec!["--arg1"]);
+        assert_eq!(call.language_id, "rust");
+        assert!(call.isolate_target_dir);
+        assert_eq!(call.project_root, dir.path());
+    }
+
+    #[test]
+    fn test_process_spawner_trait_mock_failing() {
+        let mock = MockProcessSpawner::failing();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = mock.spawn("gopls", &[], dir.path(), "go", false);
+
+        assert!(result.is_err());
+        assert_eq!(mock.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_process_spawner_trait_mock_multiple_calls() {
+        let mock = MockProcessSpawner::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Use "true" which should exist on all Unix systems
+        let result1 = mock.spawn("true", &[], dir.path(), "rust", false);
+        let result2 = mock.spawn("true", &[], dir.path(), "go", true);
+        let result3 = mock.spawn("true", &[], dir.path(), "python", false);
+
+        // All should succeed
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+        assert!(result3.is_ok());
+
+        let (mut c1, _, _) = result1.unwrap();
+        let (mut c2, _, _) = result2.unwrap();
+        let (mut c3, _, _) = result3.unwrap();
+        let _ = c1.wait();
+        let _ = c2.wait();
+        let _ = c3.wait();
+
+        assert_eq!(mock.call_count(), 3);
+        let calls = mock.spawn_calls.lock().expect("lock");
+        assert_eq!(calls[0].language_id, "rust");
+        assert_eq!(calls[1].language_id, "go");
+        assert_eq!(calls[2].language_id, "python");
+        assert!(!calls[0].isolate_target_dir);
+        assert!(calls[1].isolate_target_dir);
+    }
+
+    #[tokio::test]
+    async fn test_process_spawner_trait_mock_real_spawn() {
+        // INFO-1 test: MockProcessSpawner should delegate to RealProcessSpawner
+        // for successful spawns (when not failing).
+        let spawner = MockProcessSpawner::new();
+
+        // Use 'sleep' binary which should be available on most systems
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = spawner.spawn("sleep", &["60".to_owned()], dir.path(), "test", false);
+
+        assert!(result.is_ok(), "should succeed with real spawn");
+        let (mut child, _stdin, _stdout) = result.unwrap();
+        // Verify it's a real process
+        assert!(child.id().map(|pid| pid > 0).unwrap_or(false));
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // Verify spawn was recorded
+        assert_eq!(spawner.call_count(), 1);
+        let last = spawner.last_call();
+        assert!(last.is_some());
+        let call = last.unwrap();
+        assert_eq!(call.command, "sleep");
+        assert_eq!(call.args, vec!["60"]);
     }
 }

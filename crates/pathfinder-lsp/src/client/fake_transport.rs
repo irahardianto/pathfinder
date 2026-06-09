@@ -189,6 +189,17 @@ impl LspTransport for FakeTransport {
             let delay = *self.response_delay.lock();
             let is_error = response.get("error").is_some();
 
+            if is_error {
+                if let Some(ref dispatcher) = *self.dispatcher.lock() {
+                    dispatcher.dispatch_response_for_language(&self.language_id, &response);
+                }
+
+                let msg = response["error"]["message"]
+                    .as_str()
+                    .unwrap_or("fake error");
+                return Err(LspError::Protocol(msg.to_owned()));
+            }
+
             if let Some(delay) = delay {
                 let dispatcher = self.dispatcher.lock().clone();
                 let language_id = self.language_id.clone();
@@ -201,13 +212,6 @@ impl LspTransport for FakeTransport {
             } else {
                 if let Some(ref dispatcher) = *self.dispatcher.lock() {
                     dispatcher.dispatch_response_for_language(&self.language_id, &response);
-                }
-
-                if is_error {
-                    let msg = response["error"]["message"]
-                        .as_str()
-                        .unwrap_or("fake error");
-                    return Err(LspError::Protocol(msg.to_owned()));
                 }
             }
             Ok(())

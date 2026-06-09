@@ -107,8 +107,10 @@ impl LspClient {
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
-        self.doc_versions
-            .insert(file_uri.to_string(), std::sync::atomic::AtomicI32::new(1));
+        self.doc_versions.insert(
+            file_uri.to_string(),
+            (language_id.to_owned(), std::sync::atomic::AtomicI32::new(1)),
+        );
 
         let params = json!({
             "textDocument": {
@@ -336,9 +338,14 @@ mod tests {
         let file_uri = Url::from_file_path(workspace.join(file_path))
             .unwrap()
             .to_string();
-        let version = client.doc_versions.get(&file_uri).unwrap();
+        let entry = client.doc_versions.get(&file_uri).unwrap();
         assert_eq!(
-            version.load(Ordering::Relaxed),
+            entry.value().0,
+            "rust",
+            "language_id should be stored with doc version"
+        );
+        assert_eq!(
+            entry.value().1.load(Ordering::Relaxed),
             1,
             "version should be 1 on open"
         );
@@ -381,6 +388,8 @@ mod tests {
             .doc_versions
             .get(&file_uri)
             .unwrap()
+            .value()
+            .1
             .load(Ordering::Relaxed);
         assert_eq!(v1, 1);
 
@@ -391,6 +400,8 @@ mod tests {
             .doc_versions
             .get(&file_uri)
             .unwrap()
+            .value()
+            .1
             .load(Ordering::Relaxed);
         assert_eq!(v2, 1, "version should reset to 1 on re-open");
     }

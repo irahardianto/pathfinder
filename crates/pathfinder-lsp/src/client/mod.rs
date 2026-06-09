@@ -294,8 +294,9 @@ pub struct LspClient {
     /// C-1: Set atomically when `shutdown()` is called. Checked by `start_process`
     /// to prevent inserting new processes after the `idle_timeout_task` has exited.
     pub(crate) shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) doc_versions: Arc<DashMap<String, std::sync::atomic::AtomicI32>>,
+    pub(crate) doc_versions: Arc<DashMap<String, (String, std::sync::atomic::AtomicI32)>>,
     pub(crate) warm_start_complete: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) spawner: std::sync::Arc<dyn crate::client::process::ProcessSpawner>,
 }
 
 #[cfg(test)]
@@ -520,6 +521,7 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
         }
     }
 
@@ -558,6 +560,7 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
         }
     }
 
@@ -620,6 +623,7 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
         };
 
         (client, fake)

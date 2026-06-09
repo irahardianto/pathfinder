@@ -69,12 +69,19 @@ impl super::LspClient {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
         };
 
         let processes = Arc::clone(&client.processes);
         let dispatcher = Arc::clone(&client.dispatcher);
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(idle_timeout_task(processes, dispatcher, shutdown_rx));
+        let doc_versions = Arc::clone(&client.doc_versions);
+        tokio::spawn(idle_timeout_task(
+            processes,
+            dispatcher,
+            doc_versions,
+            shutdown_rx,
+        ));
 
         Ok(client)
     }
@@ -292,8 +299,8 @@ impl super::LspClient {
                     let _ = child.wait().await;
                 }
             }
-            // Clear stale doc_versions — new LSP instance won't know about them.
-            self.doc_versions.clear();
+            // Clear stale doc_versions for this language.
+            self.clear_doc_versions_for_language(language_id);
             // DEL-4.1: FUTURE: init_locks cleanup when dynamic language support is added.
             // Currently bounded to 5 languages (rust/go/typescript/python/java),
             // so memory cost is negligible (~5 entries * 100 bytes each).
@@ -325,11 +332,9 @@ impl super::LspClient {
                             elapsed_secs,
                             "LSP: backoff elapsed, attempting recovery"
                         );
-                        // M-8: Don't clear doc_versions here — this is outside the
-                        // init_lock. The locked section below handles the actual
-                        // recovery, and doc_versions should only be cleared there
-                        // to avoid cross-language version wipe without synchronization.
-                        self.processes.remove(language_id);
+                        // Note: Do NOT call remove() here. The removal must be done
+                        // inside the init_lock section below to avoid race conditions
+                        // where a concurrent task has already started a new process.
                     } else {
                         tracing::debug!(
                             language = %language_id,
@@ -358,7 +363,10 @@ impl super::LspClient {
                     let backoff_secs = std::cmp::min(1u64 << capped_attempt, MAX_BACKOFF_SECS);
                     let elapsed_secs = state.unavailable_since.elapsed().as_secs();
                     if elapsed_secs >= backoff_secs {
-                        let attempt = state.backoff_attempt;
+                        // Backoff elapsed = fresh attempt. Start from 0, not state.backoff_attempt.
+                        // This avoids race conditions: pre-lock no longer removes the entry,
+                        // so post-lock must explicitly reset the attempt counter.
+                        let attempt = 0;
                         drop(entry);
                         tracing::info!(
                             language = %language_id,
@@ -470,6 +478,7 @@ impl super::LspClient {
             .subscribe_server_requests_for_language(&language_id);
 
         let spawn_result = spawn_and_initialize(
+            self.spawner.as_ref(),
             &descriptor.command,
             &descriptor.args,
             &descriptor.root,
@@ -535,6 +544,7 @@ impl super::LspClient {
             reader_alive_for_supervisor,
             Arc::clone(&self.processes),
             Arc::clone(&self.dispatcher),
+            Arc::clone(&self.doc_versions),
         ));
 
         if attempt > 0 {
@@ -619,10 +629,27 @@ impl super::LspClient {
                 language = %language_id,
                 "LSP: shutdown requested during init, aborting process insertion"
             );
+
+            // CRITICAL: Kill the child process before returning.
+            // The process was successfully spawned by spawn_and_initialize,
+            // so we must not orphan it.
             progress_handle.abort();
             registration_handle.abort();
             supervisor_handle.abort();
             indexing_timeout_handle.abort();
+
+            // Gracefully shutdown the LSP process
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                transport.shutdown(&self.dispatcher, &language_id),
+            )
+            .await;
+
+            // Fallback: force-kill via lifecycle handle if shutdown didn't work
+            let mut child = lifecycle.child.lock().await;
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+
             return Err(LspError::ConnectionLost);
         }
 
@@ -698,8 +725,9 @@ impl super::LspClient {
                     }
 
                     let status_path = path.join("status");
-                    let parent_pid: u32 = std::fs::read_to_string(&status_path)
-                        .ok()
+                    let status_content = std::fs::read_to_string(&status_path).ok();
+                    let parent_pid: u32 = status_content
+                        .as_deref()
                         .and_then(|status| {
                             status
                                 .lines()
@@ -708,6 +736,29 @@ impl super::LspClient {
                                 .and_then(|v| v.parse().ok())
                         })
                         .unwrap_or(0);
+
+                    // MAJOR: Check if the process is a zombie.
+                    // Zombies still have /proc entries but are not actually running.
+                    // State codes: R=running, S=sleeping, D=disk sleep,
+                    // Z=zombie, T=stopped, t=tracing stop, X=dead.
+                    let is_zombie = status_content
+                        .as_deref()
+                        .and_then(|status| {
+                            status
+                                .lines()
+                                .find(|l| l.starts_with("State:"))
+                                .and_then(|l| l.split_whitespace().nth(1))
+                                .map(|state| state == "Z" || state == "X" || state == "T")
+                        })
+                        .unwrap_or(false);
+
+                    if is_zombie {
+                        tracing::trace!(
+                            binary = binary_name,
+                            "detect_concurrent_lsp: skipping zombie process"
+                        );
+                        continue;
+                    }
 
                     if parent_pid == our_pid {
                         tracing::trace!(
@@ -760,19 +811,21 @@ impl super::LspClient {
     /// opened documents. Clearing stale entries ensures documents are re-opened
     /// on next access via `did_open`.
     fn clear_doc_versions_for_language(&self, language_id: &str) {
-        // doc_versions is a flat DashMap<URI, version> without language metadata.
-        // Since we can't reliably map language_id → file extensions → URIs,
-        // clear ALL entries. This is safe because:
-        // 1. Documents are re-opened on next access (did_open is always called first)
-        // 2. Crash recovery is rare — clearing all is simpler and more correct than
-        //    trying to match extensions.
-        let count = self.doc_versions.len();
-        if count > 0 {
-            self.doc_versions.clear();
+        // Clear only doc_versions entries for the specified language.
+        let mut cleared = 0;
+        self.doc_versions.retain(|_uri, (lang, _)| {
+            if lang == language_id {
+                cleared += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if cleared > 0 {
             tracing::debug!(
                 language = %language_id,
-                cleared = count,
-                "LSP: cleared stale doc_versions after crash recovery"
+                cleared,
+                "LSP: cleared stale doc_versions for language after crash recovery"
             );
         }
     }
@@ -801,9 +854,6 @@ impl super::LspClient {
             };
             if state.reader_handle.is_finished() {
                 state.reader_handle.abort();
-                // Stale reader: may have panicked before calling cancel_for_language.
-                // Explicitly cancel pending requests for this language.
-                self.dispatcher.cancel_for_language(language_id);
                 let transport = Arc::clone(&state.transport);
                 let lifecycle = state.lifecycle.clone();
                 drop(entry);
@@ -815,6 +865,10 @@ impl super::LspClient {
                     |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
                 );
                 if let Some((_, ProcessEntry::Running(state))) = removed {
+                    // MAJOR: Cancel pending requests ONLY after confirming we removed
+                    // the stale entry. This prevents cross-generational cancellation
+                    // where a new process was started between our check and atomic remove.
+                    self.dispatcher.cancel_for_language(language_id);
                     state.abort_watchers();
                     // C-3: shutdown before abort — but reader is already dead here,
                     // so just force-kill directly (no response to read).
@@ -851,6 +905,7 @@ impl super::LspClient {
                         }),
                     );
                 }
+                self.dispatcher.remove(id);
                 return Err(LspError::ConnectionLost);
             }
             let counter = Arc::clone(state.transport.in_flight());
@@ -893,8 +948,6 @@ impl super::LspClient {
         };
         if state.reader_handle.is_finished() {
             state.reader_handle.abort();
-            // Stale reader: cancel pending requests explicitly
-            self.dispatcher.cancel_for_language(language_id);
             let transport = Arc::clone(&state.transport);
             let lifecycle = state.lifecycle.clone();
             drop(entry);
@@ -904,6 +957,9 @@ impl super::LspClient {
                 |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
             );
             if let Some((_, ProcessEntry::Running(state))) = removed {
+                // MAJOR: Cancel pending requests ONLY after confirming we removed
+                // the stale entry. Prevents cross-generational cancellation.
+                self.dispatcher.cancel_for_language(language_id);
                 state.abort_watchers();
                 let _ = tokio::time::timeout(
                     Duration::from_secs(2),
@@ -1734,6 +1790,7 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
         };
 
         let result = client.missing_languages.clone();
@@ -2167,6 +2224,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_delayed_error_response_returns_protocol_error() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_error("textDocument/definition", "something went wrong");
+        fake.set_response_delay(Duration::from_secs(10));
+
+        let result = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        match result {
+            Err(LspError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("something went wrong"),
+                    "error message should contain configured text: {msg}"
+                );
+            }
+            other => {
+                panic!("expected Protocol error from send() even with delay active, got: {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_notify_with_dead_reader_returns_connection_lost() {
         let (client, _fake) = make_running_client("rust");
 
@@ -2204,25 +2290,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clear_doc_versions_removes_all_entries() {
+    async fn test_clear_doc_versions_for_language() {
         let (client, _fake) = make_running_client("rust");
 
         client.doc_versions.insert(
             "file:///workspace/src/main.rs".to_owned(),
-            std::sync::atomic::AtomicI32::new(1),
+            ("rust".to_owned(), std::sync::atomic::AtomicI32::new(1)),
         );
         client.doc_versions.insert(
             "file:///workspace/src/lib.rs".to_owned(),
-            std::sync::atomic::AtomicI32::new(2),
+            ("rust".to_owned(), std::sync::atomic::AtomicI32::new(2)),
+        );
+        client.doc_versions.insert(
+            "file:///workspace/main.go".to_owned(),
+            ("go".to_owned(), std::sync::atomic::AtomicI32::new(1)),
         );
 
-        assert_eq!(client.doc_versions.len(), 2);
+        assert_eq!(client.doc_versions.len(), 3);
 
         client.clear_doc_versions_for_language("rust");
 
+        assert_eq!(client.doc_versions.len(), 1);
         assert!(
-            client.doc_versions.is_empty(),
-            "doc_versions should be cleared after clear_doc_versions_for_language"
+            client
+                .doc_versions
+                .contains_key("file:///workspace/main.go"),
+            "go doc_versions should not be cleared when clearing rust"
+        );
+        assert!(
+            !client
+                .doc_versions
+                .contains_key("file:///workspace/src/main.rs"),
+            "rust doc_versions should be cleared"
         );
     }
 
@@ -2266,7 +2365,7 @@ mod tests {
 
         client.doc_versions.insert(
             "file:///workspace/src/main.rs".to_owned(),
-            std::sync::atomic::AtomicI32::new(3),
+            ("rust".to_owned(), std::sync::atomic::AtomicI32::new(3)),
         );
         assert_eq!(client.doc_versions.len(), 1);
 
@@ -2484,20 +2583,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_force_respawn_clears_doc_versions() {
+    async fn test_force_respawn_clears_doc_versions_for_language() {
         let (client, _fake) = make_running_client("rust");
 
         client.doc_versions.insert(
             "file:///workspace/src/main.rs".to_owned(),
-            std::sync::atomic::AtomicI32::new(1),
+            ("rust".to_owned(), std::sync::atomic::AtomicI32::new(1)),
         );
-        assert_eq!(client.doc_versions.len(), 1);
+        client.doc_versions.insert(
+            "file:///workspace/main.go".to_owned(),
+            ("go".to_owned(), std::sync::atomic::AtomicI32::new(1)),
+        );
+        assert_eq!(client.doc_versions.len(), 2);
 
         let _ = client.force_respawn("rust").await;
 
+        assert_eq!(client.doc_versions.len(), 1);
         assert!(
-            client.doc_versions.is_empty(),
-            "force_respawn should clear doc_versions"
+            client
+                .doc_versions
+                .contains_key("file:///workspace/main.go"),
+            "go doc_versions should not be cleared when respawning rust"
+        );
+        assert!(
+            !client
+                .doc_versions
+                .contains_key("file:///workspace/src/main.rs"),
+            "rust doc_versions should be cleared on respawn"
         );
     }
 
@@ -2521,5 +2633,231 @@ mod tests {
             matches!(entry.value(), ProcessEntry::Unavailable(_)),
             "touch on Unavailable should be no-op"
         );
+    }
+
+    // D-2: LspClient::new() integration tests with filesystem fixtures
+    //
+    // These tests use config command overrides to provide known binary names,
+    // avoiding dependency on which::which() which is sensitive to concurrent
+    // PATH manipulation by detect::tests::test_with_fake_python_binaries.
+
+    fn lsp_config_with_command(command: &str) -> pathfinder_common::config::LspConfig {
+        pathfinder_common::config::LspConfig {
+            command: command.to_owned(),
+            args: vec![],
+            idle_timeout_minutes: 30,
+            settings: serde_json::Value::Null,
+            root_override: None,
+            typescript_plugins: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_empty_directory_no_languages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = std::sync::Arc::new(pathfinder_common::config::PathfinderConfig::default());
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed for empty dir");
+
+        assert!(
+            client.descriptors.is_empty(),
+            "empty directory should have no language descriptors"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_with_cargo_toml_detects_rust() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"",
+        )
+        .expect("write Cargo.toml");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config
+            .lsp
+            .insert("rust".to_owned(), lsp_config_with_command("rust-analyzer"));
+        let config = std::sync::Arc::new(config);
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed");
+
+        assert!(
+            client.descriptors.iter().any(|d| d.language_id == "rust"),
+            "should detect Rust language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_with_go_mod_detects_go() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/test\n\ngo 1.21",
+        )
+        .expect("write go.mod");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config
+            .lsp
+            .insert("go".to_owned(), lsp_config_with_command("gopls"));
+        let config = std::sync::Arc::new(config);
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed");
+
+        assert!(
+            client.descriptors.iter().any(|d| d.language_id == "go"),
+            "should detect Go language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_with_tsconfig_detects_typescript() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            "{\"compilerOptions\": {\"target\": \"es2020\"}}",
+        )
+        .expect("write tsconfig.json");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config.lsp.insert(
+            "typescript".to_owned(),
+            lsp_config_with_command("typescript-language-server"),
+        );
+        let config = std::sync::Arc::new(config);
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed");
+
+        assert!(
+            client
+                .descriptors
+                .iter()
+                .any(|d| d.language_id == "typescript"),
+            "should detect TypeScript language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_with_pyproject_detects_python() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"test\"\nversion = \"0.1.0\"",
+        )
+        .expect("write pyproject.toml");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config
+            .lsp
+            .insert("python".to_owned(), lsp_config_with_command("pyright"));
+        let config = std::sync::Arc::new(config);
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed");
+
+        assert!(
+            client.descriptors.iter().any(|d| d.language_id == "python"),
+            "should detect Python language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_nonexistent_workspace_succeeds_with_no_languages() {
+        let config = std::sync::Arc::new(pathfinder_common::config::PathfinderConfig::default());
+
+        let client = super::super::LspClient::new(Path::new("/definitely/does/not/exist"), config)
+            .await
+            .expect("new should succeed — detect_languages handles nonexistent dirs gracefully");
+
+        assert!(
+            client.descriptors.is_empty(),
+            "nonexistent workspace should have no descriptors"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_shutdown_flag_toggles_correctly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = std::sync::Arc::new(pathfinder_common::config::PathfinderConfig::default());
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed");
+
+        assert!(
+            !client.shutdown_requested.load(Ordering::Relaxed),
+            "shutdown should not be requested initially"
+        );
+
+        client.shutdown();
+        assert!(
+            client.shutdown_requested.load(Ordering::Relaxed),
+            "shutdown should be requested after shutdown()"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_warm_start_complete_initially_false() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = std::sync::Arc::new(pathfinder_common::config::PathfinderConfig::default());
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed");
+
+        assert!(
+            !client.warm_start_complete.load(Ordering::Relaxed),
+            "warm_start_complete should be false initially"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_multiple_marker_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"",
+        )
+        .expect("write Cargo.toml");
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/test\n\ngo 1.21",
+        )
+        .expect("write go.mod");
+
+        let mut config = pathfinder_common::config::PathfinderConfig::default();
+        config
+            .lsp
+            .insert("rust".to_owned(), lsp_config_with_command("rust-analyzer"));
+        config
+            .lsp
+            .insert("go".to_owned(), lsp_config_with_command("gopls"));
+        let config = std::sync::Arc::new(config);
+
+        let client = super::super::LspClient::new(dir.path(), config)
+            .await
+            .expect("new should succeed");
+
+        let language_ids: Vec<&str> = client
+            .descriptors
+            .iter()
+            .map(|d| d.language_id.as_str())
+            .collect();
+
+        assert!(
+            language_ids.contains(&"rust"),
+            "should detect Rust language"
+        );
+        assert!(language_ids.contains(&"go"), "should detect Go language");
     }
 }

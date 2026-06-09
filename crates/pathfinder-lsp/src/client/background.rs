@@ -24,6 +24,7 @@ pub async fn reader_supervisor_task(
     reader_alive: Arc<std::sync::atomic::AtomicBool>,
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
+    doc_versions: Arc<DashMap<String, (String, std::sync::atomic::AtomicI32)>>,
 ) {
     let crashed = match reader_handle.await {
         Ok(()) => {
@@ -68,6 +69,24 @@ pub async fn reader_supervisor_task(
         // exit. But panic/abort bypasses that, so supervisor must do it.
         if crashed {
             dispatcher.cancel_for_language(&language_id);
+            // MAJOR: Clear stale doc_versions for this language after crash recovery.
+            // A new LSP instance won't know about previously opened documents.
+            let mut cleared = 0;
+            doc_versions.retain(|_uri, (lang, _)| {
+                if lang == &language_id {
+                    cleared += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            if cleared > 0 {
+                tracing::debug!(
+                    language = %language_id,
+                    cleared,
+                    "LSP: cleared stale doc_versions for language after supervisor-detected crash"
+                );
+            }
         }
 
         if let Some(ref lifecycle) = state.lifecycle {
@@ -235,6 +254,7 @@ pub async fn registration_watcher_task(
 pub async fn idle_timeout_task(
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
+    doc_versions: Arc<DashMap<String, (String, std::sync::atomic::AtomicI32)>>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     use std::sync::atomic::Ordering;
@@ -306,6 +326,23 @@ pub async fn idle_timeout_task(
                                 if let Some(ref lifecycle) = state.lifecycle {
                                     let _ = lifecycle.child.lock().await.wait().await;
                                 }
+                                // Clear stale doc_versions for this language from the dead instance.
+                                let mut cleared = 0;
+                                doc_versions.retain(|_uri, (l, _)| {
+                                    if l == &lang {
+                                        cleared += 1;
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                });
+                                if cleared > 0 {
+                                    tracing::debug!(
+                                        language = %lang,
+                                        cleared,
+                                        "LSP: cleared stale doc_versions for language after zombie reap"
+                                    );
+                                }
                                 // M-9: Insert Unavailable for backoff protection. Without this,
                                 // ensure_process would immediately retry and could create a tight
                                 // spawn-exit loop if the child keeps dying.
@@ -375,6 +412,23 @@ pub async fn idle_timeout_task(
                         dispatcher.cancel_for_language(&lang);
                         if let Some(ref lifecycle) = state.lifecycle {
                             let _ = lifecycle.child.lock().await.wait().await;
+                        }
+                        // Clear stale doc_versions for this language from the idle-killed instance.
+                        let mut cleared = 0;
+                        doc_versions.retain(|_uri, (l, _)| {
+                            if l == &lang {
+                                cleared += 1;
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        if cleared > 0 {
+                            tracing::debug!(
+                                language = %lang,
+                                cleared,
+                                "LSP: cleared stale doc_versions for language after idle timeout"
+                            );
                         }
                     } else {
                         tracing::debug!(
@@ -1096,6 +1150,7 @@ mod tests {
             reader_alive,
             Arc::clone(&processes),
             dispatcher,
+            Arc::new(DashMap::new()),
         )
         .await;
 
