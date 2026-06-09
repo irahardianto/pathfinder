@@ -285,11 +285,16 @@ impl PathfinderServer {
             warm_start_in_progress,
         };
 
-        let source_block = format!(
-            "SYMBOL: {} ({} lines)\n",
-            params.semantic_path,
-            scope.end_line - scope.start_line
-        );
+        let line_count = scope.end_line - scope.start_line + 1;
+        let mut source_block = format!("SYMBOL: {} ({} lines)\n", params.semantic_path, line_count);
+        if line_count <= 10 {
+            source_block.push_str("```\n");
+            source_block.push_str(&scope.content);
+            if !scope.content.ends_with('\n') {
+                source_block.push('\n');
+            }
+            source_block.push_str("```\n");
+        }
 
         let impact_block = if let Some(ref imp) = impact {
             let inc = imp.incoming.as_ref().map_or(0, Vec::len);
@@ -508,9 +513,9 @@ mod tests {
         assert_eq!(refs.len(), 0);
         assert_eq!(val.files_referenced, 0);
 
-        // Not degraded, just empty results
-        assert!(!val.degraded);
-        assert_eq!(val.lsp_readiness, Some("ready".to_owned()));
+        // Degraded because results are empty
+        assert!(val.degraded);
+        assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
     }
 
     #[tokio::test]
@@ -632,6 +637,19 @@ mod tests {
             data: None,
         };
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "caller".into(),
+                kind: "function".into(),
+                detail: Some("fn caller()".into()),
+                file: "src/caller.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
         lawyer.set_references_lsp_error(Err(LspError::Timeout {
             operation: "references".to_string(),
             timeout_ms: 10000,
@@ -653,7 +671,10 @@ mod tests {
 
         // Verify degraded on LSP error in find_all_references_impl
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspTimeoutGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspTimeoutGrepFallback)
+        );
         assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
         assert_eq!(val.warm_start_in_progress, Some(true));
 
@@ -702,10 +723,13 @@ mod tests {
         let val: crate::server::types::SymbolOverviewResponse =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        // Verify NOT degraded (LSP error in BFS is logged but doesn't set overall degraded flag)
-        assert!(!val.degraded);
-        assert_eq!(val.degraded_reason, None);
-        assert_eq!(val.lsp_readiness, Some("ready".to_owned()));
+        // Verify degraded (empty BFS call hierarchy results in degradation)
+        assert!(val.degraded);
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspWarmupGrepFallback)
+        );
+        assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
 
         // Impact is populated with empty arrays (prepare succeeded)
         assert!(val.impact.is_some());
@@ -931,7 +955,10 @@ mod tests {
         // Verify degraded due to impact error
         assert!(val.degraded);
         // find_callers_callees_impl returns degraded_reason=LspErrorGrepFallback when LSP error occurs
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
 
         // Impact is None because find_callers_callees returns degraded metadata with None incoming/outgoing
@@ -979,7 +1006,10 @@ mod tests {
         // Both degraded
         assert!(val.degraded);
         // Impact error takes priority in degraded_reason (LspErrorGrepFallback)
-        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback)
+        );
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
 
         // Both unavailable
@@ -1059,7 +1089,7 @@ mod tests {
             line: 10,
             column: 8,
             snippet: "login();".into(),
-        } ] ) ) ;
+        }]));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -1093,7 +1123,7 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         // Configure references to fail to trigger degraded mode for references
         lawyer.set_references_lsp_error(Err(LspError::NoLspAvailable));
-        
+
         let item = CallHierarchyItem {
             name: "login".into(),
             kind: "function".into(),
@@ -1124,5 +1154,58 @@ mod tests {
         assert!(val.degraded);
         assert!(val.references.is_none());
         assert!(val.impact.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_symbol_overview_line_count_and_source_inclusion() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(pathfinder_common::types::SymbolScope {
+                content: "fn login() {\n    println!(\"hello\");\n}".to_owned(),
+                start_line: 10,
+                end_line: 12,
+                name_column: 0,
+                language: "rust".to_owned(),
+            }),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 10,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+        lawyer.set_references_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+        let params = crate::server::types::SymbolOverviewParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            project_only: Some(true),
+            max_callers_callees: 50,
+            max_references: 50,
+        };
+
+        let result = server.symbol_overview_impl(params).await;
+        let call_res = result.expect("should succeed");
+
+        let call_res_json = serde_json::to_value(&call_res).unwrap();
+        let text = call_res_json["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // Assert 3 lines instead of 2 (12 - 10 + 1 = 3)
+        assert!(text.contains("SYMBOL: src/auth.rs::login (3 lines)"));
+        // Assert source code is embedded in text
+        assert!(text.contains("```\nfn login() {\n    println!(\"hello\");\n}\n```"));
     }
 }
