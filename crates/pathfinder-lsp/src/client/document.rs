@@ -448,10 +448,10 @@ mod tests {
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
 
-    /// Verifies that calling did_open twice on the same file WITHOUT an
-    /// intervening did_close only sends ONE didOpen notification.
+    /// Verifies that calling `did_open` twice on the same file WITHOUT an
+    /// intervening `did_close` only sends ONE `didOpen` notification.
     /// This is the fix for the jdtls protocol-violation bug where
-    /// symbol_overview's sub-tools each called open_document on the same file.
+    /// `symbol_overview`'s sub-tools each called `open_document` on the same file.
     #[tokio::test]
     async fn test_did_open_dedup_skips_second_notification() {
         let (client, fake) = make_running_client("rust");
@@ -499,9 +499,9 @@ mod tests {
         );
     }
 
-    /// Verifies that open_document guard dedup works correctly in the
-    /// symbol_overview scenario: first guard opens, second guard is dedup'd,
-    /// dropping dedup'd guard does NOT send didClose, dropping owning guard DOES.
+    /// Verifies that `open_document` guard dedup works correctly in the
+    /// `symbol_overview` scenario: first guard opens, second guard is dedup'd,
+    /// dropping dedup'd guard does NOT send `didClose`, dropping owning guard DOES.
     #[tokio::test]
     async fn test_open_document_guard_dedup_in_composite_tool() {
         let (client, fake) = make_running_client("rust");

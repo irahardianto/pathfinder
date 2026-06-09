@@ -1409,7 +1409,9 @@ mod tests {
         );
         let probe_path = probe.unwrap();
         assert!(
-            probe_path.to_str().unwrap().ends_with(".java"),
+            probe_path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("java")),
             "Should find a .java file, got: {probe_path:?}"
         );
     }
