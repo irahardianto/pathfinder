@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.11.2...pathfinder-mcp-lsp-v0.11.3) - 2026-06-09
+
+### Added
+
+- *(lsp)* implement D-1 through D-5 deferred items and fix audit findings
+
+### Other
+
+- *(lsp)* add MockProcessSpawner succeeding mode and comprehensive FakeTransport coverage
+- *(lsp)* document D-5 error response delay asymmetry
+
 ## [0.11.2](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.11.1...pathfinder-mcp-lsp-v0.11.2) - 2026-06-08
 
 ### Fixed
