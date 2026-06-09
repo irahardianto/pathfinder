@@ -522,7 +522,7 @@ mod tests {
             false,
             false,
             false,
-            2,    // under 5s — grace period active
+            2, // under 5s — grace period active
             None,
             None,
             None,
@@ -545,7 +545,7 @@ mod tests {
             false,
             false,
             false,
-            5,    // at 5s — grace period over
+            5, // at 5s — grace period over
             None,
             None,
             None,
@@ -570,7 +570,7 @@ mod tests {
             true,
             false,
             false,
-            1,    // under 5s
+            1, // under 5s
             None,
             None,
             None,

@@ -464,9 +464,16 @@ mod tests {
             .did_open(workspace, file_path, "fn main() {}")
             .await
             .unwrap();
-        assert!(opened, "first did_open should return true (actually opened)");
+        assert!(
+            opened,
+            "first did_open should return true (actually opened)"
+        );
         let first_notifications = fake.take_notifications();
-        assert_eq!(first_notifications.len(), 1, "first open should send didOpen");
+        assert_eq!(
+            first_notifications.len(),
+            1,
+            "first open should send didOpen"
+        );
         assert_eq!(first_notifications[0].0, "textDocument/didOpen");
 
         // Second open WITHOUT did_close — should be dedup'd, return false
@@ -509,7 +516,11 @@ mod tests {
             .unwrap();
         assert!(guard1.owns_open, "first guard should own the open");
         let open_notifications = fake.take_notifications();
-        assert_eq!(open_notifications.len(), 1, "first guard should send didOpen");
+        assert_eq!(
+            open_notifications.len(),
+            1,
+            "first guard should send didOpen"
+        );
 
         // Simulate find_all_references_impl trying to open the same document
         let guard2 = client
