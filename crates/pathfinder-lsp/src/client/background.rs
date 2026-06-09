@@ -250,6 +250,32 @@ pub async fn registration_watcher_task(
     }
 }
 
+/// Collect languages whose processes are idle (elapsed > timeout, `in_flight` == 0).
+///
+/// Extracted from [`idle_timeout_task`] for testability. The idle timeout task
+/// calls this to determine which processes to remove.
+pub(crate) fn collect_idle_languages(processes: &DashMap<String, ProcessEntry>) -> Vec<String> {
+    use std::sync::atomic::Ordering;
+
+    processes
+        .iter()
+        .filter_map(|entry| {
+            let lang = entry.key();
+            if let ProcessEntry::Running(state) = entry.value() {
+                if state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
+                    && state.transport.in_flight().load(Ordering::Acquire) == 0
+                {
+                    Some(lang.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn idle_timeout_task(
     processes: Arc<DashMap<String, ProcessEntry>>,
@@ -361,27 +387,7 @@ pub async fn idle_timeout_task(
                     }
                 }
 
-                // P2-2 + P3-2 fix: Use remove_if for atomic check-and-remove.
-                // This eliminates the TOCTOU window between checking in_flight and
-                // actually removing the entry. First collect candidates, then try
-                // to remove each with remove_if.
-                let candidates: Vec<String> = processes
-                    .iter()
-                    .filter_map(|entry| {
-                        let lang = entry.key();
-                        if let ProcessEntry::Running(state) = entry.value() {
-                            if state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
-                                && state.transport.in_flight().load(Ordering::Acquire) == 0
-                            {
-                                Some(lang.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                let candidates = collect_idle_languages(&processes);
 
                 for lang in candidates {
                     // Atomically check in_flight and remove if still idle.

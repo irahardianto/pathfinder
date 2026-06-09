@@ -1077,4 +1077,70 @@ mod tests {
             panic!("Process should be Unavailable after failed spawn");
         }
     }
+
+    #[tokio::test]
+    async fn test_g_1_ensure_process_records_spawn_call_through_di_chain() {
+        use crate::client::process::test_mocks::MockProcessSpawner;
+
+        let mock_spawner = Arc::new(MockProcessSpawner::failing());
+
+        let descriptors = vec![LspDescriptor {
+            language_id: "rust".to_owned(),
+            command: "rust-analyzer".to_owned(),
+            args: vec!["--stdio".to_owned()],
+            root: std::env::temp_dir(),
+            init_timeout_secs: None,
+            auto_plugins: vec![],
+            init_options: serde_json::Value::Null,
+        }];
+
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let client = LspClient {
+            descriptors: Arc::new(descriptors),
+            missing_languages: Arc::new(Vec::new()),
+            processes: Arc::new(DashMap::new()),
+            init_locks: Arc::new(DashMap::new()),
+            dispatcher: Arc::new(RequestDispatcher::new()),
+            shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: mock_spawner.clone(),
+        };
+
+        assert_eq!(
+            mock_spawner.call_count(),
+            0,
+            "no spawn calls before ensure_process"
+        );
+
+        let result = client.ensure_process("rust").await;
+
+        assert!(
+            result.is_err(),
+            "ensure_process should fail with failing spawner"
+        );
+        assert_eq!(
+            mock_spawner.call_count(),
+            1,
+            "ensure_process must trigger exactly one spawn call through the DI chain"
+        );
+
+        let call = mock_spawner
+            .last_call()
+            .expect("spawn call must be recorded");
+        assert_eq!(
+            call.command, "rust-analyzer",
+            "spawner must receive the descriptor's command"
+        );
+        assert_eq!(
+            call.args,
+            vec!["--stdio".to_owned()],
+            "spawner must receive the descriptor's args"
+        );
+        assert_eq!(
+            call.language_id, "rust",
+            "spawner must receive the correct language_id"
+        );
+    }
 }

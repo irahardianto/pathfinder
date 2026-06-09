@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub(crate) struct FailingBehavior {
-    pub fail_after_n_requests: Option<usize>,
+    pub fail_after_n_requests: Option<u32>,
     pub fail_on_method: Option<String>,
 }
 
@@ -123,6 +123,11 @@ impl FakeTransport {
     pub fn set_response_delay(&self, delay: Duration) {
         *self.response_delay.lock() = Some(delay);
     }
+
+    #[allow(dead_code)]
+    pub fn clear_response_delay(&self) {
+        *self.response_delay.lock() = None;
+    }
 }
 
 #[async_trait]
@@ -144,7 +149,7 @@ impl LspTransport for FakeTransport {
 
             if let Some(ref behavior) = *self.failing_behavior.lock() {
                 if let Some(fail_after) = behavior.fail_after_n_requests {
-                    if count >= u32::try_from(fail_after).unwrap_or(u32::MAX) {
+                    if count >= fail_after {
                         self.alive.store(false, Ordering::SeqCst);
                         return Err(LspError::ConnectionLost);
                     }

@@ -729,4 +729,64 @@ mod tests {
             .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
+
+    #[tokio::test]
+    async fn test_lawyer_goto_definition_request_error_returns_error() {
+        let (client, fake) = make_running_client_with_caps("rust");
+
+        fake.kill();
+
+        let result = client
+            .goto_definition(Path::new("/workspace"), Path::new("src/main.rs"), 10, 5)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "goto_definition should fail when transport is dead: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(LspError::ConnectionLost)),
+            "should return ConnectionLost, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lawyer_call_hierarchy_prepare_request_error_returns_error() {
+        let (client, fake) = make_running_client_with_caps("rust");
+
+        fake.kill();
+
+        let result = client
+            .call_hierarchy_prepare(Path::new("/workspace"), Path::new("src/main.rs"), 1, 3)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "call_hierarchy_prepare should fail when transport is dead: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(LspError::ConnectionLost)),
+            "should return ConnectionLost, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lawyer_references_request_error_returns_error() {
+        let (client, fake) = make_running_client_with_caps("rust");
+
+        fake.kill();
+
+        let result = client
+            .references(Path::new("/workspace"), Path::new("src/main.rs"), 1, 4)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "references should fail when transport is dead: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(LspError::ConnectionLost)),
+            "should return ConnectionLost, got: {result:?}"
+        );
+    }
 }

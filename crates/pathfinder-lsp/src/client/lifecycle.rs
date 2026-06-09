@@ -1396,7 +1396,7 @@ mod tests {
                 "rust",
                 "textDocument/definition",
                 json!({}),
-                Duration::from_millis(50),
+                Duration::from_secs(1),
             )
             .await;
 
@@ -1601,6 +1601,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_idle_timeout_removes_process_after_timeout() {
+        use crate::client::background::collect_idle_languages;
+
         let (client, _fake) = make_running_client("rust");
 
         if let Some(entry) = client.processes.get("rust") {
@@ -1611,19 +1613,36 @@ mod tests {
             }
         }
 
-        assert!(client.processes.get("rust").is_some());
+        let candidates = collect_idle_languages(&client.processes);
+        assert_eq!(
+            candidates,
+            vec!["rust"],
+            "idle process should be a candidate for removal"
+        );
 
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            assert!(
-                state.transport.last_used().elapsed() > Duration::from_mins(15),
-                "last_used should be in the past"
-            );
-        }
+        let removed = client.processes.remove_if("rust", |_, v| {
+            if let ProcessEntry::Running(state) = v {
+                state.transport.last_used().elapsed() > Duration::from_mins(15)
+                    && state.transport.in_flight().load(Ordering::Acquire) == 0
+            } else {
+                false
+            }
+        });
+
+        assert!(
+            removed.is_some(),
+            "idle process with no in-flight requests should be removed"
+        );
+        assert!(
+            client.processes.get("rust").is_none(),
+            "process entry should be gone after idle timeout removal"
+        );
     }
 
     #[tokio::test]
     async fn test_idle_timeout_does_not_remove_process_with_in_flight() {
+        use crate::client::background::collect_idle_languages;
+
         let (client, _fake) = make_running_client("rust");
 
         if let Some(entry) = client.processes.get("rust") {
@@ -1635,13 +1654,16 @@ mod tests {
             }
         }
 
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            assert!(
-                state.transport.in_flight().load(Ordering::Relaxed) > 0,
-                "in-flight should be > 0"
-            );
-        }
+        let candidates = collect_idle_languages(&client.processes);
+        assert!(
+            candidates.is_empty(),
+            "process with in-flight requests should NOT be a candidate for removal"
+        );
+
+        assert!(
+            client.processes.get("rust").is_some(),
+            "process should still exist when in-flight > 0"
+        );
     }
 
     #[tokio::test]
@@ -2624,6 +2646,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_force_respawn_with_lifecycle_kills_old_process() {
+        use crate::client::fake_transport::FakeTransport;
+        use crate::client::{LanguageState, ProcessLifecycle};
+
+        let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+        let sleep_bin = which::which("sleep")
+            .or_else(|_| {
+                which::which("/usr/bin/sleep").map(|_| std::path::PathBuf::from("/usr/bin/sleep"))
+            })
+            .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/sleep"));
+        let child = tokio::process::Command::new(&sleep_bin)
+            .arg("60")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("Failed to spawn sleep");
+
+        let child_pid = child.id().expect("child must have a PID");
+
+        let lifecycle = ProcessLifecycle {
+            child: Arc::new(tokio::sync::Mutex::new(child)),
+        };
+        let lifecycle_for_assert = lifecycle.clone();
+
+        let fake = Arc::new(FakeTransport::new());
+        let dispatcher = Arc::new(RequestDispatcher::new());
+        fake.set_dispatcher(Arc::clone(&dispatcher));
+
+        let reader_handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let entry = ProcessEntry::Running(Box::new(LanguageState {
+            transport: Arc::clone(&fake) as Arc<dyn LspTransport>,
+            lifecycle: Some(lifecycle),
+            reader_handle,
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities::default())),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        }));
+
+        client.processes.insert("rust".to_owned(), entry);
+
+        let result = client.force_respawn("rust").await;
+
+        assert!(
+            result.is_err(),
+            "force_respawn should fail (no real LSP binary)"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut child_guard = lifecycle_for_assert.child.lock().await;
+        let status = child_guard.try_wait();
+        assert!(
+            status.is_ok() && status.as_ref().unwrap().is_some(),
+            "old sleep process should have been killed by force_respawn (pid {child_pid}): {status:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_touch_on_unavailable_entry_is_noop() {
         let client = client_with_descriptors(
             vec!["rust"],
@@ -3070,5 +3163,162 @@ mod tests {
         let caps = fake.capabilities();
         assert!(caps.definition_provider);
         assert!(caps.call_hierarchy_provider);
+    }
+
+    fn make_multi_lang_entry(fake: Arc<crate::client::fake_transport::FakeTransport>) -> ProcessEntry {
+        let reader_handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        ProcessEntry::Running(Box::new(LanguageState {
+            transport: fake as Arc<dyn LspTransport>,
+            lifecycle: None,
+            reader_handle,
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(Some(
+                IndexingCompletionSource::Progress,
+            ))),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(Some(0))),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities {
+                definition_provider: true,
+                ..DetectedCapabilities::default()
+            })),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn test_multi_language_requests_route_to_correct_transport() {
+        use crate::client::fake_transport::FakeTransport;
+
+        let mut rust_transport = FakeTransport::new();
+        rust_transport.set_language_id("rust");
+        let rust_fake = Arc::new(rust_transport);
+
+        let mut go_transport = FakeTransport::new();
+        go_transport.set_language_id("go");
+        let go_fake = Arc::new(go_transport);
+
+        let dispatcher = Arc::new(RequestDispatcher::new());
+
+        rust_fake.set_dispatcher(Arc::clone(&dispatcher));
+        go_fake.set_dispatcher(Arc::clone(&dispatcher));
+
+        rust_fake.set_response(
+            "textDocument/definition",
+            json!({ "result": { "uri": "file:///rust-result.rs" } }),
+        );
+        go_fake.set_response(
+            "textDocument/definition",
+            json!({ "result": { "uri": "file:///go-result.go" } }),
+        );
+
+        let processes = DashMap::new();
+        processes.insert("rust".to_owned(), make_multi_lang_entry(Arc::clone(&rust_fake)));
+        processes.insert("go".to_owned(), make_multi_lang_entry(Arc::clone(&go_fake)));
+
+        let descriptors = vec![
+            LanguageLsp {
+                language_id: "rust".to_owned(),
+                command: "rust-analyzer".to_owned(),
+                args: vec![],
+                root: std::env::temp_dir(),
+                init_timeout_secs: None,
+                auto_plugins: vec![],
+                init_options: serde_json::Value::Null,
+            },
+            LanguageLsp {
+                language_id: "go".to_owned(),
+                command: "gopls".to_owned(),
+                args: vec![],
+                root: std::env::temp_dir(),
+                init_timeout_secs: None,
+                auto_plugins: vec![],
+                init_options: serde_json::Value::Null,
+            },
+        ];
+
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let client = super::super::LspClient {
+            descriptors: Arc::new(descriptors),
+            missing_languages: Arc::new(Vec::new()),
+            processes: Arc::new(processes),
+            init_locks: Arc::new(DashMap::new()),
+            dispatcher: Arc::clone(&dispatcher),
+            shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: std::sync::Arc::new(
+                crate::client::process::test_mocks::MockProcessSpawner::failing(),
+            ),
+        };
+
+        let rust_result = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            rust_result.is_ok(),
+            "rust request should succeed: {rust_result:?}"
+        );
+        assert_eq!(
+            rust_result.unwrap()["uri"],
+            "file:///rust-result.rs",
+            "rust request should return rust transport's response"
+        );
+
+        let go_result = client
+            .request(
+                "go",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            go_result.is_ok(),
+            "go request should succeed: {go_result:?}"
+        );
+        assert_eq!(
+            go_result.unwrap()["uri"],
+            "file:///go-result.go",
+            "go request should return go transport's response"
+        );
+
+        assert_eq!(
+            rust_fake.request_count(),
+            1,
+            "rust transport should have 1 request"
+        );
+        assert_eq!(
+            go_fake.request_count(),
+            1,
+            "go transport should have 1 request"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_shutdown_is_noop() {
+        let (_client, fake) = make_running_client("rust");
+        let dispatcher = Arc::new(RequestDispatcher::new());
+
+        fake.set_response("shutdown", json!({ "result": null }));
+
+        assert!(fake.is_alive(), "should be alive before shutdown");
+        fake.shutdown(&dispatcher, "rust").await;
+        assert!(
+            fake.is_alive(),
+            "FakeTransport shutdown should be no-op (still alive)"
+        );
     }
 }
