@@ -432,6 +432,33 @@ pub enum Visibility {
     All,
 }
 
+/// Error returned when parsing a [`Visibility`] from a string fails.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid visibility: '{0}' (expected 'public' or 'all')")]
+pub struct ParseVisibilityError(pub String);
+
+impl std::str::FromStr for Visibility {
+    type Err = ParseVisibilityError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "public" => Ok(Self::Public),
+            "all" => Ok(Self::All),
+            other => Err(ParseVisibilityError(other.to_owned())),
+        }
+    }
+}
+
+impl fmt::Display for Visibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Public => "public",
+            Self::All => "all",
+        };
+        write!(f, "{s}")
+    }
+}
+
 /// Import inclusion mode for `get_repo_map`.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -930,5 +957,97 @@ mod tests {
         assert!(g.permanent);
         assert_eq!(g.fallback_tool.as_deref(), Some("search_codebase"));
         assert_eq!(g.trust_level, "heuristic");
+    }
+
+    #[test]
+    fn test_visibility_display_and_from_str() {
+        let v_pub = Visibility::Public;
+        assert_eq!(v_pub.to_string(), "public");
+        assert_eq!("public".parse::<Visibility>().expect("valid"), Visibility::Public);
+
+        let v_all = Visibility::All;
+        assert_eq!(v_all.to_string(), "all");
+        assert_eq!("all".parse::<Visibility>().expect("valid"), Visibility::All);
+
+        let err = "invalid".parse::<Visibility>();
+        assert!(err.is_err());
+        assert_eq!(
+            err.expect_err("invalid visibility").to_string(),
+            "invalid visibility: 'invalid' (expected 'public' or 'all')"
+        );
+    }
+
+    #[test]
+    fn test_semantic_path_parse_edge_cases() {
+        // Line 106: symbol_part is empty
+        assert!(SemanticPath::parse("src/auth.ts::").is_none());
+
+        // Line 118: dot-only symbol part (segments is empty)
+        assert!(SemanticPath::parse("src/auth.ts::.").is_none());
+
+        // Line 155: empty segment in symbol chain is skipped, but chain can still parse if other segments exist
+        let sp = SemanticPath::parse("src/auth.ts::a..b").expect("should parse a..b by skipping empty segment");
+        let chain = sp.symbol_chain.expect("should have symbol chain");
+        assert_eq!(chain.segments.len(), 2);
+        assert_eq!(chain.segments[0].name, "a");
+        assert_eq!(chain.segments[1].name, "b");
+    }
+
+    #[test]
+    fn test_version_hash_display() {
+        let h = VersionHash::compute(b"hello");
+        assert_eq!(h.to_string(), h.as_str());
+    }
+
+    #[test]
+    fn test_resolve_absolute_path_unstrict() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = WorkspaceRoot::new(dir.path()).expect("create workspace root");
+        let resolved = root.resolve(std::path::Path::new("/etc/passwd"));
+        assert!(resolved.to_string_lossy().contains("etc/passwd"));
+        assert!(!resolved.to_string_lossy().starts_with("/etc/passwd"));
+    }
+
+    #[test]
+    fn test_resolve_warning_logs() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = WorkspaceRoot::new(dir.path()).expect("create workspace root");
+        let _resolved = root.resolve(std::path::Path::new("../../etc/passwd"));
+    }
+
+    #[test]
+    fn test_degraded_reason_all_variants() {
+        use super::DegradedReason;
+
+        let variants = [
+            DegradedReason::NoLsp,
+            DegradedReason::LspWarmupEmptyUnverified,
+            DegradedReason::LspWarmupGrepFallback,
+            DegradedReason::LspTimeoutGrepFallback,
+            DegradedReason::LspErrorGrepFallback,
+            DegradedReason::NoLspGrepFallback,
+            DegradedReason::GrepFallbackFileScoped,
+            DegradedReason::GrepFallbackImplScoped,
+            DegradedReason::GrepFallbackGlobal,
+            DegradedReason::GrepFallbackDependencies,
+            DegradedReason::UnsupportedLanguageFilterBypassed,
+            DegradedReason::UnsupportedLanguage,
+            DegradedReason::GitError,
+        ];
+
+        for &variant in &variants {
+            // Verify Display impl (line 494)
+            let s = variant.to_string();
+            assert!(!s.is_empty());
+
+            // Verify guidance logic
+            let guidance = variant.guidance();
+            assert_eq!(
+                guidance.retry_recommended,
+                guidance.retry_after_seconds.is_some(),
+                "retry_recommended must match the presence of retry_after_seconds for variant {variant:?}"
+            );
+        }
     }
 }

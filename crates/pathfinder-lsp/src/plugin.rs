@@ -572,10 +572,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_no_extension_overlap_between_plugins() {
-        // Each extension should map to exactly one plugin.
-        let plugins = all_plugins();
+    fn check_extension_overlap(plugins: &[&dyn LanguagePlugin]) {
         let mut seen = std::collections::HashMap::new();
         for plugin in plugins {
             for ext in plugin.file_extensions() {
@@ -587,6 +584,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_no_extension_overlap_between_plugins() {
+        // Each extension should map to exactly one plugin.
+        check_extension_overlap(all_plugins());
+    }
+
+    #[test]
+    #[should_panic(expected = "Extension .rs claimed by both 'rust' and 'rust'")]
+    fn test_extension_overlap_panic() {
+        struct MockPlugin;
+        impl LanguagePlugin for MockPlugin {
+            fn language_id(&self) -> &'static str {
+                "rust"
+            }
+            fn file_extensions(&self) -> &'static [&'static str] {
+                &["rs"]
+            }
+            fn marker_files(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn marker_search_depth(&self) -> u32 {
+                0
+            }
+            fn lsp_candidates(&self) -> &[LspCandidate] {
+                &[]
+            }
+            fn install_hint(&self) -> &'static str {
+                ""
+            }
+        }
+        let plugins: &[&dyn LanguagePlugin] = &[&RustPlugin, &MockPlugin];
+        check_extension_overlap(plugins);
     }
 
     // ── JavaPlugin ──────────────────────────────────────────────────────

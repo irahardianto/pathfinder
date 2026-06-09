@@ -1181,4 +1181,23 @@ mod tests {
         assert_eq!(params.max_references, 50);
         assert!(!params.include_test_coverage);
     }
+
+    #[test]
+    fn test_default_value_helpers() {
+        assert_eq!(default_path_glob(), "**/*");
+        assert_eq!(default_max_results(), 50);
+        assert_eq!(default_context_lines(), 2);
+        assert_eq!(default_repo_map_path(), ".");
+        assert_eq!(default_max_tokens(), 16_000);
+        assert_eq!(default_max_tokens_per_file(), 2_000);
+        assert_eq!(default_depth(), 5);
+        assert_eq!(default_max_depth(), 3);
+        assert_eq!(default_max_callers_callees(), 20);
+        assert_eq!(default_max_references(), 50);
+        assert_eq!(default_max_dependencies(), 50);
+        assert_eq!(default_start_line(), 1);
+        assert_eq!(default_max_lines(), 500);
+        assert_eq!(default_detail_level(), "compact");
+        assert!(default_true());
+    }
 }
