@@ -599,7 +599,13 @@ impl PathfinderServer {
             ],
             "python" => vec!["src/__init__.py", "main.py", "setup.py", "__init__.py"],
             "ruby" => vec!["lib/main.rb", "main.rb"],
-            "java" => vec!["src/main/java/Main.java"],
+            // Java: cover Spring Boot, Micronaut, Quarkus, plain-Java conventions.
+            // Most real projects use Application.java, App.java, or domain-specific names.
+            "java" => vec![
+                "src/main/java/Main.java",
+                "src/main/java/App.java",
+                "src/main/java/Application.java",
+            ],
             _ => vec![],
         };
 
@@ -610,10 +616,15 @@ impl PathfinderServer {
             }
         }
 
-        // LSP-HEALTH-001 Task 3.1: Fallback to depth-limited recursive scan for monorepos
-        // Scans up to depth 4 looking for any file with matching extension.
-        // Returns relative path to first match.
-        self.find_file_by_extension_recursive(self.workspace_root.path(), extensions, 0, 4)
+        // LSP-HEALTH-001 Task 3.1: Fallback to depth-limited recursive scan for monorepos.
+        // Java gets depth 8 because standard Maven/Gradle layout uses deep package paths:
+        //   src/main/java/com/company/project/service/FooService.java = depth 7+
+        // Other languages keep depth 4 (most are 2-3 levels deep).
+        let max_depth = match language_id {
+            "java" => 8,
+            _ => 4,
+        };
+        self.find_file_by_extension_recursive(self.workspace_root.path(), extensions, 0, max_depth)
     }
 
     /// Recursive helper for `find_probe_file`: depth-limited scan for any file
@@ -1333,6 +1344,101 @@ mod tests {
         assert!(
             py_probe.is_some(),
             "Should find Python file in tools/ directory"
+        );
+    }
+
+    // ── Java probe file discovery (Issue 1 fix) ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_probe_file_java_application_candidate() {
+        // Spring Boot convention: src/main/java/Application.java
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+
+        std::fs::create_dir_all(ws_dir.path().join("src").join("main").join("java")).unwrap();
+        std::fs::write(
+            ws_dir
+                .path()
+                .join("src")
+                .join("main")
+                .join("java")
+                .join("Application.java"),
+            "public class Application { public static void main(String[] args) {} }",
+        )
+        .unwrap();
+
+        let probe = server.find_probe_file("java");
+        assert!(probe.is_some(), "Should find Application.java candidate");
+        assert_eq!(
+            probe.unwrap(),
+            std::path::PathBuf::from("src/main/java/Application.java"),
+            "Should match the well-known Application.java path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_probe_file_java_deep_package_path() {
+        // Real-world Java: files at depth 7+ (src/main/java/com/company/service/FooService.java)
+        // Before fix: depth 4 limit would miss these files entirely.
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Create a deep Java package structure: depth 7
+        let deep_path = ws_dir
+            .path()
+            .join("src")
+            .join("main")
+            .join("java")
+            .join("com")
+            .join("example")
+            .join("banking")
+            .join("service");
+        std::fs::create_dir_all(&deep_path).unwrap();
+        std::fs::write(
+            deep_path.join("AccountService.java"),
+            "package com.example.banking.service;\npublic class AccountService {}",
+        )
+        .unwrap();
+
+        let probe = server.find_probe_file("java");
+        assert!(
+            probe.is_some(),
+            "Should find Java file at depth 7 (com/example/banking/service/)"
+        );
+        let probe_path = probe.unwrap();
+        assert!(
+            probe_path.to_str().unwrap().ends_with(".java"),
+            "Should find a .java file, got: {probe_path:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_probe_file_java_app_candidate() {
+        // Plain Java convention: src/main/java/App.java
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+
+        std::fs::create_dir_all(ws_dir.path().join("src").join("main").join("java")).unwrap();
+        std::fs::write(
+            ws_dir
+                .path()
+                .join("src")
+                .join("main")
+                .join("java")
+                .join("App.java"),
+            "public class App { public static void main(String[] args) {} }",
+        )
+        .unwrap();
+
+        let probe = server.find_probe_file("java");
+        assert!(probe.is_some(), "Should find App.java candidate");
+        assert_eq!(
+            probe.unwrap(),
+            std::path::PathBuf::from("src/main/java/App.java"),
+            "Should match the well-known App.java path"
         );
     }
 
