@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.11.3...pathfinder-mcp-lsp-v0.11.4) - 2026-06-09
+
+### Fixed
+
+- resolve clippy warnings for doc markdown and case-sensitive extension comparison
+- *(lsp)* prevent duplicate didOpen and multiple didClose protocol violations
+- *(lsp)* introduce client startup grace period for dynamic capability registration
+
+### Other
+
+- run cargo fmt --all
+- *(common,lsp,server)* BATCH-05 add pathfinder-common types, plugin, and server types coverage
+- *(lsp-client)* fix cargo fmt violations in lifecycle.rs tests
+- *(lsp-client)* fix bugs and add coverage for idle timeout, error paths, and DI chain
+
 ## [0.11.3](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.11.2...pathfinder-mcp-lsp-v0.11.3) - 2026-06-09
 
 ### Added

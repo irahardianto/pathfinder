@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.10.0...pathfinder-mcp-treesitter-v0.10.1) - 2026-06-09
+
+### Added
+
+- *(treesitter)* cap native HTML element depth in Vue template AST to depth < 3
+
+### Other
+
+- *(treesitter,search)* BATCH-03 add comprehensive repo_map and ripgrep coverage
+
 ## [0.10.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.9.1...pathfinder-mcp-treesitter-v0.10.0) - 2026-06-08
 
 ### Added
