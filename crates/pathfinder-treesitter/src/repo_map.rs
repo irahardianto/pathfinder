@@ -1266,10 +1266,7 @@ mod tests {
     fn test_filter_all_keeps_private_symbols() {
         let mut priv_sym = make_sym("_internal", SymbolKind::Function);
         priv_sym.access_level = crate::surgeon::AccessLevel::Private;
-        let syms = vec![
-            priv_sym,
-            make_sym("Public", SymbolKind::Function),
-        ];
+        let syms = vec![priv_sym, make_sym("Public", SymbolKind::Function)];
         // "all" must return all symbols without filtering
         let filtered = filter_by_visibility(syms, "all", false);
         assert_eq!(filtered.len(), 2, "visibility=all keeps everything");
@@ -1404,10 +1401,9 @@ mod tests {
         // Each file's header alone is ~"\nFile: a.rs\n=========\n" ≈ 15 tokens,
         // so after a.rs is processed the budget is fully consumed and b.rs is skipped.
         let config = SkeletonConfig::new(5, 5, "all", 2_000);
-        let result =
-            generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config)
-                .await
-                .expect("generate skeleton");
+        let result = generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config)
+            .await
+            .expect("generate skeleton");
 
         // With max_tokens=5, the total skeleton immediately exceeds the budget,
         // so files_truncated should be > 0 (the second file is skipped).
@@ -1586,7 +1582,10 @@ mod tests {
         // produced by 200 constants — to reliably force truncation and exercise the
         // render_truncated_file_skeleton constants-count branch.
         let (out, truncated) = render_file_skeleton(&[sym], 100);
-        assert!(truncated, "impl with 200 constants should truncate with low max_tokens_per_file");
+        assert!(
+            truncated,
+            "impl with 200 constants should truncate with low max_tokens_per_file"
+        );
         assert!(out.contains("[TRUNCATED DUE TO SIZE]"));
         assert!(out.contains("impl BigImpl"));
         assert!(out.contains("200 constants omitted"));
@@ -1631,7 +1630,10 @@ mod tests {
         // max_tokens_per_file=1 forces truncation even for small symbols.
         let sym = make_sym("MyStruct", SymbolKind::Struct);
         let (out, truncated) = render_file_skeleton(&[sym], 1);
-        assert!(truncated, "must truncate when max_tokens_per_file is very low");
+        assert!(
+            truncated,
+            "must truncate when max_tokens_per_file is very low"
+        );
         assert!(
             out.contains("struct MyStruct"),
             "truncated skeleton must still show symbol name"
@@ -1646,7 +1648,11 @@ mod tests {
         let mut private_test = sym;
         private_test.access_level = crate::surgeon::AccessLevel::Private;
         let filtered = filter_by_visibility(vec![private_test], "public", true);
-        assert_eq!(filtered.len(), 1, "SymbolKind::Test must be kept when include_tests=true");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "SymbolKind::Test must be kept when include_tests=true"
+        );
     }
 
     /// BATCH-03b: `is_test_symbol` handles it_ prefix functions.
@@ -1655,6 +1661,10 @@ mod tests {
         let mut it_fn = make_sym("it_does_something", SymbolKind::Function);
         it_fn.access_level = crate::surgeon::AccessLevel::Private;
         let filtered = filter_by_visibility(vec![it_fn], "public", true);
-        assert_eq!(filtered.len(), 1, "it_ prefix function kept with include_tests=true");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "it_ prefix function kept with include_tests=true"
+        );
     }
 }

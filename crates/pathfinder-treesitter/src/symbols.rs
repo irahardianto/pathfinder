@@ -1138,6 +1138,7 @@ pub fn extract_template_symbols(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<
         tree.root_node(),
         source,
         "template",
+        0,
         &mut symbols,
         &mut tag_counts,
     );
@@ -1150,6 +1151,7 @@ fn walk_html_elements_flat(
     node: tree_sitter::Node<'_>,
     source: &[u8],
     parent_path: &str,
+    depth: usize,
     out: &mut Vec<ExtractedSymbol>,
     tag_counts: &mut std::collections::HashMap<String, usize>,
 ) {
@@ -1183,22 +1185,29 @@ fn walk_html_elements_flat(
                 format!("{parent_path}::{sym_name}")
             };
 
-            out.push(ExtractedSymbol {
-                name: sym_name,
-                semantic_path: sym_path.clone(),
-                kind: sym_kind,
-                byte_range: child.byte_range(),
-                start_line: child.start_position().row,
-                end_line: child.end_position().row,
-                name_column: child.start_position().column,
-                access_level: crate::surgeon::AccessLevel::Public,
-                children: Vec::new(), // Always flat
-            });
+            let should_emit = is_component || depth < 3;
 
-            // Recurse into children
-            walk_html_elements_flat(child, source, &sym_path, out, tag_counts);
+            if should_emit {
+                out.push(ExtractedSymbol {
+                    name: sym_name,
+                    semantic_path: sym_path.clone(),
+                    kind: sym_kind,
+                    byte_range: child.byte_range(),
+                    start_line: child.start_position().row,
+                    end_line: child.end_position().row,
+                    name_column: child.start_position().column,
+                    access_level: crate::surgeon::AccessLevel::Public,
+                    children: Vec::new(), // Always flat
+                });
+
+                // Recurse into children
+                walk_html_elements_flat(child, source, &sym_path, depth + 1, out, tag_counts);
+            } else {
+                // Recurse into children
+                walk_html_elements_flat(child, source, parent_path, depth + 1, out, tag_counts);
+            }
         } else {
-            walk_html_elements_flat(child, source, parent_path, out, tag_counts);
+            walk_html_elements_flat(child, source, parent_path, depth, out, tag_counts);
         }
     }
 }
@@ -1780,6 +1789,53 @@ function doThing() { count.value++ }
             result.unwrap().starts_with("template"),
             "enclosing symbol path should start with 'template'"
         );
+    }
+
+    #[test]
+    fn test_vue_template_depth_cap() {
+        let sfc = br#"<template>
+  <div> <!-- depth 0 -->
+    <span> <!-- depth 1 -->
+      <p> <!-- depth 2 -->
+        <a> <!-- depth 3 -->
+          <span></span> <!-- depth 4 -->
+        </a>
+        <MyComponent></MyComponent> <!-- component at depth 3, promoted -->
+      </p>
+    </span>
+  </div>
+</template>
+<script setup lang="ts"></script>"#;
+        let multi = parse_vue_multizone(sfc).unwrap();
+        let syms = extract_symbols_from_multizone(&multi);
+        let template_sym = syms.iter().find(|s| s.name == "template").unwrap();
+
+        // Check div at depth 0
+        let div = template_sym.children.iter().find(|c| c.name == "div");
+        assert!(div.is_some(), "div at depth 0 should exist");
+        assert_eq!(div.unwrap().semantic_path, "template::div");
+
+        // Check span at depth 1
+        let span = template_sym.children.iter().find(|c| c.name == "span");
+        assert!(span.is_some(), "span at depth 1 should exist");
+        assert_eq!(span.unwrap().semantic_path, "template::div::span");
+
+        // Check p at depth 2
+        let p = template_sym.children.iter().find(|c| c.name == "p");
+        assert!(p.is_some(), "p at depth 2 should exist");
+        assert_eq!(p.unwrap().semantic_path, "template::div::span::p");
+
+        // Check a at depth 3 (native html, depth >= 3) -> should not exist
+        let a = template_sym.children.iter().find(|c| c.name == "a");
+        assert!(a.is_none(), "a at depth 3 should NOT exist");
+
+        // Check MyComponent at depth 3 (component, always promoted) -> should exist
+        let comp = template_sym
+            .children
+            .iter()
+            .find(|c| c.name == "MyComponent");
+        assert!(comp.is_some(), "MyComponent should exist even at depth 3");
+        assert_eq!(comp.unwrap().semantic_path, "template::MyComponent");
     }
 }
 
