@@ -112,6 +112,7 @@ impl PathfinderServer {
                 indexing_status,
                 navigation_ready: status.navigation_ready,
                 probe_verified: false,
+                call_hierarchy_verified: false,
                 install_hint: None,
                 indexing_progress_percent: status.indexing_progress_percent,
                 degraded_tools: compute_degraded_tools(status),
@@ -141,7 +142,9 @@ impl PathfinderServer {
                     match cache.get(&lang_health.language) {
                         Some(entry) if entry.is_valid() && entry.success => {
                             // Valid positive entry — reuse cached result
-                            ProbeAction::UseCachedReady
+                            ProbeAction::UseCachedReady {
+                                call_hierarchy_verified: entry.call_hierarchy_verified,
+                            }
                         }
                         Some(entry) if entry.is_valid() && !entry.success => {
                             // Valid negative entry — skip probe, LSP still starting
@@ -156,9 +159,12 @@ impl PathfinderServer {
                 };
 
                 match cache_action {
-                    ProbeAction::UseCachedReady => {
+                    ProbeAction::UseCachedReady {
+                        call_hierarchy_verified,
+                    } => {
                         "ready".clone_into(&mut lang_health.status);
                         lang_health.probe_verified = true;
+                        lang_health.call_hierarchy_verified = call_hierarchy_verified;
                         if overall_status != "ready" {
                             overall_status = "ready";
                         }
@@ -176,18 +182,22 @@ impl PathfinderServer {
                         // LSP has been running for 10+ seconds but still warming_up.
                         // This likely means progress notifications aren't being emitted.
                         // Fire a lightweight probe.
-                        let probe_result =
+                        let (probe_result, call_hierarchy_verified) =
                             self.probe_language_readiness(&lang_health.language).await;
                         if probe_result {
                             "ready".clone_into(&mut lang_health.status);
                             lang_health.probe_verified = true;
+                            lang_health.call_hierarchy_verified = call_hierarchy_verified;
                             // Cache the successful probe result (indefinite TTL)
                             self.probe_cache
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .insert(
                                     lang_health.language.clone(),
-                                    crate::server::ProbeCacheEntry::new(true),
+                                    crate::server::ProbeCacheEntry::new(
+                                        true,
+                                        call_hierarchy_verified,
+                                    ),
                                 );
                             // Update overall status
                             if overall_status != "ready" {
@@ -201,7 +211,7 @@ impl PathfinderServer {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .insert(
                                     lang_health.language.clone(),
-                                    crate::server::ProbeCacheEntry::new(false),
+                                    crate::server::ProbeCacheEntry::new(false, false),
                                 );
                         }
                     }
@@ -228,7 +238,9 @@ impl PathfinderServer {
                     Some(entry) if entry.is_valid() && entry.success => {
                         // Positive entry — check if it's time for a re-probe
                         if entry.age_secs() < LIVENESS_PROBE_INTERVAL_SECS {
-                            ProbeAction::UseCachedReady
+                            ProbeAction::UseCachedReady {
+                                call_hierarchy_verified: entry.call_hierarchy_verified,
+                            }
                         } else {
                             ProbeAction::Probe // Stale — re-probe
                         }
@@ -242,8 +254,11 @@ impl PathfinderServer {
             };
 
             match cache_action {
-                ProbeAction::UseCachedReady => {
+                ProbeAction::UseCachedReady {
+                    call_hierarchy_verified,
+                } => {
                     lang_health.probe_verified = true;
+                    lang_health.call_hierarchy_verified = call_hierarchy_verified;
                     continue;
                 }
                 ProbeAction::SkipProbe => continue,
@@ -254,35 +269,38 @@ impl PathfinderServer {
             // Note: find_probe_file returns None if no source file exists.
             // In this case, we skip the probe and don't downgrade the status.
             // The language remains "ready" based on capability status alone.
-            let probe_result = match self.find_probe_file(&lang_health.language) {
-                Some(_) => self.probe_language_readiness(&lang_health.language).await,
-                None => {
-                    // No file to probe — skip liveness check, keep status as-is
-                    continue;
-                }
-            };
+            let (probe_result, call_hierarchy_verified) =
+                match self.find_probe_file(&lang_health.language) {
+                    Some(_) => self.probe_language_readiness(&lang_health.language).await,
+                    None => {
+                        // No file to probe — skip liveness check, keep status as-is
+                        continue;
+                    }
+                };
 
             if probe_result {
                 // Still alive — cache positive result
                 lang_health.probe_verified = true;
+                lang_health.call_hierarchy_verified = call_hierarchy_verified;
                 self.probe_cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(
                         lang_health.language.clone(),
-                        crate::server::ProbeCacheEntry::new(true),
+                        crate::server::ProbeCacheEntry::new(true, call_hierarchy_verified),
                     );
             } else {
                 // LSP is dead! Downgrade from "ready" to "degraded"
                 "degraded".clone_into(&mut lang_health.status);
                 lang_health.probe_verified = false;
+                lang_health.call_hierarchy_verified = false;
                 // Cache negative result
                 self.probe_cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(
                         lang_health.language.clone(),
-                        crate::server::ProbeCacheEntry::new(false),
+                        crate::server::ProbeCacheEntry::new(false, false),
                     );
             }
         }
@@ -314,6 +332,7 @@ impl PathfinderServer {
                 indexing_status: None,
                 navigation_ready: None,
                 probe_verified: false,
+                call_hierarchy_verified: false,
                 install_hint: Some(missing.install_hint.clone()),
                 indexing_progress_percent: None,
                 degraded_tools: vec![
@@ -467,10 +486,10 @@ impl PathfinderServer {
     }
 
     /// Probe whether an LSP is actually ready by attempting a lightweight operation.
-    async fn probe_language_readiness(&self, language_id: &str) -> bool {
+    async fn probe_language_readiness(&self, language_id: &str) -> (bool, bool) {
         let probe_file = self.find_probe_file(language_id);
         let Some(file_path) = probe_file else {
-            return false;
+            return (false, false);
         };
 
         let content = tokio::fs::read_to_string(self.workspace_root.path().join(&file_path))
@@ -500,13 +519,14 @@ impl PathfinderServer {
                 timeout_secs = 5,
                 "probe: goto_definition timed out — LSP not responsive"
             );
-            return false;
+            return (false, false);
         };
 
         if result.is_err() {
-            return false;
+            return (false, false);
         }
 
+        let mut call_hierarchy_verified = false;
         let caps = self.lawyer.capability_status().await;
         if let Some(status) = caps.get(language_id) {
             if status.supports_call_hierarchy == Some(true) {
@@ -527,7 +547,7 @@ impl PathfinderServer {
                         timeout_secs = 5,
                         "probe: call_hierarchy_prepare timed out — LSP partially responsive"
                     );
-                    return false;
+                    return (false, false);
                 };
 
                 if call_hierarchy_result.is_err() {
@@ -535,12 +555,13 @@ impl PathfinderServer {
                         language = %language_id,
                         "probe: goto_definition succeeded but call_hierarchy_prepare failed — LSP may be partially responsive"
                     );
-                    return false;
+                    return (false, false);
                 }
+                call_hierarchy_verified = true;
             }
         }
 
-        true
+        (true, call_hierarchy_verified)
     }
 
     /// Find a well-known file in the workspace for probing language readiness.
@@ -684,7 +705,7 @@ pub(super) fn format_uptime(seconds: u64) -> String {
 /// Decision from checking the probe cache for a language.
 pub(super) enum ProbeAction {
     /// Cached positive result exists — upgrade to "ready" immediately.
-    UseCachedReady,
+    UseCachedReady { call_hierarchy_verified: bool },
     /// Cached negative result exists and hasn't expired — skip probing.
     SkipProbe,
     /// No cache entry or expired negative — perform a live probe.
@@ -1773,14 +1794,14 @@ mod tests {
     #[tokio::test]
     async fn test_probe_cache_positive_result_never_expires() {
         // Positive cache entries should be valid indefinitely
-        let entry = crate::server::ProbeCacheEntry::new(true);
+        let entry = crate::server::ProbeCacheEntry::new(true, true);
         assert!(entry.is_valid(), "positive entry should always be valid");
     }
 
     #[tokio::test]
     async fn test_probe_cache_negative_result_is_initially_valid() {
         // Negative cache entries should be valid immediately after creation
-        let entry = crate::server::ProbeCacheEntry::new(false);
+        let entry = crate::server::ProbeCacheEntry::new(false, false);
         assert!(entry.is_valid(), "fresh negative entry should be valid");
     }
 
@@ -1800,7 +1821,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 "rust".to_string(),
-                crate::server::ProbeCacheEntry::new(false),
+                crate::server::ProbeCacheEntry::new(false, false),
             );
 
         // LSP running but not ready (navigation_ready = false)
@@ -1856,7 +1877,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 "rust".to_string(),
-                crate::server::ProbeCacheEntry::new(true),
+                crate::server::ProbeCacheEntry::new(true, true),
             );
 
         // LSP reports warming_up but cache has positive result
@@ -2059,7 +2080,7 @@ mod tests {
         let mut cache = server.probe_cache.lock().unwrap();
         cache.insert(
             "rust".to_string(),
-            crate::server::ProbeCacheEntry::new(true),
+            crate::server::ProbeCacheEntry::new(true, true),
         );
         drop(cache);
 
@@ -2194,12 +2215,17 @@ mod tests {
             file_path: &std::path::Path,
             line: u32,
             column: u32,
-        ) -> Result<Option<pathfinder_lsp::types::DefinitionLocation>, pathfinder_lsp::error::LspError> {
+        ) -> Result<
+            Option<pathfinder_lsp::types::DefinitionLocation>,
+            pathfinder_lsp::error::LspError,
+        > {
             let delay = { *self.goto_definition_delay.lock().unwrap() };
             if let Some(d) = delay {
                 tokio::time::sleep(d).await;
             }
-            self.inner.goto_definition(workspace_root, file_path, line, column).await
+            self.inner
+                .goto_definition(workspace_root, file_path, line, column)
+                .await
         }
 
         async fn call_hierarchy_prepare(
@@ -2208,28 +2234,37 @@ mod tests {
             file_path: &std::path::Path,
             line: u32,
             column: u32,
-        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyItem>, pathfinder_lsp::error::LspError> {
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyItem>, pathfinder_lsp::error::LspError>
+        {
             let delay = { *self.call_hierarchy_delay.lock().unwrap() };
             if let Some(d) = delay {
                 tokio::time::sleep(d).await;
             }
-            self.inner.call_hierarchy_prepare(workspace_root, file_path, line, column).await
+            self.inner
+                .call_hierarchy_prepare(workspace_root, file_path, line, column)
+                .await
         }
 
         async fn call_hierarchy_incoming(
             &self,
             workspace_root: &std::path::Path,
             item: &pathfinder_lsp::types::CallHierarchyItem,
-        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, pathfinder_lsp::error::LspError> {
-            self.inner.call_hierarchy_incoming(workspace_root, item).await
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, pathfinder_lsp::error::LspError>
+        {
+            self.inner
+                .call_hierarchy_incoming(workspace_root, item)
+                .await
         }
 
         async fn call_hierarchy_outgoing(
             &self,
             workspace_root: &std::path::Path,
             item: &pathfinder_lsp::types::CallHierarchyItem,
-        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, pathfinder_lsp::error::LspError> {
-            self.inner.call_hierarchy_outgoing(workspace_root, item).await
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, pathfinder_lsp::error::LspError>
+        {
+            self.inner
+                .call_hierarchy_outgoing(workspace_root, item)
+                .await
         }
 
         async fn goto_implementation(
@@ -2238,8 +2273,11 @@ mod tests {
             file_path: &std::path::Path,
             line: u32,
             column: u32,
-        ) -> Result<Vec<pathfinder_lsp::types::DefinitionLocation>, pathfinder_lsp::error::LspError> {
-            self.inner.goto_implementation(workspace_root, file_path, line, column).await
+        ) -> Result<Vec<pathfinder_lsp::types::DefinitionLocation>, pathfinder_lsp::error::LspError>
+        {
+            self.inner
+                .goto_implementation(workspace_root, file_path, line, column)
+                .await
         }
 
         async fn references(
@@ -2248,8 +2286,11 @@ mod tests {
             file_path: &std::path::Path,
             line: u32,
             column: u32,
-        ) -> Result<Vec<pathfinder_lsp::types::ReferenceLocation>, pathfinder_lsp::error::LspError> {
-            self.inner.references(workspace_root, file_path, line, column).await
+        ) -> Result<Vec<pathfinder_lsp::types::ReferenceLocation>, pathfinder_lsp::error::LspError>
+        {
+            self.inner
+                .references(workspace_root, file_path, line, column)
+                .await
         }
 
         async fn open_document(
@@ -2257,8 +2298,11 @@ mod tests {
             workspace_root: &std::path::Path,
             file_path: &std::path::Path,
             content: &str,
-        ) -> Result<Box<dyn pathfinder_lsp::lawyer::DocumentLease>, pathfinder_lsp::error::LspError> {
-            self.inner.open_document(workspace_root, file_path, content).await
+        ) -> Result<Box<dyn pathfinder_lsp::lawyer::DocumentLease>, pathfinder_lsp::error::LspError>
+        {
+            self.inner
+                .open_document(workspace_root, file_path, content)
+                .await
         }
 
         async fn capability_status(
@@ -2271,7 +2315,10 @@ mod tests {
             self.inner.missing_languages()
         }
 
-        async fn force_respawn(&self, language_id: &str) -> Result<(), pathfinder_lsp::error::LspError> {
+        async fn force_respawn(
+            &self,
+            language_id: &str,
+        ) -> Result<(), pathfinder_lsp::error::LspError> {
             self.inner.force_respawn(language_id).await
         }
     }
@@ -2387,6 +2434,76 @@ mod tests {
         let rust_health = &val.languages[0];
         assert_eq!(rust_health.status, "degraded");
         assert!(!rust_health.probe_verified);
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_probe_verifies_call_hierarchy() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = pathfinder_lsp::MockLawyer::default();
+
+        // Create a workspace with a main.rs file for probing
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, Arc::new(lawyer.clone()));
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/main.rs"),
+            r#"fn main() { println!("Hello"); }"#,
+        )
+        .unwrap();
+
+        // Mock a Rust LSP that's been warming up for 30 seconds
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: Some(true),
+                indexing_complete: Some(false), // Still warming up
+                uptime_seconds: Some(30),       // 30 seconds - should trigger probe
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+            },
+        )]));
+
+        // Mock successful goto_definition response
+        lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 0,
+            preview: "fn main()".to_string(),
+        })));
+
+        // Mock successful call_hierarchy_prepare response
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![
+            pathfinder_lsp::types::CallHierarchyItem {
+                name: "main".to_string(),
+                kind: "function".to_string(),
+                detail: None,
+                file: "src/main.rs".to_string(),
+                line: 1,
+                column: 1,
+                data: None,
+            },
+        ]));
+
+        let params = crate::server::types::LspHealthParams {
+            action: None,
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = unpack_health(call_res);
+
+        assert_eq!(val.status, "ready");
+        let rust_health = &val.languages[0];
+        assert!(rust_health.probe_verified);
+        assert!(rust_health.call_hierarchy_verified);
     }
 
     #[tokio::test]
