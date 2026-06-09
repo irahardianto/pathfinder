@@ -233,6 +233,7 @@ impl PathfinderServer {
                 Some(
                     DegradedReason::LspWarmupEmptyUnverified
                         | DegradedReason::LspWarmupGrepFallback
+                        | DegradedReason::LspTimeoutGrepFallback
                 )
             )
         };
@@ -254,7 +255,8 @@ impl PathfinderServer {
             match degraded_reason {
                 Some(
                     DegradedReason::LspWarmupEmptyUnverified
-                    | DegradedReason::LspWarmupGrepFallback,
+                    | DegradedReason::LspWarmupGrepFallback
+                    | DegradedReason::LspTimeoutGrepFallback,
                 ) => Some("warming_up".to_owned()),
                 _ => Some("unavailable".to_owned()),
             }
@@ -651,11 +653,9 @@ mod tests {
 
         // Verify degraded on LSP error in find_all_references_impl
         assert!(val.degraded);
-        // After BUG 2 fix: when grep fallback also finds nothing, we use NoLsp, not LspTimeoutGrepFallback
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
-        // Timeout maps to "unavailable", not "warming_up" — timeout != warmup.
-        assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
-        assert_eq!(val.warm_start_in_progress, None);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspTimeoutGrepFallback));
+        assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
+        assert_eq!(val.warm_start_in_progress, Some(true));
 
         // References unavailable due to degradation
         assert!(val.references.is_none());
@@ -930,8 +930,8 @@ mod tests {
 
         // Verify degraded due to impact error
         assert!(val.degraded);
-        // find_callers_callees_impl returns degraded_reason=NoLsp when LSP error occurs
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        // find_callers_callees_impl returns degraded_reason=LspErrorGrepFallback when LSP error occurs
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
 
         // Impact is None because find_callers_callees returns degraded metadata with None incoming/outgoing
@@ -978,8 +978,8 @@ mod tests {
 
         // Both degraded
         assert!(val.degraded);
-        // Impact error takes priority in degraded_reason
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        // Impact error takes priority in degraded_reason (LspErrorGrepFallback)
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
 
         // Both unavailable
@@ -1035,5 +1035,94 @@ mod tests {
             "should respect max_references=3, got {}",
             refs.len()
         );
+    }
+
+    // ── BATCH-04 Remaining Coverage Tests for overview.rs ─────────────────────
+
+    #[tokio::test]
+    async fn test_symbol_overview_find_callers_callees_err() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        // Push 3 Ok scopes so read_symbol_scope always succeeds, eliminating concurrency queue races
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Configure call_hierarchy_prepare to fail to trigger degraded mode for callers/callees
+        lawyer.push_prepare_call_hierarchy_result(Err(LspError::NoLspAvailable));
+
+        // Configure references to succeed
+        lawyer.set_references_result(Ok(vec![ReferenceLocation {
+            file: "src/main.rs".into(),
+            line: 10,
+            column: 8,
+            snippet: "login();".into(),
+        } ] ) ) ;
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::SymbolOverviewParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            project_only: Some(true),
+            max_callers_callees: 50,
+            max_references: 50,
+        };
+
+        let result = server.symbol_overview_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::SymbolOverviewResponse =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert!(val.impact.is_none());
+        assert!(val.references.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_symbol_overview_find_all_references_err() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        // Push 3 Ok scopes so read_symbol_scope always succeeds, eliminating concurrency queue races
+        surgeon.read_symbol_scope_results.lock().unwrap().extend([
+            Ok(make_scope()),
+            Ok(make_scope()),
+            Ok(make_scope()),
+        ]);
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Configure references to fail to trigger degraded mode for references
+        lawyer.set_references_lsp_error(Err(LspError::NoLspAvailable));
+        
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::SymbolOverviewParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            project_only: Some(true),
+            max_callers_callees: 50,
+            max_references: 50,
+        };
+
+        let result = server.symbol_overview_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::SymbolOverviewResponse =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert!(val.references.is_none());
+        assert!(val.impact.is_some());
     }
 }

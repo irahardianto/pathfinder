@@ -611,8 +611,13 @@ impl PathfinderServer {
                     .await
                 };
 
+                let default_degraded_reason = if is_timeout {
+                    DegradedReason::LspTimeoutGrepFallback
+                } else {
+                    DegradedReason::LspErrorGrepFallback
+                };
+
                 // Determine final state based on whether grep fallback succeeded
-                // Pattern from impact.rs: default to NoLsp, upgrade to GrepFallback only if results found
                 let (
                     references,
                     total_references,
@@ -635,16 +640,11 @@ impl PathfinderServer {
                         "Grep fallback: found {} references across {} files (heuristic only).\n\nReferences: {}\n{}\n",
                         ref_count, file_count, ref_count, items.join("\n")
                     );
-                    let grep_degraded_reason = if is_timeout {
-                        DegradedReason::LspTimeoutGrepFallback
-                    } else {
-                        DegradedReason::LspErrorGrepFallback
-                    };
                     (
                         Some(refs),
                         Some(ref_count),
                         file_count,
-                        grep_degraded_reason,
+                        default_degraded_reason,
                         "grep_file_scoped",
                         text,
                     )
@@ -658,7 +658,7 @@ impl PathfinderServer {
                         None,
                         None,
                         0,
-                        DegradedReason::NoLsp,
+                        default_degraded_reason,
                         "treesitter_fallback",
                         text,
                     )
@@ -867,8 +867,7 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded, "should be degraded on LSP error");
-        // BUG 2 FIX: when grep fallback also finds nothing, we fall back to NoLsp, not LspErrorGrepFallback
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert!(val.references.is_none());
         // GAP 5: verify resolution_strategy confirms the path taken
@@ -904,8 +903,7 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(val.degraded, "should be degraded on connection lost");
-        // BUG 2 FIX: when grep fallback also finds nothing, we fall back to NoLsp, not LspErrorGrepFallback
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
         assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
         assert!(val.references.is_none());
         // GAP 5: verify resolution_strategy confirms the path taken
@@ -2130,5 +2128,155 @@ mod tests {
             refs[0].line, 8,
             "should be the reference at line 8, not the definition at line 5"
         );
+    }
+
+    // ── BATCH-04 Remaining Coverage Tests for references.rs ─────────────────────
+
+    #[tokio::test]
+    async fn test_grep_references_fallback_regex_compilation_warning() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let definition_path = std::path::Path::new("src/main.invalid_regex");
+        let definition_scope = super::super::test_helpers::make_scope();
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/main.invalid_regex::main".to_string(),
+            max_results: 100,
+            offset: 0,
+        };
+
+        let res = server
+            .grep_references_fallback("test_symbol", definition_path, &definition_scope, &params)
+            .await;
+        assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_grep_references_fallback_overflows() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let scout = Arc::new(pathfinder_search::MockScout::default());
+
+        let ws_dir = crate::server::tools::navigation::test_helpers::make_temp_workspace();
+        let ws = pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = pathfinder_common::config::PathfinderConfig::default();
+        let sandbox = pathfinder_common::sandbox::Sandbox::new(ws.path(), &config.sandbox);
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout.clone(),
+            surgeon.clone(),
+            lawyer,
+        );
+
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/main.rs".to_string(),
+                line: u64::MAX,
+                column: u64::MAX,
+                content: "fn main() {}".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "hash".to_string(),
+                known: None,
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 1,
+            files_in_scope: 1,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
+        }));
+
+        // search_codebase_impl will call enclosing_symbol_detail, queue a result for it.
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+
+        let definition_path = std::path::Path::new("src/main.rs");
+        let definition_scope = super::super::test_helpers::make_scope();
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/main.rs::main".to_string(),
+            max_results: 100,
+            offset: 0,
+        };
+
+        let fallback_res = server
+            .grep_references_fallback("test_symbol", definition_path, &definition_scope, &params)
+            .await;
+        
+        assert!(fallback_res.is_some());
+        let (refs, files_count) = fallback_res.unwrap();
+        assert_eq!(files_count, 1);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].line, 1);
+        assert_eq!(refs[0].column, 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_all_references_file_read_failure_and_open_doc_failure() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        
+        lawyer.did_open_error.lock().unwrap().replace(pathfinder_lsp::LspError::ConnectionLost);
+
+        let ws_dir = crate::server::tools::navigation::test_helpers::make_temp_workspace();
+        let ws = pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = pathfinder_common::config::PathfinderConfig::default();
+        let sandbox = pathfinder_common::sandbox::Sandbox::new(ws.path(), &config.sandbox);
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            std::sync::Arc::new(pathfinder_search::MockScout::default()),
+            surgeon.clone(),
+            lawyer.clone(),
+        );
+
+        surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+            super::super::test_helpers::make_scope()
+        ));
+
+        let file_path = ws_dir.path().join("src/main.rs");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let params = crate::server::types::FindAllReferencesParams {
+            semantic_path: "src/main.rs::main".to_string(),
+            max_results: 100,
+            offset: 0,
+        };
+
+        lawyer.references_result.lock().unwrap().replace(Ok(vec![
+            pathfinder_lsp::types::ReferenceLocation {
+                file: "src/user.rs".to_string(),
+                line: 2,
+                column: 1,
+                snippet: "use main;".to_string(),
+            }
+        ]));
+
+        lawyer.goto_implementation_result.lock().unwrap().replace(Err(pathfinder_lsp::LspError::ConnectionLost));
+
+        let call_res = server.find_all_references_impl(params).await;
+        
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o755));
+        }
+
+        let call_res_unwrapped = call_res.expect("should succeed despite warnings");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res_unwrapped.structured_content.unwrap()).unwrap();
+        
+        assert!(!val.degraded);
+        assert_eq!(val.references.unwrap().len(), 1);
     }
 }

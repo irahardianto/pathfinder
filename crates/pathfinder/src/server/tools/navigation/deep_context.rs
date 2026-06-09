@@ -524,7 +524,8 @@ impl PathfinderServer {
             match degraded_reason {
                 Some(
                     DegradedReason::LspWarmupEmptyUnverified
-                    | DegradedReason::LspWarmupGrepFallback,
+                    | DegradedReason::LspWarmupGrepFallback
+                    | DegradedReason::LspTimeoutGrepFallback,
                 ) => Some("warming_up".to_owned()),
                 _ => Some("unavailable".to_owned()),
             }

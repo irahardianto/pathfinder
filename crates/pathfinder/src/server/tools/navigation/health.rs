@@ -2158,4 +2158,333 @@ mod tests {
             "probe_verified must be false when call hierarchy probe fails"
         );
     }
+
+    // ── BATCH-04 Remaining Coverage Tests for health.rs ─────────────────────
+
+    #[derive(Clone)]
+    struct SlowMockLawyer {
+        inner: pathfinder_lsp::MockLawyer,
+        goto_definition_delay: Arc<std::sync::Mutex<Option<std::time::Duration>>>,
+        call_hierarchy_delay: Arc<std::sync::Mutex<Option<std::time::Duration>>>,
+    }
+
+    impl SlowMockLawyer {
+        fn new(inner: pathfinder_lsp::MockLawyer) -> Self {
+            Self {
+                inner,
+                goto_definition_delay: Arc::new(std::sync::Mutex::new(None)),
+                call_hierarchy_delay: Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
+
+        fn set_goto_definition_delay(&self, delay: std::time::Duration) {
+            *self.goto_definition_delay.lock().unwrap() = Some(delay);
+        }
+
+        fn set_call_hierarchy_delay(&self, delay: std::time::Duration) {
+            *self.call_hierarchy_delay.lock().unwrap() = Some(delay);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl pathfinder_lsp::Lawyer for SlowMockLawyer {
+        async fn goto_definition(
+            &self,
+            workspace_root: &std::path::Path,
+            file_path: &std::path::Path,
+            line: u32,
+            column: u32,
+        ) -> Result<Option<pathfinder_lsp::types::DefinitionLocation>, pathfinder_lsp::error::LspError> {
+            let delay = { *self.goto_definition_delay.lock().unwrap() };
+            if let Some(d) = delay {
+                tokio::time::sleep(d).await;
+            }
+            self.inner.goto_definition(workspace_root, file_path, line, column).await
+        }
+
+        async fn call_hierarchy_prepare(
+            &self,
+            workspace_root: &std::path::Path,
+            file_path: &std::path::Path,
+            line: u32,
+            column: u32,
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyItem>, pathfinder_lsp::error::LspError> {
+            let delay = { *self.call_hierarchy_delay.lock().unwrap() };
+            if let Some(d) = delay {
+                tokio::time::sleep(d).await;
+            }
+            self.inner.call_hierarchy_prepare(workspace_root, file_path, line, column).await
+        }
+
+        async fn call_hierarchy_incoming(
+            &self,
+            workspace_root: &std::path::Path,
+            item: &pathfinder_lsp::types::CallHierarchyItem,
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, pathfinder_lsp::error::LspError> {
+            self.inner.call_hierarchy_incoming(workspace_root, item).await
+        }
+
+        async fn call_hierarchy_outgoing(
+            &self,
+            workspace_root: &std::path::Path,
+            item: &pathfinder_lsp::types::CallHierarchyItem,
+        ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, pathfinder_lsp::error::LspError> {
+            self.inner.call_hierarchy_outgoing(workspace_root, item).await
+        }
+
+        async fn goto_implementation(
+            &self,
+            workspace_root: &std::path::Path,
+            file_path: &std::path::Path,
+            line: u32,
+            column: u32,
+        ) -> Result<Vec<pathfinder_lsp::types::DefinitionLocation>, pathfinder_lsp::error::LspError> {
+            self.inner.goto_implementation(workspace_root, file_path, line, column).await
+        }
+
+        async fn references(
+            &self,
+            workspace_root: &std::path::Path,
+            file_path: &std::path::Path,
+            line: u32,
+            column: u32,
+        ) -> Result<Vec<pathfinder_lsp::types::ReferenceLocation>, pathfinder_lsp::error::LspError> {
+            self.inner.references(workspace_root, file_path, line, column).await
+        }
+
+        async fn open_document(
+            &self,
+            workspace_root: &std::path::Path,
+            file_path: &std::path::Path,
+            content: &str,
+        ) -> Result<Box<dyn pathfinder_lsp::lawyer::DocumentLease>, pathfinder_lsp::error::LspError> {
+            self.inner.open_document(workspace_root, file_path, content).await
+        }
+
+        async fn capability_status(
+            &self,
+        ) -> std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus> {
+            self.inner.capability_status().await
+        }
+
+        fn missing_languages(&self) -> Vec<pathfinder_lsp::client::MissingLanguage> {
+            self.inner.missing_languages()
+        }
+
+        async fn force_respawn(&self, language_id: &str) -> Result<(), pathfinder_lsp::error::LspError> {
+            self.inner.force_respawn(language_id).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_lsp_health_probe_timeout_goto_definition() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = pathfinder_lsp::MockLawyer::default();
+        let slow_lawyer = SlowMockLawyer::new(lawyer.clone());
+        slow_lawyer.set_goto_definition_delay(std::time::Duration::from_secs(6));
+
+        // Create a workspace with a main.rs file for probing
+        let ws_dir = crate::server::tools::navigation::test_helpers::make_temp_workspace();
+        let ws = pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = pathfinder_common::config::PathfinderConfig::default();
+        let sandbox = pathfinder_common::sandbox::Sandbox::new(ws.path(), &config.sandbox);
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            std::sync::Arc::new(pathfinder_search::MockScout::default()),
+            surgeon,
+            std::sync::Arc::new(slow_lawyer),
+        );
+
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: Some(true),
+                indexing_complete: Some(false),
+                uptime_seconds: Some(30),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams {
+            action: None,
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let val = unpack_health(result.expect("should succeed"));
+
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.status, "degraded");
+        assert!(!rust_health.probe_verified);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_lsp_health_probe_timeout_call_hierarchy_prepare() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = pathfinder_lsp::MockLawyer::default();
+        let slow_lawyer = SlowMockLawyer::new(lawyer.clone());
+        slow_lawyer.set_call_hierarchy_delay(std::time::Duration::from_secs(6));
+
+        // Create a workspace with a main.rs file for probing
+        let ws_dir = crate::server::tools::navigation::test_helpers::make_temp_workspace();
+        let ws = pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = pathfinder_common::config::PathfinderConfig::default();
+        let sandbox = pathfinder_common::sandbox::Sandbox::new(ws.path(), &config.sandbox);
+        let server = crate::server::PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            std::sync::Arc::new(pathfinder_search::MockScout::default()),
+            surgeon,
+            std::sync::Arc::new(slow_lawyer),
+        );
+
+        lawyer.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: Some(true),
+                indexing_complete: Some(false),
+                uptime_seconds: Some(30),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+            },
+        )]));
+
+        lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 0,
+            preview: "fn main()".to_string(),
+        })));
+
+        let params = crate::server::types::LspHealthParams {
+            action: None,
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        let val = unpack_health(result.expect("should succeed"));
+
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.status, "degraded");
+        assert!(!rust_health.probe_verified);
+    }
+
+    #[tokio::test]
+    async fn test_find_probe_file_unsupported_language() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        assert_eq!(server.find_probe_file("unsupported"), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_find_file_by_extension_recursive_unreadable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let unreadable = temp.path().join("unreadable");
+        std::fs::create_dir(&unreadable).unwrap();
+
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let extensions = vec!["rs"];
+        let result = server.find_file_by_extension_recursive(&unreadable, &extensions, 0, 4);
+        assert_eq!(result, None);
+
+        // Restore permissions so cleanup works properly
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn test_format_uptime_units() {
+        assert_eq!(format_uptime(30), "30s");
+        assert_eq!(format_uptime(60), "1m");
+        assert_eq!(format_uptime(90), "1m30s");
+        assert_eq!(format_uptime(3600), "1h");
+        assert_eq!(format_uptime(3660), "1h1m");
+        assert_eq!(format_uptime(3725), "1h2m");
+    }
+
+    #[test]
+    fn test_compute_degraded_tools_conditions() {
+        let mut status = pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(60),
+            diagnostics_strategy: Some("pull".to_string()),
+            supports_definition: Some(false),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(true),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+        };
+        let degraded = compute_degraded_tools(&status);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].tool, "get_definition");
+
+        status.supports_definition = Some(true);
+        status.supports_call_hierarchy = Some(false);
+        let degraded2 = compute_degraded_tools(&status);
+        assert_eq!(degraded2.len(), 2);
+        assert_eq!(degraded2[0].tool, "find_callers_callees");
+        assert_eq!(degraded2[1].tool, "read_with_deep_context");
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_restart_missing_language() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::LspHealthParams {
+            action: Some("restart".to_string()),
+            language: None,
+        };
+        let result = server.lsp_health_impl(params).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_restart_successful() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::LspHealthParams {
+            action: Some("restart".to_string()),
+            language: Some("rust".to_string()),
+        };
+        let result = server.lsp_health_impl(params).await;
+        assert!(result.is_ok());
+    }
 }

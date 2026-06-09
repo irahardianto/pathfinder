@@ -705,7 +705,12 @@ impl PathfinderServer {
                 }
             }
             Err(LspError::Timeout { .. }) => {
-                // LSP timed out — attempt grep-based reference fallback
+                // LSP timed out — attempt grep-based reference fallback.
+                // Set reason unconditionally: timeout is always the cause, whether or not
+                // grep succeeds. Without this, empty grep results would fall through to the
+                // initial NoLsp reason, misleading agents into thinking no LSP exists.
+                degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+
                 tracing::info!(
                     tool = "find_callers_callees",
                     symbol = %semantic_path,
@@ -713,7 +718,6 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-                let mut grep_fallback_found = false;
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -724,7 +728,6 @@ impl PathfinderServer {
                     .await
                 {
                     incoming = Some(refs);
-                    grep_fallback_found = true;
                     tracing::info!(
                         tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
@@ -744,21 +747,20 @@ impl PathfinderServer {
                     .await
                 {
                     outgoing = Some(refs);
-                    grep_fallback_found = true;
                     tracing::info!(
                         tool = "find_callers_callees",
                         outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
                         "find_callers_callees: grep-based outgoing deps found after timeout"
                     );
                 }
-
-                if grep_fallback_found {
-                    degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
-                }
             }
             Err(e) => {
+                // LSP returned an unexpected error — not "no LSP" but an operational failure.
+                // Set reason unconditionally: LspErrorGrepFallback describes the cause whether
+                // or not grep finds anything. NoLsp would be misleading — the LSP exists but
+                // failed, which is a different agent guidance scenario (retry vs. install).
                 degraded = true;
-                degraded_reason = Some(DegradedReason::NoLsp);
+                degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
 
                 tracing::warn!(
                     tool = "find_callers_callees",
@@ -767,7 +769,6 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-                let mut grep_fallback_found = false;
 
                 if let Some(refs) = self
                     .grep_reference_fallback(
@@ -778,7 +779,6 @@ impl PathfinderServer {
                     .await
                 {
                     incoming = Some(refs);
-                    grep_fallback_found = true;
                     tracing::info!(
                         tool = "find_callers_callees",
                         references_found = incoming.as_ref().map_or(0, Vec::len),
@@ -798,16 +798,11 @@ impl PathfinderServer {
                     .await
                 {
                     outgoing = Some(refs);
-                    grep_fallback_found = true;
                     tracing::info!(
                         tool = "find_callers_callees",
                         outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
                         "find_callers_callees: grep-based outgoing deps found after LSP error"
                     );
-                }
-
-                if grep_fallback_found {
-                    degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
                 }
             }
         }
@@ -825,7 +820,8 @@ impl PathfinderServer {
             match degraded_reason_cloned {
                 Some(
                     DegradedReason::LspWarmupEmptyUnverified
-                    | DegradedReason::LspWarmupGrepFallback,
+                    | DegradedReason::LspWarmupGrepFallback
+                    | DegradedReason::LspTimeoutGrepFallback,
                 ) => Some("warming_up".to_owned()),
                 _ => Some("unavailable".to_owned()),
             }
@@ -1324,9 +1320,10 @@ mod tests {
         let val: crate::server::types::FindCallersCalleesMetadata =
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-        // Degraded due to LSP error
+        // Degraded due to LSP error — must report LspErrorGrepFallback, not NoLsp.
+        // NoLsp would mislead agents into "install LSP" when the real cause is a transient error.
         assert!(val.degraded);
-        assert_eq!(val.degraded_reason, Some(DegradedReason::NoLsp));
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
     }
 
     // ── find_callers_callees BFS depth limiting ────────────────────────────────
@@ -3215,5 +3212,609 @@ mod tests {
         let incoming = val.incoming.as_ref().expect("must be Some");
         assert_eq!(incoming.len(), 1, "should have 1 caller before abort");
         assert_eq!(incoming[0].semantic_path, "src/caller.rs::caller");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_bfs_cycle_detection_incoming() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item_a = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item_a.clone()]));
+
+        let item_b = CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/token.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: item_b.clone(),
+            call_sites: vec![15],
+        }]));
+
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: item_a.clone(),
+            call_sites: vec![25],
+        }]));
+
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 3,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        let incoming = val.incoming.as_ref().expect("must be Some");
+        assert!(
+            !incoming
+                .iter()
+                .any(|r| r.file == "src/auth.rs" && r.semantic_path.contains("login")),
+            "cycle should be deduplicated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_empty_callee_intermediate() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item_a = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item_a.clone()]));
+
+        let item_b = CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/token.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: item_b.clone(),
+            call_sites: vec![15],
+        }]));
+
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 3,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        let outgoing = val.outgoing.as_ref().expect("must be Some");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].file, "src/token.rs");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_bfs_partial_resolution_failure() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item_a = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item_a.clone()]));
+
+        let item_b = CallHierarchyItem {
+            name: "caller_b".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/caller_b.rs".into(),
+            line: 10,
+            column: 4,
+            data: None,
+        };
+        let item_c = CallHierarchyItem {
+            name: "caller_c".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/caller_c.rs".into(),
+            line: 10,
+            column: 4,
+            data: None,
+        };
+
+        lawyer.push_incoming_call_result(Ok(vec![
+            CallHierarchyCall {
+                item: item_b.clone(),
+                call_sites: vec![5],
+            },
+            CallHierarchyCall {
+                item: item_c.clone(),
+                call_sites: vec![6],
+            },
+        ]));
+
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_incoming_call_result(Err(LspError::Protocol("failed".to_string())));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 3,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded);
+        let incoming = val.incoming.as_ref().expect("must be Some");
+        assert_eq!(incoming.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_lsp_error_triggers_grep_fallback() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let ws_dir = make_temp_workspace();
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/auth.rs"),
+            "fn login() -> bool { true }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/caller.rs"),
+            "fn handle_request() { login(); }",
+        )
+        .unwrap();
+
+        let scout = Arc::new(MockScout::default());
+        scout.set_result(Ok(pathfinder_search::SearchResult {
+            matches: vec![pathfinder_search::SearchMatch {
+                file: "src/caller.rs".to_string(),
+                line: 1,
+                column: 1,
+                content: "fn handle_request() { login(); }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
+        }));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.push_prepare_call_hierarchy_result(Err(LspError::Protocol("LSP error".to_string())));
+
+        let server = PathfinderServer::with_all_engines(
+            ws,
+            config,
+            sandbox,
+            scout,
+            surgeon,
+            lawyer,
+        );
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 2,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed despite LSP error");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded);
+        assert_eq!(val.degraded_reason, Some(DegradedReason::LspErrorGrepFallback));
+        let incoming = val.incoming.as_ref().expect("must be Some from grep");
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].file, "src/caller.rs");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_invalid_semantic_path() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(MockLawyer::default());
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "invalid_path_format".to_owned(),
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await;
+        let Err(err) = result else {
+            panic!("expected error");
+        };
+        let code = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(code, "INVALID_SEMANTIC_PATH");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_max_depth_boundaries() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon.clone(), lawyer.clone());
+
+        let zero_depth_params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 0,
+            ..Default::default()
+        };
+        let zero_depth_res = server.find_callers_callees_impl(zero_depth_params).await.expect("success");
+        let zero_depth_val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(zero_depth_res.structured_content.unwrap()).unwrap();
+        assert!(!zero_depth_val.degraded);
+
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let large_depth_params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 10,
+            ..Default::default()
+        };
+        let large_depth_res = server.find_callers_callees_impl(large_depth_params).await.expect("success");
+        let large_depth_val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(large_depth_res.structured_content.unwrap()).unwrap();
+        assert!(!large_depth_val.degraded);
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_empty_results_text_formatting() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".into(),
+            line: 10,
+            column: 4,
+            preview: "fn login() {}".into(),
+        })));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await.expect("success");
+        let text = result.content[0].as_text().expect("must be text");
+        assert!(
+            text.text.contains("LSP confirmed: zero callers/callees for this symbol."),
+            "Text output did not format zero results correctly: {}",
+            text.text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_references_truncated() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+        lawyer.push_incoming_call_result(Ok(vec![
+            CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: "caller_1".into(),
+                    kind: "function".into(),
+                    detail: None,
+                    file: "src/caller_1.rs".into(),
+                    line: 10,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![10],
+            },
+            CallHierarchyCall {
+                item: CallHierarchyItem {
+                    name: "caller_2".into(),
+                    kind: "function".into(),
+                    detail: None,
+                    file: "src/caller_2.rs".into(),
+                    line: 20,
+                    column: 4,
+                    data: None,
+                },
+                call_sites: vec![20],
+            },
+        ]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_references: 1,
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await.expect("success");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        assert!(val.references_truncated);
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_callees_unusual_symbol_types() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon.clone(), lawyer);
+
+        let params_macro = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::my_macro!".to_owned(),
+            ..Default::default()
+        };
+        let result_macro = server.find_callers_callees_impl(params_macro).await;
+        assert!(result_macro.is_ok(), "Macro symbol type should succeed");
+
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+        let params_trait = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::<impl User>::login".to_owned(),
+            ..Default::default()
+        };
+        let result_trait = server.find_callers_callees_impl(params_trait).await;
+        assert!(result_trait.is_ok(), "Trait impl symbol type should succeed");
+    }
+
+    // ── Regression: degraded_reason must reflect actual failure cause ────────
+
+    /// Regression: LSP timeout with empty grep results must report `LspTimeoutGrepFallback`,
+    /// NOT `NoLsp`. Previously the initial `degraded_reason` = `NoLsp` was never overridden when
+    /// grep found nothing, causing agents to think no LSP existed instead of "retry later".
+    #[tokio::test]
+    async fn test_lsp_timeout_empty_grep_reports_timeout_reason() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+        // empty enclosing so grep_outgoing_fallback finds nothing
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        // Simulate LSP timeout on prepare
+        lawyer.push_prepare_call_hierarchy_result(Err(LspError::Timeout {
+            operation: "callHierarchy/incomingCalls".to_string(),
+            timeout_ms: 5000,
+        }));
+
+        // Use make_server_with_lawyer (workspace has no src/ files, so grep finds nothing)
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await.expect("should succeed degraded");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded, "must be degraded on timeout");
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspTimeoutGrepFallback),
+            "timeout must report LspTimeoutGrepFallback even when grep finds nothing"
+        );
+    }
+
+    /// Regression: LSP protocol error with empty grep results must report `LspErrorGrepFallback`,
+    /// NOT `NoLsp`. Previously `degraded_reason` = `NoLsp` was set and never overridden when grep
+    /// found nothing, misleading agents into "LSP not installed" guidance.
+    #[tokio::test]
+    async fn test_lsp_protocol_error_empty_grep_reports_error_reason() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+        surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.push_prepare_call_hierarchy_result(Err(LspError::Protocol(
+            "internal server error".to_string(),
+        )));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = FindCallersCalleesParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            ..Default::default()
+        };
+
+        let result = server.find_callers_callees_impl(params).await.expect("should succeed degraded");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded, "must be degraded on LSP error");
+        assert_eq!(
+            val.degraded_reason,
+            Some(DegradedReason::LspErrorGrepFallback),
+            "LSP error must report LspErrorGrepFallback even when grep finds nothing"
+        );
     }
 }
