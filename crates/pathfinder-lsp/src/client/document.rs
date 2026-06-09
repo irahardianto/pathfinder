@@ -14,6 +14,9 @@ pub struct DocumentGuard {
     pub(crate) client: LspClient,
     pub(crate) workspace_root: std::path::PathBuf,
     pub(crate) file_path: std::path::PathBuf,
+    /// Whether this guard actually sent `didOpen` (true) or was dedup'd (false).
+    /// Dedup'd guards skip `didClose` on drop to prevent protocol violations.
+    pub(crate) owns_open: bool,
 }
 
 impl DocumentGuard {
@@ -21,17 +24,27 @@ impl DocumentGuard {
         client: LspClient,
         workspace_root: std::path::PathBuf,
         file_path: std::path::PathBuf,
+        owns_open: bool,
     ) -> Self {
         Self {
             client,
             workspace_root,
             file_path,
+            owns_open,
         }
     }
 }
 
 impl Drop for DocumentGuard {
     fn drop(&mut self) {
+        // Dedup'd guards (owns_open=false) must not send didClose — the owning
+        // guard will handle cleanup. Sending didClose from a dedup'd guard would
+        // cause a protocol violation (didClose for a document that the LSP still
+        // considers open from the owning guard's perspective).
+        if !self.owns_open {
+            return;
+        }
+
         let client = self.client.clone();
         let workspace = self.workspace_root.clone();
         let path = self.file_path.clone();
@@ -85,20 +98,22 @@ impl LspClient {
         file_path: &std::path::Path,
         content: &str,
     ) -> Result<DocumentGuard, LspError> {
-        self.did_open(workspace_root, file_path, content).await?;
+        let actually_opened = self.did_open(workspace_root, file_path, content).await?;
         Ok(DocumentGuard::new(
             self.clone(),
             workspace_root.to_path_buf(),
             file_path.to_path_buf(),
+            actually_opened,
         ))
     }
 
+    /// Returns `true` if `didOpen` was actually sent, `false` if dedup'd.
     pub(crate) async fn did_open(
         &self,
         workspace_root: &std::path::Path,
         file_path: &std::path::Path,
         content: &str,
-    ) -> Result<(), LspError> {
+    ) -> Result<bool, LspError> {
         tracing::debug!(file = %file_path.display(), "LSP: did_open");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
@@ -106,6 +121,19 @@ impl LspClient {
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
+
+        // Deduplication: if this document is already open (e.g., symbol_overview
+        // opens the file and then find_all_references_impl tries to open it again),
+        // skip sending a second didOpen. Sending duplicate didOpen without an
+        // intervening didClose is an LSP protocol violation that can cause
+        // undefined behavior in jdtls and other strict LSP servers.
+        if self.doc_versions.contains_key(file_uri.as_str()) {
+            tracing::debug!(
+                file = %file_path.display(),
+                "LSP: did_open skipped — document already open (dedup)"
+            );
+            return Ok(false);
+        }
 
         self.doc_versions.insert(
             file_uri.to_string(),
@@ -130,7 +158,7 @@ impl LspClient {
             return Err(e);
         }
         self.touch(language_id);
-        Ok(())
+        Ok(true)
     }
 
     #[allow(dead_code)] // Used by tests and available as pub(crate) API
@@ -418,5 +446,108 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    /// Verifies that calling did_open twice on the same file WITHOUT an
+    /// intervening did_close only sends ONE didOpen notification.
+    /// This is the fix for the jdtls protocol-violation bug where
+    /// symbol_overview's sub-tools each called open_document on the same file.
+    #[tokio::test]
+    async fn test_did_open_dedup_skips_second_notification() {
+        let (client, fake) = make_running_client("rust");
+
+        let workspace = Path::new("/workspace");
+        let file_path = Path::new("src/main.rs");
+
+        // First open — should send didOpen, return true
+        let opened = client
+            .did_open(workspace, file_path, "fn main() {}")
+            .await
+            .unwrap();
+        assert!(opened, "first did_open should return true (actually opened)");
+        let first_notifications = fake.take_notifications();
+        assert_eq!(first_notifications.len(), 1, "first open should send didOpen");
+        assert_eq!(first_notifications[0].0, "textDocument/didOpen");
+
+        // Second open WITHOUT did_close — should be dedup'd, return false
+        let opened2 = client
+            .did_open(workspace, file_path, "fn main() { updated }")
+            .await
+            .unwrap();
+        assert!(!opened2, "second did_open should return false (dedup'd)");
+        let second_notifications = fake.take_notifications();
+        assert_eq!(
+            second_notifications.len(),
+            0,
+            "second open without close should be deduplicated — no notification sent"
+        );
+
+        // doc_versions should still contain the file (from first open)
+        let file_uri = Url::from_file_path(workspace.join(file_path))
+            .unwrap()
+            .to_string();
+        assert!(
+            client.doc_versions.contains_key(&file_uri),
+            "doc_versions should still track the open file"
+        );
+    }
+
+    /// Verifies that open_document guard dedup works correctly in the
+    /// symbol_overview scenario: first guard opens, second guard is dedup'd,
+    /// dropping dedup'd guard does NOT send didClose, dropping owning guard DOES.
+    #[tokio::test]
+    async fn test_open_document_guard_dedup_in_composite_tool() {
+        let (client, fake) = make_running_client("rust");
+
+        let workspace = Path::new("/workspace");
+        let file_path = Path::new("src/main.rs");
+
+        // Simulate symbol_overview opening the document
+        let guard1 = client
+            .open_document(workspace, file_path, "fn main() {}")
+            .await
+            .unwrap();
+        assert!(guard1.owns_open, "first guard should own the open");
+        let open_notifications = fake.take_notifications();
+        assert_eq!(open_notifications.len(), 1, "first guard should send didOpen");
+
+        // Simulate find_all_references_impl trying to open the same document
+        let guard2 = client
+            .open_document(workspace, file_path, "fn main() {}")
+            .await
+            .unwrap();
+        assert!(!guard2.owns_open, "second guard should NOT own the open");
+        let dedup_notifications = fake.take_notifications();
+        assert_eq!(
+            dedup_notifications.len(),
+            0,
+            "second guard should be dedup'd — no didOpen sent"
+        );
+
+        // Drop guard2 (dedup'd) — must NOT send didClose
+        drop(guard2);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let after_guard2_drop = fake.take_notifications();
+        assert_eq!(
+            after_guard2_drop.len(),
+            0,
+            "dedup'd guard drop must NOT send didClose"
+        );
+
+        // Drop guard1 (owner) — MUST send didClose
+        drop(guard1);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let after_guard1_drop = fake.take_notifications();
+        assert!(
+            after_guard1_drop
+                .iter()
+                .any(|(m, _)| m == "textDocument/didClose"),
+            "owning guard drop should send exactly one didClose: {after_guard1_drop:?}"
+        );
+        assert_eq!(
+            after_guard1_drop.len(),
+            1,
+            "should be exactly one notification (didClose), not more"
+        );
     }
 }
