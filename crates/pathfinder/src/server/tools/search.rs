@@ -293,7 +293,7 @@ impl PathfinderServer {
 
                 (symbol, node_type, is_definition)
             })
-            .buffer_unordered(ENRICHMENT_CONCURRENCY)
+            .buffered(ENRICHMENT_CONCURRENCY)
             .collect()
             .await;
 
