@@ -94,7 +94,6 @@ pub(crate) trait LspTransport: Send + Sync {
 /// Production uses [`RealProcessSpawner`] which calls `tokio::process::Command`.
 /// Tests can provide a mock that validates argument construction without
 /// spawning real processes.
-#[async_trait]
 pub(crate) trait ProcessSpawner: Send + Sync {
     fn spawn(
         &self,
@@ -108,7 +107,6 @@ pub(crate) trait ProcessSpawner: Send + Sync {
 
 pub(crate) struct RealProcessSpawner;
 
-#[async_trait]
 impl ProcessSpawner for RealProcessSpawner {
     fn spawn(
         &self,
@@ -861,7 +859,111 @@ fn apply_linux_process_hardening(_cmd: &mut tokio::process::Command) {
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
+pub(crate) mod test_mocks {
+    use super::{LspError, Path, ProcessSpawner, RealProcessSpawner};
+    use std::sync::Mutex;
+    use tokio::process::{Child, ChildStdin, ChildStdout};
+
+    #[derive(Clone)]
+    pub(crate) struct SpawnCall {
+        pub(crate) command: String,
+        pub(crate) args: Vec<String>,
+        pub(crate) project_root: std::path::PathBuf,
+        pub(crate) language_id: String,
+        pub(crate) isolate_target_dir: bool,
+    }
+
+    /// Controls how `MockProcessSpawner::spawn()` behaves.
+    enum SpawnMode {
+        /// Always return `Err(LspError::Io(NotFound))`.
+        Fail,
+        /// Delegate to `RealProcessSpawner` with `sleep 60` — validates
+        /// argument construction end-to-end without needing a real LSP binary.
+        /// The caller is responsible for killing the child in test teardown.
+        Succeed,
+    }
+
+    pub(crate) struct MockProcessSpawner {
+        pub(crate) spawn_calls: Mutex<Vec<SpawnCall>>,
+        mode: SpawnMode,
+    }
+
+    impl MockProcessSpawner {
+        /// Create a spawner that always fails with `NotFound`.
+        /// Use for testing error paths (backoff, `UnavailableState` transitions).
+        pub(crate) fn failing() -> Self {
+            Self {
+                spawn_calls: Mutex::new(Vec::new()),
+                mode: SpawnMode::Fail,
+            }
+        }
+
+        /// Create a spawner that succeeds by delegating to `RealProcessSpawner`
+        /// with `sleep 60` as the command. Validates spawn argument construction
+        /// (command, args, working dir, process group) end-to-end.
+        ///
+        /// The spawned `sleep` process must be killed by the test — it will
+        /// run for 60 seconds otherwise. Use `child.kill()` in test teardown.
+        pub(crate) fn succeeding() -> Self {
+            Self {
+                spawn_calls: Mutex::new(Vec::new()),
+                mode: SpawnMode::Succeed,
+            }
+        }
+
+        pub(crate) fn call_count(&self) -> usize {
+            self.spawn_calls.lock().expect("lock").len()
+        }
+
+        pub(crate) fn last_call(&self) -> Option<SpawnCall> {
+            self.spawn_calls.lock().expect("lock").last().cloned()
+        }
+    }
+
+    impl ProcessSpawner for MockProcessSpawner {
+        fn spawn(
+            &self,
+            command: &str,
+            args: &[String],
+            project_root: &Path,
+            language_id: &str,
+            isolate_target_dir: bool,
+        ) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
+            self.spawn_calls.lock().expect("lock").push(SpawnCall {
+                command: command.to_owned(),
+                args: args.to_vec(),
+                project_root: project_root.to_owned(),
+                language_id: language_id.to_owned(),
+                isolate_target_dir,
+            });
+
+            match self.mode {
+                SpawnMode::Fail => Err(LspError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "mock spawner configured to fail",
+                ))),
+                SpawnMode::Succeed => {
+                    // Delegate to real spawner with a trivial long-running command.
+                    // This validates argument construction (command, args, cwd,
+                    // process group, stderr null, kill_on_drop) without needing
+                    // an actual LSP binary on the test system.
+                    RealProcessSpawner.spawn(
+                        "sleep",
+                        &["60".to_owned()],
+                        project_root,
+                        language_id,
+                        isolate_target_dir,
+                    )
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
 mod process_tests {
+    use super::test_mocks::MockProcessSpawner;
     use super::*;
     use tempfile::tempdir;
 
@@ -1688,90 +1790,6 @@ mod process_tests {
         assert_eq!(malformed_message_count, 2);
     }
 
-    // D-1: ProcessSpawner trait tests
-
-    struct MockProcessSpawner {
-        spawn_calls: std::sync::Mutex<Vec<SpawnCall>>,
-        should_fail: std::sync::atomic::AtomicBool,
-    }
-
-    struct SpawnCall {
-        command: String,
-        args: Vec<String>,
-        project_root: std::path::PathBuf,
-        language_id: String,
-        isolate_target_dir: bool,
-    }
-
-    impl MockProcessSpawner {
-        fn new() -> Self {
-            Self {
-                spawn_calls: std::sync::Mutex::new(Vec::new()),
-                should_fail: std::sync::atomic::AtomicBool::new(false),
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                spawn_calls: std::sync::Mutex::new(Vec::new()),
-                should_fail: std::sync::atomic::AtomicBool::new(true),
-            }
-        }
-
-        fn call_count(&self) -> usize {
-            self.spawn_calls.lock().expect("lock").len()
-        }
-
-        fn last_call(&self) -> Option<SpawnCall> {
-            self.spawn_calls.lock().expect("lock").last().cloned()
-        }
-    }
-
-    impl Clone for SpawnCall {
-        fn clone(&self) -> Self {
-            Self {
-                command: self.command.clone(),
-                args: self.args.clone(),
-                project_root: self.project_root.clone(),
-                language_id: self.language_id.clone(),
-                isolate_target_dir: self.isolate_target_dir,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ProcessSpawner for MockProcessSpawner {
-        fn spawn(
-            &self,
-            command: &str,
-            args: &[String],
-            project_root: &Path,
-            language_id: &str,
-            isolate_target_dir: bool,
-        ) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
-            self.spawn_calls.lock().expect("lock").push(SpawnCall {
-                command: command.to_owned(),
-                args: args.to_vec(),
-                project_root: project_root.to_owned(),
-                language_id: language_id.to_owned(),
-                isolate_target_dir,
-            });
-
-            if self.should_fail.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(LspError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "mock spawner configured to fail",
-                )));
-            }
-
-            // INFO-1 fix: Delegate to RealProcessSpawner for successful spawns.
-            // This allows tests to use MockProcessSpawner with real processes
-            // while still recording spawn calls.
-            let real_spawner = RealProcessSpawner;
-            real_spawner.spawn(command, args, project_root, language_id, isolate_target_dir)
-        }
-    }
-
     #[test]
     fn test_process_spawner_trait_real_spawner_nonexistent_binary() {
         let spawner = RealProcessSpawner;
@@ -1790,20 +1808,14 @@ mod process_tests {
 
     #[tokio::test]
     async fn test_process_spawner_trait_mock_records_calls() {
-        let mock = MockProcessSpawner::new();
+        let mock = MockProcessSpawner::failing();
         let dir = tempfile::tempdir().expect("tempdir");
 
-        // Use "true" which should exist on all Unix systems
-        let result = mock.spawn("true", &["--arg1".to_owned()], dir.path(), "rust", true);
-
-        // Should succeed with real spawn
-        assert!(result.is_ok());
-        let (mut child, _, _) = result.unwrap();
-        let _ = child.wait();
+        let _ = mock.spawn("gopls", &["--arg1".to_owned()], dir.path(), "rust", true);
 
         assert_eq!(mock.call_count(), 1);
         let call = mock.last_call().expect("should have a call");
-        assert_eq!(call.command, "true");
+        assert_eq!(call.command, "gopls");
         assert_eq!(call.args, vec!["--arg1"]);
         assert_eq!(call.language_id, "rust");
         assert!(call.isolate_target_dir);
@@ -1823,25 +1835,12 @@ mod process_tests {
 
     #[tokio::test]
     async fn test_process_spawner_trait_mock_multiple_calls() {
-        let mock = MockProcessSpawner::new();
+        let mock = MockProcessSpawner::failing();
         let dir = tempfile::tempdir().expect("tempdir");
 
-        // Use "true" which should exist on all Unix systems
-        let result1 = mock.spawn("true", &[], dir.path(), "rust", false);
-        let result2 = mock.spawn("true", &[], dir.path(), "go", true);
-        let result3 = mock.spawn("true", &[], dir.path(), "python", false);
-
-        // All should succeed
-        assert!(result1.is_ok());
-        assert!(result2.is_ok());
-        assert!(result3.is_ok());
-
-        let (mut c1, _, _) = result1.unwrap();
-        let (mut c2, _, _) = result2.unwrap();
-        let (mut c3, _, _) = result3.unwrap();
-        let _ = c1.wait();
-        let _ = c2.wait();
-        let _ = c3.wait();
+        let _ = mock.spawn("cmd1", &[], dir.path(), "rust", false);
+        let _ = mock.spawn("cmd2", &[], dir.path(), "go", true);
+        let _ = mock.spawn("cmd3", &[], dir.path(), "python", false);
 
         assert_eq!(mock.call_count(), 3);
         let calls = mock.spawn_calls.lock().expect("lock");
@@ -1853,28 +1852,88 @@ mod process_tests {
     }
 
     #[tokio::test]
-    async fn test_process_spawner_trait_mock_real_spawn() {
-        // INFO-1 test: MockProcessSpawner should delegate to RealProcessSpawner
-        // for successful spawns (when not failing).
-        let spawner = MockProcessSpawner::new();
+    async fn test_process_spawner_trait_real_spawn() {
+        // Test RealProcessSpawner can spawn a real process.
+        let spawner = RealProcessSpawner;
 
-        // Use 'sleep' binary which should be available on most systems
         let dir = tempfile::tempdir().expect("tempdir");
         let result = spawner.spawn("sleep", &["60".to_owned()], dir.path(), "test", false);
 
         assert!(result.is_ok(), "should succeed with real spawn");
-        let (mut child, _stdin, _stdout) = result.unwrap();
-        // Verify it's a real process
-        assert!(child.id().map(|pid| pid > 0).unwrap_or(false));
-        let _ = child.kill();
-        let _ = child.wait();
+        let (mut child, _stdin, _stdout) = result.expect("should succeed");
+        assert!(child.id().is_some_and(|pid| pid > 0));
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
 
-        // Verify spawn was recorded
-        assert_eq!(spawner.call_count(), 1);
-        let last = spawner.last_call();
-        assert!(last.is_some());
-        let call = last.unwrap();
-        assert_eq!(call.command, "sleep");
-        assert_eq!(call.args, vec!["60"]);
+    #[tokio::test]
+    async fn test_mock_spawner_succeeding_returns_real_process() {
+        let mock = MockProcessSpawner::succeeding();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = mock.spawn("gopls", &["--arg1".to_owned()], dir.path(), "rust", false);
+
+        assert!(result.is_ok(), "succeeding mode should return Ok");
+        let (mut child, _stdin, _stdout) = result.expect("succeeding mode should return Ok");
+        assert!(child.id().is_some_and(|pid| pid > 0));
+
+        // Verify call was recorded
+        assert_eq!(mock.call_count(), 1);
+        let call = mock.last_call().expect("should have a call");
+        assert_eq!(call.command, "gopls");
+        assert_eq!(call.args, vec!["--arg1"]);
+        assert_eq!(call.language_id, "rust");
+        assert!(!call.isolate_target_dir);
+
+        // Cleanup: kill the sleep process
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_mock_spawner_succeeding_records_multiple_calls() {
+        let mock = MockProcessSpawner::succeeding();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let r1 = mock.spawn("cmd1", &[], dir.path(), "rust", false);
+        let r2 = mock.spawn("cmd2", &["--stdio".to_owned()], dir.path(), "go", true);
+        let r3 = mock.spawn("cmd3", &[], dir.path(), "python", false);
+
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+        assert!(r3.is_ok());
+
+        assert_eq!(mock.call_count(), 3);
+        {
+            let calls = mock.spawn_calls.lock().expect("lock");
+            assert_eq!(calls[0].language_id, "rust");
+            assert_eq!(calls[1].language_id, "go");
+            assert_eq!(calls[2].language_id, "python");
+            assert!(!calls[0].isolate_target_dir);
+            assert!(calls[1].isolate_target_dir);
+        }
+
+        // Cleanup all spawned sleep processes
+        for (mut child, _, _) in [r1.expect("r1"), r2.expect("r2"), r3.expect("r3")] {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_spawner_succeeding_is_alive_after_spawn() {
+        let mock = MockProcessSpawner::succeeding();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = mock.spawn("sleep", &["60".to_owned()], dir.path(), "test", false);
+        assert!(result.is_ok());
+        let (mut child, _stdin, _stdout) = result.expect("should succeed");
+
+        // Process should be alive immediately after spawn
+        assert!(child.id().is_some(), "child should have a PID");
+
+        // Cleanup
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 }

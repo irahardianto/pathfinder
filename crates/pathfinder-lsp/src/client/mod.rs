@@ -18,7 +18,7 @@ mod document;
 pub(crate) mod fake_transport;
 mod lawyer_impl;
 mod lifecycle;
-mod process;
+pub(crate) mod process;
 mod protocol;
 pub mod response_parsers;
 pub mod transport;
@@ -521,7 +521,9 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+            spawner: std::sync::Arc::new(
+                crate::client::process::test_mocks::MockProcessSpawner::failing(),
+            ),
         }
     }
 
@@ -560,7 +562,9 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+            spawner: std::sync::Arc::new(
+                crate::client::process::test_mocks::MockProcessSpawner::failing(),
+            ),
         }
     }
 
@@ -623,7 +627,9 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+            spawner: std::sync::Arc::new(
+                crate::client::process::test_mocks::MockProcessSpawner::failing(),
+            ),
         };
 
         (client, fake)
@@ -943,5 +949,132 @@ mod tests {
 
         // All guards should be dropped
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    // ── G-1: ProcessSpawner DI Integration Test ─────────────────────────
+
+    #[tokio::test]
+    async fn test_g_1_mock_process_spawner_integration() {
+        use crate::client::process::test_mocks::MockProcessSpawner;
+        use std::sync::Arc;
+
+        let mock_spawner = Arc::new(MockProcessSpawner::failing());
+
+        let descriptors = vec![LspDescriptor {
+            language_id: "test".to_owned(),
+            command: "test-lsp-server".to_owned(),
+            args: vec!["--arg1".to_owned(), "--arg2".to_owned()],
+            root: std::env::temp_dir(),
+            init_timeout_secs: None,
+            auto_plugins: vec![],
+            init_options: serde_json::Value::Null,
+        }];
+
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let client = LspClient {
+            descriptors: Arc::new(descriptors),
+            missing_languages: Arc::new(Vec::new()),
+            processes: Arc::new(DashMap::new()),
+            init_locks: Arc::new(DashMap::new()),
+            dispatcher: Arc::new(RequestDispatcher::new()),
+            shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: mock_spawner.clone(),
+        };
+
+        let descriptor = client.descriptors.first().unwrap().clone();
+
+        let result = client.start_process(descriptor, 0).await;
+
+        assert!(
+            result.is_err(),
+            "start_process should fail with failing mock spawner"
+        );
+        assert_eq!(
+            mock_spawner.call_count(),
+            1,
+            "MockProcessSpawner should record exactly one spawn call"
+        );
+
+        let call = mock_spawner
+            .last_call()
+            .expect("Should have recorded a spawn call");
+        assert_eq!(call.command, "test-lsp-server");
+        assert_eq!(call.args, vec!["--arg1", "--arg2"]);
+        assert_eq!(call.language_id, "test");
+        assert_eq!(call.project_root, std::env::temp_dir());
+        assert!(
+            !call.isolate_target_dir,
+            "isolate_target_dir should be false for single-language test"
+        );
+
+        let entry = client.processes.get("test");
+        assert!(
+            entry.is_some(),
+            "Process entry should exist after failed spawn"
+        );
+        let entry = entry.unwrap();
+        assert!(matches!(entry.value(), ProcessEntry::Unavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn test_g_1_mock_process_spawner_with_failing_behavior() {
+        use crate::client::process::test_mocks::MockProcessSpawner;
+        use std::sync::Arc;
+
+        let mock_spawner = Arc::new(MockProcessSpawner::failing());
+
+        let descriptors = vec![LspDescriptor {
+            language_id: "rust".to_owned(),
+            command: "rust-analyzer".to_owned(),
+            args: vec![],
+            root: std::env::temp_dir(),
+            init_timeout_secs: None,
+            auto_plugins: vec![],
+            init_options: serde_json::Value::Null,
+        }];
+
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let client = LspClient {
+            descriptors: Arc::new(descriptors),
+            missing_languages: Arc::new(Vec::new()),
+            processes: Arc::new(DashMap::new()),
+            init_locks: Arc::new(DashMap::new()),
+            dispatcher: Arc::new(RequestDispatcher::new()),
+            shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            doc_versions: Arc::new(DashMap::new()),
+            warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spawner: mock_spawner.clone(),
+        };
+
+        let result = client.ensure_process("rust").await;
+
+        assert!(
+            result.is_err(),
+            "ensure_process should fail with failing mock spawner"
+        );
+        assert_eq!(
+            mock_spawner.call_count(),
+            1,
+            "ensure_process should call spawner exactly once"
+        );
+
+        let entry = client.processes.get("rust");
+        assert!(
+            entry.is_some(),
+            "Process entry should exist after failed ensure_process"
+        );
+        let entry = entry.unwrap();
+        if let ProcessEntry::Unavailable(state) = entry.value() {
+            assert_eq!(
+                state.backoff_attempt, 1,
+                "backoff_attempt should be 1 after first failure"
+            );
+        } else {
+            panic!("Process should be Unavailable after failed spawn");
+        }
     }
 }

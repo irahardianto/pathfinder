@@ -88,7 +88,7 @@ where
     Ok(body_value)
 }
 
-/// Mock stdout that implements AsyncRead for testing malformed responses.
+/// `MockStdout` that implements `AsyncRead` for testing malformed responses.
 ///
 /// Allows injecting raw byte sequences to test protocol error handling.
 #[cfg(test)]
@@ -554,8 +554,7 @@ mod tests {
         let result = read_message(&mut reader).await;
 
         match result {
-            Err(LspError::ConnectionLost) => {}
-            Err(LspError::Protocol(_)) => {}
+            Err(LspError::ConnectionLost | LspError::Protocol(_)) => {}
             other => panic!(
                 "expected ConnectionLost or Protocol for no blank-line separator, got: {other:?}"
             ),

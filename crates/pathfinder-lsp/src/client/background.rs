@@ -1186,4 +1186,81 @@ mod tests {
 
         let _ = tokio::time::timeout(std::time::Duration::from_millis(100), handle).await;
     }
+
+    #[tokio::test]
+    async fn test_registration_watcher_send_failure_skips_local_update() {
+        use crate::client::fake_transport::FakeTransport;
+        use crate::client::process::LspTransport;
+
+        let dispatcher = Arc::new(RequestDispatcher::new());
+        let rx = dispatcher.subscribe_server_requests_for_language("rust");
+
+        let live_capabilities = Arc::new(parking_lot::RwLock::new(
+            crate::client::DetectedCapabilities::default(),
+        ));
+
+        // Create a FakeTransport that is killed (send will return ConnectionLost)
+        let transport = Arc::new(FakeTransport::new());
+        transport.kill();
+
+        let caps_for_check = Arc::clone(&live_capabilities);
+
+        let handle = tokio::spawn(registration_watcher_task(
+            "rust".to_owned(),
+            rx,
+            live_capabilities,
+            transport as Arc<dyn LspTransport>,
+        ));
+
+        // Send a registration message via the dispatcher
+        let register_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "reg-1",
+                    "method": "textDocument/definition",
+                    "registerOptions": {}
+                }]
+            }
+        });
+        dispatcher.dispatch_response_for_language("rust", &register_msg);
+
+        // Give the watcher time to process
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify: capability should NOT be updated because send failed
+        {
+            let caps = caps_for_check.read();
+            assert!(
+                !caps.definition_provider,
+                "registration should be skipped when transport.send() fails"
+            );
+        }
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_registration_watcher_lagged_continues() {
+        let (tx, rx) = broadcast::channel::<serde_json::Value>(1);
+        let live_capabilities = Arc::new(parking_lot::RwLock::new(
+            crate::client::DetectedCapabilities::default(),
+        ));
+        let transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+
+        let handle = tokio::spawn(registration_watcher_task(
+            "rust".to_owned(),
+            rx,
+            live_capabilities,
+            transport as Arc<dyn crate::client::process::LspTransport>,
+        ));
+
+        // Drop sender to close channel
+        drop(tx);
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), handle).await;
+    }
 }

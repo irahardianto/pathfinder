@@ -1575,14 +1575,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ensure_process_full_lifecycle_unavailable_to_running() {
+    async fn test_ensure_process_unavailable_state_after_failed_start() {
         let client = client_with_descriptors(vec!["rust"], HashMap::new());
 
         assert!(client.processes.get("rust").is_none());
 
-        let _ = client.ensure_process("rust").await;
+        let result = client.ensure_process("rust").await;
+        assert!(
+            matches!(result, Err(LspError::NoLspAvailable)),
+            "ensure_process should fail and return NoLspAvailable when spawner fails"
+        );
 
         let entry = client.processes.get("rust");
+        assert!(
+            entry.is_some(),
+            "Process entry should exist after failed ensure_process"
+        );
         if let Some(entry) = entry {
             assert!(
                 matches!(entry.value(), ProcessEntry::Unavailable(_)),
@@ -1790,7 +1798,9 @@ mod tests {
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+            spawner: std::sync::Arc::new(
+                crate::client::process::test_mocks::MockProcessSpawner::failing(),
+            ),
         };
 
         let result = client.missing_languages.clone();
@@ -2859,5 +2869,206 @@ mod tests {
             "should detect Rust language"
         );
         assert!(language_ids.contains(&"go"), "should detect Go language");
+    }
+
+    // ── FakeTransport coverage gaps ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fake_transport_failing_behavior_fail_after_n_requests() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response(
+            "textDocument/definition",
+            json!({ "result": { "uri": "file:///test.rs" } }),
+        );
+        fake.set_failing_behavior(crate::client::fake_transport::FailingBehavior {
+            fail_after_n_requests: Some(2),
+            fail_on_method: None,
+        });
+
+        // First request should succeed
+        let r1 = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(r1.is_ok(), "first request should succeed: {r1:?}");
+
+        // Second request should fail (count >= 2)
+        fake.set_response(
+            "textDocument/definition",
+            json!({ "result": { "uri": "file:///test2.rs" } }),
+        );
+        let r2 = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            r2.is_err(),
+            "second request should fail due to failing behavior: {r2:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_failing_behavior_fail_on_method() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response(
+            "textDocument/definition",
+            json!({ "result": { "uri": "file:///test.rs" } }),
+        );
+        fake.set_response(
+            "textDocument/hover",
+            json!({ "result": { "contents": "test" } }),
+        );
+        fake.set_failing_behavior(crate::client::fake_transport::FailingBehavior {
+            fail_after_n_requests: None,
+            fail_on_method: Some("textDocument/hover".to_owned()),
+        });
+
+        // definition should succeed
+        let r1 = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(r1.is_ok(), "definition should succeed: {r1:?}");
+
+        // hover should fail
+        let r2 = client
+            .request(
+                "rust",
+                "textDocument/hover",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            r2.is_err(),
+            "hover should fail due to failing behavior: {r2:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_response_delay_success() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response(
+            "textDocument/hover",
+            json!({ "result": { "contents": "delayed" } }),
+        );
+        fake.set_response_delay(Duration::from_millis(50));
+
+        let result = client
+            .request(
+                "rust",
+                "textDocument/hover",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "delayed response should succeed: {result:?}"
+        );
+        let val = result.unwrap();
+        assert_eq!(val["contents"], "delayed");
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_is_alive_after_init() {
+        let (_client, fake) = make_running_client("rust");
+        assert!(fake.is_alive(), "should be alive after init");
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_kill_makes_not_alive() {
+        let (_client, fake) = make_running_client("rust");
+        assert!(fake.is_alive());
+        fake.kill();
+        assert!(!fake.is_alive(), "should not be alive after kill");
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_request_count_increments() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response("textDocument/definition", json!({ "result": {} }));
+
+        assert_eq!(fake.request_count(), 0);
+
+        let _ = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        assert_eq!(fake.request_count(), 1);
+
+        let _ = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        assert_eq!(fake.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_notification_count() {
+        let (client, fake) = make_running_client("rust");
+
+        assert_eq!(fake.notification_count(), 0);
+
+        let _ = client
+            .notify("rust", "textDocument/didOpen", json!({}))
+            .await;
+        assert_eq!(fake.notification_count(), 1);
+
+        let _ = client
+            .notify("rust", "textDocument/didChange", json!({}))
+            .await;
+        assert_eq!(fake.notification_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_capabilities_default() {
+        let (_client, fake) = make_running_client("rust");
+        let caps = fake.capabilities();
+        assert!(
+            !caps.definition_provider,
+            "default should have no definition provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fake_transport_capabilities_with_custom() {
+        let (_client, fake) = make_running_client("rust");
+        let custom_caps = DetectedCapabilities {
+            definition_provider: true,
+            call_hierarchy_provider: true,
+            ..Default::default()
+        };
+        fake.with_capabilities(custom_caps.clone());
+        let caps = fake.capabilities();
+        assert!(caps.definition_provider);
+        assert!(caps.call_hierarchy_provider);
     }
 }

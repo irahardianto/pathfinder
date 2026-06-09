@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 pub(crate) struct FailingBehavior {
     pub fail_after_n_requests: Option<usize>,
     pub fail_on_method: Option<String>,
-    pub send_error_after_response: bool,
 }
 
 pub(crate) struct FakeTransport {
@@ -221,10 +220,8 @@ impl LspTransport for FakeTransport {
                         dispatcher.dispatch_response_for_language(&language_id, &response);
                     }
                 });
-            } else {
-                if let Some(ref dispatcher) = *self.dispatcher.lock() {
-                    dispatcher.dispatch_response_for_language(&self.language_id, &response);
-                }
+            } else if let Some(ref dispatcher) = *self.dispatcher.lock() {
+                dispatcher.dispatch_response_for_language(&self.language_id, &response);
             }
             Ok(())
         } else {
