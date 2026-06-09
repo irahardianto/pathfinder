@@ -1545,3 +1545,335 @@ mod missing_coverage_tests {
         );
     }
 }
+
+// ── BATCH-03c: Argument construction and coverage gap tests ──────────────────
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod batch03c_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn make_workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        for (path, content) in files {
+            let full = dir.path().join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).expect("create dirs");
+            }
+            let mut f = std::fs::File::create(&full).expect("create file");
+            write!(f, "{content}").expect("write content");
+        }
+        dir
+    }
+
+    // ── Multi-pattern query (regex alternation) ───────────────────────────
+
+    #[tokio::test]
+    async fn test_search_multi_pattern_regex_alternation() {
+        let ws = make_workspace(&[
+            ("src/alpha.rs", "foo_function here\n"),
+            ("src/beta.rs", "bar_function here\n"),
+            ("src/gamma.rs", "unrelated_content\n"),
+        ]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "foo_function|bar_function".to_owned(),
+            is_regex: true,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 2, "multi-pattern regex should match both alternatives");
+        let files: std::collections::HashSet<_> = result.matches.iter().map(|m| m.file.clone()).collect();
+        assert!(files.iter().any(|f| f.contains("alpha")));
+        assert!(files.iter().any(|f| f.contains("beta")));
+    }
+
+    #[tokio::test]
+    async fn test_search_literal_pipe_not_alternation() {
+        let ws = make_workspace(&[
+            ("pipe.rs", "cmd | grep pattern\n"),
+            ("nopipe.rs", "foo bar\n"),
+        ]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "cmd | grep".to_owned(),
+            is_regex: false,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 1, "literal | is not alternation");
+        assert!(result.matches[0].file.contains("pipe"));
+    }
+
+    // ── File type filtering ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_file_type_glob_include_only_ts() {
+        let ws = make_workspace(&[
+            ("src/app.ts", "findme\n"),
+            ("src/styles.css", "findme\n"),
+            ("src/main.rs", "findme\n"),
+        ]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "findme".to_owned(),
+            path_glob: "**/*.ts".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 1, "only .ts files should be searched");
+        assert!(std::path::Path::new(&result.matches[0].file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("ts")));
+    }
+
+    #[tokio::test]
+    async fn test_search_file_type_glob_exclude_generated() {
+        let ws = make_workspace(&[
+            ("src/lib.rs", "findme\n"),
+            ("src/generated.rs", "findme\n"),
+            ("src/lib_test.rs", "findme\n"),
+        ]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "findme".to_owned(),
+            path_glob: "**/*.rs".to_owned(),
+            exclude_glob: "**/generated*.rs".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 2, "generated.rs should be excluded");
+        assert!(result.matches.iter().all(|m| !m.file.contains("generated")));
+    }
+
+    // ── Context line configuration ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_context_lines_one() {
+        let ws = make_workspace(&[("src/main.rs", "before\ntarget\nafter\n")]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "target".to_owned(),
+            context_lines: 1,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].context_before.len(), 1);
+        assert_eq!(result.matches[0].context_after.len(), 1);
+        assert_eq!(result.matches[0].context_before[0], "before");
+        assert_eq!(result.matches[0].context_after[0], "after");
+    }
+
+    #[tokio::test]
+    async fn test_search_context_lines_three_at_file_boundary() {
+        let ws = make_workspace(&[("src/main.rs", "target\nline2\nline3\n")]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "target".to_owned(),
+            context_lines: 3,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].context_before.len(), 0, "no before context at start of file");
+        assert_eq!(result.matches[0].context_after.len(), 2, "only 2 lines exist after match");
+    }
+
+    // ── Gitignore toggle ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_gitignore_respected_in_git_repo() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init");
+        std::fs::write(dir.path().join("main.rs"), "findme\n").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.path().join("ignored.rs"), "findme\n").unwrap();
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 1, "gitignored file must be excluded");
+        assert_eq!(result.matches[0].file, "main.rs");
+        assert_eq!(result.gitignored_skipped, 1, "gitignored_skipped should count the ignored file");
+    }
+
+    // ── Result deduplication ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_no_spurious_deduplication_different_lines() {
+        let ws = make_workspace(&[("src/main.rs", "needle_a\nneedle_b\n")]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "needle_[ab]".to_owned(),
+            is_regex: true,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 2, "two different lines must not be deduplicated");
+    }
+
+    #[tokio::test]
+    async fn test_search_multiple_matches_same_file_no_dedup() {
+        let ws = make_workspace(&[("src/main.rs", "needle\nneedle\nneedle\n")]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "needle".to_owned(),
+            context_lines: 0,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 3);
+        assert_eq!(result.matches[0].line, 1);
+        assert_eq!(result.matches[1].line, 2);
+        assert_eq!(result.matches[2].line, 3);
+    }
+
+    // ── Large result set handling ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_large_result_set_total_matches_accurate() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        for i in 0..20_u32 {
+            std::fs::write(dir.path().join(format!("file_{i:02}.rs")), "needle\n").unwrap();
+        }
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "needle".to_owned(),
+            max_results: 10,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.matches.len(), 10, "should cap at max_results=10");
+        assert!(result.total_matches >= 10, "total_matches must be at least 10: {}", result.total_matches);
+        assert!(result.truncated, "must be marked truncated");
+    }
+
+    // ── Regex pattern escaping (literal search) ───────────────────────────
+
+    #[tokio::test]
+    async fn test_search_literal_regex_special_chars_escaped() {
+        let ws = make_workspace(&[
+            ("src/main.rs", "result.unwrap()\n"),
+            ("src/other.rs", "result_unwrap\n"),
+        ]);
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: ws.path().to_path_buf(),
+            query: "result.unwrap()".to_owned(),
+            is_regex: false,
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.total_matches, 1, "dot and parens must be literal");
+        assert!(result.matches[0].file.contains("main"));
+    }
+
+    // ── files_searched / files_in_scope accounting ────────────────────────
+
+    #[tokio::test]
+    async fn test_search_files_in_scope_includes_binary() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::fs::write(dir.path().join("app.rs"), "fn main() { findme(); }").unwrap();
+        std::fs::write(dir.path().join("logo.png"), "PNG_DATA").unwrap();
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.files_searched, 1, "only app.rs is searched");
+        assert!(result.files_in_scope >= 2, "files_in_scope must count both files: {}", result.files_in_scope);
+        assert!(result.binary_skipped >= 1, "logo.png must be counted as binary skipped");
+    }
+
+    // ── safe_truncate_bytes unit tests ────────────────────────────────────
+
+    #[test]
+    fn test_safe_truncate_bytes_ascii() {
+        assert_eq!(safe_truncate_bytes(b"hello world", 5), b"hello");
+    }
+
+    #[test]
+    fn test_safe_truncate_bytes_within_limit() {
+        assert_eq!(safe_truncate_bytes(b"hi", 100), b"hi");
+    }
+
+    #[test]
+    fn test_safe_truncate_bytes_exact_limit() {
+        assert_eq!(safe_truncate_bytes(b"hello", 5), b"hello");
+    }
+
+    #[test]
+    fn test_safe_truncate_bytes_multibyte_boundary() {
+        // "aéb" = [0x61, 0xC3, 0xA9, 0x62]; limit=2 hits 0xA9 (continuation byte 10xxxxxx)
+        // → walk back to 0xC3 (leading byte 11xxxxxx, not continuation) → stop at split_at=1
+        let bytes = "aéb".as_bytes();
+        let truncated = safe_truncate_bytes(bytes, 2);
+        assert_eq!(truncated, b"a");
+        assert!(std::str::from_utf8(truncated).is_ok());
+    }
+
+    // ── strip_line_endings unit tests ─────────────────────────────────────
+
+    #[test]
+    fn test_strip_line_endings_crlf() {
+        assert_eq!(strip_line_endings(b"hello\r\n"), b"hello");
+    }
+
+    #[test]
+    fn test_strip_line_endings_lf_only() {
+        assert_eq!(strip_line_endings(b"world\n"), b"world");
+    }
+
+    #[test]
+    fn test_strip_line_endings_no_newline() {
+        assert_eq!(strip_line_endings(b"plain"), b"plain");
+    }
+
+    #[test]
+    fn test_strip_line_endings_empty() {
+        assert_eq!(strip_line_endings(b""), b"");
+    }
+
+    // ── decode_line unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_decode_line_short_ascii() {
+        assert_eq!(decode_line(b"short line\n"), "short line");
+    }
+
+    #[test]
+    fn test_decode_line_long_ascii_truncates() {
+        let long = "a".repeat(1500);
+        let long_bytes = format!("{long}\n");
+        let result = decode_line(long_bytes.as_bytes());
+        assert!(result.ends_with("... [TRUNCATED]"), "long line must be truncated");
+        assert!(result.len() < 1050, "truncated result must be under 1050 chars");
+    }
+
+    #[test]
+    fn test_decode_line_crlf_stripped() {
+        assert_eq!(decode_line(b"line content\r\n"), "line content");
+    }
+}

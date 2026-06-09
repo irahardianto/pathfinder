@@ -1256,4 +1256,405 @@ mod tests {
             "truncated_paths should contain large.rs (per-file truncated)"
         );
     }
+
+    // ---------------------------------------------------------------
+    // BATCH-03a: Configuration variant coverage
+    // ---------------------------------------------------------------
+
+    /// BATCH-03a: visibility="all" keeps private symbols (verifies the non-"public" fast path).
+    #[test]
+    fn test_filter_all_keeps_private_symbols() {
+        let mut priv_sym = make_sym("_internal", SymbolKind::Function);
+        priv_sym.access_level = crate::surgeon::AccessLevel::Private;
+        let syms = vec![
+            priv_sym,
+            make_sym("Public", SymbolKind::Function),
+        ];
+        // "all" must return all symbols without filtering
+        let filtered = filter_by_visibility(syms, "all", false);
+        assert_eq!(filtered.len(), 2, "visibility=all keeps everything");
+    }
+
+    /// BATCH-03a: visibility="all" with `include_tests=true` keeps everything too.
+    #[test]
+    fn test_filter_all_visibility_with_include_tests() {
+        let syms = vec![
+            make_sym("test_foo", SymbolKind::Function),
+            make_sym("_hidden", SymbolKind::Function),
+        ];
+        let filtered = filter_by_visibility(syms, "all", true);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    /// BATCH-03a: deeply nested symbol hierarchy renders with correct indentation.
+    #[test]
+    fn test_render_deeply_nested_symbols() {
+        let leaf = ExtractedSymbol {
+            name: "deep_method".to_string(),
+            semantic_path: "Outer.Inner.deep_method".to_string(),
+            kind: SymbolKind::Method,
+            byte_range: 0..1,
+            start_line: 0,
+            end_line: 1,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        };
+        let inner = ExtractedSymbol {
+            name: "Inner".to_string(),
+            semantic_path: "Outer.Inner".to_string(),
+            kind: SymbolKind::Struct,
+            byte_range: 0..10,
+            start_line: 0,
+            end_line: 10,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![leaf],
+        };
+        let outer = ExtractedSymbol {
+            name: "Outer".to_string(),
+            semantic_path: "Outer".to_string(),
+            kind: SymbolKind::Module,
+            byte_range: 0..100,
+            start_line: 0,
+            end_line: 100,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![inner],
+        };
+
+        let mut out = String::default();
+        render_symbols_recursive(&[outer], 0, &mut out);
+
+        assert!(out.contains("mod Outer // Outer\n"));
+        assert!(out.contains("  struct Inner // Outer.Inner\n"));
+        assert!(out.contains("    method deep_method // Outer.Inner.deep_method\n"));
+    }
+
+    /// BATCH-03a: duplicate symbol names across modules are both rendered.
+    #[test]
+    fn test_render_duplicate_symbol_names_across_modules() {
+        let mod_a = ExtractedSymbol {
+            name: "foo".to_string(),
+            semantic_path: "module_a::foo".to_string(),
+            kind: SymbolKind::Function,
+            byte_range: 0..10,
+            start_line: 0,
+            end_line: 5,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        };
+        let mod_b = ExtractedSymbol {
+            name: "foo".to_string(),
+            semantic_path: "module_b::foo".to_string(),
+            kind: SymbolKind::Function,
+            byte_range: 10..20,
+            start_line: 6,
+            end_line: 10,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        };
+        let (out, truncated) = render_file_skeleton(&[mod_a, mod_b], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("module_a::foo"), "first foo must appear");
+        assert!(out.contains("module_b::foo"), "second foo must appear");
+    }
+
+    /// BATCH-03a: `generate_skeleton_text` with very low `max_tokens` skips the second file.
+    ///
+    /// The `max_tokens` budget is set to 5 — small enough that even a single-function file
+    /// cannot fit after the first file is rendered. This exercises the token-budget
+    /// truncation branch at line 531-543 of `generate_skeleton_text`.
+    #[tokio::test]
+    async fn test_generate_skeleton_token_budget_omission_comment() {
+        use crate::mock::MockSurgeon;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let ws_root = dir.path();
+
+        // Two files — only the first can fit in a tiny token budget.
+        for name in &["a.rs", "b.rs"] {
+            std::fs::write(ws_root.join(name), "fn main() {}").expect("write");
+        }
+
+        let mock = MockSurgeon::new();
+        // Push symbols for both files; after the first is rendered the budget is exhausted.
+        for _ in 0..2 {
+            mock.extract_symbols_results
+                .lock()
+                .expect("mutex")
+                .push(Ok(vec![ExtractedSymbol {
+                    name: "main".to_string(),
+                    semantic_path: "main".to_string(),
+                    kind: SymbolKind::Function,
+                    byte_range: 0..13,
+                    start_line: 0,
+                    end_line: 0,
+                    name_column: 0,
+                    access_level: crate::surgeon::AccessLevel::Public,
+                    children: vec![],
+                }]));
+        }
+
+        let surgeon = Arc::new(mock);
+        // max_tokens=5 is far too small for two files; the second file will be truncated.
+        // Each file's header alone is ~"\nFile: a.rs\n=========\n" ≈ 15 tokens,
+        // so after a.rs is processed the budget is fully consumed and b.rs is skipped.
+        let config = SkeletonConfig::new(5, 5, "all", 2_000);
+        let result =
+            generate_skeleton_text(&*surgeon, ws_root, std::path::Path::new("."), &config)
+                .await
+                .expect("generate skeleton");
+
+        // With max_tokens=5, the total skeleton immediately exceeds the budget,
+        // so files_truncated should be > 0 (the second file is skipped).
+        assert!(
+            result.files_truncated > 0 || result.files_scanned <= 1,
+            "with max_tokens=5, at most 1 file should render; files_truncated={}, files_scanned={}",
+            result.files_truncated,
+            result.files_scanned
+        );
+        assert!(
+            result.truncated_paths.len() == result.files_truncated,
+            "truncated_paths length should match files_truncated: paths={}, truncated={}",
+            result.truncated_paths.len(),
+            result.files_truncated
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // BATCH-03b: AST edge-case rendering coverage
+    // ---------------------------------------------------------------
+
+    /// BATCH-03b: Impl block is rendered with "impl" prefix.
+    #[test]
+    fn test_render_impl_symbol_kind() {
+        let sym = make_sym("MyStruct", SymbolKind::Impl);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("impl MyStruct // MyStruct\n"));
+    }
+
+    /// BATCH-03b: Constant kind is rendered with "const" prefix.
+    #[test]
+    fn test_render_constant_symbol_kind() {
+        let sym = make_sym("MAX_SIZE", SymbolKind::Constant);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("const MAX_SIZE // MAX_SIZE\n"));
+    }
+
+    /// BATCH-03b: Interface kind is rendered with "interface" prefix.
+    #[test]
+    fn test_render_interface_symbol_kind() {
+        let sym = make_sym("Runnable", SymbolKind::Interface);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("interface Runnable // Runnable\n"));
+    }
+
+    /// BATCH-03b: Enum kind is rendered with "enum" prefix.
+    #[test]
+    fn test_render_enum_symbol_kind() {
+        let sym = make_sym("Color", SymbolKind::Enum);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("enum Color // Color\n"));
+    }
+
+    /// BATCH-03b: Test kind is rendered with "test" prefix.
+    #[test]
+    fn test_render_test_symbol_kind() {
+        let sym = make_sym("test_something", SymbolKind::Test);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("test test_something // test_something\n"));
+    }
+
+    /// BATCH-03b: Vue Zone kind is rendered with "zone" prefix.
+    #[test]
+    fn test_render_zone_symbol_kind() {
+        let sym = make_sym("template", SymbolKind::Zone);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("zone template // template\n"));
+    }
+
+    /// BATCH-03b: Component kind is rendered with "component" prefix.
+    #[test]
+    fn test_render_component_symbol_kind() {
+        let sym = make_sym("MyButton", SymbolKind::Component);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("component MyButton // MyButton\n"));
+    }
+
+    /// BATCH-03b: `HtmlElement` kind is rendered with "element" prefix.
+    #[test]
+    fn test_render_html_element_symbol_kind() {
+        let sym = make_sym("div", SymbolKind::HtmlElement);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("element div // div\n"));
+    }
+
+    /// BATCH-03b: `CssSelector` kind is rendered with "selector" prefix.
+    #[test]
+    fn test_render_css_selector_symbol_kind() {
+        let sym = make_sym(".primary", SymbolKind::CssSelector);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("selector .primary // .primary\n"));
+    }
+
+    /// BATCH-03b: `CssAtRule` kind is rendered with "at-rule" prefix.
+    #[test]
+    fn test_render_css_at_rule_symbol_kind() {
+        let sym = make_sym("@media", SymbolKind::CssAtRule);
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(!truncated);
+        assert!(out.contains("at-rule @media // @media\n"));
+    }
+
+    /// BATCH-03b: Truncated skeleton for an Enum with functions reports func count.
+    #[test]
+    fn test_render_truncated_skeleton_with_functions_in_enum() {
+        let mut fns = Vec::default();
+        for i in 0..200 {
+            fns.push(ExtractedSymbol {
+                name: format!("fn_variant_{i}"),
+                semantic_path: format!("BigEnum.fn_variant_{i}"),
+                kind: SymbolKind::Function,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            });
+        }
+        let sym = ExtractedSymbol {
+            name: "BigEnum".to_string(),
+            semantic_path: "BigEnum".to_string(),
+            kind: SymbolKind::Enum,
+            byte_range: 0..0,
+            start_line: 0,
+            end_line: 0,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: fns,
+        };
+        let (out, truncated) = render_file_skeleton(&[sym], MAX_TOKENS_PER_FILE);
+        assert!(truncated, "large enum with 200 functions should truncate");
+        assert!(out.contains("[TRUNCATED DUE TO SIZE]"));
+        assert!(out.contains("enum BigEnum"));
+        assert!(out.contains("200 functions omitted"));
+    }
+
+    /// BATCH-03b: Truncated skeleton for an Impl block with constants reports const count.
+    #[test]
+    fn test_render_truncated_skeleton_with_constants_in_impl() {
+        let mut consts = Vec::default();
+        for i in 0..200 {
+            consts.push(ExtractedSymbol {
+                name: format!("CONST_{i}"),
+                semantic_path: format!("BigImpl.CONST_{i}"),
+                kind: SymbolKind::Constant,
+                byte_range: 0..0,
+                start_line: 0,
+                end_line: 0,
+                name_column: 0,
+                access_level: crate::surgeon::AccessLevel::Public,
+                children: vec![],
+            });
+        }
+        let sym = ExtractedSymbol {
+            name: "BigImpl".to_string(),
+            semantic_path: "BigImpl".to_string(),
+            kind: SymbolKind::Impl,
+            byte_range: 0..0,
+            start_line: 0,
+            end_line: 0,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: consts,
+        };
+        // Use a low per-file cap (100 tokens ≈ 400 chars) — well under the ~7000 chars
+        // produced by 200 constants — to reliably force truncation and exercise the
+        // render_truncated_file_skeleton constants-count branch.
+        let (out, truncated) = render_file_skeleton(&[sym], 100);
+        assert!(truncated, "impl with 200 constants should truncate with low max_tokens_per_file");
+        assert!(out.contains("[TRUNCATED DUE TO SIZE]"));
+        assert!(out.contains("impl BigImpl"));
+        assert!(out.contains("200 constants omitted"));
+    }
+
+    /// BATCH-03b: Truncated skeleton with empty symbols hits the NO SYMBOLS path.
+    #[test]
+    fn test_render_truncated_skeleton_no_symbols() {
+        // render_truncated_file_skeleton with an empty slice returns the special marker.
+        let result = render_truncated_file_skeleton(&[]);
+        assert_eq!(result, "// [TRUNCATED - NO SYMBOLS EXTRACTED]");
+    }
+
+    /// BATCH-03b: `render_truncated_file_skeleton` with a non-container kind (Function)
+    /// does NOT emit child-count lines (covers the "not in the matches! set" branch).
+    #[test]
+    fn test_render_truncated_skeleton_function_no_child_count() {
+        let sym = ExtractedSymbol {
+            name: "standalone_fn".to_string(),
+            semantic_path: "standalone_fn".to_string(),
+            kind: SymbolKind::Function,
+            byte_range: 0..0,
+            start_line: 0,
+            end_line: 0,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![make_sym("nested", SymbolKind::Method)],
+        };
+        // Force render_truncated_file_skeleton by calling directly.
+        let result = render_truncated_file_skeleton(&[sym]);
+        // Functions are NOT in the container kinds set — no omission line.
+        assert!(result.contains("func standalone_fn"), "should show fn name");
+        assert!(
+            !result.contains("omitted"),
+            "functions should not emit child omission count"
+        );
+    }
+
+    /// BATCH-03b: Low `max_tokens_per_file` with a single struct triggers per-file truncation.
+    #[test]
+    fn test_render_file_skeleton_low_max_tokens() {
+        // max_tokens_per_file=1 forces truncation even for small symbols.
+        let sym = make_sym("MyStruct", SymbolKind::Struct);
+        let (out, truncated) = render_file_skeleton(&[sym], 1);
+        assert!(truncated, "must truncate when max_tokens_per_file is very low");
+        assert!(
+            out.contains("struct MyStruct"),
+            "truncated skeleton must still show symbol name"
+        );
+    }
+
+    /// BATCH-03b: `is_test_symbol` handles `SymbolKind::Test` directly.
+    #[test]
+    fn test_is_test_symbol_test_kind() {
+        let sym = make_sym("any_name", SymbolKind::Test);
+        // filter_by_visibility with include_tests=true on a private Test symbol keeps it.
+        let mut private_test = sym;
+        private_test.access_level = crate::surgeon::AccessLevel::Private;
+        let filtered = filter_by_visibility(vec![private_test], "public", true);
+        assert_eq!(filtered.len(), 1, "SymbolKind::Test must be kept when include_tests=true");
+    }
+
+    /// BATCH-03b: `is_test_symbol` handles it_ prefix functions.
+    #[test]
+    fn test_is_test_symbol_it_prefix() {
+        let mut it_fn = make_sym("it_does_something", SymbolKind::Function);
+        it_fn.access_level = crate::surgeon::AccessLevel::Private;
+        let filtered = filter_by_visibility(vec![it_fn], "public", true);
+        assert_eq!(filtered.len(), 1, "it_ prefix function kept with include_tests=true");
+    }
 }
