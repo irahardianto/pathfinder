@@ -290,6 +290,7 @@ impl Default for FindCallersCalleesParams {
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadFileParams {
     /// Relative file path.
+    #[serde(alias = "path")]
     pub filepath: String,
     /// First line to return (1-indexed).
     #[serde(default = "default_start_line")]
@@ -303,6 +304,7 @@ pub struct ReadFileParams {
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSourceFileParams {
     /// Relative file path.
+    #[serde(alias = "path")]
     pub filepath: String,
     /// Detail level: `"source_only"`, `"compact"`, `"symbols"`, or `"full"`.
     /// - `"source_only"` — source code only, no symbol metadata (lowest token cost)
@@ -965,6 +967,9 @@ pub struct LspLanguageHealth {
     /// When true, the agent can trust the status.
     #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
     pub probe_verified: bool,
+    /// Whether the call hierarchy capability was verified by a live probe.
+    #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
+    pub call_hierarchy_verified: bool,
     /// Install guidance when LSP is unavailable.
     ///
     /// Provides actionable commands users can run to install their LSP servers.
@@ -1161,6 +1166,7 @@ pub const fn default_true() -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1199,5 +1205,22 @@ mod tests {
         assert_eq!(default_max_lines(), 500);
         assert_eq!(default_detail_level(), "compact");
         assert!(default_true());
+    }
+
+    #[test]
+    fn test_filepath_alias_deserialization() {
+        let json_data = serde_json::json!({
+            "path": "src/lib.rs",
+            "start_line": 10,
+            "max_lines": 20
+        });
+        let read_file_params: ReadFileParams = serde_json::from_value(json_data).unwrap();
+        assert_eq!(read_file_params.filepath, "src/lib.rs");
+
+        let json_data_sf = serde_json::json!({
+            "path": "src/main.rs"
+        });
+        let read_sf_params: ReadSourceFileParams = serde_json::from_value(json_data_sf).unwrap();
+        assert_eq!(read_sf_params.filepath, "src/main.rs");
     }
 }
