@@ -311,21 +311,26 @@ plus malformed message counting (~3 uncovered lines).
 
 ### Status Note
 
-Partially addressed by the `response_delay` feature added to FakeTransport
+Fully addressed by the `response_delay` feature added to FakeTransport
 during BATCH-01 fix cycle. However, delayed error responses are NOT supported
 -- when `response_delay` is active and the response has an error, the error
-is dispatched through the oneshot (via the delayed spawn task) rather than
-returned directly from `send()`. This changes the error path from
-`send() -> Err` to `rx -> Err(LspError::Protocol)`.
+is dispatched immediately via the dispatcher AND returned directly from `send()`,
+completely bypassing the delay mechanism.
 
-The current behavior is acceptable for timeout testing but may need refinement
-if we want to test the exact error response path with delays:
+The current behavior is intentional and creates an asymmetry:
 
-```rust
-// Current: delayed error goes through oneshot
-// Future option: return Err from send() immediately even with delay
-//                by checking is_error before spawning delay task
-```
+- **Success + delay**: `send()` returns `Ok(())`, response arrives via oneshot after delay
+- **Error + delay**: `send()` returns `Err(LspError::Protocol)` immediately, delay ignored
+  - Error is also dispatched through the dispatcher immediately (no delay)
+  - The delayed spawn task is never used for errors
+
+This asymmetry is acceptable for current timeout tests because we only need to
+validate timeout behavior for successful responses, not error paths. Error responses
+arrive synchronously via the `send()` return, so timeout behavior cannot be tested for errors.
+
+If asynchronous error arrival testing is needed in the future, a new
+`set_delayed_error()` method could be added that returns `Ok(())` from `send()`
+and dispatches the error via the delayed task instead of returning `Err` immediately.
 
 ### Scope
 
