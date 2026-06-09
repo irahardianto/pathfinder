@@ -26,6 +26,8 @@ const PROBE_NEGATIVE_TTL_SECS: u64 = 60;
 pub(crate) struct ProbeCacheEntry {
     /// Whether the probe succeeded.
     pub(crate) success: bool,
+    /// Whether call hierarchy was verified.
+    pub(crate) call_hierarchy_verified: bool,
     /// When this entry was created. Used to check TTL for negative entries and age for liveness re-probe.
     pub(crate) created_at: std::time::Instant,
     /// Optional TTL for expiration (negative entries only). Positive entries use age-based re-probe.
@@ -33,9 +35,10 @@ pub(crate) struct ProbeCacheEntry {
 }
 
 impl ProbeCacheEntry {
-    pub(crate) fn new(success: bool) -> Self {
+    pub(crate) fn new(success: bool, call_hierarchy_verified: bool) -> Self {
         Self {
             success,
+            call_hierarchy_verified,
             created_at: std::time::Instant::now(),
             ttl: if success {
                 None // Positive entries: use age-based re-probe instead of expiry
@@ -86,6 +89,25 @@ use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use std::sync::Arc;
+
+macro_rules! deserialize_params {
+    ($tool_name:expr, $val:expr, $param_type:ty, $expected:expr) => {
+        match serde_json::from_value::<$param_type>($val) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!(
+                    "Invalid parameters for tool '{}': {}. Expected parameters: {}",
+                    $tool_name, e, $expected
+                );
+                return Err(rmcp::model::ErrorData::new(
+                    rmcp::model::ErrorCode::INVALID_PARAMS,
+                    msg,
+                    None,
+                ));
+            }
+        }
+    };
+}
 
 /// The main Pathfinder MCP server.
 ///
@@ -232,8 +254,14 @@ Examples:
     )]
     async fn search_codebase(
         &self,
-        Parameters(params): Parameters<SearchCodebaseParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<Json<SearchCodebaseResponse>, ErrorData> {
+        let params = deserialize_params!(
+            "search_codebase",
+            params,
+            SearchCodebaseParams,
+            "query: string, is_regex?: boolean, path_glob?: string, filter_mode?: 'all' | 'code' | 'comments', max_results?: integer, context_lines?: integer, known_files?: string[], group_by_file?: boolean, exclude_glob?: string, offset?: integer"
+        );
         self.search_codebase_impl(params).await
     }
 
@@ -266,8 +294,14 @@ Example: `get_repo_map(path=\"src/\", visibility=\"all\")`"
     )]
     async fn get_repo_map(
         &self,
-        Parameters(params): Parameters<GetRepoMapParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
+        let params = deserialize_params!(
+            "get_repo_map",
+            params,
+            GetRepoMapParams,
+            "path?: string, depth?: integer, max_tokens?: integer, include_signatures?: boolean, changed_since?: string"
+        );
         self.get_repo_map_impl(params).await
     }
 
@@ -293,8 +327,14 @@ Common issues:
     )]
     async fn read_symbol_scope(
         &self,
-        Parameters(params): Parameters<ReadSymbolScopeParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "read_symbol_scope",
+            params,
+            ReadSymbolScopeParams,
+            "semantic_path: string"
+        );
         self.read_symbol_scope_impl(params).await
     }
 
@@ -315,8 +355,14 @@ Example: `read_source_file(filepath=\"src/auth.ts\", detail_level=\"compact\")`"
     )]
     async fn read_source_file(
         &self,
-        Parameters(params): Parameters<ReadSourceFileParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "read_source_file",
+            params,
+            ReadSourceFileParams,
+            "filepath: string (or path), detail_level?: 'source_only' | 'compact' | 'symbols' | 'full', start_line?: integer, end_line?: integer"
+        );
         self.read_source_file_impl(params).await
     }
 
@@ -344,8 +390,14 @@ Example: `read_with_deep_context(semantic_path=\"src/auth.ts::AuthService.login\
     )]
     async fn read_with_deep_context(
         &self,
-        Parameters(params): Parameters<ReadWithDeepContextParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "read_with_deep_context",
+            params,
+            ReadWithDeepContextParams,
+            "semantic_path: string, max_depth?: integer, project_only?: boolean"
+        );
         self.read_with_deep_context_impl(params).await
     }
 
@@ -373,8 +425,14 @@ Example: `get_definition(semantic_path=\"src/auth.ts::AuthService.login\")`"
     )]
     async fn get_definition(
         &self,
-        Parameters(params): Parameters<GetDefinitionParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "get_definition",
+            params,
+            GetDefinitionParams,
+            "semantic_path: string"
+        );
         self.get_definition_impl(params).await
     }
 
@@ -391,8 +449,14 @@ Example: `find_symbol(name=\"AuthService\", kind=\"class\")`"
     )]
     async fn find_symbol(
         &self,
-        Parameters(params): Parameters<FindSymbolParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<Json<types::FindSymbolResponse>, ErrorData> {
+        let params = deserialize_params!(
+            "find_symbol",
+            params,
+            FindSymbolParams,
+            "name: string, kind?: 'class' | 'interface' | 'enum' | 'method' | 'function' | 'struct' | 'trait' | 'constant' | 'module'"
+        );
         self.find_symbol_impl(params).await
     }
 
@@ -426,8 +490,14 @@ Example: `find_callers_callees(semantic_path=\"src/auth.ts::AuthService.login\",
     )]
     async fn find_callers_callees(
         &self,
-        Parameters(params): Parameters<FindCallersCalleesParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "find_callers_callees",
+            params,
+            FindCallersCalleesParams,
+            "semantic_path: string, max_depth?: integer, project_only?: boolean"
+        );
         self.find_callers_callees_impl(params).await
     }
 
@@ -454,8 +524,14 @@ Example: `find_all_references(semantic_path=\"src/auth.ts::AuthService.login\", 
     )]
     async fn find_all_references(
         &self,
-        Parameters(params): Parameters<crate::server::types::FindAllReferencesParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "find_all_references",
+            params,
+            crate::server::types::FindAllReferencesParams,
+            "semantic_path: string, max_results?: integer, offset?: integer"
+        );
         self.find_all_references_impl(params).await
     }
 
@@ -481,8 +557,14 @@ Example: `symbol_overview(semantic_path=\"src/auth.ts::AuthService.login\")`"
     )]
     async fn symbol_overview(
         &self,
-        Parameters(params): Parameters<crate::server::types::SymbolOverviewParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "symbol_overview",
+            params,
+            crate::server::types::SymbolOverviewParams,
+            "semantic_path: string, max_depth?: integer, project_only?: boolean, max_results?: integer, offset?: integer"
+        );
         self.symbol_overview_impl(params).await
     }
 
@@ -499,8 +581,14 @@ Example: `lsp_health(language=\"rust\")`"
     )]
     async fn lsp_health(
         &self,
-        Parameters(params): Parameters<crate::server::types::LspHealthParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        Parameters(params): Parameters<serde_json::Value>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
+        let params = deserialize_params!(
+            "lsp_health",
+            params,
+            crate::server::types::LspHealthParams,
+            "language?: string, action?: 'restart'"
+        );
         self.lsp_health_impl(params).await
     }
 
@@ -515,8 +603,14 @@ Example: `read_file(filepath=\".env\", start_line=1, max_lines=50)`"
     )]
     async fn read_file(
         &self,
-        Parameters(params): Parameters<ReadFileParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "read_file",
+            params,
+            ReadFileParams,
+            "filepath: string (or path), start_line?: integer, max_lines?: integer"
+        );
         self.read_file_impl(params).await
     }
 
@@ -537,8 +631,9 @@ Example: `read_files(paths=[\"src/auth.ts\", \"src/config.ts\"], detail_level=\"
     )]
     async fn read_files(
         &self,
-        Parameters(params): Parameters<ReadFilesParams>,
+        Parameters(params): Parameters<serde_json::Value>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!("read_files", params, ReadFilesParams, "paths: string[]");
         self.read_files_impl(params).await
     }
 }
@@ -611,7 +706,7 @@ mod tests {
             include_tests: true,
         };
 
-        let result = server.get_repo_map(Parameters(params)).await;
+        let result = server.get_repo_map_impl(params).await;
         assert!(result.is_ok());
         let call_res = result.unwrap();
         let skeleton = match &call_res.content[0].raw {
@@ -668,7 +763,7 @@ mod tests {
             ..Default::default()
         };
         let result = server
-            .get_repo_map(Parameters(params))
+            .get_repo_map_impl(params)
             .await
             .expect("should succeed");
         let meta: crate::server::types::GetRepoMapMetadata =
@@ -700,7 +795,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Err(err) = server.get_repo_map(Parameters(params)).await else {
+        let Err(err) = server.get_repo_map_impl(params).await else {
             panic!("Expected ACCESS_DENIED error");
         };
         assert_eq!(err.code, ErrorCode(-32001));
@@ -770,7 +865,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = server.search_codebase(Parameters(params)).await;
+        let result = server.search_codebase_impl(params).await;
         // Json(val) gives us val.0
         let val = result.expect("search_codebase should succeed").0;
 
@@ -816,7 +911,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = server.search_codebase(Parameters(params)).await;
+        let result = server.search_codebase_impl(params).await;
 
         let err = result
             .err()
@@ -899,7 +994,7 @@ mod tests {
         };
 
         let result = server
-            .search_codebase(Parameters(params))
+            .search_codebase_impl(params)
             .await
             .expect("should succeed")
             .0;
@@ -969,7 +1064,7 @@ mod tests {
         };
 
         let result = server
-            .search_codebase(Parameters(params))
+            .search_codebase_impl(params)
             .await
             .expect("should succeed")
             .0;
@@ -1030,7 +1125,7 @@ mod tests {
         };
 
         let result = server
-            .search_codebase(Parameters(params))
+            .search_codebase_impl(params)
             .await
             .expect("should succeed")
             .0;
@@ -1064,11 +1159,11 @@ mod tests {
 
         // Full read
         let result = server
-            .read_file(Parameters(ReadFileParams {
+            .read_file_impl(ReadFileParams {
                 filepath: filepath.to_owned(),
                 start_line: 1,
                 max_lines: 500,
-            }))
+            })
             .await
             .expect("should succeed");
         let val: crate::server::types::ReadFileMetadata =
@@ -1080,11 +1175,11 @@ mod tests {
 
         // Paginated read — lines 3-5
         let result2 = server
-            .read_file(Parameters(ReadFileParams {
+            .read_file_impl(ReadFileParams {
                 filepath: filepath.to_owned(),
                 start_line: 3,
                 max_lines: 3,
-            }))
+            })
             .await
             .expect("should succeed");
         let val2: crate::server::types::ReadFileMetadata =
@@ -1102,11 +1197,11 @@ mod tests {
 
         // FILE_NOT_FOUND
         let result3 = server
-            .read_file(Parameters(ReadFileParams {
+            .read_file_impl(ReadFileParams {
                 filepath: "nonexistent.yaml".to_owned(),
                 start_line: 1,
                 max_lines: 500,
-            }))
+            })
             .await;
         assert!(result3.is_err());
         let Err(err) = result3 else {
@@ -1161,7 +1256,7 @@ mod tests {
             semantic_path: "src/auth.go::Login".to_owned(),
         };
 
-        let result = server.read_symbol_scope(Parameters(params)).await;
+        let result = server.read_symbol_scope_impl(params).await;
         let val = result.expect("should succeed");
 
         let rmcp::model::RawContent::Text(t) = &val.content[0].raw else {
@@ -1218,7 +1313,7 @@ mod tests {
             semantic_path: "src/auth.go::Login".to_owned(),
         };
 
-        let Err(err) = server.read_symbol_scope(Parameters(params)).await else {
+        let Err(err) = server.read_symbol_scope_impl(params).await else {
             panic!("Expected failed response");
         };
 
@@ -1306,7 +1401,7 @@ mod tests {
         };
 
         let result = server
-            .search_codebase(Parameters(params))
+            .search_codebase_impl(params)
             .await
             .expect("should succeed")
             .0;
@@ -1405,7 +1500,7 @@ mod tests {
         };
 
         let result = server
-            .search_codebase(Parameters(params))
+            .search_codebase_impl(params)
             .await
             .expect("should succeed")
             .0;
@@ -1502,7 +1597,7 @@ mod tests {
         };
 
         let result = server
-            .search_codebase(Parameters(params))
+            .search_codebase_impl(params)
             .await
             .expect("should succeed")
             .0;
@@ -1568,7 +1663,7 @@ mod tests {
         };
 
         server
-            .search_codebase(Parameters(params))
+            .search_codebase_impl(params)
             .await
             .expect("should succeed");
 
@@ -1676,5 +1771,36 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert_eq!(code, "FILE_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_deserialization_error_wrapping() {
+        let ws_dir = tempdir().expect("temp dir");
+        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let server = PathfinderServer::with_engines(
+            ws,
+            config,
+            sandbox,
+            Arc::new(MockScout::default()),
+            Arc::new(MockSurgeon::new()),
+        );
+
+        let invalid_params = serde_json::json!({
+            "start_line": 1
+        });
+
+        let result = server.read_file(Parameters(invalid_params)).await;
+        let Err(err) = result else {
+            panic!("expected error");
+        };
+
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err
+            .message
+            .contains("Invalid parameters for tool 'read_file'"));
+        assert!(err.message.contains("filepath"));
     }
 }
