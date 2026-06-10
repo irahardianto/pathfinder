@@ -144,6 +144,12 @@ pub struct SymbolOverviewResponse {
     pub files_referenced: usize,
     /// Whether any component was degraded.
     pub degraded: bool,
+    /// Whether the impact analysis (callers/callees) was degraded.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub impact_degraded: bool,
+    /// Whether the references lookup was degraded.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub references_degraded: bool,
     /// Reason for degradation, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<DegradedReason>,

@@ -279,6 +279,8 @@ impl PathfinderServer {
             references: references.clone(),
             files_referenced,
             degraded,
+            impact_degraded,
+            references_degraded: refs_degraded,
             degraded_reason,
             actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
@@ -671,6 +673,9 @@ mod tests {
 
         // Verify degraded on LSP error in find_all_references_impl
         assert!(val.degraded);
+        // Only references degraded, not impact
+        assert!(!val.impact_degraded);
+        assert!(val.references_degraded);
         assert_eq!(
             val.degraded_reason,
             Some(DegradedReason::LspTimeoutGrepFallback)
@@ -954,6 +959,9 @@ mod tests {
 
         // Verify degraded due to impact error
         assert!(val.degraded);
+        // Only impact degraded, references are fine
+        assert!(val.impact_degraded);
+        assert!(!val.references_degraded);
         // find_callers_callees_impl returns degraded_reason=LspErrorGrepFallback when LSP error occurs
         assert_eq!(
             val.degraded_reason,
@@ -1005,6 +1013,8 @@ mod tests {
 
         // Both degraded
         assert!(val.degraded);
+        assert!(val.impact_degraded);
+        assert!(val.references_degraded);
         // Impact error takes priority in degraded_reason (LspErrorGrepFallback)
         assert_eq!(
             val.degraded_reason,
