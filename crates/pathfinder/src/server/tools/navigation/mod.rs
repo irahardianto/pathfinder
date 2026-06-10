@@ -1770,11 +1770,12 @@ def process():
             other_skipped: 0,
         }));
 
-        // Enclosing symbol calls: we need to push Ok(None) to mock_surgeon enclosing_symbol_results.
+        // Enclosing symbol calls: we need to push Ok(None) to mock_surgeon enclosing_symbol_detail_results.
+        // find_symbol_impl uses enclosing_symbol_detail() for treesitter-based kind classification.
         // Let's push 100 times to be safe since find_symbol_impl will run parallel searches.
         for _ in 0..100 {
             mock_surgeon
-                .enclosing_symbol_results
+                .enclosing_symbol_detail_results
                 .lock()
                 .unwrap()
                 .push(Ok(None));

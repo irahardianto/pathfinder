@@ -5,6 +5,7 @@ use crate::server::types::{FindSymbolParams, FindSymbolResponse, FoundSymbol};
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
 use pathfinder_search::SearchParams;
+use pathfinder_treesitter::surgeon::SymbolKind;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
 use std::path::Path;
@@ -314,22 +315,28 @@ impl PathfinderServer {
                         // Default to 1 (first line) if conversion fails, preserving valid indexing.
                         let line_usize = usize::try_from(m.line).unwrap_or(1);
 
-                        // Enrich with Tree-sitter to get symbol name and kind
-                        // Cache fallback values to avoid recomputation on degraded paths
+                        // Enrich with Tree-sitter to get symbol name and kind.
+                        // Use enclosing_symbol_detail() to get the full ExtractedSymbol
+                        // including SymbolKind — this provides accurate kind classification
+                        // for all languages with treesitter support (including Java methods
+                        // which lack a keyword like `fn`/`def`/`function`).
                         let fallback_name = extract_name_from_line(&m.content);
                         let fallback_kind = infer_kind_from_line(&m.content);
 
                         let (symbol_name, kind, is_degraded) = match self
                             .surgeon
-                            .enclosing_symbol(self.workspace_root.path(), file_path, line_usize)
+                            .enclosing_symbol_detail(
+                                self.workspace_root.path(),
+                                file_path,
+                                line_usize,
+                            )
                             .await
                         {
-                            Ok(Some(enclosing_symbol)) => {
-                                // If enclosing_symbol is already a full semantic path (file::symbol),
-                                // extract just the symbol part. Avoid clone by splitting in-place.
-                                let symbol_part = match enclosing_symbol.find("::") {
-                                    Some(pos) => enclosing_symbol[pos + 2..].to_string(),
-                                    None => enclosing_symbol,
+                            Ok(Some(detail)) => {
+                                // Use the semantic path from treesitter for the symbol name
+                                let symbol_part = match detail.semantic_path.find("::") {
+                                    Some(pos) => detail.semantic_path[pos + 2..].to_string(),
+                                    None => detail.semantic_path,
                                 };
 
                                 // Validate symbol name is non-empty
@@ -342,7 +349,10 @@ impl PathfinderServer {
                                     );
                                     (fallback_name, fallback_kind, true)
                                 } else {
-                                    (symbol_part, fallback_kind, false)
+                                    // Use SymbolKind from treesitter — accurate for all
+                                    // supported languages including Java, Go, Python, etc.
+                                    let ts_kind = symbol_kind_to_filter_string(detail.kind);
+                                    (symbol_part, ts_kind, false)
                                 }
                             }
                             Ok(None) | Err(_) => (fallback_name, fallback_kind, true),
@@ -470,10 +480,37 @@ fn extract_symbol_name_from_path(semantic_path: &str) -> String {
         .join("::")
 }
 
-/// Infer symbol kind from line content (fallback when Tree-sitter unavailable)
+/// Map a treesitter [`SymbolKind`] to the filter-string vocabulary used by
+/// [`kind_matches_filter`]. This is the authoritative kind source when
+/// treesitter succeeds — it replaces the heuristic `infer_kind_from_line`.
+fn symbol_kind_to_filter_string(kind: SymbolKind) -> String {
+    match kind {
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test => "function".to_string(),
+        SymbolKind::Class => "class".to_string(),
+        SymbolKind::Struct => "struct".to_string(),
+        SymbolKind::Impl => "impl".to_string(),
+        SymbolKind::Constant => "constant".to_string(),
+        SymbolKind::Interface => "interface".to_string(),
+        SymbolKind::Enum => "enum".to_string(),
+        SymbolKind::Module => "module".to_string(),
+        // Vue-specific kinds and other non-standard kinds fall through
+        // to "unknown" — agents won't typically filter for these.
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Heuristic kind classification from a source line's text content.
+///
+/// Used as a fallback when treesitter is unavailable (unsupported language,
+/// parse failure, etc.). For languages with treesitter support, the
+/// authoritative kind comes from [`symbol_kind_to_filter_string`].
 fn infer_kind_from_line(line: &str) -> String {
     let lower = line.to_lowercase();
-    if lower.contains("fn ") || lower.contains("function ") || lower.contains("def ") {
+    if lower.contains("fn ")
+        || lower.contains("func ")
+        || lower.contains("function ")
+        || lower.contains("def ")
+    {
         "function".to_string()
     } else if lower.contains("struct ") {
         "struct".to_string()
@@ -519,7 +556,12 @@ fn extract_name_from_line(line: &str) -> String {
         .unwrap_or_else(|| tokens.first().map(ToString::to_string).unwrap_or_default())
 }
 
-/// Check if symbol kind matches the filter
+/// Check if symbol kind matches the filter.
+///
+/// The mapping is intentionally broad: `"function"` and `"method"` are treated
+/// as synonyms because different languages classify the same concept differently
+/// (e.g. Java methods are extracted as `SymbolKind::Function`). An agent asking
+/// for `kind="method"` should still find Java methods.
 fn kind_matches_filter(kind: &str, filter: &str) -> bool {
     let kind_lower = kind.to_lowercase();
     let filter_lower = filter.to_lowercase();
@@ -529,7 +571,10 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
     }
 
     match filter_lower.as_str() {
-        "function" => matches!(kind_lower.as_str(), "function" | "method" | "fn"),
+        // "function" and "method" are symmetric — both accept function-like kinds
+        "function" | "method" | "fn" => {
+            matches!(kind_lower.as_str(), "function" | "method" | "fn")
+        }
         "class" => matches!(kind_lower.as_str(), "class" | "struct" | "interface"),
         "struct" => kind_lower == "struct",
         "interface" => kind_lower == "interface",
@@ -697,9 +742,19 @@ mod tests {
 
     #[test]
     fn test_infer_kind_from_line() {
+        // Rust
         assert_eq!(infer_kind_from_line("fn foo() {"), "function");
+        assert_eq!(infer_kind_from_line("pub async fn bar() {"), "function");
+        // JavaScript/TypeScript
         assert_eq!(infer_kind_from_line("function bar() {"), "function");
+        // Python
         assert_eq!(infer_kind_from_line("def baz():"), "function");
+        // Go — `func` was previously missing
+        assert_eq!(infer_kind_from_line("func main() {"), "function");
+        assert_eq!(
+            infer_kind_from_line("func (s *Server) Handle() {"),
+            "function"
+        );
 
         assert_eq!(infer_kind_from_line("struct Foo {"), "struct");
         assert_eq!(infer_kind_from_line("class Bar {"), "class");
@@ -712,7 +767,44 @@ mod tests {
         assert_eq!(infer_kind_from_line("mod utils;"), "module");
         assert_eq!(infer_kind_from_line("impl Foo {"), "impl");
 
+        // Java methods have no fn/def/function keyword — heuristic returns "unknown".
+        // This is expected; Fix 1 uses treesitter SymbolKind as the primary source.
+        assert_eq!(
+            infer_kind_from_line("    public void processPayment(String txId) {"),
+            "unknown"
+        );
         assert_eq!(infer_kind_from_line("something_unrecognized"), "unknown");
+    }
+
+    #[test]
+    fn test_symbol_kind_to_filter_string() {
+        use pathfinder_treesitter::surgeon::SymbolKind;
+
+        assert_eq!(
+            symbol_kind_to_filter_string(SymbolKind::Function),
+            "function"
+        );
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Method), "function");
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Test), "function");
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Class), "class");
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Struct), "struct");
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Impl), "impl");
+        assert_eq!(
+            symbol_kind_to_filter_string(SymbolKind::Constant),
+            "constant"
+        );
+        assert_eq!(
+            symbol_kind_to_filter_string(SymbolKind::Interface),
+            "interface"
+        );
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Enum), "enum");
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Module), "module");
+        // Vue-specific kinds fall through to "unknown"
+        assert_eq!(symbol_kind_to_filter_string(SymbolKind::Zone), "unknown");
+        assert_eq!(
+            symbol_kind_to_filter_string(SymbolKind::Component),
+            "unknown"
+        );
     }
 
     #[test]
@@ -722,20 +814,35 @@ mod tests {
         assert!(kind_matches_filter("struct", "struct"));
         assert!(kind_matches_filter("class", "class"));
 
-        // Cross-language mappings
+        // Cross-language mappings: filter="function" accepts method/fn kinds
         assert!(kind_matches_filter("fn", "function"));
         assert!(kind_matches_filter("method", "function"));
         assert!(kind_matches_filter("interface", "class"));
         assert!(kind_matches_filter("const", "constant"));
         assert!(kind_matches_filter("mod", "module"));
 
+        // Symmetric: filter="method" also accepts function/fn kinds
+        // This is critical for Java: methods are extracted as SymbolKind::Function
+        // (mapped to kind="function"), but agents may search with kind="method".
+        assert!(kind_matches_filter("function", "method"));
+        assert!(kind_matches_filter("fn", "method"));
+        assert!(kind_matches_filter("method", "method"));
+
+        // filter="fn" also works symmetrically
+        assert!(kind_matches_filter("function", "fn"));
+        assert!(kind_matches_filter("method", "fn"));
+
         // Case insensitive
         assert!(kind_matches_filter("FUNCTION", "function"));
         assert!(kind_matches_filter("struct", "STRUCT"));
+        assert!(kind_matches_filter("METHOD", "function"));
+        assert!(kind_matches_filter("function", "METHOD"));
 
         // No match
         assert!(!kind_matches_filter("class", "function"));
         assert!(!kind_matches_filter("enum", "function"));
         assert!(!kind_matches_filter("unknown", "class"));
+        assert!(!kind_matches_filter("class", "method"));
+        assert!(!kind_matches_filter("enum", "method"));
     }
 }
