@@ -28,5 +28,5 @@ coverage/
 .opencode/
 opencode.jsonc
 opencode.json
-/AGENTS.md
 *.html
+
