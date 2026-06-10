@@ -1297,6 +1297,11 @@ mod tests {
 
         let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
 
+        // Remove the src/auth.go file created by make_temp_workspace so that
+        // find_probe_file("go") is forced to fall back to the recursive scan
+        // rather than immediately returning the pre-existing shallow Go file.
+        let _ = std::fs::remove_file(ws_dir.path().join("src").join("auth.go"));
+
         // Create a monorepo structure: Go file at apps/backend/cmd/server/main.go
         // (not at the standard main.go or cmd/main.go)
         std::fs::create_dir_all(
