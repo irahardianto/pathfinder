@@ -733,6 +733,16 @@ pub struct ImpactReference {
     pub direction: String,
     /// BFS traversal depth (0 = direct caller/callee, 1 = one hop away, etc.).
     pub depth: usize,
+    /// Confidence level of this reference.
+    ///
+    /// - `"lsp"` — confirmed by LSP call hierarchy (authoritative).
+    /// - `"heuristic"` — inferred by grep or AST fallback when LSP is unavailable or degraded.
+    ///   Treat as a candidate; may include false positives from dynamic dispatch or
+    ///   same-named symbols in different scopes.
+    ///
+    /// `null` (absent) when the confidence is unknown or the caller pre-dates this field.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub confidence: Option<String>,
 }
 
 /// The metadata embedded in `structured_content` for `find_callers_callees`.
@@ -787,6 +797,38 @@ pub struct FindCallersCalleesMetadata {
     /// One of: `"found"`, `"not_found"`, `"unknown_degraded"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_coverage_status: Option<String>,
+}
+
+// ── Get Semantic Path Tool Types ────────────────────────────────────────
+
+/// Parameters for `get_semantic_path`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetSemanticPathParams {
+    /// Relative path to the file (e.g., `src/auth.ts`).
+    #[serde(alias = "path")]
+    pub file: String,
+    /// 1-indexed line number to resolve.
+    pub line: u32,
+}
+
+/// Result for `get_semantic_path`.
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetSemanticPathResult {
+    /// The full semantic path (`file::symbol`) of the innermost enclosing symbol.
+    ///
+    /// `null` when the line is not inside any named symbol (e.g., it is a module-level
+    /// attribute, blank line, or the file uses an unsupported language).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_path: Option<String>,
+    /// The symbol portion only (without the file prefix).
+    ///
+    /// `null` when `semantic_path` is null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    /// The file portion of the semantic path (same as the `file` parameter).
+    pub file: String,
+    /// The queried line number (1-indexed, echoed back for confirmation).
+    pub line: u32,
 }
 
 // ── Find All References Tool Types ─────────────────────────────────────
@@ -967,6 +1009,16 @@ pub struct LspLanguageHealth {
     /// When true, the agent can trust the status.
     #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
     pub probe_verified: bool,
+    /// Whether navigation (`get_definition`, `find_all_references`) was confirmed by a live probe.
+    ///
+    /// `true` only when a live `goto_definition` probe request succeeded — meaning the LSP
+    /// returned a real location, not just that it advertised the capability in the initialize
+    /// handshake. Stronger signal than `navigation_ready` alone.
+    ///
+    /// Agents should prefer this over `probe_verified` — it has the same meaning but
+    /// communicates intent more clearly.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub navigation_tested: Option<bool>,
     /// Whether the call hierarchy capability was verified by a live probe.
     #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
     pub call_hierarchy_verified: bool,

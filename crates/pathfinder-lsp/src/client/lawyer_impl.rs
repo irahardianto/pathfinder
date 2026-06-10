@@ -224,7 +224,13 @@ impl Lawyer for LspClient {
                 "line": line.saturating_sub(1),
                 "character": column.saturating_sub(1)
             },
-            "context": { "includeDeclaration": true }
+            // includeDeclaration: false — the definition site is surfaced separately
+            // via `definition_site` in the find_all_references tool response.
+            // Including it here causes a critical failure mode: when the LSP is in a
+            // warmup/partially-indexed state and returns only 1 result, that single
+            // result is the definition itself. The caller then returns it as an
+            // authoritative reference list, silently giving the agent wrong data.
+            "context": { "includeDeclaration": false }
         });
 
         let response = match self

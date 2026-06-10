@@ -10,5 +10,6 @@ pub(super) mod navigation;
 pub(super) mod read_files;
 pub(super) mod repo_map;
 pub(super) mod search;
+pub(super) mod semantic_path;
 pub(super) mod source_file;
 pub(super) mod symbols;

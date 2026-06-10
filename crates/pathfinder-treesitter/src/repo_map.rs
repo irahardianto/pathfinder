@@ -574,7 +574,9 @@ pub async fn generate_skeleton_text(
 
     Ok(RepoMapResult {
         skeleton: skeleton_out.trim().to_string(),
-        tech_stack: tech_stack.iter().map(|l| format!("{l:?}")).collect(),
+        // Use as_str() to emit canonical lowercase language IDs (e.g. "java", "rust")
+        // instead of format!("{l:?}") which would emit Rust Debug repr ("Java", "Rust").
+        tech_stack: tech_stack.iter().map(|l| l.as_str().to_owned()).collect(),
         files_scanned: files_rendered,
         files_truncated,
         truncated_paths,

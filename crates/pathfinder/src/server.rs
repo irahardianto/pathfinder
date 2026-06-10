@@ -72,8 +72,8 @@ pub mod types;
 
 use types::{
     FindCallersCalleesParams, FindSymbolParams, GetDefinitionParams, GetRepoMapParams,
-    ReadFileParams, ReadFilesParams, ReadSourceFileParams, ReadSymbolScopeParams,
-    ReadWithDeepContextParams, SearchCodebaseParams, SearchCodebaseResponse,
+    GetSemanticPathParams, ReadFileParams, ReadFilesParams, ReadSourceFileParams,
+    ReadSymbolScopeParams, ReadWithDeepContextParams, SearchCodebaseParams, SearchCodebaseResponse,
 };
 
 use pathfinder_common::config::PathfinderConfig;
@@ -635,6 +635,31 @@ Example: `read_files(paths=[\"src/auth.ts\", \"src/config.ts\"], detail_level=\"
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let params = deserialize_params!("read_files", params, ReadFilesParams, "paths: string[]");
         self.read_files_impl(params).await
+    }
+
+    #[tool(
+        name = "get_semantic_path",
+        description = "Resolve a file path + line number to the semantic path of the innermost enclosing symbol.
+
+Use when: You have a file + line number (e.g. from a stack trace, diff hunk, or LSP location) and need the semantic path to use with other Pathfinder tools like `read_symbol_scope`, `find_callers_callees`, or `symbol_overview`.
+
+The returned `semantic_path` is in `file::symbol` format (e.g., `src/auth.rs::AuthService.login`). When the line is not inside any named symbol (e.g., a module-level import or blank line), `semantic_path` is null — use `read_source_file(filepath, detail_level=\"symbols\")` to see available symbols.
+
+Tree-sitter powered. Supported languages: .rs, .ts, .tsx, .go, .py, .vue, .js, .jsx, .java.
+
+Example: `get_semantic_path(file=\"src/auth.ts\", line=42)`"
+    )]
+    async fn get_semantic_path(
+        &self,
+        Parameters(params): Parameters<serde_json::Value>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let params = deserialize_params!(
+            "get_semantic_path",
+            params,
+            GetSemanticPathParams,
+            "file: string (or path), line: integer"
+        );
+        self.get_semantic_path_impl(params).await
     }
 }
 

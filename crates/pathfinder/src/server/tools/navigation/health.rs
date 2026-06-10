@@ -112,6 +112,7 @@ impl PathfinderServer {
                 indexing_status,
                 navigation_ready: status.navigation_ready,
                 probe_verified: false,
+                navigation_tested: None,
                 call_hierarchy_verified: false,
                 install_hint: None,
                 indexing_progress_percent: status.indexing_progress_percent,
@@ -164,6 +165,7 @@ impl PathfinderServer {
                     } => {
                         "ready".clone_into(&mut lang_health.status);
                         lang_health.probe_verified = true;
+                        lang_health.navigation_tested = Some(true);
                         lang_health.call_hierarchy_verified = call_hierarchy_verified;
                         if overall_status != "ready" {
                             overall_status = "ready";
@@ -187,6 +189,7 @@ impl PathfinderServer {
                         if probe_result {
                             "ready".clone_into(&mut lang_health.status);
                             lang_health.probe_verified = true;
+                            lang_health.navigation_tested = Some(true);
                             lang_health.call_hierarchy_verified = call_hierarchy_verified;
                             // Cache the successful probe result (indefinite TTL)
                             self.probe_cache
@@ -258,6 +261,7 @@ impl PathfinderServer {
                     call_hierarchy_verified,
                 } => {
                     lang_health.probe_verified = true;
+                    lang_health.navigation_tested = Some(true);
                     lang_health.call_hierarchy_verified = call_hierarchy_verified;
                     continue;
                 }
@@ -281,6 +285,7 @@ impl PathfinderServer {
             if probe_result {
                 // Still alive — cache positive result
                 lang_health.probe_verified = true;
+                lang_health.navigation_tested = Some(true);
                 lang_health.call_hierarchy_verified = call_hierarchy_verified;
                 self.probe_cache
                     .lock()
@@ -293,6 +298,7 @@ impl PathfinderServer {
                 // LSP is dead! Downgrade from "ready" to "degraded"
                 "degraded".clone_into(&mut lang_health.status);
                 lang_health.probe_verified = false;
+                lang_health.navigation_tested = Some(false);
                 lang_health.call_hierarchy_verified = false;
                 // Cache negative result
                 self.probe_cache
@@ -332,6 +338,7 @@ impl PathfinderServer {
                 indexing_status: None,
                 navigation_ready: None,
                 probe_verified: false,
+                navigation_tested: None,
                 call_hierarchy_verified: false,
                 install_hint: Some(missing.install_hint.clone()),
                 indexing_progress_percent: None,
@@ -1042,6 +1049,11 @@ mod tests {
         // With liveness probe, probe_verified should be true since
         // the probe ran and succeeded (LSP is responsive)
         assert!(rust_health.probe_verified);
+        assert_eq!(
+            rust_health.navigation_tested,
+            Some(true),
+            "navigation_tested must mirror probe_verified on successful probe"
+        );
     }
 
     #[tokio::test]
@@ -1097,6 +1109,11 @@ mod tests {
         assert_eq!(rust_health.language, "rust");
         assert_eq!(rust_health.status, "degraded");
         assert!(!rust_health.probe_verified);
+        assert_eq!(
+            rust_health.navigation_tested,
+            Some(false),
+            "navigation_tested must be Some(false) when liveness probe fails (LSP non-responsive)"
+        );
     }
 
     #[tokio::test]
@@ -2077,6 +2094,11 @@ mod tests {
         let rust_health = &val.languages[0];
         assert_eq!(rust_health.status, "degraded");
         assert!(!rust_health.probe_verified);
+        assert_eq!(
+            rust_health.navigation_tested,
+            Some(false),
+            "navigation_tested must be Some(false) when liveness probe fails"
+        );
     }
 
     #[tokio::test]

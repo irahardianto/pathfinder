@@ -104,6 +104,7 @@ impl PathfinderServer {
                     snippet: m.content,
                     direction: "incoming_heuristic".to_string(),
                     depth: 0,
+                    confidence: Some("heuristic".to_owned()),
                 }
             })
             .collect();
@@ -211,6 +212,7 @@ impl PathfinderServer {
                             snippet: m.content.clone(),
                             direction: "outgoing_heuristic".to_string(),
                             depth: 0,
+                            confidence: Some("heuristic".to_owned()),
                         });
                         found = true;
                     }
@@ -360,6 +362,7 @@ impl PathfinderServer {
                                     CallDirection::Outgoing => "outgoing".to_owned(),
                                 },
                                 depth: current_depth as usize,
+                                confidence: Some("lsp".to_owned()),
                             });
                             *remaining_references -= 1;
                         }
@@ -972,6 +975,8 @@ impl PathfinderServer {
                                 snippet: r.snippet.clone(),
                                 direction: "test_coverage".to_owned(),
                                 depth: 0,
+                                // Inherit confidence from the source caller reference
+                                confidence: r.confidence.clone(),
                             });
                         }
                     }
@@ -1007,6 +1012,7 @@ impl PathfinderServer {
                                         snippet: m.content,
                                         direction: "test_coverage".to_owned(),
                                         depth: 0,
+                                        confidence: Some("heuristic".to_owned()),
                                     });
                                 }
                             }

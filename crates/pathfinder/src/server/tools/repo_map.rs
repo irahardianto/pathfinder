@@ -114,7 +114,13 @@ fn derive_lsp_status(
 
 impl PathfinderServer {
     /// Build an empty-changes response when `changed_since` finds no diffs.
-    async fn empty_changes_response(&self) -> Result<CallToolResult, ErrorData> {
+    ///
+    /// Passes `changed_since_ref` so the text output can name the exact ref and
+    /// tell the agent what to do if they want the full skeleton.
+    async fn empty_changes_response(
+        &self,
+        changed_since_ref: &str,
+    ) -> Result<CallToolResult, ErrorData> {
         let capability_status = self.lawyer.capability_status().await;
         let lsp_status = derive_lsp_status(&capability_status);
         let metadata = crate::server::types::GetRepoMapMetadata {
@@ -140,9 +146,15 @@ impl PathfinderServer {
             lsp_status,
             duration_ms: None,
         };
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(
-            "No files changed since the specified ref. No skeleton generated.",
-        )]);
+        // Produce an actionable message so the agent knows WHY the result is empty
+        // and what to do next, rather than seeing a silent empty response.
+        let message = format!(
+            "No files changed since '{changed_since_ref}'. \
+             The repository is unchanged relative to that ref.\n\
+             To see the full repository skeleton, call get_repo_map without the \
+             changed_since parameter."
+        );
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(message)]);
         res.structured_content = serialize_metadata(&metadata);
         Ok(res)
     }
@@ -186,7 +198,7 @@ impl PathfinderServer {
             {
                 Ok(files) => {
                     if files.is_empty() {
-                        return self.empty_changes_response().await;
+                        return self.empty_changes_response(&params.changed_since).await;
                     }
                     changed_files = Some(files);
                 }
