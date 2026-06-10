@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.6.4...pathfinder-mcp-common-v0.7.0) - 2026-06-10
+
+### Other
+
+- *(get_repo_map)* remove dead include_imports parameter
+- minor formatting and doc cleanup in common types and ripgrep
+- *(common,lsp,server)* BATCH-05 add pathfinder-common types, plugin, and server types coverage
+
 ## [0.6.4](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-common-v0.6.3...pathfinder-mcp-common-v0.6.4) - 2026-06-08
 
 ### Fixed
