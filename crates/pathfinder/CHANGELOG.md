@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0](https://github.com/irahardianto/pathfinder/compare/v0.15.0...v0.16.0) - 2026-06-10
+
+### Added
+
+- *(symbol_overview)* add granular impact_degraded and references_degraded fields
+
+### Fixed
+
+- *(test)* remove pre-existing auth.go before monorepo probe test
+- *(find_symbol)* use treesitter SymbolKind for kind classification instead of heuristic
+
+### Other
+
+- *(get_repo_map)* remove dead include_imports parameter
+- minor formatting and doc cleanup in common types and ripgrep
+- *(common,lsp,server)* BATCH-05 add pathfinder-common types, plugin, and server types coverage
+- *(treesitter,search)* BATCH-03 add comprehensive repo_map and ripgrep coverage
+
 ## [0.15.0](https://github.com/irahardianto/pathfinder/compare/v0.14.0...v0.15.0) - 2026-06-10
 
 ### Added
