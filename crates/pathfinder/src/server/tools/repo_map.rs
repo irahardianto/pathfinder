@@ -361,7 +361,6 @@ mod tests {
             visibility: Visibility::Public,
             include_extensions: vec![],
             exclude_extensions: vec![],
-            include_imports: pathfinder_common::types::IncludeImports::ThirdParty,
             include_tests: true,
         }
     }

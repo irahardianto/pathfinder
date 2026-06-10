@@ -85,9 +85,6 @@ pub struct GetRepoMapParams {
     /// Visibility filter: `public` or `all`.
     #[serde(default)]
     pub visibility: pathfinder_common::types::Visibility,
-    /// Import inclusion: `none`, `third_party`, or `all`.
-    #[serde(default)]
-    pub include_imports: pathfinder_common::types::IncludeImports,
     /// Per-file token cap before a file skeleton is collapsed to a summary stub.
     ///
     /// When the rendered skeleton of an individual file exceeds this limit, the

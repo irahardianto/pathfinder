@@ -287,7 +287,6 @@ Parameter guidance:
 - `max_tokens` (default 16000): Total token budget. Increase for more coverage.
 - `max_tokens_per_file` (default 2000): Per-file cap. Increase if files show [TRUNCATED].
 - `visibility`: \"public\" (default) or \"all\" (includes private/internal).
-- `include_imports`: \"none\", \"third_party\" (default), or \"all\".
 - `changed_since`: Filter to recently modified files (e.g., '3h', 'HEAD~5').
 
 Example: `get_repo_map(path=\"src/\", visibility=\"all\")`"
@@ -727,7 +726,6 @@ mod tests {
             changed_since: String::default(),
             include_extensions: vec![],
             exclude_extensions: vec![],
-            include_imports: pathfinder_common::types::IncludeImports::None,
             include_tests: true,
         };
 

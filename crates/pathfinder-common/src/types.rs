@@ -459,21 +459,6 @@ impl fmt::Display for Visibility {
     }
 }
 
-/// Import inclusion mode for `get_repo_map`.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum IncludeImports {
-    /// Omit all imports.
-    None,
-    /// Include only external/package imports.
-    #[default]
-    ThirdParty,
-    /// Include all import statements.
-    All,
-}
-
 /// Reason for degraded mode in tool responses.
 ///
 /// Standardized enum for all degraded reasons across tools. Provides
