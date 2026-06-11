@@ -738,6 +738,43 @@ pub(super) fn compute_degraded_tools(
 ) -> Vec<crate::server::types::DegradedToolInfo> {
     let mut degraded = Vec::new();
 
+    // When the LSP is still warming up (navigation_ready is not yet confirmed true),
+    // all LSP-backed tools should be flagged as degraded — even if capability flags
+    // are not yet known (None). This closes the gap where warming_up status incorrectly
+    // showed an empty degraded_tools list, misleading agents into thinking tools worked.
+    let warming_up = status.navigation_ready != Some(true);
+
+    if warming_up {
+        // LSP is starting or indexing — all navigation tools operate in degraded mode.
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "get_definition".to_owned(),
+            severity: "warming_up".to_owned(),
+            description: "LSP still initializing. Uses grep heuristic until navigation_ready=true."
+                .to_owned(),
+        });
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "find_callers_callees".to_owned(),
+            severity: "warming_up".to_owned(),
+            description: "LSP still initializing. Uses grep fallback until navigation_ready=true."
+                .to_owned(),
+        });
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "read_with_deep_context".to_owned(),
+            severity: "warming_up".to_owned(),
+            description:
+                "LSP still initializing. Returns source only (no dep signatures) until ready."
+                    .to_owned(),
+        });
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "find_all_references".to_owned(),
+            severity: "warming_up".to_owned(),
+            description: "LSP still initializing. Reference results may be incomplete until ready."
+                .to_owned(),
+        });
+        return degraded;
+    }
+
+    // LSP is ready — only flag tools where specific capabilities are explicitly absent.
     if status.supports_definition != Some(true) {
         degraded.push(crate::server::types::DegradedToolInfo {
             tool: "get_definition".to_owned(),
