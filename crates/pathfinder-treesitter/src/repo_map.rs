@@ -304,6 +304,70 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
     }
 }
 
+/// Determine the effective directory traversal depth based on detected languages.
+///
+/// # For future AI agents adding new language support
+///
+/// Deep package-as-directory structures are inherent to JVM-family and .NET languages
+/// (Java, Kotlin, C#, Scala) that encode package namespace as directory hierarchy.
+/// A Java class at `com.example.corp.service.user.UserService` lives 8+ directory
+/// levels deep: `src/main/java/com/example/corp/service/user/UserService.java`.
+///
+/// Pure functional and scripting languages (Go, Rust, Python, TypeScript) use shallow
+/// module trees and work fine with depth 5.
+///
+/// When adding support for a new OOP language with package-to-directory mapping,
+/// check if it needs depth > 5 and add it here (e.g., Kotlin, Scala, C#).
+fn depth_for_detected_languages(languages: &[crate::language::SupportedLanguage]) -> u32 {
+    // Languages requiring deep directory traversal due to package-as-directory conventions.
+    // Java Maven/Gradle layout: src/main/java/com/company/pkg/ = 6+ levels before .java file.
+    let needs_deep_traversal = languages
+        .iter()
+        .any(|l| matches!(l, crate::language::SupportedLanguage::Java));
+
+    if needs_deep_traversal {
+        10 // Covers com.example.corp.service.user at any reasonable nesting depth
+    } else {
+        5 // Sufficient for Go, Rust, Python, TypeScript, JavaScript, Vue
+    }
+}
+
+/// Quick extension-based language detection using a shallow directory scan.
+///
+/// Unlike the full walk in `generate_skeleton_text`, this does NOT parse files with
+/// tree-sitter — it only inspects file extensions. Used to determine language-aware
+/// depth before the main walk is configured.
+///
+/// The scan runs at the requested config depth to avoid missing files at exactly
+/// the depth boundary, but stops as soon as all depth-relevant languages are found.
+fn detect_languages_shallow(
+    abs_target: &Path,
+    depth: u32,
+) -> Vec<crate::language::SupportedLanguage> {
+    use ignore::WalkBuilder;
+
+    let mut builder = WalkBuilder::new(abs_target);
+    builder.max_depth(Some(depth as usize));
+    builder.require_git(false);
+    builder.hidden(true);
+
+    let walker = builder.build();
+    let mut detected: Vec<crate::language::SupportedLanguage> = Vec::new();
+
+    for entry in walker.flatten() {
+        if entry.path().is_dir() {
+            continue;
+        }
+        if let Some(lang) = crate::language::SupportedLanguage::detect(entry.path()) {
+            if !detected.contains(&lang) {
+                detected.push(lang);
+            }
+        }
+    }
+
+    detected
+}
+
 /// Generate an AST-based skeleton of a directory.
 ///
 /// # Errors
@@ -324,8 +388,18 @@ pub async fn generate_skeleton_text(
 
     let abs_target = workspace_root.join(target_path);
 
+    // Two-pass depth strategy:
+    // 1. Quick extension-only pre-scan at the requested depth to detect languages.
+    //    This is O(file count) with no tree-sitter parsing — fast and cheap.
+    // 2. Compute language-aware effective depth (Java/JVM need depth 10 for
+    //    package-as-directory layouts like src/main/java/com/example/pkg/).
+    // 3. Build the full walker with the effective depth.
+    let pre_scan_languages = detect_languages_shallow(&abs_target, config.depth);
+    let language_aware_depth = depth_for_detected_languages(&pre_scan_languages);
+    let effective_depth = config.depth.max(language_aware_depth);
+
     let mut builder = WalkBuilder::new(&abs_target);
-    builder.max_depth(Some(config.depth as usize));
+    builder.max_depth(Some(effective_depth as usize));
     builder.require_git(false);
     builder.hidden(true);
     builder.add_custom_ignore_filename(".pathfinderignore");
@@ -886,7 +960,10 @@ mod tests {
     /// Validates that depth=3 misses files at depth 4, confirming the bug that the default
     /// of 3 caused (and that the new default of 5 fixes).
     #[tokio::test]
-    async fn test_generate_skeleton_text_depth_3_misses_nested_src_files() {
+    async fn test_generate_skeleton_text_depth_3_reaches_rust_files_at_depth_4() {
+        // Previously, depth=3 missed Rust files at depth 4 (crates/my-crate/src/lib.rs).
+        // With language-aware depth, the effective depth auto-expands to 5 for Rust
+        // projects, so files at depth 4 are now correctly found.
         use crate::mock::MockSurgeon;
         use std::sync::Arc;
         use tempfile::tempdir;
@@ -901,17 +978,23 @@ mod tests {
             .expect("write file");
 
         let surgeon = Arc::new(MockSurgeon::new());
-        // No extract_symbols_results configured — the file should never be reached.
+        // Configure extract_symbols to return an empty list — the file IS reached now.
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .expect("mutex")
+            .push(Ok(vec![]));
 
-        let config = SkeletonConfig::new(50_000, 3, "all", 2_000); // OLD default — deliberately too shallow
+        let config = SkeletonConfig::new(50_000, 3, "all", 2_000); // Requested depth=3
         let result =
             generate_skeleton_text(&*surgeon, ws_dir.path(), std::path::Path::new("."), &config)
                 .await
                 .expect("skeleton generation succeeds");
 
+        // effective_depth = max(3, 5) = 5 → reaches depth-4 file
         assert_eq!(
-            result.files_in_scope, 0,
-            "depth=3 must NOT reach files at crates/my-crate/src/lib.rs (depth 4)"
+            result.files_in_scope, 1,
+            "depth=3 for Rust projects should reach files at depth 4 via language-aware depth expansion"
         );
     }
 
