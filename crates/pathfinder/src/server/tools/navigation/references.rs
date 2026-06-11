@@ -454,8 +454,116 @@ impl PathfinderServer {
                         let mut result =
                             rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                                 format!(
-                                    "{}\n{}{}{}\n[completed in {duration_ms}ms]",
+                                    "{}\n{}{}{}\\n[completed in {duration_ms}ms]",
                                     format_degraded_notice(&DegradedReason::LspWarmupGrepFallback),
+                                    summary,
+                                    references_text,
+                                    pagination_note
+                                ),
+                            )]);
+                        result.structured_content = serialize_metadata(&metadata);
+                        return Ok(result);
+                    }
+
+                    // probe returned Ok(None) or Err — LSP either has no definition for this
+                    // symbol (could be a built-in/external) or is still warming up.
+                    //
+                    // If warmup is incomplete, 0 references is unverified — the LSP hasn't
+                    // finished indexing and may be missing real usages. Report degraded to
+                    // prevent agents from concluding the symbol is unused.
+                    if !self.lawyer.is_warm_start_complete() {
+                        tracing::info!(
+                            tool = "find_all_references",
+                            semantic_path = %params.semantic_path,
+                            "find_all_references: LSP returned 0 refs and warmup incomplete — \
+                             reporting as unverified to avoid false confidence"
+                        );
+
+                        let symbol_name =
+                            super::last_symbol_name(&semantic_path).unwrap_or_default();
+                        let grep_result = if symbol_name.is_empty() {
+                            None
+                        } else {
+                            self.grep_references_fallback(
+                                &symbol_name,
+                                &semantic_path.file_path,
+                                &symbol_scope,
+                                &params,
+                            )
+                            .await
+                        };
+
+                        let offset = usize::try_from(params.offset).unwrap_or(0);
+                        let max_results = usize::try_from(params.max_results).unwrap_or(50).max(1);
+
+                        let (paginated_refs, files_referenced, total_references) =
+                            if let Some((refs, file_count)) = grep_result {
+                                let ref_count = refs.len();
+                                let paginated = refs
+                                    .into_iter()
+                                    .skip(offset)
+                                    .take(max_results)
+                                    .collect::<Vec<_>>();
+                                (paginated, file_count, ref_count)
+                            } else {
+                                (Vec::new(), 0, 0)
+                            };
+
+                        let truncated = total_references > offset.saturating_add(max_results);
+                        let paginated_len = paginated_refs.len();
+
+                        let references_text = if paginated_refs.is_empty() {
+                            String::new()
+                        } else {
+                            let header = format!("References: {total_references} found\n");
+                            let items: Vec<_> = paginated_refs
+                                .iter()
+                                .map(|r| {
+                                    format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet)
+                                })
+                                .collect();
+                            format!("{}{}", header, items.join("\n"))
+                        };
+
+                        let pagination_note = if truncated {
+                            format!(
+                                "\n[showing {} of {} total — use offset={} for next page]\n",
+                                paginated_len,
+                                total_references,
+                                offset.saturating_add(max_results),
+                            )
+                        } else {
+                            String::new()
+                        };
+
+                        let summary = if total_references > 0 {
+                            format!("Found {total_references} references across {files_referenced} files (grep fallback, LSP still warming up).\n\n")
+                        } else {
+                            "LSP result unverified: zero references returned but LSP is still indexing. \
+                             Use search_codebase to find usages, or retry after lsp_health reports ready.\n"
+                                .to_string()
+                        };
+
+                        let degraded_reason = DegradedReason::LspWarmupEmptyUnverified;
+                        let metadata = crate::server::types::FindAllReferencesMetadata {
+                            references: Some(paginated_refs),
+                            total_references: Some(total_references),
+                            truncated,
+                            files_referenced,
+                            degraded: true,
+                            degraded_reason: Some(degraded_reason),
+                            actionable_guidance: Some(degraded_reason.guidance()),
+                            lsp_readiness: Some("warming_up".to_owned()),
+                            warm_start_in_progress: Some(true),
+                            duration_ms: Some(millis_to_u64(duration_ms)),
+                            resolution_strategy: Some("lsp_unverified_warmup".to_owned()),
+                        };
+
+                        let mut result =
+                            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+                                format!(
+                                    "{}\n{}{}{}\\n[completed in {duration_ms}ms]",
+                                    format_degraded_notice(&degraded_reason),
                                     summary,
                                     references_text,
                                     pagination_note

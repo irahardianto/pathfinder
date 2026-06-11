@@ -89,7 +89,7 @@ type CapabilityStatusFixture =
 type MissingLanguagesFixture = Arc<Mutex<Vec<crate::client::MissingLanguage>>>;
 
 /// A configurable fake `Lawyer` for unit testing.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MockLawyer {
     // ── goto_definition ───────────────────────────────────────────────────────
     /// Configured result for `goto_definition`. `None` = return `Ok(None)`.
@@ -137,6 +137,38 @@ pub struct MockLawyer {
     pub goto_implementation_result: GotoImplementationFixture,
     /// All calls made to `goto_implementation` in order.
     pub goto_implementation_calls: Arc<Mutex<Vec<(String, u32, u32)>>>,
+
+    // ── warm_start ────────────────────────────────────────────────────────────
+    /// Whether `is_warm_start_complete()` should return `true`.
+    /// Defaults to `true` so existing tests that don't set this behave as if
+    /// the LSP is fully warmed up. Set to `false` to simulate warmup scenarios.
+    pub warm_start_complete: bool,
+}
+
+impl Default for MockLawyer {
+    fn default() -> Self {
+        Self {
+            // Defaults to `true` so existing tests that don't exercise warmup
+            // scenarios work as before (LSP assumed warm and ready).
+            warm_start_complete: true,
+            // All other fields default via their own Default implementations.
+            goto_definition_result: Arc::default(),
+            goto_definition_results: Arc::default(),
+            goto_definition_calls: Arc::default(),
+            did_open_calls: Arc::default(),
+            did_open_error: Arc::default(),
+            did_close_calls: Arc::default(),
+            capability_status_result: Arc::default(),
+            missing_languages_result: Arc::default(),
+            prepare_call_hierarchy_results: Arc::default(),
+            incoming_call_results: Arc::default(),
+            outgoing_call_results: Arc::default(),
+            references_result: Arc::default(),
+            references_calls: Arc::default(),
+            goto_implementation_result: Arc::default(),
+            goto_implementation_calls: Arc::default(),
+        }
+    }
 }
 
 impl MockLawyer {
@@ -523,9 +555,11 @@ impl Lawyer for MockLawyer {
 
     /// PATCH-004: Check whether `warm_start` has completed.
     ///
-    /// `MockLawyer` has no `warm_start` mechanism, always returns `false`.
+    /// Returns the configured value (`true` by default — existing tests assume
+    /// the LSP is warm). Tests that exercise warmup paths should set
+    /// `mock.warm_start_complete = false` before calling the tool.
     fn is_warm_start_complete(&self) -> bool {
-        false
+        self.warm_start_complete
     }
 
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage> {
