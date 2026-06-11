@@ -172,8 +172,8 @@ impl PathfinderServer {
                 //
                 // Retry once after a brief wait: if the LSP just finished indexing
                 // between our did_open and the query, a second attempt often succeeds.
-                // This is the single most impactful fix for warmup-period reliability.
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                // 1s is sufficient — if LSP still isn't ready, grep fallback handles it.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
                 let retry_lsp_result = self
                     .lawyer
