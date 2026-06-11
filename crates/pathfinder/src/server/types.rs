@@ -232,6 +232,14 @@ pub struct ReadWithDeepContextParams {
     /// Prevents context overflow on large functions. Default: 50.
     #[serde(default = "default_max_dependencies")]
     pub max_dependencies: u32,
+    /// Include file-level import statements in the response.
+    ///
+    /// When `true`, the `imports` field in the response will contain the import/using
+    /// statements from the file. Useful for languages with verbose package paths
+    /// (Java, C#, Kotlin) where imports clarify what types are in scope.
+    /// Default: `false` to avoid unnecessary output for languages without verbose imports.
+    #[serde(default)]
+    pub include_imports: bool,
 }
 
 impl Default for ReadWithDeepContextParams {
@@ -240,6 +248,7 @@ impl Default for ReadWithDeepContextParams {
             semantic_path: String::default(),
             project_only: Some(true),
             max_dependencies: default_max_dependencies(),
+            include_imports: false,
         }
     }
 }
@@ -674,6 +683,12 @@ pub struct ReadWithDeepContextMetadata {
     /// Spec 5.1: Wall-clock duration of the tool call in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// File-level import/using statements (populated when `include_imports=true`).
+    ///
+    /// Contains the raw import lines from the file. Useful for Java, C#, Kotlin,
+    /// and other OOP languages where imports clarify what types are in scope.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub imports: Vec<String>,
 }
 
 /// The response for `get_definition`.

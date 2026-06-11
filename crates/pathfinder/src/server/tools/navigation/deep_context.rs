@@ -96,7 +96,8 @@ impl PathfinderServer {
                          probe returned no result — LSP likely warming up, waiting 3s and retrying"
                     );
 
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // 1s is sufficient — grep fallback handles the case where LSP is still not ready.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
                     let retry_result = self
                         .lawyer
@@ -549,6 +550,17 @@ impl PathfinderServer {
         } else {
             Some("treesitter_direct".to_owned())
         };
+
+        // Extract file-level import statements when requested.
+        // This is a cheap operation (line-scan, no tree-sitter) but opt-in to avoid
+        // unnecessary output for languages without verbose import blocks.
+        let imports = if params.include_imports {
+            let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+            self.extract_file_imports(&abs_file).await
+        } else {
+            Vec::new()
+        };
+
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
             start_line: scope.start_line,
             end_line: scope.end_line,
@@ -562,6 +574,7 @@ impl PathfinderServer {
             dependencies_truncated,
             resolution_strategy,
             duration_ms: Some(millis_to_u64(duration_ms)),
+            imports,
         };
 
         // Build the dependency block: list each callee signature, file, and line.
@@ -577,24 +590,139 @@ impl PathfinderServer {
             format!("\n{}", lines.join("\n"))
         };
 
+        // Build the imports block for the text channel when present.
+        let import_block = if metadata.imports.is_empty() {
+            String::new()
+        } else {
+            format!("\nImports:\n{}\n", metadata.imports.join("\n"))
+        };
+
         // Prepend degradation notice when in degraded mode
         let text = if degraded {
             let notice = degraded_reason
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
             format!(
-                "{notice}\n\n{dep_count} dependencies loaded{dep_block}\n\n{}\n[completed in {duration_ms}ms]",
+                "{notice}\n\n{dep_count} dependencies loaded{dep_block}{import_block}\n\n{}\n[completed in {duration_ms}ms]",
                 scope.content
             )
         } else {
             format!(
-                "{dep_count} dependencies loaded{dep_block}\n\n{}\n[completed in {duration_ms}ms]",
+                "{dep_count} dependencies loaded{dep_block}{import_block}\n\n{}\n[completed in {duration_ms}ms]",
                 scope.content
             )
         };
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);
         Ok(res)
+    }
+
+    /// Extract file-level import/using/require statements from a source file.
+    ///
+    /// Uses a simple line-scan approach — no tree-sitter parsing required.
+    /// Returns at most 200 import lines to prevent context overflow on files
+    /// with auto-generated import blocks (e.g., generated Java files).
+    ///
+    /// Patterns per language:
+    /// - Java/Kotlin/C#: lines starting with `import` or `using`
+    /// - Python: lines starting with `import` or `from ... import`
+    /// - TypeScript/JavaScript: lines starting with `import` or `require`
+    /// - Rust: lines starting with `use ` (leading space to exclude `use` in other contexts)
+    /// - Go: lines starting with `import` (including multi-line import blocks)
+    async fn extract_file_imports(&self, file_path: &std::path::Path) -> Vec<String> {
+        const MAX_IMPORTS: usize = 200;
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+        let content = match tokio::fs::read_to_string(file_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    tool = "read_with_deep_context",
+                    path = %file_path.display(),
+                    error = %e,
+                    "extract_file_imports: could not read file"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut imports = Vec::new();
+        let mut in_go_import_block = false;
+
+        for line in content.lines() {
+            if imports.len() >= MAX_IMPORTS {
+                break;
+            }
+
+            let trimmed = line.trim();
+
+            match ext {
+                "java" | "kt" | "scala" => {
+                    if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+                        imports.push(line.to_owned());
+                    }
+                }
+                "cs" => {
+                    if trimmed.starts_with("using ") || trimmed.starts_with("namespace ") {
+                        imports.push(line.to_owned());
+                    }
+                }
+                "py" => {
+                    if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
+                        imports.push(line.to_owned());
+                    }
+                }
+                "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
+                    // Match import statements and require() calls
+                    if trimmed.starts_with("import ")
+                        || trimmed.starts_with("import{")
+                        || trimmed.contains("require(")
+                    {
+                        imports.push(line.to_owned());
+                    }
+                }
+                "rs" => {
+                    // `use foo::bar;` — leading `use ` distinguishes from `use` keyword
+                    // in other contexts (e.g., `use std::io::{Read, Write};`).
+                    // Also capture `extern crate` for older Rust code.
+                    if trimmed.starts_with("use ") || trimmed.starts_with("extern crate ") {
+                        imports.push(line.to_owned());
+                    }
+                }
+                "go" => {
+                    // Go has single-line `import "pkg"` and multi-line `import (\n...)` blocks.
+                    if trimmed == "import (" {
+                        in_go_import_block = true;
+                        imports.push(line.to_owned());
+                    } else if in_go_import_block {
+                        imports.push(line.to_owned());
+                        if trimmed == ")" {
+                            in_go_import_block = false;
+                        }
+                    } else if trimmed.starts_with("import \"") {
+                        imports.push(line.to_owned());
+                    }
+                }
+                "swift" => {
+                    if trimmed.starts_with("import ") {
+                        imports.push(line.to_owned());
+                    }
+                }
+                "rb" => {
+                    if trimmed.starts_with("require ") || trimmed.starts_with("require_relative ") {
+                        imports.push(line.to_owned());
+                    }
+                }
+                _ => {
+                    // Unknown extension — try the most common pattern
+                    if trimmed.starts_with("import ") {
+                        imports.push(line.to_owned());
+                    }
+                }
+            }
+        }
+
+        imports
     }
 }
 
