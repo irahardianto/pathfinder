@@ -301,16 +301,18 @@ pub(crate) struct InFlightGuard {
 
 impl InFlightGuard {
     pub(crate) fn new(counter: Arc<AtomicU32>) -> Self {
-        // L-9: Relaxed ordering suffices — in_flight is only used for idle-timeout
-        // gating, not for cross-thread synchronization.
-        counter.fetch_add(1, Ordering::Relaxed);
+        // M-1: Use Release ordering for the counter increment to form a release-acquire
+        // pair with the Acquire load in idle_timeout_task.
+        counter.fetch_add(1, Ordering::Release);
         Self { counter }
     }
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
+        // M-1: Use Release ordering for the counter decrement to form a release-acquire
+        // pair with the Acquire load in idle_timeout_task.
+        self.counter.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -1051,21 +1053,21 @@ mod tests {
     fn test_in_flight_guard_increments_counter() {
         use std::sync::atomic::AtomicU32;
         let counter = Arc::new(AtomicU32::new(0));
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
 
         {
             let _guard = InFlightGuard::new(Arc::clone(&counter));
-            assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
 
             {
                 let _guard2 = InFlightGuard::new(Arc::clone(&counter));
-                assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+                assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 2);
             }
             // Second guard dropped
-            assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
         }
         // First guard dropped
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 
     #[test]
@@ -1094,7 +1096,7 @@ mod tests {
         barrier.wait();
 
         // All guards should be alive now
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 10);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 10);
 
         // Wait for all threads to complete and drop their guards
         for handle in handles {
@@ -1102,7 +1104,7 @@ mod tests {
         }
 
         // All guards should be dropped
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 
     // ── G-1: ProcessSpawner DI Integration Test ─────────────────────────

@@ -16,7 +16,7 @@ pub enum IndexingCompletionSource {
 ///
 /// Returned by the `get_repo_map` and validation tools to communicate the
 /// current health of the associated language server process.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LspLanguageStatus {
     /// Whether validation is enabled.
     pub validation: bool,
@@ -97,8 +97,8 @@ pub struct CallHierarchyItem {
     pub column: u32, // 1-indexed
 
     // Internal generic LSP data needed for incoming/outgoing requests
-    #[serde(default)]
     /// Optional raw data for LSP call hierarchy requests.
+    #[serde(default)]
     pub data: Option<serde_json::Value>,
 }
 
@@ -127,7 +127,7 @@ pub struct ReferenceLocation {
 }
 
 /// A single file system change event for `workspace/didChangeWatchedFiles`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileEvent {
     /// Absolute file URI (e.g., `file:///home/user/project/src/auth.ts`).
     pub uri: String,
@@ -136,7 +136,7 @@ pub struct FileEvent {
 }
 
 /// LSP `FileChangeType` values (§3.17.20 of the LSP spec).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[repr(u8)]
 pub enum FileChangeType {
     /// File was created.

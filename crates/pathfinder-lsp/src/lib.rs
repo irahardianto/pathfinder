@@ -16,8 +16,7 @@
 pub mod client;
 /// Module for error handling and definitions.
 pub mod error;
-/// Module for legal functionalities.
-/// The `lawyer` module providing legal-related functionality.
+/// The Lawyer trait — testability boundary for all LSP operations.
 pub mod lawyer;
 /// Mock implementation for testing.
 pub mod mock;
@@ -38,6 +37,15 @@ pub use no_op::NoOpLawyer;
 pub use types::DefinitionLocation;
 
 pub use plugin::{
-    all_plugins, plugin_for_extension, plugin_for_language, GoPlugin, LanguagePlugin, LspCandidate,
-    PythonPlugin, RustPlugin, TypeScriptPlugin,
+    all_plugins, plugin_for_extension, plugin_for_language, GoPlugin, JavaPlugin, LanguagePlugin,
+    LspCandidate, PythonPlugin, RustPlugin, TypeScriptPlugin,
 };
+
+#[cfg(test)]
+#[allow(clippy::no_effect_underscore_binding)]
+mod tests {
+    #[test]
+    fn test_java_plugin_re_export() {
+        let _plugin = crate::JavaPlugin;
+    }
+}

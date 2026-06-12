@@ -197,6 +197,11 @@ impl MockLawyer {
     // ── goto_definition ───────────────────────────────────────────────────────
 
     /// Set the result to return from the next `goto_definition()` call.
+    ///
+    /// # Warning
+    /// This result is single-use and is consumed (`take()`n) on the first `goto_definition` call.
+    /// Subsequent calls will return the default `Ok(None)` unless a new result is configured or queued.
+    /// To support multiple sequential calls, use `push_goto_definition_result` instead.
     pub fn set_goto_definition_result(&self, result: Result<Option<DefinitionLocation>, LspError>) {
         let mut guard = self
             .goto_definition_result
@@ -240,7 +245,10 @@ impl MockLawyer {
     ///
     /// Use this to test the `no_lsp` / `unsupported` early-exit branches of
     /// `run_lsp_validation` without needing a separate `Lawyer` implementation.
-    /// After the error is consumed by one `did_open` call it reverts to `Ok(())`.
+    ///
+    /// # Warning
+    /// This error is single-use and is consumed (`take()`n) on the first `open_document` call.
+    /// Subsequent calls will succeed unless a new error is configured.
     pub fn set_did_open_error(&self, error: LspError) {
         let mut guard = self
             .did_open_error
@@ -282,6 +290,10 @@ impl MockLawyer {
 
     /// Set the result to return from the next `references()` call.
     /// Accepts String for backwards compatibility, converts to `LspError::Protocol`.
+    ///
+    /// # Warning
+    /// This result is single-use and is consumed (`take()`n) on the first `references` call.
+    /// Subsequent calls will return the default `Ok(vec![])` unless a new result is configured.
     pub fn set_references_result(&self, result: Result<Vec<ReferenceLocation>, String>) {
         let lsp_result = result.map_err(LspError::Protocol);
         self.set_references_lsp_error(lsp_result);
@@ -289,6 +301,10 @@ impl MockLawyer {
 
     /// Set the result to return from the next `references()` call.
     /// Accepts `LspError` directly, allowing tests to exercise all error variants.
+    ///
+    /// # Warning
+    /// This result is single-use and is consumed (`take()`n) on the first `references` call.
+    /// Subsequent calls will return the default `Ok(vec![])` unless a new result is configured.
     pub fn set_references_lsp_error(&self, result: Result<Vec<ReferenceLocation>, LspError>) {
         let mut guard = self
             .references_result
@@ -318,6 +334,10 @@ impl MockLawyer {
     // ── goto_implementation ──────────────────────────────────────────────────────
 
     /// Set the result to return from the next `goto_implementation()` call.
+    ///
+    /// # Warning
+    /// This result is single-use and is consumed (`take()`n) on the first `goto_implementation` call.
+    /// Subsequent calls will return the default `Ok(vec![])` unless a new result is configured.
     pub fn set_goto_implementation_result(
         &self,
         result: Result<Vec<DefinitionLocation>, LspError>,

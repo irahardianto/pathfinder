@@ -51,13 +51,12 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        // M-10: Check capability before sending request.
-        let caps = self.capabilities_for(language_id)?;
-        if !caps.definition_provider {
-            return Err(LspError::UnsupportedCapability {
-                capability: "definitionProvider".to_owned(),
-            });
-        }
+        self.wait_for_capability(
+            language_id,
+            |caps| caps.definition_provider,
+            "definitionProvider",
+        )
+        .await?;
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -112,12 +111,12 @@ impl Lawyer for LspClient {
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id)?;
-        if !caps.call_hierarchy_provider {
-            return Err(LspError::UnsupportedCapability {
-                capability: "callHierarchyProvider".to_owned(),
-            });
-        }
+        self.wait_for_capability(
+            language_id,
+            |caps| caps.call_hierarchy_provider,
+            "callHierarchyProvider",
+        )
+        .await?;
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -208,12 +207,12 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id)?;
-        if !caps.references_provider {
-            return Err(LspError::UnsupportedCapability {
-                capability: "referencesProvider".to_owned(),
-            });
-        }
+        self.wait_for_capability(
+            language_id,
+            |caps| caps.references_provider,
+            "referencesProvider",
+        )
+        .await?;
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -277,12 +276,12 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id)?;
-        if !caps.implementation_provider {
-            return Err(LspError::UnsupportedCapability {
-                capability: "implementationProvider".to_owned(),
-            });
-        }
+        self.wait_for_capability(
+            language_id,
+            |caps| caps.implementation_provider,
+            "implementationProvider",
+        )
+        .await?;
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;

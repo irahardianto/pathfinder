@@ -177,4 +177,50 @@ mod tests {
         let result = lawyer.call_hierarchy_outgoing(&workspace(), &item).await;
         assert!(matches!(result, Err(LspError::NoLspAvailable)));
     }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_references_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer.references(&workspace(), &file(), 1, 1).await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_goto_implementation_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer
+            .goto_implementation(&workspace(), &file(), 1, 1)
+            .await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_open_document_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer
+            .open_document(&workspace(), &file(), "fn main() {}")
+            .await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_capability_status_returns_empty_map() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer.capability_status().await;
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_no_op_lawyer_missing_languages_returns_empty_vec() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer.missing_languages();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_no_op_lawyer_force_respawn_returns_no_lsp() {
+        let lawyer = NoOpLawyer;
+        let result = lawyer.force_respawn("rust").await;
+        assert!(matches!(result, Err(LspError::NoLspAvailable)));
+    }
 }
