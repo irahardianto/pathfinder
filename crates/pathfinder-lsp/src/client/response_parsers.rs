@@ -24,14 +24,47 @@ fn resolve_relative_path(uri_str: &str, workspace_root: &Path, fallback: &str) -
 }
 
 async fn read_preview_line(abs_path: &Path, line_index: usize) -> String {
-    match tokio::fs::read_to_string(abs_path).await {
-        Ok(content) => content
-            .lines()
-            .nth(line_index)
-            .map(|l| l.trim().to_owned())
-            .unwrap_or_default(),
-        Err(_) => String::new(),
+    use tokio::io::AsyncReadExt;
+    let Ok(file) = tokio::fs::File::open(abs_path).await else {
+        return String::new();
+    };
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut line = Vec::new();
+
+    for idx in 0..=line_index {
+        line.clear();
+        let mut bytes_read = 0;
+        loop {
+            let mut byte = [0u8; 1];
+            if reader.read_exact(&mut byte).await.is_ok() {
+                let b = byte[0];
+                if b == b'\n' {
+                    break;
+                }
+                if idx == line_index && bytes_read < 512 {
+                    line.push(b);
+                }
+                bytes_read += 1;
+                if bytes_read >= 10240 {
+                    // Skip rest of excessively long line to prevent memory growth
+                    loop {
+                        let mut skip_byte = [0u8; 1];
+                        if reader.read_exact(&mut skip_byte).await.is_err() || skip_byte[0] == b'\n'
+                        {
+                            break;
+                        }
+                    }
+                    break;
+                }
+            } else {
+                if idx == line_index && !line.is_empty() {
+                    break;
+                }
+                return String::new();
+            }
+        }
     }
+    String::from_utf8_lossy(&line).trim().to_owned()
 }
 
 fn parse_uri_and_range(
@@ -317,9 +350,9 @@ pub async fn parse_references_response(
 
         let uri =
             Url::parse(uri_str).map_err(|e| LspError::Protocol(format!("invalid URI: {e}")))?;
-        let file_path = uri
-            .to_file_path()
-            .map_err(|()| LspError::Protocol("URI is not a file path".to_owned()))?;
+        let Ok(file_path) = uri.to_file_path() else {
+            continue;
+        };
         let relative_path = match file_path.strip_prefix(workspace_root) {
             Ok(p) => p.to_path_buf(),
             Err(_) => file_path,
@@ -739,5 +772,55 @@ mod tests {
             result.contains("lib.rs"),
             "should fall back to full path when outside workspace"
         );
+    }
+
+    #[tokio::test]
+    async fn test_parse_references_response_skips_non_file_uri() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace_root = temp.path();
+        let src_dir = workspace_root.join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        let file_path = src_dir.join("lib.rs");
+        std::fs::write(&file_path, "pub fn helper() {}").expect("write test file");
+
+        let file_uri = Url::from_file_path(&file_path).unwrap().to_string();
+
+        let response = json!([
+            {
+                "uri": "jdt://contents/foo/bar/Baz.class",
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 5 }
+                }
+            },
+            {
+                "uri": file_uri,
+                "range": {
+                    "start": { "line": 0, "character": 8 },
+                    "end": { "line": 0, "character": 14 }
+                }
+            }
+        ]);
+
+        let result = parse_references_response(&response, workspace_root)
+            .await
+            .expect("should parse successfully");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file, "src/lib.rs");
+    }
+
+    #[tokio::test]
+    async fn test_read_preview_line_bounds() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file_path = temp.path().join("long_line.txt");
+        // Write 20KB line of 'a's
+        let long_line = "a".repeat(20000);
+        std::fs::write(&file_path, &long_line).expect("write");
+
+        let snippet = read_preview_line(&file_path, 0).await;
+        // The snippet should be bounded (<= 512 bytes)
+        assert!(snippet.len() <= 512);
+        assert!(snippet.chars().all(|c| c == 'a'));
     }
 }
