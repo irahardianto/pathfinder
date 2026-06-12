@@ -53,28 +53,14 @@ pub struct MissingLanguage {
 
 /// Return an actionable install hint for each language.
 ///
-/// Provides specific commands users can run to install their LSP servers.
+/// Delegates to the plugin registry (single source of truth).
+/// Falls back to a generic hint for unknown languages.
 #[must_use]
 pub fn install_hint(language_id: &str) -> String {
-    match language_id {
-        "rust" => {
-            "Install rust-analyzer: https://rust-analyzer.github.io/".to_string()
-        }
-        "go" => "Install gopls: go install golang.org/x/tools/gopls@latest".to_string(),
-        "typescript" => {
-            "Install typescript-language-server: npm install -g typescript-language-server typescript"
-                .to_string()
-        }
-        "python" => {
-            "Install pyright-langserver: npm install -g pyright\nOr install pylsp: pip install python-lsp-server"
-                .to_string()
-        }
-        "java" => {
-            "Install jdtls: https://github.com/eclipse-jdtls/eclipse.jdt.ls\nRequires JDK 21+"
-                .to_string()
-        }
-        _ => format!("Install a language server for {language_id}"),
-    }
+    crate::plugin::plugin_for_language(language_id).map_or_else(
+        || format!("Install a language server for {language_id}"),
+        |p| p.install_hint().to_string(),
+    )
 }
 
 /// Identifies a language and the command used to spawn its LSP server.
@@ -868,7 +854,7 @@ pub async fn detect_languages(
         }
     }
 
-    // Java — pom.xml, build.gradle, build.gradle.kts (depth 2 for monorepos)
+    // Java — pom.xml, build.gradle, build.gradle.kts, settings.gradle, settings.gradle.kts (depth 2 for monorepos)
     //
     // CAVEAT: settings.gradle / settings.gradle.kts can match non-Java Gradle projects
     // (Android-only, Kotlin-only). This is an acceptable false positive — jdtls will
@@ -882,10 +868,12 @@ pub async fn detect_languages(
         (Some(r), Some("build.gradle"))
     } else if let Some(r) = find_marker(workspace_root, "build.gradle.kts", 2).await {
         (Some(r), Some("build.gradle.kts"))
+    } else if let Some(r) = find_marker(workspace_root, "settings.gradle", 2).await {
+        (Some(r), Some("settings.gradle"))
     } else {
         (
-            find_marker(workspace_root, "settings.gradle", 2).await,
-            Some("settings.gradle"),
+            find_marker(workspace_root, "settings.gradle.kts", 2).await,
+            Some("settings.gradle.kts"),
         )
     };
     if let Some(root) = java_root {
@@ -2093,6 +2081,23 @@ mod tests {
     }
 
     #[test]
+    fn test_install_hint_matches_plugin_registry() {
+        // Verify detect.rs::install_hint delegates to plugin registry
+        // (single source of truth) and never diverges.
+        use crate::plugin::all_plugins;
+        for plugin in all_plugins() {
+            let from_detect = super::install_hint(plugin.language_id());
+            let from_plugin = plugin.install_hint();
+            assert_eq!(
+                from_detect,
+                from_plugin,
+                "install_hint for '{}' diverges between detect.rs and plugin.rs",
+                plugin.language_id()
+            );
+        }
+    }
+
+    #[test]
     fn test_detect_venv_env_var() {
         let dir = tempdir().expect("temp dir");
         let venv_dir = dir.path().join("custom_venv").join("bin");
@@ -2162,7 +2167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_detect_java_via_settings_gradle_kts() {
+    async fn test_detect_java_via_settings_gradle() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(
             dir.path().join("settings.gradle"),
@@ -2183,6 +2188,31 @@ mod tests {
         assert!(
             has_java,
             "settings.gradle should trigger Java detection (or missing report)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_java_via_settings_gradle_kts() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("settings.gradle.kts"),
+            "rootProject.name = \"test\"",
+        )
+        .expect("write");
+
+        let result = detect_languages(dir.path(), &make_ts_config()).await;
+
+        assert!(
+            result.is_ok(),
+            "detect_languages should not error: {result:?}"
+        );
+
+        let r = result.expect("detect_languages result should be Ok");
+        let has_java = r.detected.iter().any(|l| l.language_id == "java")
+            || r.missing.iter().any(|l| l.language_id == "java");
+        assert!(
+            has_java,
+            "settings.gradle.kts should trigger Java detection (or missing report)"
         );
     }
 

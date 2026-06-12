@@ -102,7 +102,7 @@ pub(crate) trait ProcessSpawner: Send + Sync {
         project_root: &Path,
         language_id: &str,
         isolate_target_dir: bool,
-    ) -> Result<(Child, ChildStdin, ChildStdout), LspError>;
+    ) -> Result<(Child, ChildStdin, ChildStdout, Option<std::fs::File>), LspError>;
 }
 
 pub(crate) struct RealProcessSpawner;
@@ -115,7 +115,7 @@ impl ProcessSpawner for RealProcessSpawner {
         project_root: &Path,
         language_id: &str,
         isolate_target_dir: bool,
-    ) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
+    ) -> Result<(Child, ChildStdin, ChildStdout, Option<std::fs::File>), LspError> {
         spawn_lsp_child(command, args, project_root, language_id, isolate_target_dir)
     }
 }
@@ -145,6 +145,12 @@ pub(super) struct ManagedProcess {
     pub(super) last_used: parking_lot::Mutex<Instant>,
     /// Number of in-flight requests (prevents idle timeout during active ops).
     pub(super) in_flight: Arc<AtomicU32>,
+    /// Advisory lock on the jdtls data directory (Java only).
+    ///
+    /// Held for the lifetime of the jdtls process to prevent concurrent
+    /// Pathfinder instances from selecting the same data directory.
+    /// Dropping this field releases the advisory lock.
+    _jdtls_lock: Option<std::fs::File>,
 }
 
 impl ManagedProcess {
@@ -290,7 +296,7 @@ pub(super) async fn spawn_and_initialize(
         init_options
     };
 
-    let (child, stdin, stdout) =
+    let (child, stdin, stdout, jdtls_lock) =
         spawner.spawn(command, args, project_root, language_id, isolate_target_dir)?;
     let mut writer = tokio::io::BufWriter::new(stdin);
 
@@ -338,9 +344,81 @@ pub(super) async fn spawn_and_initialize(
         capabilities,
         last_used: parking_lot::Mutex::new(Instant::now()),
         in_flight: Arc::new(AtomicU32::new(0)),
+        _jdtls_lock: jdtls_lock,
     };
 
     Ok((process, reader_handle))
+}
+
+/// Resolves a unique jdtls `-data` directory for this Pathfinder instance.
+///
+/// jdtls requires exclusive access to its data directory. When multiple
+/// Pathfinder instances target the same workspace, sharing a single
+/// `jdtls-data/` directory causes lock conflicts and startup failures.
+///
+/// Strategy:
+/// 1. Try `project_root/.pathfinder/jdtls-data/` with an advisory file lock.
+/// 2. If the lock is already held (concurrent instance), fall back to
+///    `project_root/.pathfinder/jdtls-data-{pid}/`.
+///
+/// Returns `(data_dir_path, lock_guard)`. The caller must keep `lock_guard`
+/// alive for the lifetime of the jdtls process; dropping it releases the
+/// advisory lock.
+pub(crate) fn resolve_jdtls_data_dir(
+    project_root: &Path,
+) -> (std::path::PathBuf, Option<std::fs::File>) {
+    let base_dir = project_root.join(".pathfinder").join("jdtls-data");
+    if let Err(e) = std::fs::create_dir_all(&base_dir) {
+        tracing::error!(
+            data_dir = %base_dir.display(),
+            error = %e,
+            "LSP: failed to create jdtls data directory"
+        );
+        // Return the base dir anyway — jdtls will error on its own
+        return (base_dir, None);
+    }
+
+    // Try to acquire an advisory lock on a sentinel file.
+    // File::try_lock is stable since Rust 1.84.
+    let lock_path = base_dir.join(".pathfinder-lock");
+    match std::fs::File::create(&lock_path) {
+        Ok(lock_file) => {
+            if let Ok(()) = lock_file.try_lock() {
+                tracing::info!(
+                    data_dir = %base_dir.display(),
+                    "LSP: acquired jdtls data directory lock (primary instance)"
+                );
+                (base_dir, Some(lock_file))
+            } else {
+                // Lock held by another instance — use PID-suffixed fallback
+                let pid = std::process::id();
+                let fallback_dir = project_root
+                    .join(".pathfinder")
+                    .join(format!("jdtls-data-{pid}"));
+                if let Err(e) = std::fs::create_dir_all(&fallback_dir) {
+                    tracing::error!(
+                        data_dir = %fallback_dir.display(),
+                        error = %e,
+                        "LSP: failed to create fallback jdtls data directory"
+                    );
+                }
+                tracing::info!(
+                    data_dir = %fallback_dir.display(),
+                    pid,
+                    "LSP: using PID-suffixed jdtls data directory (concurrent instance)"
+                );
+                (fallback_dir, None)
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                lock_path = %lock_path.display(),
+                error = %e,
+                "LSP: failed to create jdtls lock file — using primary dir without lock"
+            );
+            (base_dir, None)
+        }
+    }
 }
 
 /// Spawn the LSP child process with process-group hardening and extract stdio handles.
@@ -355,7 +433,7 @@ fn spawn_lsp_child(
     project_root: &Path,
     language_id: &str,
     isolate_target_dir: bool,
-) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
+) -> Result<(Child, ChildStdin, ChildStdout, Option<std::fs::File>), LspError> {
     let mut cmd = tokio::process::Command::new(command);
     cmd.args(args)
         .current_dir(project_root)
@@ -463,16 +541,10 @@ fn spawn_lsp_child(
     // jdtls always needs a unique data directory per workspace — NOT gated on
     // isolate_target_dir because this is a functional requirement, not an
     // isolation concern. Without -data, jdtls fails or shares state between projects.
-    if language_id == "java" {
-        let data_dir = project_root.join(".pathfinder").join("jdtls-data");
-        if let Err(e) = std::fs::create_dir_all(&data_dir) {
-            tracing::error!(
-                language = language_id,
-                data_dir = %data_dir.display(),
-                error = %e,
-                "LSP: failed to create jdtls data directory — jdtls may fail to start"
-            );
-        }
+    // jdtls data directory isolation: resolve a unique data dir with advisory
+    // file locking to prevent concurrent Pathfinder instances from colliding.
+    let jdtls_lock = if language_id == "java" {
+        let (data_dir, lock) = resolve_jdtls_data_dir(project_root);
         cmd.arg("-data").arg(&data_dir);
         tracing::info!(
             language = language_id,
@@ -481,7 +553,10 @@ fn spawn_lsp_child(
         );
         // Ensure .pathfinder/ is in .gitignore (jdtls always creates files here)
         ensure_pathfinder_in_gitignore(project_root);
-    }
+        lock
+    } else {
+        None
+    };
 
     // prctl(PR_SET_PDEATHSIG) is Linux-only — not available on macOS/BSD even
     // though they are also "unix". Gate strictly on linux to avoid link errors
@@ -523,7 +598,7 @@ fn spawn_lsp_child(
         .ok_or_else(|| LspError::Protocol("LSP stdin was not piped".to_owned()))?;
     let child = child_group.into_inner();
 
-    Ok((child, stdin, stdout))
+    Ok((child, stdin, stdout, jdtls_lock))
 }
 
 /// Ensure `.pathfinder/` is listed in the project's `.gitignore`.
@@ -928,7 +1003,7 @@ pub(crate) mod test_mocks {
             project_root: &Path,
             language_id: &str,
             isolate_target_dir: bool,
-        ) -> Result<(Child, ChildStdin, ChildStdout), LspError> {
+        ) -> Result<(Child, ChildStdin, ChildStdout, Option<std::fs::File>), LspError> {
             self.spawn_calls.lock().expect("lock").push(SpawnCall {
                 command: command.to_owned(),
                 args: args.to_vec(),
@@ -1162,6 +1237,7 @@ mod process_tests {
             capabilities: crate::client::capabilities::DetectedCapabilities::default(),
             last_used: parking_lot::Mutex::new(std::time::Instant::now()),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            _jdtls_lock: None,
         };
 
         let dispatcher = std::sync::Arc::new(RequestDispatcher::new());
@@ -1205,6 +1281,7 @@ mod process_tests {
             capabilities: crate::client::capabilities::DetectedCapabilities::default(),
             last_used: parking_lot::Mutex::new(std::time::Instant::now()),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            _jdtls_lock: None,
         }
     }
 
@@ -1302,19 +1379,82 @@ mod process_tests {
         assert_eq!(count, 1, "should not duplicate /.pathfinder/ entry");
     }
 
-    // ── jdtls data directory tests (AC-2.9) ─────────────────────────────────
+    // ── jdtls data directory isolation tests ─────────────────────────────────
 
     #[test]
-    fn test_jdtls_data_dir_created_for_java() {
+    fn test_resolve_jdtls_data_dir_creates_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let data_dir = dir.path().join(".pathfinder").join("jdtls-data");
-        assert!(!data_dir.exists(), "data dir should not exist before call");
+        let (data_dir, lock) = super::resolve_jdtls_data_dir(dir.path());
+        assert!(data_dir.exists(), "data dir must be created");
+        assert!(data_dir.is_dir(), "data dir must be a directory");
+        assert!(
+            data_dir.starts_with(dir.path().join(".pathfinder")),
+            "data dir must be under .pathfinder/"
+        );
+        assert!(lock.is_some(), "primary instance should acquire lock");
+    }
 
-        // Simulate the data-dir creation side-effect directly
-        std::fs::create_dir_all(&data_dir).expect("create_dir_all");
+    #[test]
+    fn test_resolve_jdtls_data_dir_primary_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (data_dir, _lock) = super::resolve_jdtls_data_dir(dir.path());
+        assert_eq!(
+            data_dir,
+            dir.path().join(".pathfinder").join("jdtls-data"),
+            "primary instance should use jdtls-data (no PID suffix)"
+        );
+    }
 
-        assert!(data_dir.exists(), "jdtls data dir should be created");
-        assert!(data_dir.is_dir(), "jdtls data dir should be a directory");
+    #[test]
+    fn test_resolve_jdtls_data_dir_concurrent_uses_pid_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // First instance acquires the primary lock
+        let (primary_dir, primary_lock) = super::resolve_jdtls_data_dir(dir.path());
+        assert!(primary_lock.is_some(), "first call should get the lock");
+        assert_eq!(
+            primary_dir,
+            dir.path().join(".pathfinder").join("jdtls-data"),
+        );
+
+        // Second instance should fall back to PID-suffixed directory
+        let (fallback_dir, fallback_lock) = super::resolve_jdtls_data_dir(dir.path());
+        assert_ne!(
+            fallback_dir, primary_dir,
+            "concurrent instance must use a different directory"
+        );
+        let expected_suffix = format!("jdtls-data-{}", std::process::id());
+        assert!(
+            fallback_dir.ends_with(&expected_suffix),
+            "fallback dir should end with PID suffix, got: {}",
+            fallback_dir.display()
+        );
+        // Fallback doesn't need a lock (PID is unique per process)
+        assert!(
+            fallback_lock.is_none(),
+            "fallback should not hold primary lock"
+        );
+        assert!(fallback_dir.exists(), "fallback dir must be created");
+    }
+
+    #[test]
+    fn test_resolve_jdtls_data_dir_lock_released_on_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Acquire and immediately drop the lock
+        {
+            let (_data_dir, _lock) = super::resolve_jdtls_data_dir(dir.path());
+            // lock dropped here
+        }
+
+        // Should be able to acquire the primary lock again
+        let (data_dir, lock) = super::resolve_jdtls_data_dir(dir.path());
+        assert_eq!(
+            data_dir,
+            dir.path().join(".pathfinder").join("jdtls-data"),
+            "after lock release, primary dir should be available again"
+        );
+        assert!(lock.is_some(), "should re-acquire lock after previous drop");
     }
 
     #[tokio::test]
@@ -1860,7 +2000,7 @@ mod process_tests {
         let result = spawner.spawn("sleep", &["60".to_owned()], dir.path(), "test", false);
 
         assert!(result.is_ok(), "should succeed with real spawn");
-        let (mut child, _stdin, _stdout) = result.expect("should succeed");
+        let (mut child, _stdin, _stdout, _lock) = result.expect("should succeed");
         assert!(child.id().is_some_and(|pid| pid > 0));
         let _ = child.kill().await;
         let _ = child.wait().await;
@@ -1874,7 +2014,7 @@ mod process_tests {
         let result = mock.spawn("gopls", &["--arg1".to_owned()], dir.path(), "rust", false);
 
         assert!(result.is_ok(), "succeeding mode should return Ok");
-        let (mut child, _stdin, _stdout) = result.expect("succeeding mode should return Ok");
+        let (mut child, _stdin, _stdout, _lock) = result.expect("succeeding mode should return Ok");
         assert!(child.id().is_some_and(|pid| pid > 0));
 
         // Verify call was recorded
@@ -1914,7 +2054,7 @@ mod process_tests {
         }
 
         // Cleanup all spawned sleep processes
-        for (mut child, _, _) in [r1.expect("r1"), r2.expect("r2"), r3.expect("r3")] {
+        for (mut child, _, _, _) in [r1.expect("r1"), r2.expect("r2"), r3.expect("r3")] {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
@@ -1927,7 +2067,7 @@ mod process_tests {
 
         let result = mock.spawn("sleep", &["60".to_owned()], dir.path(), "test", false);
         assert!(result.is_ok());
-        let (mut child, _stdin, _stdout) = result.expect("should succeed");
+        let (mut child, _stdin, _stdout, _lock) = result.expect("should succeed");
 
         // Process should be alive immediately after spawn
         assert!(child.id().is_some(), "child should have a PID");
