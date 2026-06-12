@@ -30,7 +30,7 @@ schemars = "1.2.1"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 mockall = "0.13"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tracing-subscriber = "0.3"
 
 [[bench]]
