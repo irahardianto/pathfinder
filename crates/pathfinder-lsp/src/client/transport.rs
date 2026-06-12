@@ -51,10 +51,9 @@ where
             break;
         }
 
-        if let Some(value) = trimmed
-            .strip_prefix("Content-Length: ")
-            .or_else(|| trimmed.strip_prefix("content-length: "))
-        {
+        let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
+        if parts.len() == 2 && parts[0].trim_end().eq_ignore_ascii_case("content-length") {
+            let value = parts[1].trim();
             content_length = Some(value.parse::<usize>().map_err(|_| {
                 LspError::Protocol(format!("invalid Content-Length value: {value}"))
             })?);
@@ -275,6 +274,26 @@ mod tests {
         let result = read_message(&mut reader).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["result"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_case_insensitive_and_whitespace_content_length() {
+        let body = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":42}";
+        let test_headers = vec![
+            format!("content-length: {}\r\n\r\n", body.len()),
+            format!("CONTENT-LENGTH: {}\r\n\r\n", body.len()),
+            format!("Content-length   :   {}\r\n\r\n", body.len()),
+        ];
+
+        for framed in test_headers {
+            let mut buf: Vec<u8> = framed.as_bytes().to_vec();
+            buf.extend_from_slice(body);
+
+            let mut reader = BufReader::new(buf.as_slice());
+            let result = read_message(&mut reader).await;
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap()["result"], 42);
+        }
     }
 
     #[tokio::test]

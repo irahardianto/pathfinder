@@ -318,9 +318,9 @@ pub async fn idle_timeout_task(
             }
             () = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
                 let dead_languages: Vec<String> = processes
-                    .iter_mut()
-                    .filter_map(|mut entry| {
-                        if let ProcessEntry::Running(state) = entry.value_mut() {
+                    .iter()
+                    .filter_map(|entry| {
+                        if let ProcessEntry::Running(state) = entry.value() {
                             if state.transport.is_alive() {
                                 None
                             } else {
@@ -562,6 +562,7 @@ pub fn extract_registration_action(msg: &serde_json::Value) -> RegistrationActio
         "client/unregisterCapability" => {
             if let Some(unregs) = msg
                 .pointer("/params/unregisterations")
+                .or_else(|| msg.pointer("/params/unregistrations"))
                 .and_then(|v| v.as_array())
             {
                 for unreg in unregs {
@@ -807,6 +808,25 @@ mod tests {
         assert_eq!(action.registrations.len(), 0);
         assert_eq!(action.unregistrations.len(), 1);
         assert_eq!(action.unregistrations[0], "reg-1");
+    }
+
+    #[test]
+    fn test_extract_registration_action_unregister_correct_spelling() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "client/unregisterCapability",
+            "params": {
+                "unregistrations": [{
+                    "id": "reg-2"
+                }]
+            }
+        });
+
+        let action = extract_registration_action(&msg);
+        assert_eq!(action.registrations.len(), 0);
+        assert_eq!(action.unregistrations.len(), 1);
+        assert_eq!(action.unregistrations[0], "reg-2");
     }
 
     #[test]

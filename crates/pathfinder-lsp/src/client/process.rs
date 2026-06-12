@@ -191,7 +191,10 @@ impl LspTransport for ManagedProcess {
 
     fn is_alive(&self) -> bool {
         let Ok(mut child) = self.child.try_lock() else {
-            return true; // Lock contended — assume alive
+            // Lock contended (supervisor is reaping) — conservatively report not-alive.
+            // This avoids delaying zombie detection by an idle timeout interval.
+            // If the process IS alive, the next check will confirm it.
+            return false;
         };
         match child.try_wait() {
             Ok(None) => true,
@@ -350,6 +353,44 @@ pub(super) async fn spawn_and_initialize(
     Ok((process, reader_handle))
 }
 
+fn is_process_alive(pid: i32) -> bool {
+    // On Linux, checking if /proc/{pid} exists is a safe way to check process liveness
+    // without using unsafe blocks.
+    let proc_path = std::path::Path::new("/proc");
+    if proc_path.exists() {
+        proc_path.join(pid.to_string()).exists()
+    } else {
+        // Fallback for non-procfs Unix or other platforms
+        let _ = pid;
+        true
+    }
+}
+
+fn cleanup_orphaned_jdtls_data_dirs(pathfinder_dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(pathfinder_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if let Some(pid_str) = name.strip_prefix("jdtls-data-") {
+                    if let Ok(pid) = pid_str.parse::<i32>() {
+                        if !is_process_alive(pid) {
+                            tracing::info!(
+                                dir = %path.display(),
+                                pid,
+                                "LSP: cleaning up orphaned jdtls data directory from exited process"
+                            );
+                            let _ = std::fs::remove_dir_all(&path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Resolves a unique jdtls `-data` directory for this Pathfinder instance.
 ///
 /// jdtls requires exclusive access to its data directory. When multiple
@@ -367,7 +408,10 @@ pub(super) async fn spawn_and_initialize(
 pub(crate) fn resolve_jdtls_data_dir(
     project_root: &Path,
 ) -> (std::path::PathBuf, Option<std::fs::File>) {
-    let base_dir = project_root.join(".pathfinder").join("jdtls-data");
+    let pathfinder_dir = project_root.join(".pathfinder");
+    cleanup_orphaned_jdtls_data_dirs(&pathfinder_dir);
+
+    let base_dir = pathfinder_dir.join("jdtls-data");
     if let Err(e) = std::fs::create_dir_all(&base_dir) {
         tracing::error!(
             data_dir = %base_dir.display(),
@@ -607,53 +651,68 @@ fn spawn_lsp_child(
 /// This prevents the isolated cache directories from being tracked by git.
 /// The function is idempotent — it checks for existing entries before appending.
 fn ensure_pathfinder_in_gitignore(project_root: &Path) {
+    use std::io::{Read, Seek, SeekFrom, Write};
     let gitignore_path = project_root.join(".gitignore");
 
-    // Check if .pathfinder/ is already in .gitignore
-    if let Ok(existing) = std::fs::read_to_string(&gitignore_path) {
-        for line in existing.lines() {
-            let trimmed = line.trim();
-            if trimmed == ".pathfinder" || trimmed == ".pathfinder/" || trimmed == "/.pathfinder/" {
-                return; // Already present
-            }
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&gitignore_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                path = %gitignore_path.display(),
+                error = %e,
+                "L-2: Failed to open or create .gitignore — \
+                 isolated cache directories may be tracked by git"
+            );
+            return;
         }
-        // Append to existing .gitignore
-        let mut content = existing;
-        if !content.ends_with('\n') {
-            content.push('\n');
+    };
+
+    let mut existing = String::new();
+    if let Err(e) = file.read_to_string(&mut existing) {
+        tracing::warn!(
+            path = %gitignore_path.display(),
+            error = %e,
+            "L-2: Failed to read .gitignore — \
+             isolated cache directories may be tracked by git"
+        );
+        return;
+    }
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == ".pathfinder" || trimmed == ".pathfinder/" || trimmed == "/.pathfinder/" {
+            return; // Already present
         }
-        content.push_str("\n# Pathfinder LSP cache isolation\n.pathfinder/\n");
-        match std::fs::write(&gitignore_path, content) {
-            Ok(()) => {
-                tracing::info!(path = %gitignore_path.display(), "Appended .pathfinder/ to .gitignore");
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %gitignore_path.display(),
-                    error = %e,
-                    "L-2: Failed to append .pathfinder/ to .gitignore — \
-                     isolated cache directories may be tracked by git"
-                );
-            }
-        }
+    }
+
+    let mut to_write = String::new();
+    if existing.is_empty() {
+        to_write.push_str("# Pathfinder LSP cache isolation\n.pathfinder/\n");
     } else {
-        // No .gitignore exists — create one with just .pathfinder/
-        match std::fs::write(
-            &gitignore_path,
-            "# Pathfinder LSP cache isolation\n.pathfinder/\n",
-        ) {
-            Ok(()) => {
-                tracing::info!(path = %gitignore_path.display(), "Created .gitignore with .pathfinder/ entry");
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %gitignore_path.display(),
-                    error = %e,
-                    "L-2: Failed to create .gitignore — \
-                     isolated cache directories may be tracked by git"
-                );
-            }
+        if !existing.ends_with('\n') {
+            to_write.push('\n');
         }
+        to_write.push_str("\n# Pathfinder LSP cache isolation\n.pathfinder/\n");
+    }
+
+    if let Err(e) = file
+        .seek(SeekFrom::End(0))
+        .and_then(|_| file.write_all(to_write.as_bytes()))
+    {
+        tracing::warn!(
+            path = %gitignore_path.display(),
+            error = %e,
+            "L-2: Failed to append to .gitignore — \
+             isolated cache directories may be tracked by git"
+        );
+    } else {
+        tracing::info!(path = %gitignore_path.display(), "Updated .gitignore with .pathfinder/ entry");
     }
 }
 
@@ -670,8 +729,17 @@ async fn build_initialize_request(
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
 
-    let initialization_options = if !plugins.is_empty() {
-        // Build plugins array for typescript-language-server
+    let mut initialization_options = json!({});
+
+    if !init_options.is_null() {
+        if let Some(obj) = init_options.as_object() {
+            initialization_options = json!(obj.clone());
+        } else {
+            initialization_options = init_options;
+        }
+    }
+
+    if !plugins.is_empty() {
         let plugin_entries: Vec<Value> = plugins
             .iter()
             .map(|name| {
@@ -681,21 +749,27 @@ async fn build_initialize_request(
             })
             .collect();
 
-        json!({
-            "plugins": plugin_entries,
-            // Tell tsserver to handle .vue files
-            "tsserver": {
-                "extraFileExtensions": [
-                    { "extension": "vue", "scriptKind": 3 }  // TS = 3 in tsserver enum
-                ]
-            }
-        })
-    } else if !init_options.is_null() {
-        // Language-specific init options (Python venv path, Java jdtls settings, etc.)
-        init_options
-    } else {
-        json!({})
-    };
+        if let Some(obj) = initialization_options.as_object_mut() {
+            obj.insert("plugins".to_owned(), json!(plugin_entries));
+            obj.insert(
+                "tsserver".to_owned(),
+                json!({
+                    "extraFileExtensions": [
+                        { "extension": "vue", "scriptKind": 3 }
+                    ]
+                }),
+            );
+        } else {
+            initialization_options = json!({
+                "plugins": plugin_entries,
+                "tsserver": {
+                    "extraFileExtensions": [
+                        { "extension": "vue", "scriptKind": 3 }
+                    ]
+                }
+            });
+        }
+    }
 
     Ok(RequestDispatcher::make_request(
         id,
@@ -1457,6 +1531,38 @@ mod process_tests {
         assert!(lock.is_some(), "should re-acquire lock after previous drop");
     }
 
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_cleanup_orphaned_jdtls_data_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pathfinder_dir = dir.path().join(".pathfinder");
+        std::fs::create_dir_all(&pathfinder_dir).unwrap();
+
+        // Create a directory for a dead PID (e.g. 999999)
+        let dead_pid_dir = pathfinder_dir.join("jdtls-data-999999");
+        std::fs::create_dir_all(&dead_pid_dir).unwrap();
+
+        // Create a directory for our own PID (definitely alive)
+        let alive_pid_dir = pathfinder_dir.join(format!("jdtls-data-{}", std::process::id()));
+        std::fs::create_dir_all(&alive_pid_dir).unwrap();
+
+        assert!(dead_pid_dir.exists());
+        assert!(alive_pid_dir.exists());
+
+        super::cleanup_orphaned_jdtls_data_dirs(&pathfinder_dir);
+
+        // Dead PID directory should be cleaned up
+        assert!(
+            !dead_pid_dir.exists(),
+            "dead PID jdtls data dir should be cleaned up"
+        );
+        // Alive PID directory should remain
+        assert!(
+            alive_pid_dir.exists(),
+            "alive PID jdtls data dir should NOT be cleaned up"
+        );
+    }
+
     #[tokio::test]
     async fn test_initialize_java_init_options_passed() {
         use serde_json::json;
@@ -1611,7 +1717,7 @@ mod process_tests {
     }
 
     #[tokio::test]
-    async fn test_build_initialize_request_with_plugins_overrides_init_options() {
+    async fn test_build_initialize_request_with_plugins_and_init_options_merged() {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let plugins = vec!["@vue/typescript-plugin".to_owned()];
@@ -1622,13 +1728,10 @@ mod process_tests {
             .expect("ok");
 
         let opts = &request["params"]["initializationOptions"];
-        assert!(
-            opts["plugins"].is_array(),
-            "plugins should take precedence over init_options"
-        );
-        assert!(
-            opts.get("custom").is_none(),
-            "custom init_options should NOT be merged when plugins present"
+        assert!(opts["plugins"].is_array(), "plugins should be present");
+        assert_eq!(
+            opts["custom"], "value",
+            "custom init_options should be merged"
         );
     }
 
