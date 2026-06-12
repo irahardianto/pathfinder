@@ -196,13 +196,13 @@ impl LspTransport for FakeTransport {
             // Delay/Error asymmetry: Error responses bypass `response_delay` entirely.
             // When `is_error=true`:
             // - Error is dispatched via the dispatcher immediately (no delay)
-            // - `send()` returns `Err(LspError::Protocol(...))` immediately (no delay)
+            // - `send()` returns `Err(LspError::ServerError{..})` immediately (no delay)
             // - The `response_delay` value is completely ignored for error responses
             // - The delayed spawn task (line 203-211) is never used for errors
             //
             // This creates an intentional asymmetry:
             // - Success + delay -> `send()` returns `Ok(())`, response arrives via oneshot after delay
-            // - Error + delay -> `send()` returns `Err(Protocol)` immediately, delay ignored
+            // - Error + delay -> `send()` returns `Err(ServerError)` immediately, delay ignored
             //
             // See BATCH-01-DESIGN-GAP-REMEDIATION.md G-2 for rationale.
             if is_error {
@@ -210,10 +210,16 @@ impl LspTransport for FakeTransport {
                     dispatcher.dispatch_response_for_language(&self.language_id, &response);
                 }
 
+                let code = response["error"]["code"].as_i64().unwrap_or(0);
                 let msg = response["error"]["message"]
                     .as_str()
                     .unwrap_or("fake error");
-                return Err(LspError::Protocol(msg.to_owned()));
+                let data = response["error"].get("data").cloned();
+                return Err(LspError::ServerError {
+                    code,
+                    message: msg.to_owned(),
+                    data,
+                });
             }
 
             if let Some(delay) = delay {

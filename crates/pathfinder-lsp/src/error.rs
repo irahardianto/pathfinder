@@ -51,6 +51,64 @@ mod tests {
 
     #[test]
     #[allow(clippy::unwrap_used)]
+    fn test_lsp_error_server_error_recovery_hint() {
+        let err = LspError::ServerError {
+            code: -32601,
+            message: "Method not found".to_string(),
+            data: None,
+        };
+        let hint = err.recovery_hint();
+
+        assert!(hint.is_some());
+        let hint_str = hint.unwrap();
+        assert!(hint_str.contains("-32601"));
+        assert!(hint_str.contains("Method not found"));
+        assert!(hint_str.contains("lsp_health"));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_lsp_error_server_error_with_data_recovery_hint() {
+        let err = LspError::ServerError {
+            code: -32002,
+            message: "ServerNotReady".to_string(),
+            data: Some(serde_json::json!({"retry": true})),
+        };
+        let hint = err.recovery_hint();
+
+        assert!(hint.is_some());
+        let hint_str = hint.unwrap();
+        assert!(hint_str.contains("-32002"));
+        assert!(hint_str.contains("ServerNotReady"));
+    }
+
+    #[test]
+    fn test_lsp_error_display_server_error() {
+        let err = LspError::ServerError {
+            code: -32601,
+            message: "Method not found".to_string(),
+            data: None,
+        };
+        let display = format!("{err}");
+        assert!(display.contains("-32601"));
+        assert!(display.contains("Method not found"));
+    }
+
+    #[test]
+    fn test_lsp_error_display_server_error_with_data() {
+        let err = LspError::ServerError {
+            code: -32002,
+            message: "ServerNotReady".to_string(),
+            data: Some(serde_json::json!({"retry": true})),
+        };
+        let display = format!("{err}");
+        assert!(display.contains("-32002"));
+        assert!(display.contains("ServerNotReady"));
+        assert!(display.contains("retry"));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_lsp_error_connection_lost_recovery_hint() {
         let err = LspError::ConnectionLost;
         let hint = err.recovery_hint();
@@ -146,6 +204,8 @@ mod tests {
         assert_eq!(display, "LSP protocol error: invalid response");
     }
 
+    // Display tests for ServerError are above (test_lsp_error_display_server_error*)
+
     #[test]
     fn test_lsp_error_display_connection_lost() {
         let err = LspError::ConnectionLost;
@@ -217,6 +277,24 @@ mod tests {
         assert!(LspError::Io(std::io::Error::other("test"))
             .recovery_hint()
             .is_some());
+
+        // ServerError
+        assert!(LspError::ServerError {
+            code: -32600,
+            message: "test".to_string(),
+            data: None,
+        }
+        .recovery_hint()
+        .is_some());
+
+        // ServerError with data
+        assert!(LspError::ServerError {
+            code: -32600,
+            message: "test".to_string(),
+            data: Some(serde_json::json!("extra")),
+        }
+        .recovery_hint()
+        .is_some());
     }
 }
 
@@ -250,6 +328,21 @@ pub enum LspError {
     /// suitable for logging and agent-facing messages.
     #[error("LSP protocol error: {0}")]
     Protocol(String),
+
+    /// The LSP server returned a structured JSON-RPC error response.
+    ///
+    /// Unlike [`Protocol`](Self::Protocol), this preserves the numeric error code
+    /// and optional `data` payload from the server, enabling callers to make
+    /// code-specific decisions (e.g., -32002 `ServerNotReady` vs -32601 `MethodNotFound`).
+    #[error("LSP server error [{code}]: {message}{}", data.as_ref().map_or_else(String::new, |d| format!(" (data: {d})")))]
+    ServerError {
+        /// JSON-RPC error code (e.g., -32601, -32002).
+        code: i64,
+        /// Human-readable error message from the server.
+        message: String,
+        /// Optional structured data from the server.
+        data: Option<serde_json::Value>,
+    },
 
     /// The LSP server process crashed or the connection was broken.
     ///
@@ -304,6 +397,11 @@ impl LspError {
             ),
             Self::Protocol(msg) => Some(format!(
                 "LSP protocol error: {msg}. \
+                 Call lsp_health to check server health. \
+                 Use search_codebase for text-based navigation in the meantime."
+            )),
+            Self::ServerError { code, message, .. } => Some(format!(
+                "LSP server returned error [{code}]: {message}. \
                  Call lsp_health to check server health. \
                  Use search_codebase for text-based navigation in the meantime."
             )),

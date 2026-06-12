@@ -24,7 +24,7 @@ const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
 ///
 /// - Pending requests are tagged with `language_id` so `cancel_all` can be scoped
 /// - Notifications and server requests are routed through per-language channels
-type PendingRequest = (String, oneshot::Sender<Result<Value, LspError>>);
+type PendingRequest = (String, Option<oneshot::Sender<Result<Value, LspError>>>);
 
 pub(crate) struct RequestDispatcher {
     /// `DashMap` for concurrent request registration, dispatch, and cancellation.
@@ -69,7 +69,7 @@ impl RequestDispatcher {
     ) -> (u64, oneshot::Receiver<Result<Value, LspError>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, (language_id.to_owned(), tx));
+        self.pending.insert(id, (language_id.to_owned(), Some(tx)));
         (id, rx)
     }
 
@@ -199,7 +199,7 @@ impl RequestDispatcher {
         };
 
         // Normal response to a request we sent (has id, no method).
-        if let Some((_id, (_lang, sender))) = self.pending.remove(&id) {
+        if let Some((_id, (_lang, Some(sender)))) = self.pending.remove(&id) {
             let is_error = message.get("error").is_some();
             tracing::debug!(
                 language = %source_language_id,
@@ -208,11 +208,18 @@ impl RequestDispatcher {
                 "LSP: dispatching response to pending request"
             );
             let result = if is_error {
-                let err_msg = message["error"]["message"]
+                let error_obj = &message["error"];
+                let code = error_obj["code"].as_i64().unwrap_or(0);
+                let err_msg = error_obj["message"]
                     .as_str()
                     .unwrap_or("LSP returned an error")
                     .to_owned();
-                Err(LspError::Protocol(err_msg))
+                let data = error_obj.get("data").cloned();
+                Err(LspError::ServerError {
+                    code,
+                    message: err_msg,
+                    data,
+                })
             } else {
                 Ok(message["result"].clone())
             };
@@ -280,13 +287,15 @@ impl RequestDispatcher {
     /// use `cancel_for_language()` instead.
     #[allow(dead_code)] // Kept for tests and future use
     pub(crate) fn cancel_all(&self) {
-        // Collect all IDs, then remove each by key to take ownership of the sender.
-        // DashMap doesn't have into_iter(), so we collect IDs first.
-        let ids: Vec<u64> = self.pending.iter().map(|e| *e.key()).collect();
-        for id in ids {
-            if let Some((_id, (_lang, tx))) = self.pending.remove(&id) {
-                let _ = tx.send(Err(LspError::ConnectionLost));
+        let mut senders = Vec::new();
+        self.pending.retain(|_id, (_lang, tx_opt)| {
+            if let Some(tx) = tx_opt.take() {
+                senders.push(tx);
             }
+            false
+        });
+        for tx in senders {
+            let _ = tx.send(Err(LspError::ConnectionLost));
         }
     }
 
@@ -296,17 +305,19 @@ impl RequestDispatcher {
     /// This isolates the crash to only that language's pending requests,
     /// leaving other languages' requests unaffected.
     pub(crate) fn cancel_for_language(&self, language_id: &str) {
-        // Collect IDs for matching language entries, then remove each by key
-        // to take ownership of the sender (oneshot::Sender doesn't impl Clone).
-        // With DashMap, this doesn't block register/dispatch on other shards.
-        let ids_to_cancel: Vec<u64> = self
-            .pending
-            .iter()
-            .filter(|entry| entry.value().0 == language_id)
-            .map(|entry| *entry.key())
-            .collect();
+        let mut senders = Vec::new();
+        self.pending.retain(|_id, (lang, tx_opt)| {
+            if lang == language_id {
+                if let Some(tx) = tx_opt.take() {
+                    senders.push(tx);
+                }
+                false
+            } else {
+                true
+            }
+        });
 
-        let count = ids_to_cancel.len();
+        let count = senders.len();
         if count > 0 {
             tracing::debug!(
                 language = %language_id,
@@ -315,10 +326,8 @@ impl RequestDispatcher {
             );
         }
 
-        for id in ids_to_cancel {
-            if let Some((_id, (_lang, tx))) = self.pending.remove(&id) {
-                let _ = tx.send(Err(LspError::ConnectionLost));
-            }
+        for tx in senders {
+            let _ = tx.send(Err(LspError::ConnectionLost));
         }
     }
 }
@@ -363,8 +372,48 @@ mod tests {
         let result = rx.await.expect("oneshot receive");
         assert!(result.is_err());
         match result {
-            Err(LspError::Protocol(msg)) => assert!(msg.contains("Method not found")),
-            _ => panic!("expected Protocol error"),
+            Err(LspError::ServerError {
+                code,
+                message,
+                data,
+            }) => {
+                assert_eq!(code, -32601);
+                assert!(message.contains("Method not found"));
+                assert!(data.is_none());
+            }
+            _ => panic!("expected ServerError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_error_response_preserves_data() {
+        let dispatcher = RequestDispatcher::new();
+        let (id, rx) = dispatcher.register("test");
+
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32002,
+                "message": "ServerNotReady",
+                "data": { "retry": true }
+            }
+        });
+        dispatcher.dispatch_response(&response);
+
+        let result = rx.await.expect("oneshot receive");
+        match result {
+            Err(LspError::ServerError {
+                code,
+                message,
+                data,
+            }) => {
+                assert_eq!(code, -32002);
+                assert_eq!(message, "ServerNotReady");
+                assert!(data.is_some());
+                assert_eq!(data.unwrap()["retry"], true);
+            }
+            _ => panic!("expected ServerError with data"),
         }
     }
 
