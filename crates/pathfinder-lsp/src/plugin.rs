@@ -7,7 +7,6 @@
 //! - Manifest validation rules
 //! - Install guidance for missing binaries
 //! - LSP initialization options
-//! - Install guidance for missing binaries
 //!
 //! # Design Rationale
 //!
@@ -83,7 +82,7 @@ impl LanguagePlugin for RustPlugin {
     }
 
     fn marker_search_depth(&self) -> u32 {
-        0
+        2
     }
 
     fn lsp_candidates(&self) -> &[LspCandidate] {
@@ -139,7 +138,7 @@ impl LanguagePlugin for TypeScriptPlugin {
     }
 
     fn file_extensions(&self) -> &'static [&'static str] {
-        &["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue"]
+        &["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "mts", "cts"]
     }
 
     fn marker_files(&self) -> &'static [&'static str] {
@@ -196,7 +195,7 @@ impl LanguagePlugin for PythonPlugin {
                 default_args: &["--stdio"],
             },
             LspCandidate {
-                binary: "pyright",
+                binary: "basedpyright-langserver",
                 default_args: &["--stdio"],
             },
             LspCandidate {
@@ -326,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_rust_plugin_marker_search_depth() {
-        assert_eq!(RustPlugin.marker_search_depth(), 0);
+        assert_eq!(RustPlugin.marker_search_depth(), 2);
     }
 
     #[test]
@@ -453,7 +452,7 @@ mod tests {
         assert_eq!(candidates.len(), 5);
         assert_eq!(candidates[0].binary, "pyright-langserver");
         assert_eq!(candidates[0].default_args, &["--stdio"]);
-        assert_eq!(candidates[1].binary, "pyright");
+        assert_eq!(candidates[1].binary, "basedpyright-langserver");
         assert_eq!(candidates[1].default_args, &["--stdio"]);
         assert_eq!(candidates[2].binary, "pylsp");
         assert_eq!(candidates[3].binary, "ruff");

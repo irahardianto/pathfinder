@@ -166,6 +166,60 @@ fn strip_jsonc_comments(input: &str) -> String {
     result
 }
 
+fn strip_json_trailing_commas(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut is_escaping = false;
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            if is_escaping {
+                is_escaping = false;
+                result.push(c);
+                continue;
+            }
+            if c == '\\' {
+                is_escaping = true;
+                result.push(c);
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            result.push(c);
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            result.push(c);
+            continue;
+        }
+
+        if c == ',' {
+            let temp_peek = chars.clone();
+            let mut is_trailing = false;
+            for next_c in temp_peek {
+                if next_c.is_whitespace() {
+                    continue;
+                }
+                if next_c == '}' || next_c == ']' {
+                    is_trailing = true;
+                }
+                break;
+            }
+            if is_trailing {
+                continue;
+            }
+        }
+
+        result.push(c);
+    }
+
+    result
+}
+
 /// Validate a marker file before starting an LSP process.
 ///
 /// Returns `Ok(())` when the file is structurally valid. Returns `Err(reason)`
@@ -204,13 +258,21 @@ pub(crate) fn validate_marker_file(
             Err(e) => Err(format!("Cargo.toml is not valid TOML: {e}")),
         },
         ("go", "go.mod") => {
-            let first_line = contents.lines().next().unwrap_or("").trim();
-            if first_line.starts_with("module ") || first_line == "module" {
-                Ok(())
+            let target_line = contents
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with("//"));
+
+            if let Some(line) = target_line {
+                if line.starts_with("module ") && !line["module ".len()..].trim().is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "go.mod does not start with a valid 'module' declaration (got: {line:?})"
+                    ))
+                }
             } else {
-                Err(format!(
-                    "go.mod does not start with 'module' declaration (got: {first_line:?})"
-                ))
+                Err("go.mod is empty or contains only comments".to_owned())
             }
         }
         ("typescript", "tsconfig.json") => {
@@ -219,8 +281,9 @@ pub(crate) fn validate_marker_file(
             if serde_json::from_str::<serde_json::Value>(&contents).is_ok() {
                 Ok(())
             } else {
-                let stripped = strip_jsonc_comments(&contents);
-                serde_json::from_str::<serde_json::Value>(&stripped)
+                let stripped_comments = strip_jsonc_comments(&contents);
+                let stripped_commas = strip_json_trailing_commas(&stripped_comments);
+                serde_json::from_str::<serde_json::Value>(&stripped_commas)
                     .map(|_| ())
                     .map_err(|e| format!("tsconfig.json is not valid JSON: {e}"))
             }
@@ -271,7 +334,9 @@ pub(crate) fn detect_venv(workspace_root: &std::path::Path) -> Option<std::path:
         "venv/bin/python",
         "venv/Scripts/python.exe",
         "env/bin/python",
+        "env/Scripts/python.exe",
         ".env/bin/python",
+        ".env/Scripts/python.exe",
     ];
 
     for relative in &candidates {
@@ -282,23 +347,34 @@ pub(crate) fn detect_venv(workspace_root: &std::path::Path) -> Option<std::path:
         }
     }
 
-    // Conda: $CONDA_PREFIX/bin/python
+    // Conda: $CONDA_PREFIX/bin/python or $CONDA_PREFIX/python.exe or $CONDA_PREFIX/Scripts/python.exe
     if let Ok(conda_prefix) = std::env::var("CONDA_PREFIX") {
-        let path = std::path::PathBuf::from(&conda_prefix)
-            .join("bin")
-            .join("python");
-        if path.exists() {
-            tracing::debug!(path = %path.display(), "ST-5: detected Conda Python interpreter");
-            return Some(path);
+        let prefix_path = std::path::PathBuf::from(&conda_prefix);
+        let paths = [
+            prefix_path.join("bin").join("python"),
+            prefix_path.join("python.exe"),
+            prefix_path.join("Scripts").join("python.exe"),
+        ];
+        for path in &paths {
+            if path.exists() {
+                tracing::debug!(path = %path.display(), "ST-5: detected Conda Python interpreter");
+                return Some(path.clone());
+            }
         }
     }
 
     // $VIRTUAL_ENV: already-activated venv in the shell that launched Pathfinder
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        let path = std::path::PathBuf::from(&venv).join("bin").join("python");
-        if path.exists() {
-            tracing::debug!(path = %path.display(), "ST-5: detected activated venv via $VIRTUAL_ENV");
-            return Some(path);
+        let venv_path = std::path::PathBuf::from(&venv);
+        let paths = [
+            venv_path.join("bin").join("python"),
+            venv_path.join("Scripts").join("python.exe"),
+        ];
+        for path in &paths {
+            if path.exists() {
+                tracing::debug!(path = %path.display(), "ST-5: detected activated venv via $VIRTUAL_ENV");
+                return Some(path.clone());
+            }
         }
     }
 
@@ -321,18 +397,87 @@ pub(crate) fn detect_python_init_options(workspace_root: &std::path::Path) -> se
     })
 }
 
+/// Helper to detect JDK home directory based on env vars and project files (.sdkmanrc, .java-version).
+fn detect_jdk_home(root: &std::path::Path) -> Option<String> {
+    // 1. Check if JAVA_HOME is already in env and not empty
+    if let Ok(home) = std::env::var("JAVA_HOME") {
+        if !home.is_empty() {
+            return Some(home);
+        }
+    }
+
+    let home_str = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())?;
+    let home_dir = std::path::PathBuf::from(home_str);
+
+    // Helper to check and verify if a path exists and contains a bin/java or bin/javac
+    let verify_jdk = |path: std::path::PathBuf| -> Option<String> {
+        if path.join("bin/java").exists() || path.join("bin/javac").exists() {
+            return Some(path.to_string_lossy().into_owned());
+        }
+        let mac_home = path.join("Contents/Home");
+        if mac_home.join("bin/java").exists() {
+            return Some(mac_home.to_string_lossy().into_owned());
+        }
+        None
+    };
+
+    // 2. Try .sdkmanrc
+    let sdkmanrc_path = root.join(".sdkmanrc");
+    if sdkmanrc_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&sdkmanrc_path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(stripped) = line.strip_prefix("java=") {
+                    let version = stripped.trim();
+                    let path = home_dir.join(format!(".sdkman/candidates/java/{version}"));
+                    if let Some(verified) = verify_jdk(path) {
+                        return Some(verified);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Try .java-version
+    let java_version_path = root.join(".java-version");
+    if java_version_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&java_version_path) {
+            let version = contents.trim();
+            if !version.is_empty() {
+                let path = home_dir.join(format!(".sdkman/candidates/java/{version}"));
+                if let Some(verified) = verify_jdk(path) {
+                    return Some(verified);
+                }
+                let path = home_dir.join(format!(".asdf/installs/java/{version}"));
+                if let Some(verified) = verify_jdk(path) {
+                    return Some(verified);
+                }
+                let path = home_dir.join(format!(".jenv/versions/{version}"));
+                if let Some(verified) = verify_jdk(path) {
+                    return Some(verified);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Build jdtls initialization options.
 ///
-/// Enables Maven and Gradle import and, when `JAVA_HOME` is set, pins the
-/// JDK home so jdtls uses the correct JDK across different shell environments.
+/// Enables Maven and Gradle import and, when a JDK is detected (via `JAVA_HOME`,
+/// `.sdkmanrc`, or `.java-version`), pins the JDK home so jdtls uses the correct JDK
+/// across different shell environments.
 #[must_use]
-fn detect_java_init_options(workspace_root: &std::path::Path) -> serde_json::Value {
+fn detect_java_init_options(
+    detected_root: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> serde_json::Value {
     use serde_json::json;
-    // workspace_root is read for potential future per-project config but is
-    // currently unused; the underscore prefix suppresses the lint.
-    let _ = workspace_root;
 
-    let java_home = std::env::var("JAVA_HOME").ok();
+    let java_home = detect_jdk_home(detected_root).or_else(|| detect_jdk_home(workspace_root));
 
     let mut settings = json!({
         "java": {
@@ -375,17 +520,20 @@ fn resolve_command(name: &str, lang: &str) -> Option<String> {
                 language = lang,
                 binary = name,
                 "LSP: binary not found on PATH — language server will not start. \
-                 Install it or set `lsp.{lang}.command` in .pathfinder.toml to \
-                 an absolute path (e.g. for nix, asdf, volta, or GUI launcher installs)"
+                 Install it or set `lsp.{}.command` in .pathfinder.toml to \
+                 an absolute path (e.g. for nix, asdf, volta, or GUI launcher installs)",
+                lang
             );
         })
         .ok()
 }
 
-/// Search for a marker file within `base` directory up to `max_depth` levels deep.
+/// Searches for a marker file starting from `base` up to `max_depth` subdirectory levels.
 ///
+/// `max_depth` is clamped to 2 — deeper scans are not supported.
 /// Returns the directory containing the marker file, or `None` if not found.
 async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std::path::PathBuf> {
+    let max_depth = max_depth.min(2);
     // Check base directory first (depth 0)
     if tokio::fs::metadata(base.join(marker)).await.is_ok() {
         return Some(base.to_path_buf());
@@ -393,7 +541,10 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
     if max_depth == 0 {
         return None;
     }
-    // Scan immediate children (depth 1 and 2)
+
+    let mut matches = Vec::new();
+
+    // Scan immediate children (depth 1)
     let Ok(mut dir) = tokio::fs::read_dir(base).await else {
         return None;
     };
@@ -402,10 +553,19 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
         if !path.is_dir() {
             continue;
         }
+
+        // Skip symlinks
+        if let Ok(file_type) = entry.file_type().await {
+            if file_type.is_symlink() {
+                continue;
+            }
+        }
+
         // Check this subdirectory
         if tokio::fs::metadata(path.join(marker)).await.is_ok() {
-            return Some(path);
+            matches.push(path.clone());
         }
+
         // One more level if depth allows
         if max_depth >= 2 {
             let Ok(mut sub) = tokio::fs::read_dir(&path).await else {
@@ -413,13 +573,33 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
             };
             while let Ok(Some(sub_entry)) = sub.next_entry().await {
                 let sub_path = sub_entry.path();
-                if sub_path.is_dir() && tokio::fs::metadata(sub_path.join(marker)).await.is_ok() {
-                    return Some(sub_path);
+                if sub_path.is_dir() {
+                    // Skip symlinks
+                    if let Ok(file_type) = sub_entry.file_type().await {
+                        if file_type.is_symlink() {
+                            continue;
+                        }
+                    }
+                    if tokio::fs::metadata(sub_path.join(marker)).await.is_ok() {
+                        matches.push(sub_path);
+                    }
                 }
             }
         }
     }
-    None
+
+    match matches.len() {
+        0 => None,
+        1 => Some(matches[0].clone()),
+        _ => {
+            tracing::info!(
+                "Multiple {} marker files found in monorepo. Using workspace root {} as project root.",
+                marker,
+                base.display()
+            );
+            Some(base.to_path_buf())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +651,11 @@ async fn workspace_has_vue_files(workspace_root: &Path) -> bool {
                     }
                 }
                 if path.is_dir() {
+                    if let Ok(file_type) = entry.file_type().await {
+                        if file_type.is_symlink() {
+                            continue;
+                        }
+                    }
                     if let Some(dir_name) = path.file_name() {
                         if should_exclude_dir(dir_name) {
                             continue;
@@ -522,6 +707,7 @@ async fn detect_ts_plugin(workspace_root: &Path, plugin_name: &str) -> Option<St
 ///
 /// Priority: config override > auto-detection (only when `.vue` files exist).
 async fn detect_typescript_plugins(
+    project_root: &Path,
     workspace_root: &Path,
     config: &pathfinder_common::config::PathfinderConfig,
 ) -> Vec<String> {
@@ -542,10 +728,17 @@ async fn detect_typescript_plugins(
 
     // Auto-detect Vue plugin when .vue files are present
     let mut plugins = Vec::new();
-    if workspace_has_vue_files(workspace_root).await {
-        if let Some(plugin) = detect_ts_plugin(workspace_root, "@vue/typescript-plugin").await {
+    let has_vue = workspace_has_vue_files(project_root).await
+        || (project_root != workspace_root && workspace_has_vue_files(workspace_root).await);
+    if has_vue {
+        let plugin = detect_ts_plugin(project_root, "@vue/typescript-plugin").await;
+        let plugin = match plugin {
+            Some(p) => Some(p),
+            None => detect_ts_plugin(workspace_root, "@vue/typescript-plugin").await,
+        };
+        if let Some(p) = plugin {
             tracing::info!("Auto-detected @vue/typescript-plugin for Vue SFC support");
-            plugins.push(plugin);
+            plugins.push(p);
         }
     }
 
@@ -606,322 +799,495 @@ pub async fn detect_languages(
         };
     }
 
-    // Rust — Cargo.toml (root only; Rust workspaces always have it at the root)
-    let rust_root = match get_override!("rust") {
-        Some(r) => Some(r),
-        None => find_marker(workspace_root, "Cargo.toml", 0).await,
-    };
-    if let Some(root) = rust_root {
-        let has_override = get_command_override!("rust").is_some();
-        let cmd =
-            get_command_override!("rust").or_else(|| resolve_command("rust-analyzer", "rust"));
-        if let Some(command) = cmd {
-            // ST-2: validate Cargo.toml before spending time spawning the process
-            let marker_path = root.join("Cargo.toml");
-            if let Err(reason) = validate_marker_file(&marker_path, "rust") {
-                tracing::warn!(language = "rust", %reason, "ST-2: invalid manifest — skipping LSP start");
-                missing.push(MissingLanguage {
-                    language_id: "rust".to_owned(),
-                    marker_file: "Cargo.toml".to_string(),
-                    tried_binaries: vec!["rust-analyzer".to_string()],
-                    install_hint: format!("Fix Cargo.toml: {reason}"),
-                });
-            } else {
-                detected.push(LanguageLsp {
-                    language_id: "rust".to_owned(),
-                    command,
-                    args: get_args!("rust", vec![]),
-                    root,
-                    init_timeout_secs: None,
-                    auto_plugins: vec![],
-                    init_options: serde_json::Value::Null,
-                });
+    // Rust
+    if let Some(rust_plugin) = crate::plugin::plugin_for_language("rust") {
+        let (rust_root, rust_marker) = if get_override!("rust").is_some() {
+            (get_override!("rust"), None)
+        } else {
+            let mut found = None;
+            for marker in rust_plugin.marker_files() {
+                if let Some(r) = find_marker(
+                    workspace_root,
+                    marker,
+                    rust_plugin.marker_search_depth() as usize,
+                )
+                .await
+                {
+                    found = Some((r, marker));
+                    break;
+                }
             }
-        } else if !has_override {
-            // Marker found but no binary, and no custom command configured
-            missing.push(MissingLanguage {
-                language_id: "rust".to_owned(),
-                marker_file: "Cargo.toml".to_string(),
-                tried_binaries: vec!["rust-analyzer".to_string()],
-                install_hint: install_hint("rust"),
-            });
-        }
-    }
-
-    // Go — go.mod (check root then up to depth 2 for monorepos like apps/backend)
-    let go_root = match get_override!("go") {
-        Some(r) => Some(r),
-        None => find_marker(workspace_root, "go.mod", 2).await,
-    };
-    if let Some(root) = go_root {
-        let has_override = get_command_override!("go").is_some();
-        let cmd = get_command_override!("go").or_else(|| resolve_command("gopls", "go"));
-        if let Some(command) = cmd {
-            // ST-2: validate go.mod before spawning gopls
-            let marker_path = root.join("go.mod");
-            if let Err(reason) = validate_marker_file(&marker_path, "go") {
-                tracing::warn!(language = "go", %reason, "ST-2: invalid manifest — skipping LSP start");
-                missing.push(MissingLanguage {
-                    language_id: "go".to_owned(),
-                    marker_file: "go.mod".to_string(),
-                    tried_binaries: vec!["gopls".to_string()],
-                    install_hint: format!("Fix go.mod: {reason}"),
-                });
+            if let Some((r, m)) = found {
+                (Some(r), Some(*m))
             } else {
-                detected.push(LanguageLsp {
-                    language_id: "go".to_owned(),
-                    command,
-                    args: get_args!("go", vec![]),
-                    root,
-                    init_timeout_secs: None,
-                    auto_plugins: vec![],
-                    init_options: serde_json::Value::Null,
-                });
+                (None, None)
             }
-        } else if !has_override {
-            missing.push(MissingLanguage {
-                language_id: "go".to_owned(),
-                marker_file: "go.mod".to_string(),
-                tried_binaries: vec!["gopls".to_string()],
-                install_hint: install_hint("go"),
+        };
+        if let Some(root) = rust_root {
+            let has_override = get_command_override!("rust").is_some();
+            let cmd = get_command_override!("rust").or_else(|| {
+                let mut resolved = None;
+                for candidate in rust_plugin.lsp_candidates() {
+                    if let Some(resolved_cmd) = resolve_command(candidate.binary, "rust") {
+                        resolved = Some(resolved_cmd);
+                        break;
+                    }
+                }
+                resolved
             });
-        }
-    }
-
-    // TypeScript / JavaScript — tsconfig.json or package.json (depth 2)
-    let (ts_root, ts_marker) = if get_override!("typescript").is_some() {
-        (get_override!("typescript"), None)
-    } else if let Some(r) = find_marker(workspace_root, "tsconfig.json", 2).await {
-        (Some(r), Some("tsconfig.json"))
-    } else {
-        (
-            find_marker(workspace_root, "package.json", 2).await,
-            Some("package.json"),
-        )
-    };
-    if let Some(root) = ts_root {
-        let has_override = get_command_override!("typescript").is_some();
-        let cmd = get_command_override!("typescript")
-            .or_else(|| resolve_command("typescript-language-server", "typescript"));
-        if let Some(command) = cmd {
-            let auto_plugins = detect_typescript_plugins(workspace_root, config).await;
-            // ST-2: validate tsconfig.json before spawning tsserver
-            if let Some(marker) = ts_marker {
-                let marker_path = root.join(marker);
-                if let Err(reason) = validate_marker_file(&marker_path, "typescript") {
-                    tracing::warn!(language = "typescript", %reason, "ST-2: invalid manifest — skipping LSP start");
-                    missing.push(MissingLanguage {
-                        language_id: "typescript".to_owned(),
-                        marker_file: marker.to_string(),
-                        tried_binaries: vec!["typescript-language-server".to_string()],
-                        install_hint: format!("Fix {marker}: {reason}"),
-                    });
+            if let Some(command) = cmd {
+                // ST-2: validate Cargo.toml before spending time spawning the process
+                if let Some(marker) = rust_marker {
+                    let marker_path = root.join(marker);
+                    if let Err(reason) = validate_marker_file(&marker_path, "rust") {
+                        tracing::warn!(language = "rust", %reason, "ST-2: invalid manifest — skipping LSP start");
+                        missing.push(MissingLanguage {
+                            language_id: "rust".to_owned(),
+                            marker_file: marker.to_string(),
+                            tried_binaries: rust_plugin
+                                .lsp_candidates()
+                                .iter()
+                                .map(|c| c.binary.to_string())
+                                .collect(),
+                            install_hint: format!("Fix {marker}: {reason}"),
+                        });
+                    } else {
+                        detected.push(LanguageLsp {
+                            language_id: "rust".to_owned(),
+                            command,
+                            args: get_args!("rust", vec![]),
+                            root,
+                            init_timeout_secs: None,
+                            auto_plugins: vec![],
+                            init_options: serde_json::Value::Null,
+                        });
+                    }
                 } else {
+                    // config root_override — no marker to validate
+                    detected.push(LanguageLsp {
+                        language_id: "rust".to_owned(),
+                        command,
+                        args: get_args!("rust", vec![]),
+                        root,
+                        init_timeout_secs: None,
+                        auto_plugins: vec![],
+                        init_options: serde_json::Value::Null,
+                    });
+                }
+            } else if !has_override {
+                missing.push(MissingLanguage {
+                    language_id: "rust".to_owned(),
+                    marker_file: rust_marker.unwrap_or("Cargo.toml").to_string(),
+                    tried_binaries: rust_plugin
+                        .lsp_candidates()
+                        .iter()
+                        .map(|c| c.binary.to_string())
+                        .collect(),
+                    install_hint: install_hint("rust"),
+                });
+            }
+        }
+    } else {
+        tracing::error!("rust plugin not found in registry — skipping detection");
+    }
+
+    // Go
+    if let Some(go_plugin) = crate::plugin::plugin_for_language("go") {
+        let (go_root, go_marker) = if get_override!("go").is_some() {
+            (get_override!("go"), None)
+        } else {
+            let mut found = None;
+            for marker in go_plugin.marker_files() {
+                if let Some(r) = find_marker(
+                    workspace_root,
+                    marker,
+                    go_plugin.marker_search_depth() as usize,
+                )
+                .await
+                {
+                    found = Some((r, marker));
+                    break;
+                }
+            }
+            if let Some((r, m)) = found {
+                (Some(r), Some(*m))
+            } else {
+                (None, None)
+            }
+        };
+        if let Some(root) = go_root {
+            let has_override = get_command_override!("go").is_some();
+            let cmd = get_command_override!("go").or_else(|| {
+                let mut resolved = None;
+                for candidate in go_plugin.lsp_candidates() {
+                    if let Some(resolved_cmd) = resolve_command(candidate.binary, "go") {
+                        resolved = Some(resolved_cmd);
+                        break;
+                    }
+                }
+                resolved
+            });
+            if let Some(command) = cmd {
+                // ST-2: validate go.mod before spawning gopls
+                if let Some(marker) = go_marker {
+                    let marker_path = root.join(marker);
+                    if let Err(reason) = validate_marker_file(&marker_path, "go") {
+                        tracing::warn!(language = "go", %reason, "ST-2: invalid manifest — skipping LSP start");
+                        missing.push(MissingLanguage {
+                            language_id: "go".to_owned(),
+                            marker_file: marker.to_string(),
+                            tried_binaries: go_plugin
+                                .lsp_candidates()
+                                .iter()
+                                .map(|c| c.binary.to_string())
+                                .collect(),
+                            install_hint: format!("Fix {marker}: {reason}"),
+                        });
+                    } else {
+                        detected.push(LanguageLsp {
+                            language_id: "go".to_owned(),
+                            command,
+                            args: get_args!("go", vec![]),
+                            root,
+                            init_timeout_secs: None,
+                            auto_plugins: vec![],
+                            init_options: serde_json::Value::Null,
+                        });
+                    }
+                } else {
+                    // config root_override — no marker to validate
+                    detected.push(LanguageLsp {
+                        language_id: "go".to_owned(),
+                        command,
+                        args: get_args!("go", vec![]),
+                        root,
+                        init_timeout_secs: None,
+                        auto_plugins: vec![],
+                        init_options: serde_json::Value::Null,
+                    });
+                }
+            } else if !has_override {
+                missing.push(MissingLanguage {
+                    language_id: "go".to_owned(),
+                    marker_file: go_marker.unwrap_or("go.mod").to_string(),
+                    tried_binaries: go_plugin
+                        .lsp_candidates()
+                        .iter()
+                        .map(|c| c.binary.to_string())
+                        .collect(),
+                    install_hint: install_hint("go"),
+                });
+            }
+        }
+    } else {
+        tracing::error!("go plugin not found in registry — skipping detection");
+    }
+
+    // TypeScript / JavaScript
+    if let Some(ts_plugin) = crate::plugin::plugin_for_language("typescript") {
+        let (ts_root, ts_marker) = if get_override!("typescript").is_some() {
+            (get_override!("typescript"), None)
+        } else {
+            let mut found = None;
+            for marker in ts_plugin.marker_files() {
+                if let Some(r) = find_marker(
+                    workspace_root,
+                    marker,
+                    ts_plugin.marker_search_depth() as usize,
+                )
+                .await
+                {
+                    found = Some((r, marker));
+                    break;
+                }
+            }
+            if let Some((r, m)) = found {
+                (Some(r), Some(*m))
+            } else {
+                (None, None)
+            }
+        };
+        if let Some(root) = ts_root {
+            let has_override = get_command_override!("typescript").is_some();
+            let cmd = get_command_override!("typescript").or_else(|| {
+                let mut resolved = None;
+                for candidate in ts_plugin.lsp_candidates() {
+                    if let Some(resolved_cmd) = resolve_command(candidate.binary, "typescript") {
+                        resolved = Some(resolved_cmd);
+                        break;
+                    }
+                }
+                resolved
+            });
+            if let Some(command) = cmd {
+                let auto_plugins = detect_typescript_plugins(&root, workspace_root, config).await;
+                // ST-2: validate marker file before spawning tsserver
+                if let Some(marker) = ts_marker {
+                    let marker_path = root.join(marker);
+                    if let Err(reason) = validate_marker_file(&marker_path, "typescript") {
+                        tracing::warn!(language = "typescript", %reason, "ST-2: invalid manifest — skipping LSP start");
+                        missing.push(MissingLanguage {
+                            language_id: "typescript".to_owned(),
+                            marker_file: marker.to_string(),
+                            tried_binaries: ts_plugin
+                                .lsp_candidates()
+                                .iter()
+                                .map(|c| c.binary.to_string())
+                                .collect(),
+                            install_hint: format!("Fix {marker}: {reason}"),
+                        });
+                    } else {
+                        detected.push(LanguageLsp {
+                            language_id: "typescript".to_owned(),
+                            command,
+                            args: get_args!(
+                                "typescript",
+                                ts_plugin.lsp_candidates()[0]
+                                    .default_args
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect()
+                            ),
+                            root,
+                            init_timeout_secs: None,
+                            auto_plugins,
+                            init_options: serde_json::Value::Null,
+                        });
+                    }
+                } else {
+                    // config root_override — no marker to validate
                     detected.push(LanguageLsp {
                         language_id: "typescript".to_owned(),
                         command,
-                        args: get_args!("typescript", vec!["--stdio".to_owned()]),
+                        args: get_args!(
+                            "typescript",
+                            ts_plugin.lsp_candidates()[0]
+                                .default_args
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect()
+                        ),
                         root,
                         init_timeout_secs: None,
                         auto_plugins,
                         init_options: serde_json::Value::Null,
                     });
                 }
-            } else {
-                // config root_override — no marker to validate
-                detected.push(LanguageLsp {
+            } else if !has_override {
+                missing.push(MissingLanguage {
                     language_id: "typescript".to_owned(),
-                    command,
-                    args: get_args!("typescript", vec!["--stdio".to_owned()]),
-                    root,
-                    init_timeout_secs: None,
-                    auto_plugins,
-                    init_options: serde_json::Value::Null,
+                    marker_file: ts_marker
+                        .unwrap_or("tsconfig.json or package.json")
+                        .to_string(),
+                    tried_binaries: ts_plugin
+                        .lsp_candidates()
+                        .iter()
+                        .map(|c| c.binary.to_string())
+                        .collect(),
+                    install_hint: install_hint("typescript"),
                 });
             }
-        } else if !has_override {
-            missing.push(MissingLanguage {
-                language_id: "typescript".to_owned(),
-                marker_file: ts_marker
-                    .unwrap_or("tsconfig.json or package.json")
-                    .to_string(),
-                tried_binaries: vec!["typescript-language-server".to_string()],
-                install_hint: install_hint("typescript"),
-            });
         }
+    } else {
+        tracing::error!("typescript plugin not found in registry — skipping detection");
     }
 
-    // Python — pyproject.toml, setup.py, or requirements.txt (depth 2)
-    let (py_root, py_marker) = if get_override!("python").is_some() {
-        (get_override!("python"), None)
-    } else if let Some(r) = find_marker(workspace_root, "pyproject.toml", 2).await {
-        (Some(r), Some("pyproject.toml"))
-    } else if let Some(r) = find_marker(workspace_root, "setup.py", 2).await {
-        (Some(r), Some("setup.py"))
-    } else {
-        (
-            find_marker(workspace_root, "requirements.txt", 2).await,
-            Some("requirements.txt"),
-        )
-    };
-    if let Some(root) = py_root {
-        // Try Python LSP servers in order of preference.
-        // pyright-langserver: Fast, strict type checking, most popular for modern Python (best quality)
-        // pyright: npm package binary, pyright-langserver alternative
-        // pylsp: Community standard, plugin ecosystem, good all-rounder
-        // ruff: Extremely fast linter with built-in LSP server (ruff-lsp deprecated since 0.4.0)
-        // jedi-language-server: Mature, lightweight, pure Python
-        let python_lsp_candidates = [
-            ("pyright-langserver", vec!["--stdio".to_owned()]),
-            ("pyright", vec!["--stdio".to_owned()]),
-            ("pylsp", vec![]),
-            ("ruff", vec!["server".to_owned(), "--stdio".to_owned()]),
-            ("jedi-language-server", vec![]),
-        ];
-
-        let has_override = get_command_override!("python").is_some();
-
-        let maybe_command_and_args = if let Some(cmd_override) = get_command_override!("python") {
-            // User specified custom command in config
-            Some((cmd_override, vec!["--stdio".to_owned()])) // Keep backward compatibility: default to --stdio for custom commands
+    // Python
+    if let Some(py_plugin) = crate::plugin::plugin_for_language("python") {
+        let (py_root, py_marker) = if get_override!("python").is_some() {
+            (get_override!("python"), None)
         } else {
-            // Try each candidate in order, tracking which were tried
-            let mut resolved = None;
-            for (binary, args) in &python_lsp_candidates {
-                if let Some(resolved_cmd) = resolve_command(binary, "python") {
-                    resolved = Some((resolved_cmd, args.clone()));
+            let mut found = None;
+            for marker in py_plugin.marker_files() {
+                if let Some(r) = find_marker(
+                    workspace_root,
+                    marker,
+                    py_plugin.marker_search_depth() as usize,
+                )
+                .await
+                {
+                    found = Some((r, marker));
                     break;
                 }
             }
-            resolved
+            if let Some((r, m)) = found {
+                (Some(r), Some(*m))
+            } else {
+                (None, None)
+            }
         };
-
-        if let Some((command, default_args)) = maybe_command_and_args {
-            // ST-2: validate pyproject.toml before spawning
-            let maybe_marker_path = py_marker
-                .filter(|m| *m == "pyproject.toml")
-                .map(|m| root.join(m));
-            let manifest_ok = if let Some(mp) = maybe_marker_path {
-                match validate_marker_file(&mp, "python") {
-                    Ok(()) => true,
-                    Err(reason) => {
-                        tracing::warn!(language = "python", %reason, "ST-2: invalid manifest — skipping LSP start");
-                        missing.push(MissingLanguage {
-                            language_id: "python".to_owned(),
-                            marker_file: "pyproject.toml".to_string(),
-                            tried_binaries: vec![command.clone()],
-                            install_hint: format!("Fix pyproject.toml: {reason}"),
-                        });
-                        false
+        if let Some(root) = py_root {
+            let has_override = get_command_override!("python").is_some();
+            let maybe_command_and_args = if let Some(cmd_override) = get_command_override!("python")
+            {
+                Some((cmd_override, vec!["--stdio".to_owned()]))
+            } else {
+                let mut resolved = None;
+                for candidate in py_plugin.lsp_candidates() {
+                    if let Some(resolved_cmd) = resolve_command(candidate.binary, "python") {
+                        resolved = Some((
+                            resolved_cmd,
+                            candidate
+                                .default_args
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect(),
+                        ));
+                        break;
                     }
                 }
-            } else {
-                true // setup.py / requirements.txt — no structural validation
+                resolved
             };
 
-            if manifest_ok {
-                // ST-5: detect Python venv for Pyright's initializationOptions
-                let init_options = detect_python_init_options(workspace_root);
-                if !init_options.is_null() {
-                    tracing::info!(
-                        options = ?init_options,
-                        "ST-5: Python venv detected — will pass pythonPath to LSP"
-                    );
+            if let Some((command, default_args)) = maybe_command_and_args {
+                let maybe_marker_path = py_marker
+                    .filter(|m| *m == "pyproject.toml")
+                    .map(|m| root.join(m));
+                let manifest_ok = if let Some(mp) = maybe_marker_path {
+                    match validate_marker_file(&mp, "python") {
+                        Ok(()) => true,
+                        Err(reason) => {
+                            tracing::warn!(language = "python", %reason, "ST-2: invalid manifest — skipping LSP start");
+                            missing.push(MissingLanguage {
+                                language_id: "python".to_owned(),
+                                marker_file: "pyproject.toml".to_string(),
+                                tried_binaries: vec![command.clone()],
+                                install_hint: format!("Fix pyproject.toml: {reason}"),
+                            });
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
+
+                if manifest_ok {
+                    let init_options = detect_python_init_options(&root);
+                    if !init_options.is_null() {
+                        tracing::info!(
+                            options = ?init_options,
+                            "ST-5: Python venv detected — will pass pythonPath to LSP"
+                        );
+                    }
+                    detected.push(LanguageLsp {
+                        language_id: "python".to_owned(),
+                        command,
+                        args: get_args!("python", default_args),
+                        root,
+                        init_timeout_secs: None,
+                        auto_plugins: vec![],
+                        init_options,
+                    });
                 }
-                detected.push(LanguageLsp {
+            } else if !has_override {
+                missing.push(MissingLanguage {
                     language_id: "python".to_owned(),
-                    command,
-                    args: get_args!("python", default_args),
-                    root,
-                    init_timeout_secs: None,
-                    auto_plugins: vec![],
-                    init_options,
+                    marker_file: py_marker
+                        .unwrap_or("pyproject.toml, setup.py, or requirements.txt")
+                        .to_string(),
+                    tried_binaries: py_plugin
+                        .lsp_candidates()
+                        .iter()
+                        .map(|c| c.binary.to_string())
+                        .collect(),
+                    install_hint: install_hint("python"),
                 });
             }
-        } else if !has_override {
-            // No binary found and no custom command configured — add to missing
-            missing.push(MissingLanguage {
-                language_id: "python".to_owned(),
-                marker_file: py_marker
-                    .unwrap_or("pyproject.toml, setup.py, or requirements.txt")
-                    .to_string(),
-                tried_binaries: python_lsp_candidates
-                    .iter()
-                    .map(|(name, _)| name.to_string())
-                    .collect(),
-                install_hint: install_hint("python"),
-            });
         }
+    } else {
+        tracing::error!("python plugin not found in registry — skipping detection");
     }
 
-    // Java — pom.xml, build.gradle, build.gradle.kts, settings.gradle, settings.gradle.kts (depth 2 for monorepos)
-    //
-    // CAVEAT: settings.gradle / settings.gradle.kts can match non-Java Gradle projects
-    // (Android-only, Kotlin-only). This is an acceptable false positive — jdtls will
-    // simply find no Java sources and idle. A future refinement can check for .java
-    // files in src/ if this becomes a problem.
-    let (java_root, java_marker) = if get_override!("java").is_some() {
-        (get_override!("java"), None)
-    } else if let Some(r) = find_marker(workspace_root, "pom.xml", 2).await {
-        (Some(r), Some("pom.xml"))
-    } else if let Some(r) = find_marker(workspace_root, "build.gradle", 2).await {
-        (Some(r), Some("build.gradle"))
-    } else if let Some(r) = find_marker(workspace_root, "build.gradle.kts", 2).await {
-        (Some(r), Some("build.gradle.kts"))
-    } else if let Some(r) = find_marker(workspace_root, "settings.gradle", 2).await {
-        (Some(r), Some("settings.gradle"))
-    } else {
-        (
-            find_marker(workspace_root, "settings.gradle.kts", 2).await,
-            Some("settings.gradle.kts"),
-        )
-    };
-    if let Some(root) = java_root {
-        let has_override = get_command_override!("java").is_some();
-        let cmd = get_command_override!("java").or_else(|| resolve_command("jdtls", "java"));
-        if let Some(command) = cmd {
-            // ST-2: validate marker before spawning
-            if let Some(marker) = java_marker {
-                let marker_path = root.join(marker);
-                if let Err(reason) = validate_marker_file(&marker_path, "java") {
-                    tracing::warn!(language = "java", %reason, "ST-2: invalid manifest");
-                    missing.push(MissingLanguage {
-                        language_id: "java".to_owned(),
-                        marker_file: marker.to_string(),
-                        tried_binaries: vec!["jdtls".to_string()],
-                        install_hint: format!("Fix {marker}: {reason}"),
-                    });
+    // Java
+    if let Some(java_plugin) = crate::plugin::plugin_for_language("java") {
+        let (java_root, java_marker) = if get_override!("java").is_some() {
+            (get_override!("java"), None)
+        } else {
+            let mut found = None;
+            for marker in java_plugin.marker_files() {
+                if let Some(r) = find_marker(
+                    workspace_root,
+                    marker,
+                    java_plugin.marker_search_depth() as usize,
+                )
+                .await
+                {
+                    found = Some((r, marker));
+                    break;
+                }
+            }
+            if let Some((r, m)) = found {
+                (Some(r), Some(*m))
+            } else {
+                (None, None)
+            }
+        };
+        if let Some(root) = java_root {
+            let has_override = get_command_override!("java").is_some();
+            let cmd = get_command_override!("java").or_else(|| {
+                let mut resolved = None;
+                for candidate in java_plugin.lsp_candidates() {
+                    if let Some(resolved_cmd) = resolve_command(candidate.binary, "java") {
+                        resolved = Some(resolved_cmd);
+                        break;
+                    }
+                }
+                resolved
+            });
+            if let Some(command) = cmd {
+                let maybe_marker_path = java_marker
+                    .filter(|m| *m == "pom.xml" || *m == "build.gradle" || *m == "build.gradle.kts")
+                    .map(|m| root.join(m));
+                let manifest_ok = if let Some(mp) = &maybe_marker_path {
+                    match validate_marker_file(mp, "java") {
+                        Ok(()) => true,
+                        Err(reason) => {
+                            let marker = java_marker.unwrap_or("pom.xml or build.gradle");
+                            tracing::warn!(language = "java", %reason, "ST-2: invalid manifest");
+                            missing.push(MissingLanguage {
+                                language_id: "java".to_owned(),
+                                marker_file: marker.to_string(),
+                                tried_binaries: java_plugin
+                                    .lsp_candidates()
+                                    .iter()
+                                    .map(|c| c.binary.to_string())
+                                    .collect(),
+                                install_hint: format!("Fix {marker}: {reason}"),
+                            });
+                            false
+                        }
+                    }
                 } else {
+                    true
+                };
+
+                if manifest_ok {
+                    let init_opts = detect_java_init_options(&root, workspace_root);
                     detected.push(LanguageLsp {
                         language_id: "java".to_owned(),
                         command,
                         args: get_args!("java", vec![]),
                         root,
-                        init_timeout_secs: Some(180), // jdtls is slow to start on large projects
+                        init_timeout_secs: Some(180),
                         auto_plugins: vec![],
-                        init_options: detect_java_init_options(workspace_root),
+                        init_options: init_opts,
                     });
                 }
-            } else {
-                // config root_override — no marker to validate
-                detected.push(LanguageLsp {
+            } else if !has_override {
+                missing.push(MissingLanguage {
                     language_id: "java".to_owned(),
-                    command,
-                    args: get_args!("java", vec![]),
-                    root,
-                    init_timeout_secs: Some(180),
-                    auto_plugins: vec![],
-                    init_options: detect_java_init_options(workspace_root),
+                    marker_file: java_marker.unwrap_or("pom.xml or build.gradle").to_string(),
+                    tried_binaries: java_plugin
+                        .lsp_candidates()
+                        .iter()
+                        .map(|c| c.binary.to_string())
+                        .collect(),
+                    install_hint: install_hint("java"),
                 });
             }
-        } else if !has_override {
-            missing.push(MissingLanguage {
-                language_id: "java".to_owned(),
-                marker_file: java_marker.unwrap_or("pom.xml or build.gradle").to_string(),
-                tried_binaries: vec!["jdtls".to_string()],
-                install_hint: install_hint("java"),
-            });
         }
+    } else {
+        tracing::error!("java plugin not found in registry — skipping detection");
     }
 
     Ok(DetectionResult { detected, missing })
@@ -933,15 +1299,7 @@ pub async fn detect_languages(
 /// file. Returns `None` if the language is unsupported.
 #[must_use]
 pub fn language_id_for_extension(ext: &str) -> Option<&'static str> {
-    match ext {
-        "rs" => Some("rust"),
-        "go" => Some("go"),
-        // Both TypeScript and JavaScript are served by typescript-language-server
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Some("typescript"),
-        "py" | "pyi" => Some("python"),
-        "java" => Some("java"),
-        _ => None,
-    }
+    crate::plugin::plugin_for_extension(ext).map(crate::plugin::LanguagePlugin::language_id)
 }
 
 #[cfg(test)]
@@ -1537,8 +1895,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_detects_python_fallback_to_pyright() {
-        test_with_fake_python_binaries(&["pyright"], || async {
+    async fn test_detects_python_fallback_to_basedpyright() {
+        test_with_fake_python_binaries(&["basedpyright-langserver"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
 
@@ -1547,12 +1905,12 @@ mod tests {
                 .expect("detect");
 
             if let Some(py) = result.detected.iter().find(|l| l.language_id == "python") {
-                // pyright uses --stdio args
+                // basedpyright-langserver uses --stdio args
                 assert_eq!(py.args.len(), 1);
                 assert!(py.args[0].contains("--stdio"));
-                assert!(py.command.contains("pyright"));
+                assert!(py.command.contains("basedpyright-langserver"));
             } else {
-                panic!("Python should be detected with pyright");
+                panic!("Python should be detected with basedpyright-langserver");
             }
         })
         .await;
@@ -1703,6 +2061,16 @@ mod tests {
         let path = dir.path().join("go.mod");
         std::fs::write(&path, "module github.com/foo/bar\n\ngo 1.21").expect("write");
         assert!(validate_marker_file(&path, "go").is_ok());
+
+        // Test with leading comments and blank lines
+        let dir2 = tempdir().expect("temp dir");
+        let path2 = dir2.path().join("go.mod");
+        std::fs::write(
+            &path2,
+            "// some comment\n  // another comment\n\nmodule my-module",
+        )
+        .expect("write");
+        assert!(validate_marker_file(&path2, "go").is_ok());
     }
 
     #[test]
@@ -1712,9 +2080,17 @@ mod tests {
         std::fs::write(&path, "// corrupted file").expect("write");
         let result = validate_marker_file(&path, "go");
         assert!(result.is_err(), "go.mod without 'module' should fail");
-        assert!(result
+        assert!(result.expect_err("expected Err").contains("only comments"));
+
+        // Test with bare module keyword
+        let dir2 = tempdir().expect("temp dir");
+        let path2 = dir2.path().join("go.mod");
+        std::fs::write(&path2, "module").expect("write");
+        let result2 = validate_marker_file(&path2, "go");
+        assert!(result2.is_err(), "go.mod with bare 'module' should fail");
+        assert!(result2
             .expect_err("expected Err")
-            .contains("'module' declaration"));
+            .contains("valid 'module' declaration"));
     }
 
     #[test]
@@ -1723,6 +2099,42 @@ mod tests {
         let path = dir.path().join("tsconfig.json");
         std::fs::write(&path, r#"{"compilerOptions":{"strict":true}}"#).expect("write");
         assert!(validate_marker_file(&path, "typescript").is_ok());
+
+        // Test with comments and trailing commas
+        let path2 = dir.path().join("tsconfig2.json");
+        std::fs::write(
+            &path2,
+            r#"{
+                // compiler configurations
+                "compilerOptions": {
+                    "strict": true,
+                    "target": "es2020",
+                },
+                /* trailing commas allowed in arrays */
+                "include": [
+                    "src/**/*",
+                ]
+            }"#,
+        )
+        .expect("write");
+        // Note: the filename must be tsconfig.json to match the tsconfig arm in validate_marker_file
+        let path3 = dir.path().join("tsconfig.json");
+        std::fs::write(
+            &path3,
+            r#"{
+                // compiler configurations
+                "compilerOptions": {
+                    "strict": true,
+                    "target": "es2020",
+                },
+                /* trailing commas allowed in arrays */
+                "include": [
+                    "src/**/*",
+                ],
+            }"#,
+        )
+        .expect("write");
+        assert!(validate_marker_file(&path3, "typescript").is_ok());
     }
 
     #[test]
@@ -2029,7 +2441,7 @@ mod tests {
     #[test]
     fn test_detect_java_init_options_structure() {
         let dir = tempdir().expect("temp dir");
-        let opts = detect_java_init_options(dir.path());
+        let opts = detect_java_init_options(dir.path(), dir.path());
         assert!(!opts.is_null(), "java init_options should not be null");
         assert!(
             opts["java"]["import"]["gradle"]["enabled"]
@@ -2046,6 +2458,114 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_detect_jdk_home_sdkmanrc() {
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let temp = tempdir().expect("temp dir");
+        let proj_root = temp.path().join("project");
+        let fake_home = temp.path().join("home");
+        std::fs::create_dir_all(&proj_root).unwrap();
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        // Create a fake sdkman jdk candidate
+        let jdk_path = fake_home.join(".sdkman/candidates/java/17.0.7-tem");
+        std::fs::create_dir_all(jdk_path.join("bin")).unwrap();
+        std::fs::write(jdk_path.join("bin/java"), "").unwrap();
+
+        // Write .sdkmanrc
+        std::fs::write(proj_root.join(".sdkmanrc"), "java=17.0.7-tem\n").unwrap();
+
+        // Save original env vars
+        let orig_home = std::env::var("HOME").ok();
+        let orig_userprofile = std::env::var("USERPROFILE").ok();
+        let orig_java_home = std::env::var("JAVA_HOME").ok();
+
+        // Set test env
+        std::env::set_var("HOME", &fake_home);
+        std::env::set_var("USERPROFILE", &fake_home);
+        std::env::remove_var("JAVA_HOME");
+
+        let detected = detect_jdk_home(&proj_root);
+
+        // Restore env
+        if let Some(val) = orig_home {
+            std::env::set_var("HOME", val);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(val) = orig_userprofile {
+            std::env::set_var("USERPROFILE", val);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+        if let Some(val) = orig_java_home {
+            std::env::set_var("JAVA_HOME", val);
+        } else {
+            std::env::remove_var("JAVA_HOME");
+        }
+
+        assert_eq!(detected, Some(jdk_path.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_detect_jdk_home_java_version() {
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let temp = tempdir().expect("temp dir");
+        let proj_root = temp.path().join("project");
+        let fake_home = temp.path().join("home");
+        std::fs::create_dir_all(&proj_root).unwrap();
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        // Create a fake asdf jdk candidate
+        let jdk_path = fake_home.join(".asdf/installs/java/11.0.2");
+        std::fs::create_dir_all(jdk_path.join("bin")).unwrap();
+        std::fs::write(jdk_path.join("bin/java"), "").unwrap();
+
+        // Write .java-version
+        std::fs::write(proj_root.join(".java-version"), "11.0.2\n").unwrap();
+
+        // Save original env vars
+        let orig_home = std::env::var("HOME").ok();
+        let orig_userprofile = std::env::var("USERPROFILE").ok();
+        let orig_java_home = std::env::var("JAVA_HOME").ok();
+
+        // Set test env
+        std::env::set_var("HOME", &fake_home);
+        std::env::set_var("USERPROFILE", &fake_home);
+        std::env::remove_var("JAVA_HOME");
+
+        let detected = detect_jdk_home(&proj_root);
+
+        // Restore env
+        if let Some(val) = orig_home {
+            std::env::set_var("HOME", val);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(val) = orig_userprofile {
+            std::env::set_var("USERPROFILE", val);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+        if let Some(val) = orig_java_home {
+            std::env::set_var("JAVA_HOME", val);
+        } else {
+            std::env::remove_var("JAVA_HOME");
+        }
+
+        assert_eq!(detected, Some(jdk_path.to_string_lossy().into_owned()));
+    }
+
+    #[test]
     fn test_language_id_for_extension_covers_all_known() {
         assert_eq!(language_id_for_extension("rs"), Some("rust"));
         assert_eq!(language_id_for_extension("go"), Some("go"));
@@ -2056,6 +2576,8 @@ mod tests {
         assert_eq!(language_id_for_extension("mjs"), Some("typescript"));
         assert_eq!(language_id_for_extension("cjs"), Some("typescript"));
         assert_eq!(language_id_for_extension("vue"), Some("typescript"));
+        assert_eq!(language_id_for_extension("mts"), Some("typescript"));
+        assert_eq!(language_id_for_extension("cts"), Some("typescript"));
         assert_eq!(language_id_for_extension("py"), Some("python"));
         assert_eq!(language_id_for_extension("pyi"), Some("python"));
         assert_eq!(language_id_for_extension("java"), Some("java"));
@@ -2255,6 +2777,66 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_detect_python_venv_in_subdirectory() {
+        let dir = tempdir().expect("temp dir");
+        let sub = dir.path().join("apps").join("backend");
+        std::fs::create_dir_all(&sub).expect("create dir");
+        std::fs::write(sub.join("requirements.txt"), "flask==2.0").expect("write");
+
+        let venv_python = sub.join(".venv").join("bin").join("python");
+        std::fs::create_dir_all(venv_python.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&venv_python, "#!/bin/sh\nexec python3 \"$@\"").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&venv_python, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        // Mock a fake python binary so Python is detected as running, not missing
+        // Hold the lock across await intentionally — serializes env-mutating tests.
+        let _path_lock = PATH_MUTEX.lock().expect("path mutex");
+        let old_path = std::env::var("PATH").expect("PATH");
+        let fake_bin_dir = dir.path().join("fake_bin");
+        std::fs::create_dir_all(&fake_bin_dir).expect("create bin dir");
+        std::fs::write(fake_bin_dir.join("pyright-langserver"), "#!/bin/sh").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                fake_bin_dir.join("pyright-langserver"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("chmod");
+        }
+        let new_path = format!("{}:{}", fake_bin_dir.to_str().expect("utf8"), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+
+        std::env::set_var("PATH", old_path);
+
+        let py_lsp = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "python")
+            .expect("python detected");
+        assert!(
+            !py_lsp.init_options.is_null(),
+            "python init_options should not be null when venv is in subdirectory"
+        );
+        assert_eq!(
+            py_lsp.init_options["python"]["pythonPath"]
+                .as_str()
+                .expect("pythonPath string"),
+            venv_python.to_str().expect("utf8")
+        );
+    }
+
+    #[tokio::test]
     async fn test_detect_vue_files_in_shallow_nested_dirs() {
         let dir = tempdir().expect("temp dir");
         let nested = dir.path().join("src").join("components");
@@ -2298,6 +2880,20 @@ mod tests {
 
         let found = find_marker(dir.path(), "go.mod", 2).await;
         assert_eq!(found.as_deref(), Some(sub.as_path()));
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_multiple_matches() {
+        let dir = tempdir().expect("temp dir");
+        let sub1 = dir.path().join("backend");
+        let sub2 = dir.path().join("worker");
+        std::fs::create_dir_all(&sub1).expect("create dir");
+        std::fs::create_dir_all(&sub2).expect("create dir");
+        std::fs::write(sub1.join("go.mod"), "module backend").expect("write");
+        std::fs::write(sub2.join("go.mod"), "module worker").expect("write");
+
+        let found = find_marker(dir.path(), "go.mod", 2).await;
+        assert_eq!(found.as_deref(), Some(dir.path()));
     }
 
     #[tokio::test]
@@ -2380,5 +2976,91 @@ mod tests {
         }
 
         assert!(result.is_some(), "should detect Python from CONDA_PREFIX");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_detect_venv_windows_paths() {
+        let dir = tempdir().expect("temp dir");
+
+        // 1. Conda Windows path: CONDA_PREFIX/python.exe
+        let conda_windows_python = dir.path().join("conda_env").join("python.exe");
+        std::fs::create_dir_all(conda_windows_python.parent().unwrap()).unwrap();
+        std::fs::write(&conda_windows_python, "").unwrap();
+
+        // 2. VIRTUAL_ENV Windows path: VIRTUAL_ENV/Scripts/python.exe
+        let venv_windows_python = dir
+            .path()
+            .join("virtual_env")
+            .join("Scripts")
+            .join("python.exe");
+        std::fs::create_dir_all(venv_windows_python.parent().unwrap()).unwrap();
+        std::fs::write(&venv_windows_python, "").unwrap();
+
+        let _guard = match PATH_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        // Test CONDA_PREFIX Windows path detection
+        let orig_conda = std::env::var("CONDA_PREFIX").ok();
+        std::env::set_var("CONDA_PREFIX", dir.path().join("conda_env"));
+        let res_conda = detect_venv(dir.path());
+        if let Some(val) = orig_conda {
+            std::env::set_var("CONDA_PREFIX", val);
+        } else {
+            std::env::remove_var("CONDA_PREFIX");
+        }
+        assert_eq!(res_conda, Some(conda_windows_python));
+
+        // Test VIRTUAL_ENV Windows path detection
+        let orig_venv = std::env::var("VIRTUAL_ENV").ok();
+        std::env::set_var("VIRTUAL_ENV", dir.path().join("virtual_env"));
+        let res_venv = detect_venv(dir.path());
+        if let Some(val) = orig_venv {
+            std::env::set_var("VIRTUAL_ENV", val);
+        } else {
+            std::env::remove_var("VIRTUAL_ENV");
+        }
+        assert_eq!(res_venv, Some(venv_windows_python));
+    }
+
+    // ── Issue 1: find_marker max_depth clamping ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_marker_clamps_max_depth_to_2() {
+        // max_depth=5 must behave identically to max_depth=2.
+        // Place a marker at depth 2 — both calls must find it.
+        let dir = tempdir().expect("temp dir");
+        let deep = dir.path().join("apps").join("backend");
+        std::fs::create_dir_all(&deep).expect("create dirs");
+        std::fs::write(deep.join("Cargo.toml"), "[package]").expect("write");
+
+        let result_depth_2 = find_marker(dir.path(), "Cargo.toml", 2).await;
+        let result_depth_5 = find_marker(dir.path(), "Cargo.toml", 5).await;
+        assert_eq!(
+            result_depth_2, result_depth_5,
+            "max_depth=5 must behave identically to max_depth=2 (clamped)"
+        );
+        assert_eq!(
+            result_depth_2.as_deref(),
+            Some(deep.as_path()),
+            "should find marker at depth 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_large_depth_no_depth_3_scan() {
+        // Place a marker at depth 3 — even max_depth=100 must NOT find it (clamped to 2).
+        let dir = tempdir().expect("temp dir");
+        let deep = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).expect("create dirs");
+        std::fs::write(deep.join("go.mod"), "module deep").expect("write");
+
+        let found = find_marker(dir.path(), "go.mod", 100).await;
+        assert!(
+            found.is_none(),
+            "max_depth is clamped to 2, so depth-3 marker must not be found"
+        );
     }
 }
