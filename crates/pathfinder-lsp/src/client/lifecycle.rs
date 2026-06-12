@@ -460,7 +460,13 @@ impl super::LspClient {
             "LSP: spawning process"
         );
 
-        let in_coexistence_mode = self.detect_concurrent_lsp(&language_id, &descriptor.command);
+        let client = self.clone();
+        let lang_id = language_id.clone();
+        let cmd = descriptor.command.clone();
+        let in_coexistence_mode =
+            tokio::task::spawn_blocking(move || client.detect_concurrent_lsp(&lang_id, &cmd))
+                .await
+                .unwrap_or(false);
         let isolate_target_dir = in_coexistence_mode;
 
         let plugins = descriptor.auto_plugins.clone();
@@ -679,7 +685,7 @@ impl super::LspClient {
         Ok(())
     }
 
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self, clippy::too_many_lines)]
     pub(crate) fn detect_concurrent_lsp(&self, language_id: &str, command: &str) -> bool {
         let binary_name = Path::new(command)
             .file_name()
@@ -793,6 +799,77 @@ impl super::LspClient {
                 }
             }
         }
+
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            let our_pid = std::process::id();
+            let output = std::process::Command::new("ps")
+                .args(["-axo", "pid,ppid,state,comm"])
+                .output();
+
+            if let Ok(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut external_count = 0;
+                for line in stdout.lines().skip(1) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() < 4 {
+                        continue;
+                    }
+                    let pid_str = parts[0];
+                    let ppid_str = parts[1];
+                    let state = parts[2];
+                    let comm = parts[3..].join(" ");
+
+                    let Ok(pid) = pid_str.parse::<u32>() else {
+                        continue;
+                    };
+                    if pid == our_pid {
+                        continue;
+                    }
+
+                    let Ok(ppid) = ppid_str.parse::<u32>() else {
+                        continue;
+                    };
+
+                    if !comm.contains(binary_name) {
+                        continue;
+                    }
+
+                    let is_zombie = state.contains('Z') || state.contains('T');
+                    if is_zombie {
+                        continue;
+                    }
+
+                    if ppid == our_pid {
+                        continue;
+                    }
+
+                    external_count += 1;
+                }
+
+                if external_count > 0 {
+                    let isolation_desc = match language_id {
+                        "rust" => "Cargo target directory",
+                        "go" => "Go build cache (GOCACHE/GOMODCACHE)",
+                        "typescript" => "TypeScript temp directory (TMPDIR)",
+                        "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
+                        _ => "No",
+                    };
+                    tracing::warn!(
+                        language = language_id,
+                        binary = binary_name,
+                        external_instances = external_count,
+                        "LSP: detected {} external concurrent instances of {binary_name}. \
+                         {} build artifact isolation will be applied to avoid cache lock contention. \
+                         First-time indexing may take 30-60s for this workspace.",
+                        external_count,
+                        isolation_desc
+                    );
+                    return true;
+                }
+            }
+        }
+
         let _ = (language_id, binary_name);
         false
     }
@@ -853,58 +930,6 @@ impl super::LspClient {
                 return Err(LspError::NoLspAvailable);
             };
             if state.reader_handle.is_finished() {
-                state.reader_handle.abort();
-                let transport = Arc::clone(&state.transport);
-                let lifecycle = state.lifecycle.clone();
-                drop(entry);
-                // P1-1 fix: Use remove_if to only remove if reader is still finished.
-                // This prevents killing a healthy replacement process spawned between
-                // drop(entry) and the remove operation.
-                let removed = self.processes.remove_if(
-                    language_id,
-                    |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
-                );
-                if let Some((_, ProcessEntry::Running(state))) = removed {
-                    // MAJOR: Cancel pending requests ONLY after confirming we removed
-                    // the stale entry. This prevents cross-generational cancellation
-                    // where a new process was started between our check and atomic remove.
-                    self.dispatcher.cancel_for_language(language_id);
-                    state.abort_watchers();
-                    // C-3: shutdown before abort — but reader is already dead here,
-                    // so just force-kill directly (no response to read).
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        transport.shutdown(&self.dispatcher, language_id),
-                    )
-                    .await;
-                    if let Some(ref lc) = lifecycle {
-                        let mut child = lc.child.lock().await;
-                        let wait_result =
-                            tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
-                        if wait_result.is_err() {
-                            tracing::warn!(
-                                language = %language_id,
-                                "LSP: stale process did not exit after SIGTERM — sending SIGKILL"
-                            );
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
-                        }
-                    }
-                    tracing::warn!(
-                        language = %language_id,
-                        "LSP: reader task not alive, removed stale entry for recovery"
-                    );
-                    // M-9: Insert Unavailable for backoff protection. Without this,
-                    // ensure_process would immediately retry and could create a tight
-                    // spawn-exit loop if the child keeps dying immediately.
-                    self.processes.insert(
-                        language_id.to_owned(),
-                        ProcessEntry::Unavailable(UnavailableState {
-                            unavailable_since: Instant::now(),
-                            backoff_attempt: 1,
-                        }),
-                    );
-                }
                 self.dispatcher.remove(id);
                 return Err(LspError::ConnectionLost);
             }
@@ -924,6 +949,16 @@ impl super::LspClient {
             .await
             .map_err(|_| {
                 self.dispatcher.remove(id);
+                // LSP spec: client SHOULD send $/cancelRequest when giving up on a
+                // request so the server can stop processing and free resources.
+                let cancel_transport = Arc::clone(&transport);
+                tokio::spawn(async move {
+                    let cancel_notif = RequestDispatcher::make_notification(
+                        "$/cancelRequest",
+                        &serde_json::json!({"id": id}),
+                    );
+                    let _ = cancel_transport.send(&cancel_notif).await;
+                });
                 LspError::Timeout {
                     operation: method.to_owned(),
                     timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
@@ -947,53 +982,6 @@ impl super::LspClient {
             return Err(LspError::NoLspAvailable);
         };
         if state.reader_handle.is_finished() {
-            state.reader_handle.abort();
-            let transport = Arc::clone(&state.transport);
-            let lifecycle = state.lifecycle.clone();
-            drop(entry);
-            // P1-1 fix: Use remove_if to only remove if reader is still finished.
-            let removed = self.processes.remove_if(
-                language_id,
-                |_, v| matches!(v, ProcessEntry::Running(s) if s.reader_handle.is_finished()),
-            );
-            if let Some((_, ProcessEntry::Running(state))) = removed {
-                // MAJOR: Cancel pending requests ONLY after confirming we removed
-                // the stale entry. Prevents cross-generational cancellation.
-                self.dispatcher.cancel_for_language(language_id);
-                state.abort_watchers();
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    transport.shutdown(&self.dispatcher, language_id),
-                )
-                .await;
-                if let Some(ref lc) = lifecycle {
-                    let mut child = lc.child.lock().await;
-                    let wait_result =
-                        tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
-                    if wait_result.is_err() {
-                        tracing::warn!(
-                            language = %language_id,
-                            "LSP: stale process did not exit after SIGTERM in notify — sending SIGKILL"
-                        );
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                    }
-                }
-                tracing::warn!(
-                    language = %language_id,
-                    "LSP: reader task not alive in notify, removed stale entry for recovery"
-                );
-                // M-9: Insert Unavailable for backoff protection. Without this,
-                // ensure_process would immediately retry and could create a tight
-                // spawn-exit loop if the child keeps dying immediately.
-                self.processes.insert(
-                    language_id.to_owned(),
-                    ProcessEntry::Unavailable(UnavailableState {
-                        unavailable_since: Instant::now(),
-                        backoff_attempt: 1,
-                    }),
-                );
-            }
             return Err(LspError::ConnectionLost);
         }
         // P2-3 fix: Extract transport clone before sending, so we don't hold
@@ -1014,6 +1002,51 @@ impl super::LspClient {
                 ProcessEntry::Unavailable(_) => Err(LspError::NoLspAvailable),
                 ProcessEntry::Running(state) => Ok(state.live_capabilities.read().clone()),
             },
+        }
+    }
+
+    pub(crate) async fn wait_for_capability<F>(
+        &self,
+        language_id: &str,
+        check_cap: F,
+        cap_name: &str,
+    ) -> Result<(), LspError>
+    where
+        F: Fn(&crate::client::DetectedCapabilities) -> bool,
+    {
+        let grace = crate::client::grace_period_for_language(language_id);
+        if grace == 0 {
+            let caps = self.capabilities_for(language_id)?;
+            if check_cap(&caps) {
+                return Ok(());
+            }
+            return Err(LspError::UnsupportedCapability {
+                capability: cap_name.to_owned(),
+            });
+        }
+
+        loop {
+            let uptime = {
+                let entry = self
+                    .processes
+                    .get(language_id)
+                    .ok_or(LspError::NoLspAvailable)?;
+                match entry.value() {
+                    ProcessEntry::Unavailable(_) => return Err(LspError::NoLspAvailable),
+                    ProcessEntry::Running(state) => state.spawned_at.elapsed().as_secs(),
+                }
+            };
+            let caps = self.capabilities_for(language_id)?;
+            if check_cap(&caps) {
+                return Ok(());
+            }
+            if uptime >= grace {
+                return Err(LspError::UnsupportedCapability {
+                    capability: cap_name.to_owned(),
+                });
+            }
+            // Sleep for 100ms before retrying to avoid spinning CPU
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -1360,6 +1393,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_wait_for_capability_immediate_success() {
+        let (client, _fake) = make_running_client("rust");
+        // rust has grace period 0. If we set capability to true, it succeeds immediately.
+        if let Some(entry) = client.processes.get("rust") {
+            if let ProcessEntry::Running(state) = entry.value() {
+                let mut live_caps = state.live_capabilities.write();
+                live_caps.definition_provider = true;
+            }
+        }
+        let result = client
+            .wait_for_capability(
+                "rust",
+                |caps| caps.definition_provider,
+                "definitionProvider",
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_capability_immediate_failure_static() {
+        let (client, _fake) = make_running_client("rust");
+        // rust has grace period 0. Force capability to false.
+        if let Some(entry) = client.processes.get("rust") {
+            if let ProcessEntry::Running(state) = entry.value() {
+                let mut live_caps = state.live_capabilities.write();
+                live_caps.definition_provider = false;
+            }
+        }
+        let result = client
+            .wait_for_capability(
+                "rust",
+                |caps| caps.definition_provider,
+                "definitionProvider",
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(LspError::UnsupportedCapability { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_capability_delayed_success() {
+        let (client, _fake) = make_running_client("java");
+        // java has grace period 15s. Force capability to false initially.
+        if let Some(entry) = client.processes.get("java") {
+            if let ProcessEntry::Running(state) = entry.value() {
+                let mut live_caps = state.live_capabilities.write();
+                live_caps.definition_provider = false;
+            }
+        }
+
+        let client_clone = client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(entry) = client_clone.processes.get("java") {
+                if let ProcessEntry::Running(state) = entry.value() {
+                    let mut live_caps = state.live_capabilities.write();
+                    live_caps.definition_provider = true;
+                }
+            }
+        });
+
+        let start = Instant::now();
+        let result = client
+            .wait_for_capability(
+                "java",
+                |caps| caps.definition_provider,
+                "definitionProvider",
+            )
+            .await;
+
+        assert!(result.is_ok(), "should succeed eventually: {result:?}");
+        assert!(
+            start.elapsed() >= Duration::from_millis(200),
+            "should have waited at least 200ms"
+        );
+    }
+
+    #[tokio::test]
     async fn test_request_with_running_process_returns_response() {
         let (client, fake) = make_running_client("rust");
 
@@ -1438,8 +1552,8 @@ mod tests {
             .is_some_and(|e| matches!(e.value(), ProcessEntry::Running(_)));
 
         assert!(
-            !has_running,
-            "Running entry should be replaced by Unavailable for backoff after dead reader"
+            has_running,
+            "Running entry should NOT be removed by request() itself; only by supervisor"
         );
     }
 
@@ -2256,7 +2370,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_delayed_error_response_returns_protocol_error() {
+    async fn test_request_timeout_sends_cancel_notification() {
+        let (client, fake) = make_running_client("rust");
+
+        fake.set_response("textDocument/definition", json!({ "result": null }));
+        fake.set_response_delay(Duration::from_secs(10));
+
+        let _ = client
+            .request(
+                "rust",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_millis(50),
+            )
+            .await;
+
+        // Give the spawned cancel task time to execute
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let notifications = fake.take_notifications();
+        let cancel = notifications
+            .iter()
+            .find(|(method, _)| method == "$/cancelRequest");
+        assert!(
+            cancel.is_some(),
+            "should send $/cancelRequest on timeout, got notifications: {notifications:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_delayed_error_response_returns_server_error() {
         let (client, fake) = make_running_client("rust");
 
         fake.set_error("textDocument/definition", "something went wrong");
@@ -2272,14 +2415,14 @@ mod tests {
             .await;
 
         match result {
-            Err(LspError::Protocol(msg)) => {
+            Err(LspError::ServerError { message, .. }) => {
                 assert!(
-                    msg.contains("something went wrong"),
-                    "error message should contain configured text: {msg}"
+                    message.contains("something went wrong"),
+                    "error message should contain configured text: {message}"
                 );
             }
             other => {
-                panic!("expected Protocol error from send() even with delay active, got: {other:?}")
+                panic!("expected ServerError from send() even with delay active, got: {other:?}")
             }
         }
     }
@@ -2609,8 +2752,8 @@ mod tests {
             .await;
 
         assert!(
-            matches!(result, Err(LspError::Protocol(ref msg)) if msg.contains("server internal error")),
-            "should return Protocol error from server error response: {result:?}"
+            matches!(result, Err(LspError::ServerError { ref message, .. }) if message.contains("server internal error")),
+            "should return ServerError from server error response: {result:?}"
         );
     }
 
@@ -3325,5 +3468,43 @@ mod tests {
             fake.is_alive(),
             "FakeTransport shutdown should be no-op (still alive)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_request_and_notify_do_not_cleanup_stale_reader() {
+        let (client, _fake) = make_running_client("rust");
+        // Abort the reader handle to make it is_finished()
+        {
+            let entry = client.processes.get("rust").unwrap();
+            let ProcessEntry::Running(state) = entry.value() else {
+                panic!("expected Running process entry");
+            };
+            state.reader_handle.abort();
+        }
+
+        // Wait a brief moment for the reader task to be aborted
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Verify calling request returns ConnectionLost
+        let res = client
+            .request("rust", "someMethod", json!({}), Duration::from_secs(1))
+            .await;
+        assert!(matches!(res, Err(LspError::ConnectionLost)));
+
+        // Verify the process entry is still in the map (no inline cleanup) and is STILL Running
+        {
+            let entry = client.processes.get("rust").unwrap();
+            assert!(matches!(entry.value(), ProcessEntry::Running(_)));
+        }
+
+        // Verify calling notify returns ConnectionLost
+        let res_notify = client.notify("rust", "someNotification", json!({})).await;
+        assert!(matches!(res_notify, Err(LspError::ConnectionLost)));
+
+        // Verify the process entry is still in the map and is STILL Running
+        {
+            let entry = client.processes.get("rust").unwrap();
+            assert!(matches!(entry.value(), ProcessEntry::Running(_)));
+        }
     }
 }
