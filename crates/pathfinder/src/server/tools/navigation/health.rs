@@ -115,6 +115,8 @@ impl PathfinderServer {
                 navigation_tested: None,
                 call_hierarchy_verified: false,
                 install_hint: None,
+                server_name: status.server_name.clone(),
+                registrations_received: status.registrations_received,
                 indexing_progress_percent: status.indexing_progress_percent,
                 degraded_tools: compute_degraded_tools(status),
                 indexing_source: status.indexing_source.clone(),
@@ -341,6 +343,8 @@ impl PathfinderServer {
                 navigation_tested: None,
                 call_hierarchy_verified: false,
                 install_hint: Some(missing.install_hint.clone()),
+                server_name: None,
+                registrations_received: None,
                 indexing_progress_percent: None,
                 degraded_tools: vec![
                     crate::server::types::DegradedToolInfo {
@@ -398,6 +402,16 @@ impl PathfinderServer {
             );
         }
 
+        // Flag languages in dynamic registration grace period
+        for lang_health in &languages {
+            if lang_health.navigation_ready.is_none() && lang_health.status != "unavailable" {
+                known_limitations.push(format!(
+                    "{}: dynamic capability registration may still be in progress — retry lsp_health in a few seconds",
+                    lang_health.language
+                ));
+            }
+        }
+
         let response = crate::server::types::LspHealthResponse {
             status: overall_status.to_owned(),
             languages,
@@ -412,6 +426,14 @@ impl PathfinderServer {
             let mut detail_parts = Vec::new();
             if l.probe_verified {
                 detail_parts.push("probe_verified".to_owned());
+            }
+            if let Some(ref name) = l.server_name {
+                detail_parts.push(format!("server: {name}"));
+            }
+            if let Some(regs) = l.registrations_received {
+                if regs > 0 {
+                    detail_parts.push(format!("registrations: {regs}"));
+                }
             }
             // Spec 5.3: Show indexing status with progress percentage
             if let Some(ref idx) = l.indexing_status {
@@ -908,6 +930,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -954,6 +977,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1000,6 +1024,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1050,6 +1075,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1123,6 +1149,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1187,6 +1214,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1251,6 +1279,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1531,6 +1560,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1660,6 +1690,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1750,6 +1781,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1797,6 +1829,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1843,6 +1876,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1884,6 +1918,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -1937,6 +1972,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2010,6 +2046,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2066,6 +2103,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2115,6 +2153,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2173,6 +2212,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2245,6 +2285,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2308,6 +2349,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2533,6 +2575,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2586,6 +2629,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2640,6 +2684,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         )]));
 
@@ -2736,6 +2781,7 @@ mod tests {
             indexing_source: None,
             indexing_duration_secs: None,
             indexing_progress_percent: None,
+            registrations_received: None,
         };
         let degraded = compute_degraded_tools(&status);
         assert_eq!(degraded.len(), 1);
@@ -2775,5 +2821,230 @@ mod tests {
         };
         let result = server.lsp_health_impl(params).await;
         assert!(result.is_ok());
+    }
+
+    // ── Component 3: Grace Period Known Limitations ────────────────────
+    #[tokio::test]
+    async fn test_lsp_health_grace_period_known_limitation() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Simulate a language where navigation_ready is still None (grace period)
+        // This happens when the LSP hasn't yet registered capabilities dynamically.
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "java".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: None, // Still in grace period
+                indexing_complete: Some(false),
+                uptime_seconds: Some(3),
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+                server_name: Some("jdtls".to_string()),
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+                registrations_received: Some(0),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = unpack_health(call_res);
+
+        // Should have a known_limitation about dynamic registration
+        assert!(
+            val.known_limitations
+                .iter()
+                .any(|l| l.contains("dynamic capability registration")),
+            "expected known_limitation about dynamic registration, got: {:?}",
+            val.known_limitations
+        );
+        // The limitation should mention the language
+        assert!(
+            val.known_limitations
+                .iter()
+                .any(|l| l.contains("java") && l.contains("dynamic capability registration")),
+            "limitation must mention 'java'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_no_grace_period_limitation_when_ready() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // A ready language (navigation_ready = Some(true)) should NOT have the limitation
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: Some(true),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(30),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+                server_name: Some("rust-analyzer".to_string()),
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+                registrations_received: Some(5),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val = unpack_health(call_res);
+
+        assert!(
+            !val.known_limitations
+                .iter()
+                .any(|l| l.contains("dynamic capability registration")),
+            "ready language should NOT have grace period limitation"
+        );
+    }
+
+    // ── Component 4: Server Name and Registrations in Health ───────────
+    #[tokio::test]
+    async fn test_lsp_health_server_name_in_output() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Remove probe files to prevent liveness probe
+        let src_dir = ws_dir.path().join("src");
+        let _ = std::fs::remove_file(src_dir.join("main.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.rs"));
+        let _ = std::fs::remove_file(src_dir.join("token.rs"));
+        let _ = std::fs::remove_file(src_dir.join("service.rs"));
+        let _ = std::fs::remove_file(src_dir.join("user.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.go"));
+
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "rust".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: Some(true),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(60),
+                diagnostics_strategy: Some("pull".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(true),
+                server_name: Some("rust-analyzer".to_string()),
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+                registrations_received: Some(3),
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+
+        // Check structured content
+        let val = unpack_health(call_res.clone());
+        assert_eq!(val.languages.len(), 1);
+        let rust_health = &val.languages[0];
+        assert_eq!(rust_health.server_name, Some("rust-analyzer".to_string()));
+        assert_eq!(rust_health.registrations_received, Some(3));
+
+        // Check text summary includes server name
+        let text = call_res
+            .content
+            .iter()
+            .filter_map(|c| match c.raw {
+                rmcp::model::RawContent::Text(ref t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            text.contains("server: rust-analyzer"),
+            "text output should mention server name, got: {text}"
+        );
+        assert!(
+            text.contains("registrations: 3"),
+            "text output should mention registrations count, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lsp_health_registrations_zero_omitted_from_text() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Remove probe files to prevent liveness probe
+        let src_dir = ws_dir.path().join("src");
+        let _ = std::fs::remove_file(src_dir.join("main.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.rs"));
+        let _ = std::fs::remove_file(src_dir.join("token.rs"));
+        let _ = std::fs::remove_file(src_dir.join("service.rs"));
+        let _ = std::fs::remove_file(src_dir.join("user.rs"));
+        let _ = std::fs::remove_file(src_dir.join("auth.go"));
+
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+            "go".to_string(),
+            pathfinder_lsp::types::LspLanguageStatus {
+                validation: true,
+                reason: "LSP connected".to_string(),
+                navigation_ready: Some(true),
+                indexing_complete: Some(true),
+                uptime_seconds: Some(10),
+                diagnostics_strategy: Some("push".to_string()),
+                supports_definition: Some(true),
+                supports_call_hierarchy: Some(true),
+                supports_diagnostics: Some(true),
+                supports_formatting: Some(false),
+                server_name: None, // no server name
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+                registrations_received: Some(0), // zero registrations — should NOT appear in text
+            },
+        )]));
+
+        let params = crate::server::types::LspHealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let call_res = result.expect("should succeed");
+
+        let text = call_res
+            .content
+            .iter()
+            .filter_map(|c| match c.raw {
+                rmcp::model::RawContent::Text(ref t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            !text.contains("registrations:"),
+            "zero registrations should be omitted from text, got: {text}"
+        );
+        assert!(
+            !text.contains("server:"),
+            "no server name should mean no 'server:' in text, got: {text}"
+        );
     }
 }

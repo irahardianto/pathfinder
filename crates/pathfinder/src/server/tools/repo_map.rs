@@ -619,6 +619,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         );
 
@@ -640,6 +641,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         );
 
@@ -661,6 +663,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         );
 
@@ -682,6 +685,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         );
 
@@ -703,6 +707,7 @@ mod tests {
                 indexing_source: None,
                 indexing_duration_secs: None,
                 indexing_progress_percent: None,
+                registrations_received: None,
             },
         );
 

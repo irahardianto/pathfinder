@@ -1046,6 +1046,15 @@ pub struct LspLanguageHealth {
     /// `None` when LSP is running or language not detected at all.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub install_hint: Option<String>,
+    /// The LSP server identity (e.g., "rust-analyzer", "Pyright", "gopls").
+    /// Useful for distinguishing which Python LSP is running.
+    /// `None` when the process is not running or server omitted serverInfo.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub server_name: Option<String>,
+    /// Number of dynamic capability registrations received from the LSP server.
+    /// Useful for diagnosing dynamic registration delays (e.g., jdtls).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub registrations_received: Option<u32>,
     /// Indexing progress percentage (0-100) if the LSP reports it via workDoneProgress.
     /// `None` when the LSP does not report progress or indexing is complete.
     #[serde(skip_serializing_if = "Option::is_none")]

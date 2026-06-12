@@ -351,8 +351,9 @@ impl Lawyer for LspClient {
                     indexing_source: None,
                     indexing_duration_secs: None,
                     indexing_progress_percent: None,
+                    registrations_received: None,
                 },
-                |entry| entry.to_validation_status(&desc.command),
+                |entry| entry.to_validation_status(&desc.command, &desc.language_id),
             );
             status.insert(desc.language_id.clone(), lang_status);
         }

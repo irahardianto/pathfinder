@@ -101,6 +101,10 @@ pub struct DetectedCapabilities {
     pub(crate) static_formatting_provider: bool,
     #[serde(skip)]
     pub(crate) static_diagnostics_strategy: DiagnosticsStrategy,
+    /// Number of dynamic capability registrations received.
+    /// Incremented by `apply_registration` on each successful registration.
+    #[serde(default)]
+    pub registrations_received: u32,
 }
 
 impl DetectedCapabilities {
@@ -181,6 +185,8 @@ impl DetectedCapabilities {
             static_call_hierarchy_provider: call_hierarchy_provider,
             static_formatting_provider: formatting_provider,
             static_diagnostics_strategy: diagnostics_strategy,
+            // Counts successful dynamic registrations (monotonic counter).
+            registrations_received: 0,
         }
     }
 
@@ -251,6 +257,7 @@ impl DetectedCapabilities {
         if changed {
             self.dynamic_registrations
                 .insert(registration_id.to_owned(), method.to_owned());
+            self.registrations_received += 1;
         }
 
         changed
@@ -885,5 +892,53 @@ mod tests {
         assert!(!caps.workspace_diagnostic_provider);
         assert!(caps.server_name.is_none());
         assert!(caps.dynamic_registrations.is_empty());
+        assert_eq!(caps.registrations_received, 0);
+    }
+
+    #[test]
+    fn test_registrations_received_counter() {
+        let mut caps = DetectedCapabilities::default();
+        assert_eq!(caps.registrations_received, 0);
+
+        // First registration: definition provider
+        let changed =
+            caps.apply_registration("textDocument/definition", "reg-1", &serde_json::Value::Null);
+        assert!(changed);
+        assert_eq!(caps.registrations_received, 1);
+
+        // Second registration: references provider
+        let changed =
+            caps.apply_registration("textDocument/references", "reg-2", &serde_json::Value::Null);
+        assert!(changed);
+        assert_eq!(caps.registrations_received, 2);
+
+        // Idempotent: same registration_id should not increment
+        let changed =
+            caps.apply_registration("textDocument/definition", "reg-1", &serde_json::Value::Null);
+        assert!(!changed);
+        assert_eq!(
+            caps.registrations_received, 2,
+            "duplicate registration_id must not increment counter"
+        );
+
+        // Unknown method: should not increment
+        let changed = caps.apply_registration(
+            "textDocument/unknownMethod",
+            "reg-3",
+            &serde_json::Value::Null,
+        );
+        assert!(!changed);
+        assert_eq!(
+            caps.registrations_received, 2,
+            "unknown method must not increment counter"
+        );
+
+        // Unregistration should NOT decrement (counter only goes up)
+        let reverted = caps.apply_unregistration("reg-1");
+        assert!(reverted);
+        assert_eq!(
+            caps.registrations_received, 2,
+            "unregistration must not decrement counter"
+        );
     }
 }

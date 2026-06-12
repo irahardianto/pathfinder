@@ -60,6 +60,11 @@ pub struct LspLanguageStatus {
     /// `None` when the LSP does not report progress or indexing is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_progress_percent: Option<u8>,
+    /// Number of dynamic capability registrations received from the LSP server.
+    /// Useful for diagnosing dynamic registration delays (e.g., jdtls).
+    /// `None` when the process is not running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registrations_received: Option<u32>,
 }
 
 /// The location of a symbol's definition in the workspace.

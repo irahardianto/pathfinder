@@ -94,7 +94,11 @@ pub(crate) enum ProcessEntry {
 }
 
 impl ProcessEntry {
-    fn to_validation_status(&self, command: &str) -> crate::types::LspLanguageStatus {
+    fn to_validation_status(
+        &self,
+        command: &str,
+        language_id: &str,
+    ) -> crate::types::LspLanguageStatus {
         match self {
             Self::Running(state) => {
                 // MT-3: Read from live_capabilities (may include dynamic registrations).
@@ -119,6 +123,7 @@ impl ProcessEntry {
                 };
                 validation_status_from_parts(
                     command,
+                    language_id,
                     true,
                     effective_diag_strategy,
                     caps.definition_provider,
@@ -132,10 +137,12 @@ impl ProcessEntry {
                     indexing_source,
                     indexing_duration_secs,
                     indexing_progress_pct,
+                    caps.registrations_received,
                 )
             }
             Self::Unavailable(_) => validation_status_from_parts(
                 command,
+                language_id,
                 false,
                 DiagnosticsStrategy::None,
                 false,
@@ -147,8 +154,24 @@ impl ProcessEntry {
                 None,
                 None,
                 None,
+                0,
             ),
         }
+    }
+}
+
+/// Returns the dynamic-registration grace period for the given language.
+///
+/// Languages that dynamically register capabilities after `initialize`
+/// (e.g., jdtls) need a longer window before we treat a missing
+/// `definitionProvider` as conclusive. Statically-advertising servers
+/// (rust-analyzer, gopls, pyright) get 0s — a `false` reading is
+/// immediately conclusive.
+pub(crate) fn grace_period_for_language(language_id: &str) -> u64 {
+    match language_id {
+        "java" => 15,
+        "typescript" | "javascript" => 5,
+        _ => 0,
     }
 }
 
@@ -164,6 +187,7 @@ impl ProcessEntry {
 #[allow(clippy::fn_params_excessive_bools)]
 fn validation_status_from_parts(
     command: &str,
+    language_id: &str,
     running: bool,
     diagnostics_strategy: DiagnosticsStrategy,
     supports_definition: bool,
@@ -175,6 +199,7 @@ fn validation_status_from_parts(
     indexing_source: Option<String>,
     indexing_duration_secs: Option<u64>,
     indexing_progress_pct: Option<u8>,
+    registrations_received: u32,
 ) -> crate::types::LspLanguageStatus {
     if !running {
         return crate::types::LspLanguageStatus {
@@ -192,16 +217,17 @@ fn validation_status_from_parts(
             indexing_source: None,
             indexing_duration_secs: None,
             indexing_progress_percent: None,
+            registrations_received: None,
         };
     }
 
     // Grace period for dynamic registration: jdtls and similar LSPs register
     // capabilities dynamically *after* initialize (they don't statically
-    // advertise definitionProvider in the handshake). Under 5s uptime with
-    // definition_provider=false likely means registrations haven't arrived yet —
-    // return None (indeterminate) instead of Some(false) to avoid prematurely
-    // reporting warming_up and causing agents to add unnecessary retry delays.
-    let navigation_ready = if !supports_definition && uptime_seconds < 5 {
+    // advertise definitionProvider in the handshake). Language-aware grace
+    // periods prevent premature `Some(false)` for slow-registering servers
+    // while keeping static servers (rust-analyzer, gopls) immediately conclusive.
+    let grace = grace_period_for_language(language_id);
+    let navigation_ready = if !supports_definition && uptime_seconds < grace {
         None // Indeterminate — too early to tell, registrations may be in flight
     } else {
         Some(supports_definition)
@@ -234,6 +260,11 @@ fn validation_status_from_parts(
             } else {
                 indexing_progress_pct
             },
+            registrations_received: if running {
+                Some(registrations_received)
+            } else {
+                None
+            },
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
@@ -253,6 +284,11 @@ fn validation_status_from_parts(
                 None
             } else {
                 indexing_progress_pct
+            },
+            registrations_received: if running {
+                Some(registrations_received)
+            } else {
+                None
             },
         },
     }
@@ -325,7 +361,7 @@ mod tests {
             backoff_attempt: 0,
             unavailable_since: std::time::Instant::now(),
         });
-        let status = entry.to_validation_status("gopls");
+        let status = entry.to_validation_status("gopls", "go");
         assert!(!status.validation);
         assert!(status.reason.contains("gopls"));
         assert!(status.reason.contains("failed"));
@@ -339,6 +375,7 @@ mod tests {
         // Future agents: add more variants here as capabilities grow.
         let status = validation_status_from_parts(
             "rust-analyzer",
+            "rust",
             true,
             DiagnosticsStrategy::Pull,
             true,  // supports_definition
@@ -350,6 +387,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         assert!(
             status.validation,
@@ -367,6 +405,7 @@ mod tests {
     fn test_process_entry_running_with_diagnostics_indexing_complete() {
         let status = validation_status_from_parts(
             "rust-analyzer",
+            "rust",
             true,
             DiagnosticsStrategy::Pull,
             true,  // supports_definition
@@ -378,6 +417,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         assert!(status.validation);
         assert_eq!(status.indexing_complete, Some(true));
@@ -389,6 +429,7 @@ mod tests {
         // LSP connected but does not support textDocument/diagnostic.
         let status = validation_status_from_parts(
             "gopls",
+            "go",
             true,
             DiagnosticsStrategy::None,
             true,
@@ -400,6 +441,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         assert!(
             !status.validation,
@@ -419,6 +461,7 @@ mod tests {
         // Uptime should always be Some for a running process (even if 0 seconds).
         let status = validation_status_from_parts(
             "pyright",
+            "python",
             true,
             DiagnosticsStrategy::Pull,
             true,
@@ -430,6 +473,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         assert!(status.uptime_seconds.is_some());
         assert!(status.indexing_complete.is_some());
@@ -444,6 +488,7 @@ mod tests {
         // Navigation should still be "ready" because initialize handshake completed.
         let status = validation_status_from_parts(
             "pyright",
+            "python",
             true, // running
             DiagnosticsStrategy::None,
             true,  // supports_definition
@@ -455,6 +500,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         // Navigation ready regardless of diagnostics and indexing status
         assert_eq!(status.navigation_ready, Some(true));
@@ -469,6 +515,7 @@ mod tests {
         // Edge case: LSP running but doesn't support definition at all
         let status = validation_status_from_parts(
             "weird-lsp",
+            "rust",
             true, // running
             DiagnosticsStrategy::Pull,
             false, // supports_definition = false
@@ -480,6 +527,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         // Navigation not ready because LSP doesn't have definitionProvider capability
         assert_eq!(status.navigation_ready, Some(false));
@@ -492,6 +540,7 @@ mod tests {
         // When LSP is not running (crashed, failed to start), navigation_ready is None
         let status = validation_status_from_parts(
             "gopls",
+            "go",
             false,                     // NOT running
             DiagnosticsStrategy::None, // irrelevant when !running
             true,                      // irrelevant when !running
@@ -503,6 +552,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         assert_eq!(status.navigation_ready, None);
         assert_eq!(status.indexing_complete, None);
@@ -516,65 +566,71 @@ mod tests {
         // (indeterminate) instead of Some(false) to avoid premature warming_up.
         let status = validation_status_from_parts(
             "jdtls",
+            "java",
             true,
             DiagnosticsStrategy::None,
             false, // no definition yet — dynamic registration in flight
             false,
             false,
             false,
-            2, // under 5s — grace period active
+            2, // under 15s Java grace period — indeterminate
             None,
             None,
             None,
             None,
+            0,
         );
         assert_eq!(
             status.navigation_ready, None,
-            "under 5s with no definition should be indeterminate, not false"
+            "java under 15s with no definition should be indeterminate, not false"
         );
     }
 
     #[test]
     fn test_navigation_ready_false_after_grace_period() {
-        // After 5s, if definition is still not supported, it's conclusive.
+        // After 15s (Java grace period), if definition is still not supported, it's conclusive.
         let status = validation_status_from_parts(
             "jdtls",
+            "java",
             true,
             DiagnosticsStrategy::None,
             false, // still no definition after grace period
             false,
             false,
             false,
-            5, // at 5s — grace period over
+            15, // at 15s — Java grace period over
             None,
             None,
             None,
             None,
+            0,
         );
         assert_eq!(
             status.navigation_ready,
             Some(false),
-            "at/after 5s with no definition should be conclusively false"
+            "at/after 15s with no definition should be conclusively false"
         );
     }
 
     #[test]
     fn test_navigation_ready_true_during_grace_period_with_definition() {
-        // If supports_definition is true (even under 5s), return Some(true).
+        // If supports_definition is true (even early), return Some(true).
         // Grace period only applies when definition is false.
         let status = validation_status_from_parts(
             "gopls",
+            "go",
             true,
             DiagnosticsStrategy::Push,
             true, // definition available
             true,
             false,
             false,
-            1, // under 5s
+            1, // uptime 1s
             None,
             None,
             None,
             None,
+            0,
         );
         assert_eq!(
             status.navigation_ready,
@@ -798,6 +854,7 @@ mod tests {
     fn test_validation_status_not_running() {
         let status = validation_status_from_parts(
             "rust-analyzer",
+            "rust",
             false, // not running
             DiagnosticsStrategy::Pull,
             true,
@@ -809,6 +866,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(!status.validation);
@@ -828,6 +886,7 @@ mod tests {
     fn test_validation_status_running_with_pull_diagnostics() {
         let status = validation_status_from_parts(
             "rust-analyzer",
+            "rust",
             true, // running
             DiagnosticsStrategy::Pull,
             true,
@@ -839,6 +898,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(status.validation);
@@ -858,6 +918,7 @@ mod tests {
     fn test_validation_status_running_with_push_diagnostics() {
         let status = validation_status_from_parts(
             "gopls",
+            "go",
             true,
             DiagnosticsStrategy::Push,
             true,
@@ -869,6 +930,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(status.validation);
@@ -887,6 +949,7 @@ mod tests {
     fn test_validation_status_running_with_no_diagnostics() {
         let status = validation_status_from_parts(
             "some-lsp",
+            "rust",
             true,
             DiagnosticsStrategy::None,
             true,
@@ -898,6 +961,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(!status.validation);
@@ -917,6 +981,7 @@ mod tests {
     fn test_validation_status_navigation_ready_false_when_no_definition() {
         let status = validation_status_from_parts(
             "lsp",
+            "rust",
             true,
             DiagnosticsStrategy::Pull,
             false, // no definition support
@@ -928,6 +993,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(status.validation);
@@ -939,6 +1005,7 @@ mod tests {
     fn test_validation_status_includes_server_name() {
         let status = validation_status_from_parts(
             "command",
+            "rust",
             true,
             DiagnosticsStrategy::Pull,
             true,
@@ -950,6 +1017,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert_eq!(status.server_name, Some("custom-lsp-server".to_owned()));
@@ -959,6 +1027,7 @@ mod tests {
     fn test_validation_status_no_server_name() {
         let status = validation_status_from_parts(
             "command",
+            "rust",
             true,
             DiagnosticsStrategy::Pull,
             true,
@@ -970,6 +1039,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(status.server_name.is_none());
@@ -1226,5 +1296,144 @@ mod tests {
             call.language_id, "rust",
             "spawner must receive the correct language_id"
         );
+    }
+
+    // ── Language-aware grace period tests ─────────────────────────────────────
+
+    #[test]
+    fn test_grace_period_zero_for_static_servers() {
+        // rust-analyzer at 0s with supports_definition=false → Some(false) (NOT None)
+        // Static servers have 0s grace period — false is immediately conclusive.
+        let status = validation_status_from_parts(
+            "rust-analyzer",
+            "rust",
+            true,
+            DiagnosticsStrategy::Pull,
+            false, // no definition
+            true,
+            false,
+            false,
+            0, // uptime 0s — but 0s grace means no indeterminate window
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert_eq!(
+            status.navigation_ready,
+            Some(false),
+            "static servers: false at 0s should be conclusive, not indeterminate"
+        );
+    }
+
+    #[test]
+    fn test_grace_period_java_14s_still_indeterminate() {
+        let status = validation_status_from_parts(
+            "jdtls",
+            "java",
+            true,
+            DiagnosticsStrategy::None,
+            false,
+            false,
+            false,
+            false,
+            14, // under 15s Java grace period
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert_eq!(
+            status.navigation_ready, None,
+            "java at 14s with no definition should be indeterminate"
+        );
+    }
+
+    #[test]
+    fn test_grace_period_java_15s_conclusive() {
+        let status = validation_status_from_parts(
+            "jdtls",
+            "java",
+            true,
+            DiagnosticsStrategy::None,
+            false,
+            false,
+            false,
+            false,
+            15, // at 15s Java grace boundary
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert_eq!(
+            status.navigation_ready,
+            Some(false),
+            "java at 15s should be conclusively false"
+        );
+    }
+
+    #[test]
+    fn test_grace_period_typescript_4s_indeterminate() {
+        let status = validation_status_from_parts(
+            "typescript-language-server",
+            "typescript",
+            true,
+            DiagnosticsStrategy::Push,
+            false,
+            false,
+            false,
+            false,
+            4, // under 5s TS grace period
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert_eq!(
+            status.navigation_ready, None,
+            "typescript at 4s with no definition should be indeterminate"
+        );
+    }
+
+    #[test]
+    fn test_grace_period_go_0s_conclusive() {
+        // gopls statically advertises — 0s grace period.
+        let status = validation_status_from_parts(
+            "gopls",
+            "go",
+            true,
+            DiagnosticsStrategy::Push,
+            false,
+            false,
+            false,
+            false,
+            0,
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert_eq!(
+            status.navigation_ready,
+            Some(false),
+            "go at 0s with no definition should be conclusive (0s grace)"
+        );
+    }
+
+    #[test]
+    fn test_grace_period_function_values() {
+        assert_eq!(grace_period_for_language("java"), 15);
+        assert_eq!(grace_period_for_language("typescript"), 5);
+        assert_eq!(grace_period_for_language("javascript"), 5);
+        assert_eq!(grace_period_for_language("rust"), 0);
+        assert_eq!(grace_period_for_language("go"), 0);
+        assert_eq!(grace_period_for_language("python"), 0);
+        assert_eq!(grace_period_for_language("unknown"), 0);
     }
 }
