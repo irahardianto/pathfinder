@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.11.6...pathfinder-mcp-lsp-v0.12.0) - 2026-06-13
+
+### Added
+
+- *(lsp)* add LspError::ServerError variant to preserve JSON-RPC error codes
+- *(lsp)* implement language-aware grace periods, server identity, and capability registration telemetry
+
+### Fixed
+
+- *(lsp)* improve type definitions, trait coverage, and documentation
+- *(lsp)* harden language detection with multi-marker consistency and graceful fallbacks
+- *(lsp)* add cancel notification on timeout and harden lifecycle layer
+- *(lsp)* harden process management, transport, and background task layer
+- *(lsp)* harden response parsers with bounded preview and jdt:// URI handling
+- *(lsp)* resolve concurrent jdtls process conflicts, enhance java detection markers, and add tests
+- *(references)* prevent false-confidence zero references during warmup
+
+### Other
+
+- *(deps)* bump criterion from 0.5.1 to 0.8.2
+- *(lsp)* pre-allocate call sites vector in response parser
+
 ## [0.11.6](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.11.5...pathfinder-mcp-lsp-v0.11.6) - 2026-06-10
 
 ### Other
