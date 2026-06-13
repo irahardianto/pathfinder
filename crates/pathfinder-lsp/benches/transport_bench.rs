@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use pathfinder_lsp::client::transport::{read_message, write_message};
 use serde_json::json;
+use std::hint::black_box;
 use tokio::io::BufReader;
 
 fn bench_write_message(c: &mut Criterion) {

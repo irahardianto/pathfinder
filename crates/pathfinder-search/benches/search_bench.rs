@@ -5,8 +5,9 @@
     clippy::assigning_clones
 )]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_search::{RipgrepScout, Scout, SearchParams};
+use std::hint::black_box;
 use std::io::Write;
 use tempfile::TempDir;
 

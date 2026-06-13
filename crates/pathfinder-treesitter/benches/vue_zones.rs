@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::format_push_string)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pathfinder_treesitter::vue_zones::{parse_vue_multizone, scan_vue_zones};
+use std::hint::black_box;
 
 const SMALL_SFC: &[u8] = br#"<template>
   <div>Hello</div>

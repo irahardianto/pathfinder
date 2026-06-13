@@ -1,11 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use pathfinder_lsp::client::response_parsers::{
     parse_call_hierarchy_prepare_response, parse_definition_response, parse_references_response,
     parse_single_definition_location,
 };
 use serde_json::json;
+use std::hint::black_box;
 use std::path::Path;
 use tokio::runtime::Runtime;
 

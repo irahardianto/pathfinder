@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_common::config::SandboxConfig;
 use pathfinder_common::sandbox::Sandbox;
+use std::hint::black_box;
 use std::path::Path;
 
 fn bench_sandbox_check(c: &mut Criterion) {

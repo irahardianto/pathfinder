@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pathfinder_treesitter::language::SupportedLanguage;
 use pathfinder_treesitter::parser::AstParser;
+use std::hint::black_box;
 
 fn generate_large_source(n_functions: usize) -> Vec<u8> {
     let mut src = Vec::with_capacity(n_functions * 60);

@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pathfinder_common::types::{SemanticPath, VersionHash, WorkspaceRoot};
+use std::hint::black_box;
 use std::path::Path;
 
 fn bench_semantic_path_parse(c: &mut Criterion) {

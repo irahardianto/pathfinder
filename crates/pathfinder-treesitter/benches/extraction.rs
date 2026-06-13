@@ -6,10 +6,11 @@
     clippy::too_many_lines
 )]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pathfinder_treesitter::language::SupportedLanguage;
 use pathfinder_treesitter::parser::AstParser;
 use pathfinder_treesitter::symbols::extract_symbols_from_tree;
+use std::hint::black_box;
 
 fn generate_rust_source(n_functions: usize) -> Vec<u8> {
     let mut src = String::from("struct Foo { x: i32 }\n\nimpl Foo {\n");

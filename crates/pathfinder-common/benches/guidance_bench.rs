@@ -1,5 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_common::types::DegradedReason;
+use std::hint::black_box;
 
 fn bench_degraded_reason_guidance(c: &mut Criterion) {
     let mut group = c.benchmark_group("degraded_reason_guidance");

@@ -981,7 +981,8 @@ mod tests {
     }
 
     #[test]
-    fn test_is_workspace_file_traversal_outside_workspace() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_is_workspace_file_traversal_outside_workspace() -> Result<(), Box<dyn std::error::Error>>
+    {
         let dir = tempfile::tempdir()?;
         let canonical = dir.path().canonicalize()?;
 

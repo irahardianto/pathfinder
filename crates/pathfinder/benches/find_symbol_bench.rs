@@ -5,7 +5,8 @@
     clippy::semicolon_if_nothing_returned
 )]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 // Import the functions we optimized
 // Note: These are from the pathfinder crate, but we're benchmarking the algorithm itself

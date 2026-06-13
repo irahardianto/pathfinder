@@ -5,11 +5,12 @@
     clippy::format_collect
 )]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_common::types::SymbolChain;
 use pathfinder_treesitter::language::SupportedLanguage;
 use pathfinder_treesitter::parser::AstParser;
 use pathfinder_treesitter::symbols::{did_you_mean, extract_symbols_from_tree};
+use std::hint::black_box;
 
 fn bench_did_you_mean(c: &mut Criterion) {
     let mut group = c.benchmark_group("did_you_mean");
