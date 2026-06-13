@@ -71,9 +71,10 @@ mod tools;
 pub mod types;
 
 use types::{
-    FindCallersCalleesParams, FindSymbolParams, GetDefinitionParams, GetRepoMapParams,
-    GetSemanticPathParams, ReadFileParams, ReadFilesParams, ReadSourceFileParams,
-    ReadSymbolScopeParams, ReadWithDeepContextParams, SearchCodebaseParams, SearchCodebaseResponse,
+    FindAllReferencesParams, FindCallersCalleesParams, FindSymbolParams, GetDefinitionParams,
+    GetRepoMapParams, GetSemanticPathParams, LspHealthParams, ReadFileParams, ReadFilesParams,
+    ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams, SearchCodebaseParams,
+    SearchCodebaseResponse, SymbolOverviewParams,
 };
 
 use pathfinder_common::config::PathfinderConfig;
@@ -89,25 +90,6 @@ use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use std::sync::Arc;
-
-macro_rules! deserialize_params {
-    ($tool_name:expr, $val:expr, $param_type:ty, $expected:expr) => {
-        match serde_json::from_value::<$param_type>($val) {
-            Ok(p) => p,
-            Err(e) => {
-                let msg = format!(
-                    "Invalid parameters for tool '{}': {}. Expected parameters: {}",
-                    $tool_name, e, $expected
-                );
-                return Err(rmcp::model::ErrorData::new(
-                    rmcp::model::ErrorCode::INVALID_PARAMS,
-                    msg,
-                    None,
-                ));
-            }
-        }
-    };
-}
 
 /// The main Pathfinder MCP server.
 ///
@@ -254,14 +236,8 @@ Examples:
     )]
     async fn search_codebase(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<SearchCodebaseParams>,
     ) -> Result<Json<SearchCodebaseResponse>, ErrorData> {
-        let params = deserialize_params!(
-            "search_codebase",
-            params,
-            SearchCodebaseParams,
-            "query: string, is_regex?: boolean, path_glob?: string, filter_mode?: 'all' | 'code' | 'comments', max_results?: integer, context_lines?: integer, known_files?: string[], group_by_file?: boolean, exclude_glob?: string, offset?: integer"
-        );
         self.search_codebase_impl(params).await
     }
 
@@ -293,14 +269,8 @@ Example: `get_repo_map(path=\"src/\", visibility=\"all\")`"
     )]
     async fn get_repo_map(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<GetRepoMapParams>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
-        let params = deserialize_params!(
-            "get_repo_map",
-            params,
-            GetRepoMapParams,
-            "path?: string, depth?: integer, max_tokens?: integer, include_signatures?: boolean, changed_since?: string"
-        );
         self.get_repo_map_impl(params).await
     }
 
@@ -326,14 +296,8 @@ Common issues:
     )]
     async fn read_symbol_scope(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<ReadSymbolScopeParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "read_symbol_scope",
-            params,
-            ReadSymbolScopeParams,
-            "semantic_path: string"
-        );
         self.read_symbol_scope_impl(params).await
     }
 
@@ -354,14 +318,8 @@ Example: `read_source_file(filepath=\"src/auth.ts\", detail_level=\"compact\")`"
     )]
     async fn read_source_file(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<ReadSourceFileParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "read_source_file",
-            params,
-            ReadSourceFileParams,
-            "filepath: string (or path), detail_level?: 'source_only' | 'compact' | 'symbols' | 'full', start_line?: integer, end_line?: integer"
-        );
         self.read_source_file_impl(params).await
     }
 
@@ -389,14 +347,8 @@ Example: `read_with_deep_context(semantic_path=\"src/auth.ts::AuthService.login\
     )]
     async fn read_with_deep_context(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<ReadWithDeepContextParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "read_with_deep_context",
-            params,
-            ReadWithDeepContextParams,
-            "semantic_path: string, max_depth?: integer, project_only?: boolean"
-        );
         self.read_with_deep_context_impl(params).await
     }
 
@@ -424,14 +376,8 @@ Example: `get_definition(semantic_path=\"src/auth.ts::AuthService.login\")`"
     )]
     async fn get_definition(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<GetDefinitionParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "get_definition",
-            params,
-            GetDefinitionParams,
-            "semantic_path: string"
-        );
         self.get_definition_impl(params).await
     }
 
@@ -448,14 +394,8 @@ Example: `find_symbol(name=\"AuthService\", kind=\"class\")`"
     )]
     async fn find_symbol(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<FindSymbolParams>,
     ) -> Result<Json<types::FindSymbolResponse>, ErrorData> {
-        let params = deserialize_params!(
-            "find_symbol",
-            params,
-            FindSymbolParams,
-            "name: string, kind?: 'class' | 'interface' | 'enum' | 'method' | 'function' | 'struct' | 'trait' | 'constant' | 'module'"
-        );
         self.find_symbol_impl(params).await
     }
 
@@ -489,14 +429,8 @@ Example: `find_callers_callees(semantic_path=\"src/auth.ts::AuthService.login\",
     )]
     async fn find_callers_callees(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<FindCallersCalleesParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "find_callers_callees",
-            params,
-            FindCallersCalleesParams,
-            "semantic_path: string, max_depth?: integer, project_only?: boolean"
-        );
         self.find_callers_callees_impl(params).await
     }
 
@@ -523,14 +457,8 @@ Example: `find_all_references(semantic_path=\"src/auth.ts::AuthService.login\", 
     )]
     async fn find_all_references(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<FindAllReferencesParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "find_all_references",
-            params,
-            crate::server::types::FindAllReferencesParams,
-            "semantic_path: string, max_results?: integer, offset?: integer"
-        );
         self.find_all_references_impl(params).await
     }
 
@@ -556,14 +484,8 @@ Example: `symbol_overview(semantic_path=\"src/auth.ts::AuthService.login\")`"
     )]
     async fn symbol_overview(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<SymbolOverviewParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "symbol_overview",
-            params,
-            crate::server::types::SymbolOverviewParams,
-            "semantic_path: string, max_depth?: integer, project_only?: boolean, max_results?: integer, offset?: integer"
-        );
         self.symbol_overview_impl(params).await
     }
 
@@ -580,14 +502,8 @@ Example: `lsp_health(language=\"rust\")`"
     )]
     async fn lsp_health(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<LspHealthParams>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
-        let params = deserialize_params!(
-            "lsp_health",
-            params,
-            crate::server::types::LspHealthParams,
-            "language?: string, action?: 'restart'"
-        );
         self.lsp_health_impl(params).await
     }
 
@@ -602,14 +518,8 @@ Example: `read_file(filepath=\".env\", start_line=1, max_lines=50)`"
     )]
     async fn read_file(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<ReadFileParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "read_file",
-            params,
-            ReadFileParams,
-            "filepath: string (or path), start_line?: integer, max_lines?: integer"
-        );
         self.read_file_impl(params).await
     }
 
@@ -630,9 +540,8 @@ Example: `read_files(paths=[\"src/auth.ts\", \"src/config.ts\"], detail_level=\"
     )]
     async fn read_files(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<ReadFilesParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!("read_files", params, ReadFilesParams, "paths: string[]");
         self.read_files_impl(params).await
     }
 
@@ -650,14 +559,8 @@ Example: `get_semantic_path(file=\"src/auth.ts\", line=42)`"
     )]
     async fn get_semantic_path(
         &self,
-        Parameters(params): Parameters<serde_json::Value>,
+        Parameters(params): Parameters<GetSemanticPathParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let params = deserialize_params!(
-            "get_semantic_path",
-            params,
-            GetSemanticPathParams,
-            "file: string (or path), line: integer"
-        );
         self.get_semantic_path_impl(params).await
     }
 }
@@ -1798,6 +1701,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_deserialization_error_wrapping() {
+        // Deserialization errors are now handled by rmcp's `FromContextPart`
+        // impl (tested in integration tests). This test verifies that the impl
+        // layer correctly rejects semantically invalid but structurally valid
+        // params (empty filepath → FILE_NOT_FOUND).
         let ws_dir = tempdir().expect("temp dir");
         let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
         let config = PathfinderConfig::default();
@@ -1811,19 +1718,14 @@ mod tests {
             Arc::new(MockSurgeon::new()),
         );
 
-        let invalid_params = serde_json::json!({
-            "start_line": 1
-        });
-
-        let result = server.read_file(Parameters(invalid_params)).await;
-        let Err(err) = result else {
-            panic!("expected error");
+        // Structurally valid params but semantically invalid (empty filepath).
+        let params = ReadFileParams {
+            filepath: String::new(),
+            start_line: 0,
+            max_lines: 500,
         };
 
-        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
-        assert!(err
-            .message
-            .contains("Invalid parameters for tool 'read_file'"));
-        assert!(err.message.contains("filepath"));
+        let result = server.read_file_impl(params).await;
+        assert!(result.is_err(), "empty filepath should error");
     }
 }

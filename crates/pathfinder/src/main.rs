@@ -156,4 +156,14 @@ mod tests {
             assert!(msg.contains("path") || msg.contains("Invalid"));
         }
     }
+
+    #[test]
+    fn test_parse_init() {
+        let json_str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#;
+        let res: Result<rmcp::model::ClientJsonRpcMessage, _> = serde_json::from_str(json_str);
+        match res {
+            Ok(msg) => println!("Success: {msg:?}"),
+            Err(e) => panic!("Parse failed: {e:?}"),
+        }
+    }
 }
