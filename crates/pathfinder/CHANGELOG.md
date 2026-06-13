@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0](https://github.com/irahardianto/pathfinder/compare/v0.16.0...v0.17.0) - 2026-06-13
+
+### Added
+
+- *(lsp)* implement language-aware grace periods, server identity, and capability registration telemetry
+- *(navigation)* add include_imports option
+- *(lsp)* add LspError::ServerError variant to preserve JSON-RPC error codes
+- *(treesitter)* add language-aware traversal depth for repo map skeleton
+
+### Fixed
+
+- *(references)* prevent false-confidence zero references during warmup
+- *(health)* report all navigation tools as warming_up when LSP is initializing
+- *(lsp)* improve type definitions, trait coverage, and documentation
+- *(lsp)* harden language detection with multi-marker consistency and graceful fallbacks
+- *(lsp)* add cancel notification on timeout and harden lifecycle layer
+- *(lsp)* harden process management, transport, and background task layer
+- *(lsp)* harden response parsers with bounded preview and jdt:// URI handling
+- *(lsp)* resolve concurrent jdtls process conflicts, enhance java detection markers, and add tests
+
+### Other
+
+- *(deps)* bump criterion from 0.5.1 to 0.8.2
+- *(find-symbol)* optimize symbol lookup path and resolve clippy warnings
+- *(search)* optimize search path normalization and group building
+- *(server)* optimize language_from_path to return static string slices
+- *(navigation)* reduce definition warmup retry sleep duration from 3s to 1s
+- *(deps)* bump mockall from 0.13.1 to 0.14.0
+- *(sandbox)* pre-compute and classify sandbox deny patterns
+- *(lsp)* pre-allocate call sites vector in response parser
+- *(deps)* bump tree-sitter-python from 0.23.6 to 0.25.0
+- *(deps)* bump tree-sitter-rust from 0.23.3 to 0.24.2
+
 ## [0.16.0](https://github.com/irahardianto/pathfinder/compare/v0.15.0...v0.16.0) - 2026-06-10
 
 ### Added

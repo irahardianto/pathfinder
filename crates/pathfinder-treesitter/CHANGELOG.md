@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.10.3...pathfinder-mcp-treesitter-v0.10.4) - 2026-06-13
+
+### Added
+
+- *(treesitter)* add language-aware traversal depth for repo map skeleton
+
+### Other
+
+- *(deps)* bump criterion from 0.5.1 to 0.8.2
+- *(deps)* bump tree-sitter-python from 0.23.6 to 0.25.0
+- *(deps)* bump tree-sitter-rust from 0.23.3 to 0.24.2
+
 ## [0.10.3](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.10.2...pathfinder-mcp-treesitter-v0.10.3) - 2026-06-10
 
 ### Other
