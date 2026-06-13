@@ -227,7 +227,7 @@ impl PathfinderServer {
     }
 }
 
-// ── Tool Router (defines all 13 tools) ──────────────────────────────
+// ── Tool Router (defines all 14 tools) ──────────────────────────────
 
 #[tool_router]
 impl PathfinderServer {
