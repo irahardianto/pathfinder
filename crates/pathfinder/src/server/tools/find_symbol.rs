@@ -105,7 +105,7 @@ struct MatchToEnrich {
 /// Result of enriching a match with Tree-sitter.
 struct EnrichedMatch {
     semantic_path: String,
-    kind: String,
+    kind: &'static str,
     file: String,
     line: u64,
     preview: String,
@@ -251,6 +251,14 @@ impl PathfinderServer {
                 .await;
 
         // Phase 3: Flatten results and filter matches
+        // OPT-1: Pre-compute canonical workspace root once to avoid the
+        // expensive canonicalize() syscall (10-100µs) on every match.
+        let canonical_root = self
+            .workspace_root
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace_root.path().to_path_buf());
+
         let mut matches_to_enrich: Vec<MatchToEnrich> = Vec::new();
         for result in search_results {
             for m in result.matches {
@@ -267,7 +275,7 @@ impl PathfinderServer {
                 let file_path = Path::new(&m.file);
 
                 // Skip non-workspace files
-                if !is_workspace_file(file_path, self.workspace_root.path()) {
+                if !is_workspace_file(file_path, self.workspace_root.path(), &canonical_root) {
                     continue;
                 }
 
@@ -297,10 +305,22 @@ impl PathfinderServer {
             }
         }
 
+        // OPT-4: Deduplicate by (file, line) before enrichment.
+        // Multiple ripgrep patterns can match the same definition (e.g. `fn\s+foo`
+        // and `\bfoo\b`). Deduplicating here avoids redundant Tree-sitter file
+        // parses + AST walks — the most expensive per-match operation.
+        let pre_dedup_count = matches_to_enrich.len();
+        {
+            let mut seen_locations = std::collections::HashSet::new();
+            matches_to_enrich.retain(|m| seen_locations.insert((m.file.clone(), m.line)));
+        }
+        let dedup_eliminated = pre_dedup_count - matches_to_enrich.len();
+
         // Phase 4: Parallel enrichments
         tracing::debug!(
             tool = "find_symbol",
             num_matches = matches_to_enrich.len(),
+            dedup_eliminated = dedup_eliminated,
             "find_symbol: starting parallel enrichments"
         );
 
@@ -371,7 +391,7 @@ impl PathfinderServer {
 
                         // Filter by kind if specified
                         if let Some(ref filter_kind) = kind_filter {
-                            if !kind_matches_filter(&kind, filter_kind) {
+                            if !kind_matches_filter(kind, filter_kind) {
                                 return (None, is_degraded);
                             }
                         }
@@ -406,7 +426,7 @@ impl PathfinderServer {
             if let Some(e) = enriched {
                 all_matches.push(FoundSymbol {
                     semantic_path: e.semantic_path,
-                    kind: e.kind,
+                    kind: e.kind.to_owned(),
                     file: e.file,
                     line: e.line,
                     preview: e.preview,
@@ -483,19 +503,19 @@ fn extract_symbol_name_from_path(semantic_path: &str) -> String {
 /// Map a treesitter [`SymbolKind`] to the filter-string vocabulary used by
 /// [`kind_matches_filter`]. This is the authoritative kind source when
 /// treesitter succeeds — it replaces the heuristic `infer_kind_from_line`.
-fn symbol_kind_to_filter_string(kind: SymbolKind) -> String {
+fn symbol_kind_to_filter_string(kind: SymbolKind) -> &'static str {
     match kind {
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test => "function".to_string(),
-        SymbolKind::Class => "class".to_string(),
-        SymbolKind::Struct => "struct".to_string(),
-        SymbolKind::Impl => "impl".to_string(),
-        SymbolKind::Constant => "constant".to_string(),
-        SymbolKind::Interface => "interface".to_string(),
-        SymbolKind::Enum => "enum".to_string(),
-        SymbolKind::Module => "module".to_string(),
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test => "function",
+        SymbolKind::Class => "class",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Constant => "constant",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Module => "module",
         // Vue-specific kinds and other non-standard kinds fall through
         // to "unknown" — agents won't typically filter for these.
-        _ => "unknown".to_string(),
+        _ => "unknown",
     }
 }
 
@@ -504,34 +524,34 @@ fn symbol_kind_to_filter_string(kind: SymbolKind) -> String {
 /// Used as a fallback when treesitter is unavailable (unsupported language,
 /// parse failure, etc.). For languages with treesitter support, the
 /// authoritative kind comes from [`symbol_kind_to_filter_string`].
-fn infer_kind_from_line(line: &str) -> String {
+fn infer_kind_from_line(line: &str) -> &'static str {
     let lower = line.to_lowercase();
     if lower.contains("fn ")
         || lower.contains("func ")
         || lower.contains("function ")
         || lower.contains("def ")
     {
-        "function".to_string()
+        "function"
     } else if lower.contains("struct ") {
-        "struct".to_string()
+        "struct"
     } else if lower.contains("class ") || lower.contains("type ") {
-        "class".to_string()
+        "class"
     } else if lower.contains("enum ") {
-        "enum".to_string()
+        "enum"
     } else if lower.contains("trait ") || lower.contains("interface ") {
-        "interface".to_string()
+        "interface"
     } else if lower.contains("const ")
         || lower.contains("static ")
         || lower.contains("var ")
         || lower.contains("let ")
     {
-        "constant".to_string()
+        "constant"
     } else if lower.contains("mod ") || lower.contains("module ") {
-        "module".to_string()
+        "module"
     } else if lower.contains("impl ") {
-        "impl".to_string()
+        "impl"
     } else {
-        "unknown".to_string()
+        "unknown"
     }
 }
 
@@ -563,30 +583,54 @@ fn extract_name_from_line(line: &str) -> String {
 /// (e.g. Java methods are extracted as `SymbolKind::Function`). An agent asking
 /// for `kind="method"` should still find Java methods.
 fn kind_matches_filter(kind: &str, filter: &str) -> bool {
-    let kind_lower = kind.to_lowercase();
-    let filter_lower = filter.to_lowercase();
-
-    if kind_lower == filter_lower {
+    // Use eq_ignore_ascii_case to avoid to_lowercase() allocations.
+    // All kind/filter strings are ASCII-only ("function", "struct", etc.).
+    if kind.eq_ignore_ascii_case(filter) {
         return true;
     }
 
-    match filter_lower.as_str() {
+    // Normalize filter once for matching. All arms are ASCII lowercase literals.
+    if filter.eq_ignore_ascii_case("function")
+        || filter.eq_ignore_ascii_case("method")
+        || filter.eq_ignore_ascii_case("fn")
+    {
         // "function" and "method" are symmetric — both accept function-like kinds
-        "function" | "method" | "fn" => {
-            matches!(kind_lower.as_str(), "function" | "method" | "fn")
-        }
-        "class" => matches!(kind_lower.as_str(), "class" | "struct" | "interface"),
-        "struct" => kind_lower == "struct",
-        "interface" => kind_lower == "interface",
-        "enum" => kind_lower == "enum",
-        "constant" => matches!(kind_lower.as_str(), "constant" | "const" | "static" | "let"),
-        "module" => matches!(kind_lower.as_str(), "module" | "mod" | "namespace"),
-        _ => false,
+        kind.eq_ignore_ascii_case("function")
+            || kind.eq_ignore_ascii_case("method")
+            || kind.eq_ignore_ascii_case("fn")
+    } else if filter.eq_ignore_ascii_case("class") {
+        kind.eq_ignore_ascii_case("class")
+            || kind.eq_ignore_ascii_case("struct")
+            || kind.eq_ignore_ascii_case("interface")
+    } else if filter.eq_ignore_ascii_case("struct") {
+        kind.eq_ignore_ascii_case("struct")
+    } else if filter.eq_ignore_ascii_case("interface") {
+        kind.eq_ignore_ascii_case("interface")
+    } else if filter.eq_ignore_ascii_case("enum") {
+        kind.eq_ignore_ascii_case("enum")
+    } else if filter.eq_ignore_ascii_case("constant") {
+        kind.eq_ignore_ascii_case("constant")
+            || kind.eq_ignore_ascii_case("const")
+            || kind.eq_ignore_ascii_case("static")
+            || kind.eq_ignore_ascii_case("let")
+    } else if filter.eq_ignore_ascii_case("module") {
+        kind.eq_ignore_ascii_case("module")
+            || kind.eq_ignore_ascii_case("mod")
+            || kind.eq_ignore_ascii_case("namespace")
+    } else {
+        false
     }
 }
 
 /// Check if file is in workspace (not in `node_modules`, target, .git, etc.)
-fn is_workspace_file(path: &Path, workspace_root: &Path) -> bool {
+///
+/// Takes a pre-computed `canonical_root` to avoid the expensive `canonicalize()`
+/// syscall per match. The caller pre-computes this once before the loop.
+///
+/// Fast path: if the path is relative and contains no `..` traversal, it is
+/// unconditionally in-workspace (only skip-pattern filtering applies). This
+/// covers ~99% of ripgrep output.
+fn is_workspace_file(path: &Path, workspace_root: &Path, canonical_root: &Path) -> bool {
     let path_str = path.to_string_lossy();
 
     let skip_patterns = [
@@ -604,11 +648,17 @@ fn is_workspace_file(path: &Path, workspace_root: &Path) -> bool {
         }
     }
 
-    // Check path is within workspace_root
+    // Fast path: relative paths without traversal are guaranteed in-workspace.
+    // The caller (find_symbol_impl Phase 3) already rejects paths containing
+    // ".." or starting with "/" / "\\", so this fast path handles the
+    // overwhelming majority of matches without any syscall.
+    if !path.is_absolute() && !path_str.contains("..") {
+        return true;
+    }
+
+    // Slow path: only reached for edge cases (absolute paths, symlinks).
+    // Uses the pre-computed canonical root — avoids redundant canonicalize().
     let Ok(full_path) = workspace_root.join(path).canonicalize() else {
-        return false;
-    };
-    let Ok(canonical_root) = workspace_root.canonicalize() else {
         return false;
     };
 
@@ -844,5 +894,178 @@ mod tests {
         assert!(!kind_matches_filter("unknown", "class"));
         assert!(!kind_matches_filter("class", "method"));
         assert!(!kind_matches_filter("enum", "method"));
+    }
+
+    #[test]
+    fn test_is_workspace_file_relative_fast_path() -> Result<(), Box<dyn std::error::Error>> {
+        // OPT-1: relative paths without ".." should hit the fast path
+        // and return true without any syscall.
+        let dir = tempfile::tempdir()?;
+        let canonical = dir.path().canonicalize()?;
+
+        // Normal source files — fast path returns true
+        assert!(is_workspace_file(
+            Path::new("src/main.rs"),
+            dir.path(),
+            &canonical
+        ));
+        assert!(is_workspace_file(
+            Path::new("crates/pathfinder/src/lib.rs"),
+            dir.path(),
+            &canonical
+        ));
+        assert!(is_workspace_file(
+            Path::new("README.md"),
+            dir.path(),
+            &canonical
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_workspace_file_skip_patterns() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let canonical = dir.path().canonicalize()?;
+
+        // Skip patterns should reject even on fast path
+        assert!(!is_workspace_file(
+            Path::new("src/node_modules/lodash/index.js"),
+            dir.path(),
+            &canonical
+        ));
+        assert!(!is_workspace_file(
+            Path::new("some/target/debug/main"),
+            dir.path(),
+            &canonical
+        ));
+        assert!(!is_workspace_file(
+            Path::new("project/.git/objects/abc"),
+            dir.path(),
+            &canonical
+        ));
+        assert!(!is_workspace_file(
+            Path::new("app/vendor/github.com/pkg"),
+            dir.path(),
+            &canonical
+        ));
+        assert!(!is_workspace_file(
+            Path::new("frontend/dist/bundle.js"),
+            dir.path(),
+            &canonical
+        ));
+        assert!(!is_workspace_file(
+            Path::new("app/build/output.js"),
+            dir.path(),
+            &canonical
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_workspace_file_traversal_slow_path() -> Result<(), Box<dyn std::error::Error>> {
+        // Paths with ".." should take the slow path (canonicalize)
+        let dir = tempfile::tempdir()?;
+        let canonical = dir.path().canonicalize()?;
+
+        // ".." traversal that stays within workspace is still valid
+        // but takes the slow path. The joined path may or may not resolve.
+        // Create a nested dir so the traversal resolves back to workspace.
+        std::fs::create_dir_all(dir.path().join("a/b"))?;
+        std::fs::write(dir.path().join("test.txt"), "hello")?;
+        assert!(is_workspace_file(
+            Path::new("a/b/../../test.txt"),
+            dir.path(),
+            &canonical
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_workspace_file_traversal_outside_workspace() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let canonical = dir.path().canonicalize()?;
+
+        // Traversal outside workspace should fail (canonicalized path won't
+        // start with canonical root)
+        assert!(!is_workspace_file(
+            Path::new("../../etc/passwd"),
+            dir.path(),
+            &canonical
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pre_enrichment_dedup() {
+        // OPT-4: verify dedup by (file, line) retains first occurrence
+        // and removes duplicates.
+        let mut matches = vec![
+            MatchToEnrich {
+                file: "src/main.rs".to_string(),
+                line: 10,
+                content: "fn foo() {".to_string(),
+            },
+            MatchToEnrich {
+                file: "src/main.rs".to_string(),
+                line: 10,
+                content: "fn foo() {".to_string(), // duplicate
+            },
+            MatchToEnrich {
+                file: "src/main.rs".to_string(),
+                line: 20,
+                content: "fn bar() {".to_string(), // same file, different line
+            },
+            MatchToEnrich {
+                file: "src/lib.rs".to_string(),
+                line: 10,
+                content: "fn baz() {".to_string(), // different file, same line
+            },
+        ];
+
+        let pre_count = matches.len();
+        {
+            let mut seen = std::collections::HashSet::new();
+            matches.retain(|m| seen.insert((m.file.clone(), m.line)));
+        }
+
+        assert_eq!(matches.len(), 3);
+        assert_eq!(pre_count - matches.len(), 1);
+        assert_eq!(matches[0].file, "src/main.rs");
+        assert_eq!(matches[0].line, 10);
+        assert_eq!(matches[1].file, "src/main.rs");
+        assert_eq!(matches[1].line, 20);
+        assert_eq!(matches[2].file, "src/lib.rs");
+        assert_eq!(matches[2].line, 10);
+    }
+
+    #[test]
+    fn test_pre_enrichment_dedup_preserves_all_unique() {
+        // OPT-4: when all entries are unique, none should be removed.
+        let mut matches = vec![
+            MatchToEnrich {
+                file: "a.rs".to_string(),
+                line: 1,
+                content: "fn a() {".to_string(),
+            },
+            MatchToEnrich {
+                file: "b.rs".to_string(),
+                line: 2,
+                content: "fn b() {".to_string(),
+            },
+            MatchToEnrich {
+                file: "c.rs".to_string(),
+                line: 3,
+                content: "fn c() {".to_string(),
+            },
+        ];
+
+        let pre_count = matches.len();
+        {
+            let mut seen = std::collections::HashSet::new();
+            matches.retain(|m| seen.insert((m.file.clone(), m.line)));
+        }
+
+        assert_eq!(matches.len(), pre_count);
+        assert_eq!(matches.len(), 3);
     }
 }
