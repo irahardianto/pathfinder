@@ -27,6 +27,7 @@ Check once per session.
 | Symbol overview | `symbol_overview` | Source + callers + callees + references in one call |
 | LSP status | `lsp_health` | Check when navigation returns `degraded: true` |
 | Read config file | `read_file` | For YAML, TOML, JSON, .env, Dockerfile |
+| Location → semantic path | `get_semantic_path` | File:line → semantic path. For stack traces, grep results, error messages. |
 
 ### Addressing
 
@@ -34,7 +35,7 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 ### Degraded Mode
 
-`get_definition`, `find_callers_callees`, `read_with_deep_context`, `find_all_references` use LSP. When `degraded: true`:
+`get_definition`, `find_callers_callees`, `read_with_deep_context`, `find_all_references`, `symbol_overview` use LSP. When `degraded: true`:
 - Text output starts with: `⚠️ DEGRADED ({reason}) — {tool-specific guidance}`
 - Results are best-effort — never treat empty as confirmed-zero
 - Check `degraded_reason` and `lsp_readiness`

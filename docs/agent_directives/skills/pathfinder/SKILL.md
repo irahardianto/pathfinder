@@ -186,7 +186,7 @@ Check `max_tokens_used` in the response to see the effective budget applied.
 
 ## LSP Degraded Mode
 
-**Tools that use LSP:** `get_definition`, `find_callers_callees`, `read_with_deep_context`, `find_all_references`.
+**Tools that use LSP:** `get_definition`, `find_callers_callees`, `read_with_deep_context`, `find_all_references`, `symbol_overview`.
 
 **Visual indicator:** When degraded, text output starts with:
 ```
@@ -276,6 +276,22 @@ the symbol might be defined in a different file. The semantic path requires the
 | `symbols` | Symbol tree only, no source | Discover available symbols |
 | `full` | Source + nested symbol tree | Deep understanding |
 
+### Converting Grep/Stack Trace Results to Semantic Paths
+
+When you have a file + line from grep, error output, or a stack trace:
+```
+1. get_semantic_path(file="src/auth.ts", line=42)
+   → Returns semantic path of the symbol at that line
+   → null if line is outside any named symbol
+
+2. Use the returned semantic_path with any other Pathfinder tool:
+   read_symbol_scope(semantic_path="<returned path>")
+   find_callers_callees(semantic_path="<returned path>")
+```
+
+Supported languages: .rs, .ts, .tsx, .go, .py, .vue, .js, .jsx, .java.
+For unsupported languages, use `read_source_file(filepath, detail_level="symbols")` instead.
+
 ## Quick Reference
 
 | I want to... | Tool chain |
@@ -292,8 +308,9 @@ the symbol might be defined in a different file. The semantic path requires the
 | Find ALL references (including non-call) | `find_all_references` |
 | Jump to a definition | `get_definition` |
 | Find tech debt | `search_codebase(query="TODO\|FIXME", filter_mode="comments_only")` |
-| Check LSP status | `lsp_health` |
+| Check LSP status | `lsp_health` (pass `language="rust"` for specific lang, `action="restart"` to force-restart) |
 | Read a config file | `read_file` |
+| Convert file:line to semantic path | `get_semantic_path` (for stack traces, grep results, error messages) |
 
 ## Fallback (Pathfinder Unavailable)
 
@@ -307,5 +324,6 @@ If tools are not available, fall back transparently:
 | `get_repo_map` | `Glob` or `ls` |
 | `find_callers_callees` / `get_definition` | `Grep` (approximate) |
 | `find_symbol` / `symbol_overview` | `Grep` + `Read` (approximate) |
+| `get_semantic_path` | `Grep` + `Read` (parse file manually) |
 
 Do not block on Pathfinder. Complete the work with built-in tools.
