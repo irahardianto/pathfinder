@@ -51,7 +51,7 @@ Pathfinder solves these problems by providing:
 
 ### Key Features
 
-- 🛠️ **13 MCP Tools** — covering code navigation, semantic discovery, file reading, impact analysis, and batch operations.
+- 🛠️ **14 MCP Tools** — covering code navigation, semantic discovery, file reading, impact analysis, and batch operations.
 - 🌐 **8 Languages** — native Tree-sitter support for Go, Java, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
 - ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
@@ -203,7 +203,7 @@ For any MCP-compatible client, the minimum effective setup is to inject the **AG
 <!-- TOOLS -->
 ## Tools
 
-Pathfinder exposes 13 tools organized into three categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
+Pathfinder exposes 14 tools organized into four categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
 
 ### 🔍 Search & Navigation
 
@@ -228,6 +228,12 @@ Pathfinder exposes 13 tools organized into three categories. Every tool operates
 | `read_file` | Read raw file content with pagination (`start_line`, `max_lines`). Best for configuration files (YAML, TOML, Dockerfile). For source code, prefer `read_symbol_scope`. |
 | `read_files` | Batch read multiple files in a single call with per-file error resilience. AST-parsed for source files, raw content for config files. Max 10 files per call. Supports `detail_level` and `max_lines_per_file` controls. |
 
+### 🔧 Utility
+
+| Tool | Description |
+|---|---|
+| `get_semantic_path` | Convert a file path + line number to the semantic path of the enclosing symbol. Essential for bridging grep results, stack traces, and error messages to Pathfinder's semantic path system. Tree-sitter powered. |
+
 <!-- ARCHITECTURE -->
 ## Architecture
 
@@ -251,7 +257,8 @@ pathfinder/
 │   │               ├── source_file.rs
 │   │               ├── symbols.rs
 │   │               ├── find_symbol.rs
-│   │               └── read_files.rs
+│   │               ├── read_files.rs
+│   │               └── semantic_path.rs
 │   │
 │   ├── pathfinder-common/       # Shared types, errors, config, sandbox
 │   ├── pathfinder-treesitter/   # The Surgeon — AST parsing & symbol extraction
@@ -394,6 +401,7 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] `find_symbol` tool — resolve bare symbol names to semantic paths
 - [x] `read_files` tool — batch multi-file reading with per-file error resilience
 - [x] `symbol_overview` tool — composite source + callers + callees + references in one call
+- [x] `get_semantic_path` tool — convert file:line locations to semantic paths
 - [ ] Additional language support (C/C++, C#, Kotlin, etc.)
 - [ ] Custom LSP server command overrides via configuration file
 
