@@ -52,6 +52,22 @@ const DEFAULT_DENY_PATTERNS: &[&str] = &[
     "build/",
 ];
 
+/// Pre-computed additional deny pattern. Classifies each raw config pattern
+/// once at init time so `is_additional_denied()` performs zero allocations.
+enum AdditionalDenyPattern {
+    /// `*.ext` — match by file extension suffix (pre-computed `.ext` form).
+    ExtensionGlob { dot_ext: String },
+    /// `dir/` — directory pattern with pre-computed boundary variants.
+    Directory {
+        dir: String,
+        dir_slash: String,
+        slash_dir_slash: String,
+        slash_dir: String,
+    },
+    /// Bare-word pattern — exact filename match only.
+    Exact { pattern: String },
+}
+
 /// The sandbox enforcer. Checks file paths against the three-tier deny model.
 pub struct Sandbox {
     /// Workspace root path. Used for normalizing same-workspace absolute paths.
@@ -60,8 +76,8 @@ pub struct Sandbox {
     effective_default_deny: Vec<String>,
     /// User-defined `.pathfinderignore` rules.
     user_ignore: Option<Gitignore>,
-    /// Config-level additional deny patterns.
-    additional_deny: Vec<String>,
+    /// Config-level additional deny patterns (pre-computed for zero-alloc checks).
+    additional_deny: Vec<AdditionalDenyPattern>,
 }
 
 impl Sandbox {
@@ -106,11 +122,36 @@ impl Sandbox {
             .map(|s| (*s).to_owned())
             .collect();
 
+        // Pre-compute additional deny patterns so is_additional_denied()
+        // performs zero heap allocations per check() call.
+        let additional_deny = config
+            .additional_deny
+            .iter()
+            .map(|pattern| {
+                if let Some(ext) = pattern.strip_prefix("*.") {
+                    AdditionalDenyPattern::ExtensionGlob {
+                        dot_ext: format!(".{ext}"),
+                    }
+                } else if let Some(dir) = pattern.strip_suffix('/') {
+                    AdditionalDenyPattern::Directory {
+                        dir: dir.to_owned(),
+                        dir_slash: format!("{dir}/"),
+                        slash_dir_slash: format!("/{dir}/"),
+                        slash_dir: format!("/{dir}"),
+                    }
+                } else {
+                    AdditionalDenyPattern::Exact {
+                        pattern: pattern.clone(),
+                    }
+                }
+            })
+            .collect();
+
         Self {
             workspace_root: workspace_root.to_path_buf(),
             effective_default_deny,
             user_ignore,
-            additional_deny: config.additional_deny.clone(),
+            additional_deny,
         }
     }
 
@@ -278,31 +319,36 @@ impl Sandbox {
 
     fn is_additional_denied(&self, path_str: &str) -> bool {
         for pattern in &self.additional_deny {
-            if pattern.starts_with("*.") {
-                // Extension glob: "*.generated.ts" — match by file extension suffix
-                let ext = pattern.trim_start_matches("*.");
-                if path_str.ends_with(&format!(".{ext}")) {
-                    return true;
+            match pattern {
+                AdditionalDenyPattern::ExtensionGlob { dot_ext } => {
+                    if path_str.ends_with(dot_ext.as_str()) {
+                        return true;
+                    }
                 }
-            } else if pattern.ends_with('/') {
-                // Directory pattern: "secrets/" — match any path component boundary
-                let dir = pattern.trim_end_matches('/');
-                // Match at start or after a path separator so "temp/" does not deny "src/template/"
-                if path_str == dir
-                    || path_str.starts_with(&format!("{dir}/"))
-                    || path_str.contains(&format!("/{dir}/"))
-                    || path_str.ends_with(&format!("/{dir}"))
-                {
-                    return true;
+                AdditionalDenyPattern::Directory {
+                    dir,
+                    dir_slash,
+                    slash_dir_slash,
+                    slash_dir,
+                } => {
+                    // Match at start or after a path separator so "temp/" does not deny "src/template/"
+                    if path_str == dir
+                        || path_str.starts_with(dir_slash.as_str())
+                        || path_str.contains(slash_dir_slash.as_str())
+                        || path_str.ends_with(slash_dir.as_str())
+                    {
+                        return true;
+                    }
                 }
-            } else {
-                // Bare-word pattern: match only against the filename component, not the full path
-                // so that "secret" does not deny "src/secretariat/utils.rs"
-                let basename = std::path::Path::new(path_str)
-                    .file_name()
-                    .map_or(path_str, |f| f.to_str().unwrap_or(path_str));
-                if basename == pattern || path_str == pattern.as_str() {
-                    return true;
+                AdditionalDenyPattern::Exact { pattern } => {
+                    // Bare-word pattern: match only against the filename component, not the full path
+                    // so that "secret" does not deny "src/secretariat/utils.rs"
+                    let basename = std::path::Path::new(path_str)
+                        .file_name()
+                        .map_or(path_str, |f| f.to_str().unwrap_or(path_str));
+                    if basename == pattern || path_str == pattern.as_str() {
+                        return true;
+                    }
                 }
             }
         }
