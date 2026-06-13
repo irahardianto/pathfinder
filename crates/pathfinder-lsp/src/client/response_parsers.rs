@@ -307,8 +307,9 @@ pub fn parse_call_hierarchy_calls_response(
         }
         let item = parsed_items.remove(0);
 
-        let mut call_sites = Vec::new();
-        if let Some(ranges) = call.get(ranges_key).and_then(|r| r.as_array()) {
+        let ranges = call.get(ranges_key).and_then(|r| r.as_array());
+        let mut call_sites = Vec::with_capacity(ranges.map_or(0, Vec::len));
+        if let Some(ranges) = ranges {
             for range in ranges {
                 if let Some(line) = range
                     .get("start")
