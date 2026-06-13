@@ -209,7 +209,7 @@ impl PathfinderServer {
                         if lang == "text" {
                             None
                         } else {
-                            Some(lang)
+                            Some(lang.to_owned())
                         }
                     });
 
@@ -297,7 +297,7 @@ impl PathfinderServer {
             let language = if language == "text" {
                 String::new()
             } else {
-                language
+                language.to_owned()
             };
 
             FileResult {

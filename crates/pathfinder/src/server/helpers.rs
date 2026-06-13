@@ -160,7 +160,7 @@ pub(crate) fn format_degraded_notice(reason: &pathfinder_common::types::Degraded
 
 /// Detect the language of a file from its extension.
 /// Used by `read_file` to populate the `language` field in the response.
-pub(crate) fn language_from_path(path: &Path) -> String {
+pub(crate) fn language_from_path(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ts" | "tsx") => "typescript",
         Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
@@ -180,7 +180,6 @@ pub(crate) fn language_from_path(path: &Path) -> String {
         }
         _ => "text",
     }
-    .to_owned()
 }
 
 // ── Semantic-Path Helpers ───────────────────────────────────────────

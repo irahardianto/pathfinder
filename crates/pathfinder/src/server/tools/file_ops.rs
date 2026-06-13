@@ -85,7 +85,7 @@ impl PathfinderServer {
             .join("\n");
 
         // 4. Detect language from extension
-        let language = language_from_path(relative_path);
+        let language = language_from_path(relative_path).to_owned();
         let duration_ms = start.elapsed().as_millis();
 
         tracing::info!(
