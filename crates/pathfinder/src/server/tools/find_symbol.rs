@@ -1,7 +1,7 @@
 //! `search` tool (symbol mode) — Resolve a bare symbol name to its `file::symbol` semantic path(s).
 
-use crate::server::helpers::io_error_data;
-use crate::server::types::{FindSymbolParams, FindSymbolResponse, FoundSymbol};
+use crate::server::helpers::invalid_params_error;
+use crate::server::types::{FindSymbolResponse, FoundSymbol, SearchParams as SearchToolParams};
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
 use pathfinder_search::SearchParams;
@@ -127,27 +127,29 @@ impl PathfinderServer {
     /// 4. Limited to `max_results` entries
     pub(crate) async fn find_symbol_impl(
         &self,
-        params: FindSymbolParams,
+        params: SearchToolParams,
     ) -> Result<Json<FindSymbolResponse>, ErrorData> {
         let start = std::time::Instant::now();
 
         tracing::info!(
             tool = "find_symbol",
-            name = %params.name,
+            query = %params.query,
             kind = ?params.kind,
             path_glob = %params.path_glob,
             max_results = params.max_results,
             "find_symbol: start"
         );
 
-        if params.name.trim().is_empty() {
-            return Err(io_error_data("name must not be empty"));
+        if params.query.trim().is_empty() {
+            return Err(invalid_params_error("query must not be empty"));
         }
 
         // Validate name doesn't contain path traversal or regex metacharacters
-        let name_lower = params.name.to_lowercase();
+        let name_lower = params.query.to_lowercase();
         if name_lower.contains("..") || name_lower.contains('/') || name_lower.contains('\\') {
-            return Err(io_error_data("name must not contain path separators"));
+            return Err(invalid_params_error(
+                "query must not contain path separators",
+            ));
         }
 
         // Check if path_glob already filters by extension
@@ -180,7 +182,7 @@ impl PathfinderServer {
         let mut search_params_list: Vec<SearchParams> = Vec::new();
         for (ext, glob) in extensions {
             let ext_patterns =
-                crate::server::tools::navigation::definition_patterns(ext, &params.name);
+                crate::server::tools::navigation::definition_patterns(ext, &params.query);
             for pattern in ext_patterns {
                 search_params_list.push(SearchParams {
                     workspace_root: self.workspace_root.path().to_path_buf(),
@@ -446,11 +448,11 @@ impl PathfinderServer {
         // Sort by relevance (exact match > prefix match > contains match)
         unique_matches.sort_by(|a, b| {
             let score_a = relevance_score(
-                &params.name,
+                &params.query,
                 &extract_symbol_name_from_path(&a.semantic_path),
             );
             let score_b = relevance_score(
-                &params.name,
+                &params.query,
                 &extract_symbol_name_from_path(&b.semantic_path),
             );
             match score_b.cmp(&score_a) {

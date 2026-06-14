@@ -1,14 +1,14 @@
 //! `search` tool (text/regex mode) — Ripgrep-backed text search with Tree-sitter enrichment.
 
-use crate::server::helpers::{io_error_data, millis_to_u64};
+use crate::server::helpers::{invalid_params_error, io_error_data, millis_to_u64};
 use crate::server::types::{
-    GroupedKnownMatch, GroupedMatch, SearchCodebaseParams, SearchCodebaseResponse,
+    GroupedKnownMatch, GroupedMatch, SearchCodebaseResponse, SearchMode, SearchParams,
     SearchResultGroup,
 };
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
 use pathfinder_common::types::{DegradedReason, FilterMode};
-use pathfinder_search::{SearchMatch, SearchParams};
+use pathfinder_search::{SearchMatch, SearchParams as ScoutSearchParams};
 use pathfinder_treesitter::language::SupportedLanguage;
 use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
@@ -39,42 +39,64 @@ impl PathfinderServer {
     /// - `exclude_glob` is passed to the scout to exclude files before search.
     /// - `known_files` suppresses verbose context for files the agent already has.
     /// - `group_by_file` clusters results into `file_groups` in the response.
-    // Orchestrates Ripgrep (raw search) and Tree-sitter (AST enrichment), with
-    // degraded-mode bypass logic, response formatting for both grouped and flat output,
-    // and detailed telemetry logging. The linear structure makes the orchestration
-    // easier to understand and verify.
+    pub(crate) async fn search_impl(
+        &self,
+        params: SearchParams,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        match params.mode {
+            SearchMode::Text | SearchMode::Regex => {
+                let result = self.search_codebase_impl(params).await?;
+                let text = serde_json::to_string_pretty(&result.0)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"));
+                Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::Content::text(text),
+                ]))
+            }
+            SearchMode::Symbol => {
+                let result = self.find_symbol_impl(params).await?;
+                let text = serde_json::to_string_pretty(&result.0)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"));
+                Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::Content::text(text),
+                ]))
+            }
+        }
+    }
+
+    /// Core logic for the `search` tool (text/regex mode).
     #[expect(
         clippy::too_many_lines,
         reason = "Sequential pipeline: ripgrep → TS enrichment → filter → group → response. Extraction done at helper level; remaining orchestration is linear."
     )]
     pub(crate) async fn search_codebase_impl(
         &self,
-        params: SearchCodebaseParams,
+        params: SearchParams,
     ) -> Result<Json<SearchCodebaseResponse>, ErrorData> {
         let start = std::time::Instant::now();
+        let is_regex = matches!(params.mode, SearchMode::Regex);
+        let group_by_file = true;
+        let filter_mode = FilterMode::CodeOnly;
 
         tracing::info!(
             tool = "search_codebase",
             query = %params.query,
-            is_regex = params.is_regex,
+            is_regex,
             path_glob = %params.path_glob,
             exclude_glob = %params.exclude_glob,
             known_files_count = params.known_files.len(),
-            group_by_file = params.group_by_file,
-            filter_mode = ?params.filter_mode,
+            group_by_file,
+            filter_mode = ?filter_mode,
             "search_codebase: start"
         );
 
         if params.query.trim().is_empty() {
-            return Err(crate::server::helpers::io_error_data(
-                "query must not be empty",
-            ));
+            return Err(invalid_params_error("query must not be empty"));
         }
 
-        let search_params = SearchParams {
+        let search_params = ScoutSearchParams {
             workspace_root: self.workspace_root.path().to_path_buf(),
             query: params.query.clone(),
-            is_regex: params.is_regex,
+            is_regex,
             path_glob: params.path_glob.clone(),
             exclude_glob: params.exclude_glob.clone(),
             max_results: params.max_results as usize,
@@ -105,11 +127,11 @@ impl PathfinderServer {
                 // `degraded: true` and `degraded_reason: "unsupported_language_filter_bypassed"`
                 // so they can decide how to handle the results themselves. Returning zero matches
                 // would cause agents to falsely conclude the codebase has no results.
-                let filter_was_bypassed = degraded && params.filter_mode != FilterMode::All;
+                let filter_was_bypassed = degraded && filter_mode != FilterMode::All;
                 let filtered_matches = if filter_was_bypassed {
                     enriched_matches
                 } else {
-                    apply_filter_mode(enriched_matches, &node_types, params.filter_mode)
+                    apply_filter_mode(enriched_matches, &node_types, filter_mode)
                 };
 
                 let degraded_reason = if filter_was_bypassed {
@@ -129,7 +151,7 @@ impl PathfinderServer {
                     .collect();
 
                 // Build grouped output if requested.
-                let file_groups = if params.group_by_file {
+                let file_groups = if group_by_file {
                     Some(build_file_groups(&filtered_matches, &known_set))
                 } else {
                     None
@@ -160,7 +182,7 @@ impl PathfinderServer {
                     .and_then(|v| v.try_into().ok())
                     .unwrap_or(100);
 
-                let filter_mode_name = match params.filter_mode {
+                let filter_mode_name = match filter_mode {
                     FilterMode::All => "all",
                     FilterMode::CodeOnly => "code_only",
                     FilterMode::CommentsOnly => "comments_only",
@@ -168,7 +190,7 @@ impl PathfinderServer {
 
                 let hint = if returned_count == 0
                     && result.total_matches > 0
-                    && params.filter_mode != FilterMode::All
+                    && filter_mode != FilterMode::All
                 {
                     Some(format!(
                         "0 matches with filter_mode={} but {} match(es) exist with filter_mode=all. Retry with filter_mode='all' to see all match types.",
@@ -187,7 +209,7 @@ impl PathfinderServer {
                     files_searched,
                     files_in_scope,
                     coverage_percent,
-                    filter_mode = ?params.filter_mode,
+                    filter_mode = ?filter_mode,
                     filter_bypassed = filter_was_bypassed,
                     hint_emitted = hint.is_some(),
                     ripgrep_ms,
@@ -226,6 +248,29 @@ impl PathfinderServer {
             }
             Err(err) => {
                 let duration_ms = start.elapsed().as_millis();
+
+                // Invalid regex/glob patterns are client errors (bad input),
+                // not server failures. Return INVALID_PARAMS (-32602).
+                // SearchError::InvalidPattern formats as "invalid {type} pattern: ..."
+                let err_msg = err.to_string();
+                if err_msg.starts_with("invalid regex pattern:")
+                    || err_msg.starts_with("invalid path_glob:")
+                    || err_msg.starts_with("invalid exclude_glob:")
+                {
+                    tracing::info!(
+                        tool = "search_codebase",
+                        error = %err,
+                        error_code = "INVALID_PARAMS",
+                        duration_ms,
+                        "search_codebase: invalid pattern"
+                    );
+                    return Err(ErrorData::new(
+                        rmcp::model::ErrorCode::INVALID_PARAMS,
+                        format!("invalid pattern: {err_msg}"),
+                        None,
+                    ));
+                }
+
                 tracing::warn!(
                     tool = "search_codebase",
                     error = %err,
@@ -464,19 +509,16 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "findme".to_owned(),
-            is_regex: false,
+            mode: SearchMode::Text,
             path_glob: "**/*.xyz".to_owned(),
-            exclude_glob: String::default(),
-            offset: 0,
             max_results: 10,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
-            // Use FilterMode::All so no bypass occurs — degraded_reason is "unsupported_language"
-            // (not "unsupported_language_filter_bypassed" which happens with CodeOnly/CommentsOnly)
-            filter_mode: pathfinder_common::types::FilterMode::All,
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
         };
         let result = server.search_codebase_impl(params).await;
         let response = result.expect("search should succeed");
@@ -490,8 +532,8 @@ mod tests {
                 .degraded_reason
                 .as_ref()
                 .map(std::string::ToString::to_string),
-            Some("unsupported_language".to_string()),
-            "with FilterMode::All, filter is not bypassed so reason is unsupported_language"
+            Some("unsupported_language_filter_bypassed".to_string()),
+            "filter is bypassed so reason is unsupported_language_filter_bypassed"
         );
     }
 
@@ -561,18 +603,16 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "findme".to_owned(),
-            is_regex: false,
+            mode: SearchMode::Text,
             path_glob: "**/*.rs".to_owned(),
-            exclude_glob: String::default(),
-            offset: 0,
             max_results: 10,
             context_lines: 0,
-            // KEY: file is in known_files + group_by_file: true
             known_files: vec!["src/main.rs".to_owned()],
-            group_by_file: true,
-            filter_mode: pathfinder_common::types::FilterMode::All,
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
         };
 
         let result = server.search_codebase_impl(params).await;
@@ -782,17 +822,16 @@ mod tests {
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
         // Request comments_only on an unsupported language — without the fix this returns 0 matches
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "TODO".to_owned(),
-            is_regex: false,
+            mode: SearchMode::Text,
             path_glob: "**/*.xyz".to_owned(),
-            exclude_glob: String::default(),
-            offset: 0,
             max_results: 10,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
-            filter_mode: pathfinder_common::types::FilterMode::CommentsOnly,
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
         };
         let result = server.search_codebase_impl(params).await;
         let response = result.expect("search should succeed");
@@ -855,18 +894,16 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "find_me".to_owned(),
-            is_regex: false,
+            mode: SearchMode::Text,
             path_glob: "**/*.rs".to_owned(),
-            exclude_glob: String::default(),
-            offset: 0,
             max_results: 10,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
-            // code_only will filter out the comment match
-            filter_mode: pathfinder_common::types::FilterMode::CodeOnly,
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
         };
         let result = server.search_codebase_impl(params).await;
         let response = result.expect("search should succeed");
@@ -925,17 +962,16 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "find_me".to_owned(),
-            is_regex: false,
+            mode: SearchMode::Text,
             path_glob: "**/*.rs".to_owned(),
-            exclude_glob: String::default(),
-            offset: 0,
             max_results: 10,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
-            filter_mode: pathfinder_common::types::FilterMode::All,
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
         };
         let result = server.search_codebase_impl(params).await;
         let response = result.expect("search should succeed");
@@ -989,17 +1025,16 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "findme".to_owned(),
-            is_regex: false,
+            mode: SearchMode::Text,
             path_glob: "**/*.rs".to_owned(),
-            exclude_glob: String::default(),
-            offset: 0,
-            max_results: 2, // Small limit to force truncation
+            max_results: 2,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
-            filter_mode: pathfinder_common::types::FilterMode::All,
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
         };
         let result = server.search_codebase_impl(params).await;
         let response = result.expect("search should succeed");
@@ -1051,17 +1086,16 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "findme".to_owned(),
-            is_regex: false,
+            mode: SearchMode::Text,
             path_glob: "**/*".to_owned(),
-            exclude_glob: String::default(),
-            offset: 0,
             max_results: 10,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
-            filter_mode: pathfinder_common::types::FilterMode::All,
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
         };
         let result = server.search_codebase_impl(params).await;
         let response = result.expect("search should succeed");
@@ -1078,5 +1112,37 @@ mod tests {
             response.0.other_skipped, 0,
             "other_skipped should be 0 when no I/O errors occur"
         );
+    }
+
+    #[tokio::test]
+    async fn test_search_codebase_invalid_regex_returns_invalid_params() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = SearchParams {
+            query: "[invalid regex".to_owned(),
+            mode: SearchMode::Regex,
+            path_glob: "**/*.rs".to_owned(),
+            max_results: 10,
+            context_lines: 0,
+            known_files: vec![],
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
+        };
+        let result = server.search_codebase_impl(params).await;
+        let Err(err) = result else {
+            panic!("Expected search to fail on invalid regex");
+        };
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("invalid pattern"));
     }
 }

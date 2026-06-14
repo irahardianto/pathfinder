@@ -14,11 +14,13 @@
 //! - `inspect(include_dependencies=true)` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{
-    parse_semantic_path, pathfinder_to_error_data, treesitter_error_to_error_data,
+    invalid_params_error, parse_semantic_path, pathfinder_to_error_data,
+    treesitter_error_to_error_data,
 };
+use crate::server::types::{HealthParams, LocateParams, TraceParams, TraceScope};
 use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
-use rmcp::model::ErrorData;
+use rmcp::model::{CallToolResult, ErrorData};
 
 mod deep_context;
 mod definition;
@@ -575,11 +577,13 @@ impl PathfinderServer {
                 if let Some(chain) = &semantic_path.symbol_chain {
                     if let Some(base_name) = chain.segments.last() {
                         // Use find_symbol to search across files
-                        let find_params = crate::server::types::FindSymbolParams {
-                            name: base_name.name.clone(),
+                        let find_params = crate::server::types::SearchParams {
+                            query: base_name.name.clone(),
+                            mode: crate::server::types::SearchMode::Symbol,
                             kind: None,
                             path_glob: "**/*".to_owned(),
                             max_results: 3,
+                            ..Default::default()
                         };
                         match self.find_symbol_impl(find_params).await {
                             Ok(response) => {
@@ -657,6 +661,58 @@ impl PathfinderServer {
             }
             Err(e) => Err(treesitter_error_to_error_data(e)),
         }
+    }
+
+    /// Consolidated `locate` handler.
+    pub(crate) async fn locate_impl(
+        &self,
+        params: LocateParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        match (params.semantic_path.as_ref(), params.file.as_ref(), params.line) {
+            // Definition lookup
+            (Some(_), None, None) => {
+                self.get_definition_impl(params).await
+            }
+            // Semantic path resolution
+            (None, Some(_), Some(_)) => {
+                self.get_semantic_path_impl(params).await
+            }
+            // Ambiguous: both modes specified
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(invalid_params_error(
+                "provide either `semantic_path` (definition lookup) or `file`+`line` (semantic path resolution), not both",
+            )),
+            // Missing required fields for semantic path mode
+            (None, Some(_), None) => Err(invalid_params_error(
+                "`line` is required when using `file` for semantic path resolution",
+            )),
+            (None, None, Some(_)) => Err(invalid_params_error(
+                "`file` is required when using `line` for semantic path resolution",
+            )),
+            // Nothing provided
+            (None, None, None) => Err(invalid_params_error(
+                "provide either `semantic_path` or `file`+`line`",
+            )),
+        }
+    }
+
+    /// Consolidated `trace` handler.
+    pub(crate) async fn trace_impl(
+        &self,
+        params: TraceParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        match params.scope {
+            TraceScope::Callers => self.find_callers_callees_impl(params).await,
+            TraceScope::References => self.find_all_references_impl(params).await,
+            TraceScope::Overview => self.symbol_overview_impl(params).await,
+        }
+    }
+
+    /// Consolidated `health` handler.
+    pub(crate) async fn health_impl(
+        &self,
+        params: HealthParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.lsp_health_impl(params).await
     }
 
     fn try_separator_correction(semantic_path_str: &str) -> Option<String> {

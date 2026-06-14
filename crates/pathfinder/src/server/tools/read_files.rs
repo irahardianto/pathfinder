@@ -1,7 +1,9 @@
 //! `read` tool (batch mode) — batch read multiple files in a single call.
 
-use crate::server::helpers::{language_from_path, serialize_metadata};
-use crate::server::types::{FileResult, ReadFilesParams, ReadFilesResponse};
+use crate::server::helpers::{
+    invalid_params_error, io_error_data, language_from_path, serialize_metadata,
+};
+use crate::server::types::{FileResult, ReadFilesResponse, ReadParams};
 use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, ErrorData};
 use std::path::Path;
@@ -35,20 +37,59 @@ fn truncate_content(content: &str, max_lines: u32) -> String {
 }
 
 impl PathfinderServer {
+    /// Consolidated `read` handler → delegates to `read_file_impl`,
+    /// `read_source_file_impl`, or `read_files_impl`.
+    ///
+    /// Routing:
+    /// - `paths` provided → batch mode → `read_files_impl`
+    /// - `filepath` provided + source extension → `read_source_file_impl`
+    /// - `filepath` provided + config extension → `read_file_impl`
+    pub(crate) async fn read_impl(&self, params: ReadParams) -> Result<CallToolResult, ErrorData> {
+        // Exactly one of filepath / paths must be set.
+        match (&params.filepath, &params.paths) {
+            (Some(_), Some(_)) => Err(invalid_params_error(
+                "provide either `filepath` (single file) or `paths` (batch), not both",
+            )),
+            (None, None) => Err(invalid_params_error(
+                "provide either `filepath` (single file) or `paths` (batch)",
+            )),
+            // Batch mode
+            (None, Some(_)) => self.read_files_impl(params).await,
+            // Single file
+            (Some(filepath), None) => {
+                if let Some(end) = params.end_line {
+                    if end < params.start_line {
+                        return Err(invalid_params_error("`end_line` must be >= `start_line`"));
+                    }
+                }
+                if is_source_file(Path::new(filepath)) {
+                    self.read_source_file_impl(params).await
+                } else {
+                    self.read_file_impl(params).await
+                }
+            }
+        }
+    }
+
     /// Core logic for the `read_files` batch tool.
     ///
     /// Reads multiple files in a single call with per-file error resilience.
     /// Files are processed sequentially to avoid file descriptor exhaustion.
-    #[tracing::instrument(skip(self, params), fields(count = %params.paths.len()))]
+    #[tracing::instrument(skip(self, params), fields(count = %params.paths.as_ref().map_or(0, std::vec::Vec::len)))]
     pub(crate) async fn read_files_impl(
         &self,
-        params: ReadFilesParams,
+        params: ReadParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
         tracing::info!(tool = "read_files", "read_files: start");
 
-        if params.paths.is_empty() {
+        let paths = params
+            .paths
+            .as_ref()
+            .ok_or_else(|| io_error_data("paths must be provided"))?;
+
+        if paths.is_empty() {
             tracing::warn!(tool = "read_files", "empty paths");
             return Err(ErrorData::invalid_params(
                 "Must provide at least 1 file path",
@@ -60,16 +101,12 @@ impl PathfinderServer {
             ));
         }
 
-        if params.paths.len() > 10 {
-            tracing::warn!(
-                tool = "read_files",
-                count = params.paths.len(),
-                "too many paths"
-            );
+        if paths.len() > 10 {
+            tracing::warn!(tool = "read_files", count = paths.len(), "too many paths");
             return Err(ErrorData::invalid_params(
                 "Maximum 10 file paths allowed per call",
                 Some(serde_json::json!({
-                    "provided": params.paths.len(),
+                    "provided": paths.len(),
                     "max": 10
                 })),
             ));
@@ -78,7 +115,7 @@ impl PathfinderServer {
         let mut set = JoinSet::new();
         let mut spawned = 0;
 
-        for (idx, file_path) in params.paths.iter().enumerate() {
+        for (idx, file_path) in paths.iter().enumerate() {
             let server = self.clone();
             let file_path = file_path.clone();
             let params = params.clone();
@@ -96,7 +133,7 @@ impl PathfinderServer {
             spawned += 1;
         }
 
-        let mut indexed_results: Vec<(usize, FileResult)> = Vec::with_capacity(params.paths.len());
+        let mut indexed_results: Vec<(usize, FileResult)> = Vec::with_capacity(paths.len());
         while let Some(res) = set.join_next().await {
             match res {
                 Ok((idx, result)) => indexed_results.push((idx, result)),
@@ -160,7 +197,7 @@ impl PathfinderServer {
     /// this delegates to `read_source_file_impl` to get full content without symbols (for token efficiency).
     /// For config files and other files, reads raw content directly.
     #[allow(clippy::too_many_lines)]
-    async fn read_single_file(&self, file_path: &str, params: &ReadFilesParams) -> FileResult {
+    async fn read_single_file(&self, file_path: &str, params: &ReadParams) -> FileResult {
         let path = Path::new(file_path);
 
         if let Err(e) = self.sandbox.check(path) {
@@ -177,11 +214,13 @@ impl PathfinderServer {
         let absolute_path = self.workspace_root.resolve(path);
 
         if is_source_file(path) {
-            let rs_params = crate::server::types::ReadSourceFileParams {
-                filepath: file_path.to_string(),
+            let rs_params = crate::server::types::ReadParams {
+                filepath: Some(file_path.to_string()),
+                paths: None,
+                detail_level: params.detail_level.clone(),
                 start_line: 1,
                 end_line: None,
-                detail_level: params.detail_level.clone(),
+                max_lines_per_file: params.max_lines_per_file,
             };
 
             match self.read_source_file_impl(rs_params).await {
@@ -366,14 +405,15 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadFilesParams {
-            paths: vec![
+        let params = ReadParams {
+            paths: Some(vec![
                 "file1.rs".to_string(),
                 "file2.ts".to_string(),
                 "file3.py".to_string(),
-            ],
+            ]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -414,14 +454,15 @@ mod tests {
         fs::write(ws_dir.path().join("valid1.txt"), "content1").expect("write");
         fs::write(ws_dir.path().join("valid2.txt"), "content2").expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec![
+        let params = ReadParams {
+            paths: Some(vec![
                 "valid1.txt".to_string(),
                 "valid2.txt".to_string(),
                 "missing.txt".to_string(),
-            ],
+            ]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -460,10 +501,11 @@ mod tests {
             Arc::new(MockSurgeon::new()),
         );
 
-        let params = ReadFilesParams {
-            paths: vec![".git/HEAD".to_string()],
+        let params = ReadParams {
+            paths: Some(vec![".git/HEAD".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -500,10 +542,11 @@ mod tests {
             Arc::new(MockSurgeon::new()),
         );
 
-        let params = ReadFilesParams {
-            paths: (0..11).map(|i| format!("file{i}.txt")).collect(),
+        let params = ReadParams {
+            paths: Some((0..11).map(|i| format!("file{i}.txt")).collect()),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server.read_files_impl(params).await;
@@ -527,10 +570,11 @@ mod tests {
             Arc::new(MockSurgeon::new()),
         );
 
-        let params = ReadFilesParams {
-            paths: vec![],
+        let params = ReadParams {
+            paths: Some(vec![]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server.read_files_impl(params).await;
@@ -572,10 +616,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadFilesParams {
-            paths: vec!["main.rs".to_string(), "config.toml".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["main.rs".to_string(), "config.toml".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -624,10 +669,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params1 = ReadFilesParams {
-            paths: vec!["test.rs".to_string()],
+        let params1 = ReadParams {
+            paths: Some(vec!["test.rs".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
         let result1 = server
             .read_files_impl(params1)
@@ -676,10 +722,11 @@ mod tests {
         let content = lines.join("\n");
         fs::write(ws_dir.path().join("test.txt"), &content).expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["test.txt".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["test.txt".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 3,
+            ..Default::default()
         };
 
         let result = server
@@ -758,10 +805,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadFilesParams {
-            paths: vec!["empty.rs".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["empty.rs".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -799,10 +847,11 @@ mod tests {
         )
         .expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["binary.bin".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["binary.bin".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -849,10 +898,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadFilesParams {
-            paths: vec!["test.rs".to_string(), "test.rs".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["test.rs".to_string(), "test.rs".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -911,10 +961,11 @@ mod tests {
         fs::write(ws_dir.path().join("test.mjs"), "export default {}").expect("write");
         fs::write(ws_dir.path().join("test.cjs"), "module.exports = {}").expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["test.mjs".to_string(), "test.cjs".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["test.mjs".to_string(), "test.cjs".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -948,10 +999,11 @@ mod tests {
         let png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01";
         fs::write(ws_dir.path().join("image.png"), png_header).expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["image.png".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["image.png".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -986,10 +1038,11 @@ mod tests {
         let content = "[settings]\nkey = \"value\"";
         fs::write(ws_dir.path().join("config.toml"), content).expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["config.toml".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["config.toml".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -1027,10 +1080,11 @@ mod tests {
         let content = "line1\nline2\nline3\nline4\nline5";
         fs::write(ws_dir.path().join("exact.txt"), content).expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["exact.txt".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["exact.txt".to_string()]),
             detail_level: "source_only".to_string(),
-            max_lines_per_file: 5, // Exactly matches content line count
+            max_lines_per_file: 5,
+            ..Default::default()
         };
 
         let result = server
@@ -1069,10 +1123,11 @@ mod tests {
         )
         .expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["hello.txt".to_string(), "second.toml".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["hello.txt".to_string(), "second.toml".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server
@@ -1128,10 +1183,11 @@ mod tests {
 
         fs::write(ws_dir.path().join("exists.txt"), "content").expect("write");
 
-        let params = ReadFilesParams {
-            paths: vec!["exists.txt".to_string(), "missing.txt".to_string()],
+        let params = ReadParams {
+            paths: Some(vec!["exists.txt".to_string(), "missing.txt".to_string()]),
             detail_level: "source_only".to_string(),
             max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server

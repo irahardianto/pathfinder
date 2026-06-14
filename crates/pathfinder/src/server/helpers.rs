@@ -122,6 +122,11 @@ pub(crate) fn io_error_data(msg: impl Into<std::borrow::Cow<'static, str>>) -> E
     ErrorData::internal_error(msg, None)
 }
 
+/// Wrap a parameter validation message in an [`ErrorData`] with code `INVALID_PARAMS`.
+pub(crate) fn invalid_params_error(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
+    ErrorData::invalid_params(msg, None)
+}
+
 // ── Degraded Mode Formatting ────────────────────────────────────────
 
 /// Format a standardized degraded-mode text prefix for agent consumption.
