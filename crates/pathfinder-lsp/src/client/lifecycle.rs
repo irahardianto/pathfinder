@@ -2921,6 +2921,8 @@ mod tests {
             "[package]\nname = \"test\"\nversion = \"0.1.0\"",
         )
         .expect("write Cargo.toml");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").expect("write main.rs");
 
         let mut config = pathfinder_common::config::PathfinderConfig::default();
         config
@@ -2946,6 +2948,7 @@ mod tests {
             "module example.com/test\n\ngo 1.21",
         )
         .expect("write go.mod");
+        std::fs::write(dir.path().join("main.go"), "package main").expect("write main.go");
 
         let mut config = pathfinder_common::config::PathfinderConfig::default();
         config
@@ -2971,6 +2974,7 @@ mod tests {
             "{\"compilerOptions\": {\"target\": \"es2020\"}}",
         )
         .expect("write tsconfig.json");
+        std::fs::write(dir.path().join("index.ts"), "").expect("write index.ts");
 
         let mut config = pathfinder_common::config::PathfinderConfig::default();
         config.lsp.insert(
@@ -3000,6 +3004,7 @@ mod tests {
             "[project]\nname = \"test\"\nversion = \"0.1.0\"",
         )
         .expect("write pyproject.toml");
+        std::fs::write(dir.path().join("main.py"), "").expect("write main.py");
 
         let mut config = pathfinder_common::config::PathfinderConfig::default();
         config
@@ -3075,11 +3080,15 @@ mod tests {
             "[package]\nname = \"test\"\nversion = \"0.1.0\"",
         )
         .expect("write Cargo.toml");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").expect("write main.rs");
+
         std::fs::write(
             dir.path().join("go.mod"),
             "module example.com/test\n\ngo 1.21",
         )
         .expect("write go.mod");
+        std::fs::write(dir.path().join("main.go"), "package main").expect("write main.go");
 
         let mut config = pathfinder_common::config::PathfinderConfig::default();
         config

@@ -8,7 +8,7 @@ use crate::server::helpers::{
     format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
     require_symbol_target, serialize_metadata,
 };
-use crate::server::types::FindCallersCalleesParams;
+use crate::server::types::TraceParams;
 use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
 use pathfinder_lsp::LspError;
@@ -52,17 +52,16 @@ impl PathfinderServer {
         definition_path: &std::path::Path,
         files_referenced: &mut std::collections::HashSet<String>,
     ) -> Option<Vec<crate::server::types::ImpactReference>> {
-        let search_params = crate::server::types::SearchCodebaseParams {
+        let search_params = crate::server::types::SearchParams {
             query: symbol_name.to_string(),
-            is_regex: false,
+            mode: crate::server::types::SearchMode::Text,
             path_glob: "**/*".to_string(),
-            filter_mode: pathfinder_common::types::FilterMode::CodeOnly,
             max_results: 20,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
             exclude_glob: String::new(),
             offset: 0,
+            kind: None,
         };
 
         let result = match self.search_codebase_impl(search_params).await {
@@ -399,14 +398,14 @@ impl PathfinderServer {
     )]
     pub(crate) async fn find_callers_callees_impl(
         &self,
-        params: FindCallersCalleesParams,
+        params: TraceParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
         // Cap max_depth to prevent unbounded BFS traversal (PRD §5.1 maximum).
         // Also floor at 1 to guarantee at least one level of traversal.
         let max_depth = params.max_depth.clamp(1, 5);
-        let project_only = params.project_only.unwrap_or(true);
+        let project_only = true;
         // Clamp max_references to minimum 1 to prevent silently empty results.
         let max_references = params.max_references.max(1);
         // Split budget between incoming and outgoing. Give any odd slot to incoming.
@@ -953,7 +952,7 @@ impl PathfinderServer {
         };
 
         // Spec 4.2: Test coverage search
-        let (test_callers, test_coverage_status) = if params.include_test_coverage {
+        let (test_callers, test_coverage_status) = if false {
             let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
             if symbol_name.is_empty() {
@@ -1084,8 +1083,7 @@ impl PathfinderServer {
             text_parts.push("   - LSP still warming up (wait 30s, try again)".to_owned());
             text_parts.push(String::new());
             if symbol_name.is_empty() {
-                text_parts
-                    .push("   Workaround: Use search to find usages manually.".to_owned());
+                text_parts.push("   Workaround: Use search to find usages manually.".to_owned());
             } else {
                 text_parts.push(format!(
                     "   Workaround: Use search(query=\"{symbol_name}\") to find usages manually."
@@ -1168,7 +1166,7 @@ impl PathfinderServer {
 mod tests {
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
     use super::*;
-    use crate::server::types::FindCallersCalleesParams;
+    use crate::server::types::TraceParams;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{DegradedReason, WorkspaceRoot};
@@ -1203,7 +1201,7 @@ mod tests {
             lawyer,
         );
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1275,7 +1273,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
@@ -1329,7 +1327,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1373,7 +1371,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1422,7 +1420,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1498,7 +1496,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1, // Should stop after first level
             ..Default::default()
@@ -1524,7 +1522,7 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: ".git/objects/abc::def".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1558,7 +1556,7 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1609,7 +1607,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
@@ -1696,7 +1694,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1824,7 +1822,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -1880,7 +1878,7 @@ mod tests {
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
@@ -1898,86 +1896,6 @@ mod tests {
     }
 
     // ── TASK-2: project_only filter ───────────────────────────────────────────
-
-    /// With `project_only = false`, stdlib/absolute-path items should pass through
-    /// the BFS filter and appear in the impact graph.
-    #[tokio::test]
-    async fn test_find_callers_callees_project_only_false_includes_external_refs() {
-        let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .push(Ok(make_scope()));
-
-        let lawyer = Arc::new(MockLawyer::default());
-
-        let item = CallHierarchyItem {
-            name: "login".into(),
-            kind: "function".into(),
-            detail: None,
-            file: "src/auth.rs".into(),
-            line: 9,
-            column: 4,
-            data: None,
-        };
-        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
-
-        // Incoming: a project file (should be included regardless of project_only)
-        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
-            item: CallHierarchyItem {
-                name: "handle_request".into(),
-                kind: "function".into(),
-                detail: None,
-                file: "src/server.rs".into(),
-                line: 20,
-                column: 4,
-                data: None,
-            },
-            call_sites: vec![25],
-        }]));
-
-        // Outgoing: an absolute stdlib path — should be EXCLUDED with project_only=true
-        // but INCLUDED when project_only=false
-        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
-            item: CallHierarchyItem {
-                name: "write_all".into(),
-                kind: "function".into(),
-                detail: None,
-                file: "/home/user/.rustup/toolchains/stable/lib/std/io.rs".into(),
-                line: 100,
-                column: 4,
-                data: None,
-            },
-            call_sites: vec![10],
-        }]));
-
-        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
-
-        let params = FindCallersCalleesParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
-            max_depth: 1,
-            project_only: Some(false), // key: include external
-            ..Default::default()
-        };
-        let result = server
-            .find_callers_callees_impl(params)
-            .await
-            .expect("should succeed");
-        let val: crate::server::types::FindCallersCalleesMetadata =
-            serde_json::from_value(result.structured_content.unwrap()).unwrap();
-
-        let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
-        assert_eq!(
-            outgoing.len(),
-            1,
-            "project_only=false should include the stdlib absolute path ref"
-        );
-        assert!(
-            outgoing[0].file.starts_with('/'),
-            "outgoing ref should be the absolute stdlib path"
-        );
-    }
 
     /// With `project_only = true` (the default), absolute stdlib paths should be
     /// silently dropped from the BFS impact graph.
@@ -2022,7 +1940,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             // project_only defaults to true via Default::default()
@@ -2105,7 +2023,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             max_references: 2, // Budget split: incoming gets 1, outgoing gets 1. Total budget=2.
@@ -2160,12 +2078,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 3,
             max_references: 50,
-            project_only: Some(true),
-            include_test_coverage: false,
+            ..Default::default()
         };
         let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2212,12 +2129,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1, // Limit depth to 1
             max_references: 50,
-            project_only: Some(true),
-            include_test_coverage: false,
+            ..Default::default()
         };
         let result = server.find_callers_callees_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2286,7 +2202,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 3,
             ..Default::default()
@@ -2357,7 +2273,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -2449,7 +2365,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindCallersCalleesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -2526,7 +2442,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindCallersCalleesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -2743,7 +2659,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindCallersCalleesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/handler.rs::handle".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -2850,7 +2766,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindCallersCalleesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/worker.rs::process".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -2970,7 +2886,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindCallersCalleesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/worker.rs::do_work".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -3039,7 +2955,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             max_references: 50,
@@ -3102,7 +3018,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 1,
             ..Default::default()
@@ -3120,153 +3036,6 @@ mod tests {
         assert!(text.contains("[depth="), "text: {text}");
         assert!(text.contains("src/server.rs:L20"), "text: {text}");
         assert!(text.contains("[completed in"), "text: {text}");
-    }
-
-    // ── include_test_coverage=true path ──────────────────────────────
-
-    #[tokio::test]
-    async fn test_find_callers_callees_with_test_coverage() {
-        let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .push(Ok(make_scope()));
-        surgeon
-            .enclosing_symbol_detail_results
-            .lock()
-            .unwrap()
-            .push(Ok(None));
-
-        let lawyer = Arc::new(MockLawyer::default());
-
-        let item = CallHierarchyItem {
-            name: "login".into(),
-            kind: "function".into(),
-            detail: None,
-            file: "src/auth.rs".into(),
-            line: 9,
-            column: 4,
-            data: None,
-        };
-        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
-        lawyer.push_incoming_call_result(Ok(vec![]));
-        lawyer.push_outgoing_call_result(Ok(vec![]));
-
-        // Configure scout to return test file matches
-        let scout = Arc::new(MockScout::default());
-        scout.set_result(Ok(pathfinder_search::SearchResult {
-            matches: vec![pathfinder_search::SearchMatch {
-                file: "src/auth_test.rs".to_string(),
-                line: 10,
-                column: 4,
-                content: "fn test_login() { login(); }".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: Some("src/auth_test.rs::test_login".to_string()),
-                is_definition: Some(true),
-                version_hash: "sha256:abc".to_string(),
-                known: Some(false),
-            }],
-            total_matches: 1,
-            truncated: false,
-            files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
-        }));
-
-        let ws_dir = make_temp_workspace();
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server =
-            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
-
-        let params = FindCallersCalleesParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
-            max_depth: 2,
-            include_test_coverage: true,
-            ..Default::default()
-        };
-        let result = server.find_callers_callees_impl(params).await;
-        let call_res = result.expect("should succeed");
-        let val: crate::server::types::FindCallersCalleesMetadata =
-            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
-
-        // Verify test coverage results
-        assert!(
-            val.test_callers.is_some(),
-            "test_callers should be populated"
-        );
-        let test_refs = val.test_callers.as_ref().unwrap();
-        assert_eq!(test_refs.len(), 1);
-        assert_eq!(test_refs[0].file, "src/auth_test.rs");
-        assert_eq!(test_refs[0].direction, "test_coverage");
-        assert_eq!(val.test_coverage_status, Some("found".to_owned()));
-    }
-
-    #[tokio::test]
-    async fn test_find_callers_callees_test_coverage_not_found() {
-        let surgeon = Arc::new(MockSurgeon::new());
-        surgeon
-            .read_symbol_scope_results
-            .lock()
-            .unwrap()
-            .push(Ok(make_scope()));
-
-        let lawyer = Arc::new(MockLawyer::default());
-
-        let item = CallHierarchyItem {
-            name: "login".into(),
-            kind: "function".into(),
-            detail: None,
-            file: "src/auth.rs".into(),
-            line: 9,
-            column: 4,
-            data: None,
-        };
-        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
-        lawyer.push_incoming_call_result(Ok(vec![]));
-        lawyer.push_outgoing_call_result(Ok(vec![]));
-
-        // Scout returns empty — no test files found
-        let scout = Arc::new(MockScout::default());
-        scout.set_result(Ok(pathfinder_search::SearchResult {
-            matches: vec![],
-            total_matches: 0,
-            truncated: false,
-            files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
-        }));
-
-        let ws_dir = make_temp_workspace();
-        let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-        let server =
-            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
-
-        let params = FindCallersCalleesParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
-            max_depth: 2,
-            include_test_coverage: true,
-            ..Default::default()
-        };
-        let result = server.find_callers_callees_impl(params).await;
-        let call_res = result.expect("should succeed");
-        let val: crate::server::types::FindCallersCalleesMetadata =
-            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
-
-        assert!(
-            val.test_callers.is_none(),
-            "test_callers should be None when not found"
-        );
-        assert_eq!(val.test_coverage_status, Some("not_found".to_owned()));
     }
 
     #[tokio::test]
@@ -3317,7 +3086,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 4,
             max_references: 50,
@@ -3379,7 +3148,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 3,
             ..Default::default()
@@ -3441,7 +3210,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 3,
             ..Default::default()
@@ -3516,7 +3285,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 3,
             ..Default::default()
@@ -3592,7 +3361,7 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 2,
             ..Default::default()
@@ -3619,7 +3388,7 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "invalid_path_format".to_owned(),
             ..Default::default()
         };
@@ -3674,7 +3443,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon.clone(), lawyer.clone());
 
-        let zero_depth_params = FindCallersCalleesParams {
+        let zero_depth_params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 0,
             ..Default::default()
@@ -3707,7 +3476,7 @@ mod tests {
         }]));
         lawyer.push_outgoing_call_result(Ok(vec![]));
 
-        let large_depth_params = FindCallersCalleesParams {
+        let large_depth_params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_depth: 10,
             ..Default::default()
@@ -3752,7 +3521,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -3820,7 +3589,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_references: 1,
             ..Default::default()
@@ -3861,7 +3630,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon.clone(), lawyer);
 
-        let params_macro = FindCallersCalleesParams {
+        let params_macro = TraceParams {
             semantic_path: "src/auth.rs::my_macro!".to_owned(),
             ..Default::default()
         };
@@ -3873,7 +3642,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(Ok(make_scope()));
-        let params_trait = FindCallersCalleesParams {
+        let params_trait = TraceParams {
             semantic_path: "src/auth.rs::<impl User>::login".to_owned(),
             ..Default::default()
         };
@@ -3914,7 +3683,7 @@ mod tests {
         // Use make_server_with_lawyer (workspace has no src/ files, so grep finds nothing)
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -3958,7 +3727,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = FindCallersCalleesParams {
+        let params = TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };

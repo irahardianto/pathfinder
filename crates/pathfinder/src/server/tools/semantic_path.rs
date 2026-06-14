@@ -8,30 +8,37 @@
 //! to obtain the semantic path they need to call other Pathfinder tools.
 
 use crate::server::helpers::{pathfinder_to_error_data, serialize_metadata};
-use crate::server::types::{GetSemanticPathParams, GetSemanticPathResult};
+use crate::server::types::{GetSemanticPathResult, LocateParams};
 use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, ErrorData};
 
 impl PathfinderServer {
     /// Core logic for the `locate` tool (file+line → semantic path mode).
     ///
-    /// Walks the Tree-sitter AST of the file at `params.file` and returns the
-    /// semantic path of the symbol that encloses `params.line`.
+    /// Walks the Tree-sitter AST of the file and returns the
+    /// semantic path of the symbol that encloses the line.
     pub(crate) async fn get_semantic_path_impl(
         &self,
-        params: GetSemanticPathParams,
+        params: LocateParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
+        let file = params
+            .file
+            .as_ref()
+            .ok_or_else(|| rmcp::model::ErrorData::invalid_params("file is required", None))?;
+        let line = params
+            .line
+            .ok_or_else(|| rmcp::model::ErrorData::invalid_params("line is required", None))?;
 
         tracing::info!(
             tool = "get_semantic_path",
-            file = %params.file,
-            line = params.line,
+            file = %file,
+            line = line,
             "get_semantic_path: start"
         );
 
         // Sandbox check — prevent path traversal to sensitive files.
-        if let Err(e) = self.sandbox.check(std::path::Path::new(&params.file)) {
+        if let Err(e) = self.sandbox.check(std::path::Path::new(file)) {
             let duration_ms = start.elapsed().as_millis();
             tracing::warn!(
                 tool = "get_semantic_path",
@@ -43,7 +50,7 @@ impl PathfinderServer {
         }
 
         // Verify the file exists before calling Tree-sitter.
-        let abs_path = self.workspace_root.path().join(&params.file);
+        let abs_path = self.workspace_root.path().join(file);
         if !abs_path.exists() {
             let err = pathfinder_common::error::PathfinderError::FileNotFound {
                 path: abs_path.clone(),
@@ -57,13 +64,13 @@ impl PathfinderServer {
         }
 
         // Delegate to Tree-sitter surgeon to find the enclosing symbol.
-        let line = params.line as usize;
+        let line_idx = line as usize;
         let symbol_result = self
             .surgeon
             .enclosing_symbol(
                 self.workspace_root.path(),
-                std::path::Path::new(&params.file),
-                line,
+                std::path::Path::new(file),
+                line_idx,
             )
             .await;
 
@@ -73,8 +80,8 @@ impl PathfinderServer {
                 let duration_ms = start.elapsed().as_millis();
                 tracing::warn!(
                     tool = "get_semantic_path",
-                    file = %params.file,
-                    line,
+                    file = %file,
+                    line = line_idx,
                     error = %e,
                     duration_ms,
                     "enclosing_symbol failed"
@@ -85,33 +92,30 @@ impl PathfinderServer {
 
         let duration_ms = start.elapsed().as_millis();
 
-        let semantic_path = symbol
-            .as_deref()
-            .map(|sym| format!("{}::{sym}", params.file));
+        let semantic_path = symbol.as_deref().map(|sym| format!("{file}::{sym}"));
 
         let result = GetSemanticPathResult {
             semantic_path: semantic_path.clone(),
             symbol: symbol.clone(),
-            file: params.file.clone(),
-            line: params.line,
+            file: file.clone(),
+            line,
         };
 
         let text = match &semantic_path {
             Some(sp) => format!("{sp}\n\n[resolved in {duration_ms}ms]"),
             None => format!(
-                "Line {line} in '{}' is not inside a named symbol.\n\n\
+                "Line {line} in '{file}' is not inside a named symbol.\n\n\
                  The line may be a module-level attribute, blank line, or top-level import. \
-                 Use `read(filepath=\"{}\", detail_level=\"symbols\")` to see \
+                 Use `read(filepath=\"{file}\", detail_level=\"symbols\")` to see \
                  the available symbols in this file.\n\n\
                  [resolved in {duration_ms}ms]",
-                params.file, params.file
             ),
         };
 
         tracing::info!(
             tool = "get_semantic_path",
-            file = %params.file,
-            line,
+            file = %file,
+            line = line_idx,
             semantic_path = ?semantic_path,
             duration_ms,
             "get_semantic_path: complete"
@@ -164,9 +168,10 @@ mod tests {
             .push(Ok(Some("login".to_owned())));
 
         let server = make_server(ws, mock_surgeon);
-        let params = GetSemanticPathParams {
-            file: file_rel.to_owned(),
-            line: 1,
+        let params = LocateParams {
+            file: Some(file_rel.to_owned()),
+            line: Some(1),
+            ..Default::default()
         };
 
         let result = server.get_semantic_path_impl(params).await;
@@ -199,9 +204,10 @@ mod tests {
             .push(Ok(None));
 
         let server = make_server(ws, mock_surgeon);
-        let params = GetSemanticPathParams {
-            file: file_rel.to_owned(),
-            line: 1,
+        let params = LocateParams {
+            file: Some(file_rel.to_owned()),
+            line: Some(1),
+            ..Default::default()
         };
 
         let result = server.get_semantic_path_impl(params).await;
@@ -221,9 +227,10 @@ mod tests {
         let mock_surgeon = MockSurgeon::new();
 
         let server = make_server(ws, mock_surgeon);
-        let params = GetSemanticPathParams {
-            file: "nonexistent.rs".to_owned(),
-            line: 5,
+        let params = LocateParams {
+            file: Some("nonexistent.rs".to_owned()),
+            line: Some(5),
+            ..Default::default()
         };
 
         let result = server.get_semantic_path_impl(params).await;
@@ -241,9 +248,10 @@ mod tests {
 
         let server = make_server(ws, mock_surgeon);
         // .env is a hardcoded sandbox deny
-        let params = GetSemanticPathParams {
-            file: ".env".to_owned(),
-            line: 1,
+        let params = LocateParams {
+            file: Some(".env".to_owned()),
+            line: Some(1),
+            ..Default::default()
         };
 
         let result = server.get_semantic_path_impl(params).await;

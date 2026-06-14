@@ -4,7 +4,7 @@ use crate::server::helpers::{
     format_degraded_notice, millis_to_u64, pathfinder_to_error_data, serialize_metadata,
 };
 use crate::server::types::{
-    default_max_tokens, GetRepoMapParams, LspCapabilities, RepoCapabilities,
+    default_max_tokens, Detail, ExploreParams, LspCapabilities, RepoCapabilities,
 };
 use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
@@ -172,7 +172,7 @@ impl PathfinderServer {
     )]
     pub(crate) async fn get_repo_map_impl(
         &self,
-        params: GetRepoMapParams,
+        params: ExploreParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
         tracing::info!(tool = "get_repo_map", path = %params.path, "get_repo_map: start");
@@ -210,6 +210,14 @@ impl PathfinderServer {
             }
         }
 
+        // Apply detail overrides to depth and max_tokens
+        let (depth, max_tokens) = match params.detail {
+            Detail::Structure => (params.depth.min(1), params.max_tokens.min(4_000)),
+            Detail::Files => (params.depth.min(3), params.max_tokens.min(8_000)),
+            Detail::Symbols => (params.depth, params.max_tokens),
+        };
+        let include_tests = !matches!(params.detail, Detail::Structure | Detail::Files);
+
         let ts_start = std::time::Instant::now();
         let visibility_str = match params.visibility {
             pathfinder_common::types::Visibility::Public => "public",
@@ -217,7 +225,7 @@ impl PathfinderServer {
         };
 
         // Auto-scale token budget for large projects
-        let effective_max_tokens = if params.max_tokens == default_max_tokens() {
+        let effective_max_tokens = if max_tokens == default_max_tokens() {
             // Only auto-scale when the user didn't explicitly set a value
             let source_file_count = count_source_files(self.workspace_root.path()).await;
             if source_file_count > 20 {
@@ -227,30 +235,30 @@ impl PathfinderServer {
                     tool = "get_repo_map",
                     source_file_count,
                     auto_scaled_tokens = scaled,
-                    requested_tokens = params.max_tokens,
+                    requested_tokens = max_tokens,
                     "auto-scaling max_tokens for large project"
                 );
                 scaled
             } else {
-                params.max_tokens
+                max_tokens
             }
         } else {
             // Respect explicit user setting
-            params.max_tokens
+            max_tokens
         };
 
         // Clamp to reasonable bounds: minimum 500 (usable output), max 100k (memory safety)
         let max_tokens = effective_max_tokens.clamp(500, 100_000);
         let config = pathfinder_treesitter::repo_map::SkeletonConfig::new(
             max_tokens,
-            params.depth,
+            depth,
             visibility_str,
             params.max_tokens_per_file,
         )
         .with_changed_files(changed_files)
         .with_include_extensions(params.include_extensions)
         .with_exclude_extensions(params.exclude_extensions)
-        .with_include_tests(params.include_tests);
+        .with_include_tests(include_tests);
 
         let result = match self
             .surgeon
@@ -339,7 +347,7 @@ impl PathfinderServer {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use crate::server::types::GetRepoMapParams;
+    use crate::server::types::{Detail, ExploreParams};
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
     use pathfinder_common::types::{Visibility, WorkspaceRoot};
@@ -351,9 +359,10 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn default_params() -> GetRepoMapParams {
-        GetRepoMapParams {
+    fn default_params() -> ExploreParams {
+        ExploreParams {
             path: ".".to_owned(),
+            detail: Detail::Symbols,
             changed_since: String::new(),
             max_tokens: 16_000,
             max_tokens_per_file: 2_000,
@@ -361,7 +370,6 @@ mod tests {
             visibility: Visibility::Public,
             include_extensions: vec![],
             exclude_extensions: vec![],
-            include_tests: true,
         }
     }
 

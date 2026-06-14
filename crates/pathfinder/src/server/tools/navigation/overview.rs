@@ -19,7 +19,7 @@ impl PathfinderServer {
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn symbol_overview_impl(
         &self,
-        params: crate::server::types::SymbolOverviewParams,
+        params: crate::server::types::TraceParams,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
@@ -90,12 +90,12 @@ impl PathfinderServer {
             }
         };
 
-        let impact_params = crate::server::types::FindCallersCalleesParams {
+        let impact_params = crate::server::types::TraceParams {
             semantic_path: params.semantic_path.clone(),
+            scope: crate::server::types::TraceScope::Callers,
             max_depth: 2,
-            max_references: params.max_callers_callees,
-            project_only: params.project_only,
-            include_test_coverage: false,
+            max_references: params.max_references,
+            offset: 0,
         };
 
         let impact_result = self.find_callers_callees_impl(impact_params).await;
@@ -160,9 +160,11 @@ impl PathfinderServer {
             }
         };
 
-        let refs_params = crate::server::types::FindAllReferencesParams {
+        let refs_params = crate::server::types::TraceParams {
             semantic_path: params.semantic_path.clone(),
-            max_results: params.max_references,
+            scope: crate::server::types::TraceScope::References,
+            max_depth: 0,
+            max_references: params.max_references,
             offset: 0,
         };
 
@@ -418,11 +420,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -489,11 +490,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -549,11 +549,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -592,11 +591,10 @@ mod tests {
             lawyer,
         );
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -659,11 +657,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -716,11 +713,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -764,11 +760,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -800,11 +795,10 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: String::new(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -834,11 +828,10 @@ mod tests {
             lawyer,
         );
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "nonexistent/path.rs::function".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -888,11 +881,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 6, // Budget split: incoming gets 6/2=3
-            max_references: 50,
+            max_references: 6,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -945,11 +937,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -999,11 +990,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -1054,11 +1044,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
-            max_references: 3, // Limit to 3
+            max_references: 3,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -1103,11 +1092,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -1149,11 +1137,10 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;
@@ -1197,11 +1184,10 @@ mod tests {
         lawyer.set_references_result(Ok(vec![]));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
-        let params = crate::server::types::SymbolOverviewParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
-            max_callers_callees: 50,
             max_references: 50,
+            ..Default::default()
         };
 
         let result = server.symbol_overview_impl(params).await;

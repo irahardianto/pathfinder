@@ -1290,7 +1290,88 @@ pub async fn detect_languages(
         tracing::error!("java plugin not found in registry — skipping detection");
     }
 
-    Ok(DetectionResult { detected, missing })
+    let mut filtered_detected = Vec::new();
+    for lsp in detected {
+        if let Some(plugin) = crate::plugin::plugin_for_language(&lsp.language_id) {
+            if has_source_files_recursive(workspace_root, plugin.file_extensions(), 0).await {
+                filtered_detected.push(lsp);
+            } else {
+                tracing::info!(
+                    language = %lsp.language_id,
+                    "Filtering out language from detection: no source files found in workspace"
+                );
+            }
+        } else {
+            filtered_detected.push(lsp);
+        }
+    }
+
+    let mut filtered_missing = Vec::new();
+    for lsp in missing {
+        if let Some(plugin) = crate::plugin::plugin_for_language(&lsp.language_id) {
+            if has_source_files_recursive(workspace_root, plugin.file_extensions(), 0).await {
+                filtered_missing.push(lsp);
+            } else {
+                tracing::info!(
+                    language = %lsp.language_id,
+                    "Filtering out missing language from detection: no source files found in workspace"
+                );
+            }
+        } else {
+            filtered_missing.push(lsp);
+        }
+    }
+
+    Ok(DetectionResult {
+        detected: filtered_detected,
+        missing: filtered_missing,
+    })
+}
+
+fn has_source_files_recursive<'a>(
+    dir: &'a Path,
+    extensions: &'a [&'static str],
+    depth: usize,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+    Box::pin(async move {
+        if depth > 8 {
+            return false;
+        }
+        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+            return false;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.')
+                        || name == "node_modules"
+                        || name == "target"
+                        || name == "vendor"
+                        || name == "dist"
+                        || name == "build"
+                        || name == "__pycache__"
+                        || name == "pytest-of-irahardianto"
+                    {
+                        continue;
+                    }
+                }
+                if has_source_files_recursive(&path, extensions, depth + 1).await {
+                    return true;
+                }
+            } else if file_type.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if extensions.iter().any(|&e| e.eq_ignore_ascii_case(ext)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    })
 }
 
 /// Map a file extension to its language identifier.
@@ -1312,8 +1393,11 @@ mod tests {
     // Mutex to ensure tests that modify PATH run serially
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
-    /// Helper to run tests with fake Python LSP binaries in PATH
-    #[allow(clippy::await_holding_lock, clippy::expect_fun_call)]
+    #[allow(
+        clippy::await_holding_lock,
+        clippy::expect_fun_call,
+        clippy::items_after_statements
+    )]
     async fn test_with_fake_python_binaries<F, Fut>(binaries: &[&str], test: F)
     where
         F: FnOnce() -> Fut,
@@ -1337,8 +1421,23 @@ mod tests {
                 .expect(&format!("create symlink for {binary}"));
         }
 
-        // Save original PATH
-        let original_path = std::env::var("PATH").ok();
+        struct PathGuard {
+            original_path: Option<String>,
+        }
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                if let Some(ref orig) = self.original_path {
+                    std::env::set_var("PATH", orig);
+                } else {
+                    std::env::remove_var("PATH");
+                }
+            }
+        }
+
+        // Save original PATH via guard
+        let _path_guard = PathGuard {
+            original_path: std::env::var("PATH").ok(),
+        };
 
         // Set PATH to ONLY our temp bin dir to avoid finding system LSPs
         let new_path = temp_bin_dir.path().to_string_lossy().to_string();
@@ -1346,13 +1445,6 @@ mod tests {
 
         // Run the test
         test().await;
-
-        // Restore original PATH
-        if let Some(orig) = original_path {
-            std::env::set_var("PATH", orig);
-        } else {
-            std::env::remove_var("PATH");
-        }
     }
 
     // Helper to create a fake @vue/typescript-plugin directory in node_modules.
@@ -1425,6 +1517,8 @@ mod tests {
     async fn test_detects_cargo_toml() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("write");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create dir");
+        std::fs::write(dir.path().join("src/lib.rs"), "fn main() {}").expect("write");
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
@@ -1439,6 +1533,7 @@ mod tests {
     async fn test_detects_go_mod() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("go.mod"), "module foo").expect("write");
+        std::fs::write(dir.path().join("main.go"), "package main").expect("write");
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
@@ -1451,6 +1546,7 @@ mod tests {
     async fn test_detects_typescript_via_tsconfig() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("tsconfig.json"), "{}").expect("write");
+        std::fs::write(dir.path().join("index.ts"), "").expect("write");
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
@@ -1468,6 +1564,7 @@ mod tests {
     async fn test_detects_typescript_via_package_json() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("package.json"), "{}").expect("write");
+        std::fs::write(dir.path().join("index.ts"), "").expect("write");
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
@@ -1482,6 +1579,7 @@ mod tests {
     async fn test_detects_python_via_pyproject() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+        std::fs::write(dir.path().join("main.py"), "").expect("write");
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
@@ -1495,6 +1593,9 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("write");
         std::fs::write(dir.path().join("package.json"), "{}").expect("write");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create dir");
+        std::fs::write(dir.path().join("src/lib.rs"), "").expect("write");
+        std::fs::write(dir.path().join("index.ts"), "").expect("write");
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
@@ -1504,7 +1605,7 @@ mod tests {
             .map(|l| l.language_id.as_str())
             .collect();
         for id in &ids {
-            assert!(["rust", "go", "typescript", "python"].contains(id));
+            assert!(["rust", "typescript"].contains(id));
         }
     }
 
@@ -1523,6 +1624,7 @@ mod tests {
         let sub_dir = dir.path().join("apps").join("backend");
         std::fs::create_dir_all(&sub_dir).expect("create dir");
         std::fs::write(sub_dir.join("go.mod"), "module foo").expect("write");
+        std::fs::write(sub_dir.join("main.go"), "package main").expect("write");
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
@@ -1534,6 +1636,10 @@ mod tests {
     #[tokio::test]
     async fn test_root_override_config() {
         let dir = tempdir().expect("temp dir");
+        let custom_backend = dir.path().join("custom/backend");
+        std::fs::create_dir_all(&custom_backend).expect("create dir");
+        std::fs::write(custom_backend.join("main.go"), "package main").expect("write");
+
         let mut config = pathfinder_common::config::PathfinderConfig::default();
         config.lsp.insert(
             "go".to_string(),
@@ -1552,6 +1658,46 @@ mod tests {
             assert_eq!(go_lang.root, dir.path().join("custom/backend"));
             assert_eq!(go_lang.command, "gopls");
         }
+    }
+
+    #[tokio::test]
+    async fn test_filters_out_language_with_no_source_files() {
+        let dir = tempdir().expect("temp dir");
+        // Marker file present
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("write");
+
+        // No .rs file -> should NOT detect
+        let result = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+        assert!(
+            result.detected.is_empty(),
+            "should filter out rust language when no source files exist"
+        );
+        assert!(
+            result.missing.is_empty(),
+            "should filter out rust language from missing when no source files exist"
+        );
+
+        // Write a .rs file -> should detect
+        std::fs::create_dir_all(dir.path().join("src")).expect("create dir");
+        std::fs::write(dir.path().join("src/lib.rs"), "fn main() {}").expect("write");
+        let result2 = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+
+        let total_detected = result2.detected.len() + result2.missing.len();
+        assert_eq!(
+            total_detected, 1,
+            "should detect rust language when source file is added"
+        );
+
+        let detected_lang_id = if result2.detected.is_empty() {
+            &result2.missing[0].language_id
+        } else {
+            &result2.detected[0].language_id
+        };
+        assert_eq!(detected_lang_id, "rust");
     }
 
     #[test]
@@ -1860,6 +2006,7 @@ mod tests {
             // Use a temp dir with pyproject.toml but no LSP binaries in PATH
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
 
             let result = detect_languages(dir.path(), &make_ts_config())
                 .await
@@ -1878,6 +2025,7 @@ mod tests {
         test_with_fake_python_binaries(&["pyright-langserver", "pylsp"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
 
             let result = detect_languages(dir.path(), &make_ts_config())
                 .await
@@ -1899,6 +2047,7 @@ mod tests {
         test_with_fake_python_binaries(&["basedpyright-langserver"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
 
             let result = detect_languages(dir.path(), &make_ts_config())
                 .await
@@ -1921,6 +2070,7 @@ mod tests {
         test_with_fake_python_binaries(&["pylsp"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
 
             let result = detect_languages(dir.path(), &make_ts_config())
                 .await
@@ -1942,6 +2092,7 @@ mod tests {
         test_with_fake_python_binaries(&["ruff"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
 
             let result = detect_languages(dir.path(), &make_ts_config())
                 .await
@@ -1965,6 +2116,7 @@ mod tests {
         test_with_fake_python_binaries(&["jedi-language-server"], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
 
             let result = detect_languages(dir.path(), &make_ts_config())
                 .await
@@ -1987,6 +2139,7 @@ mod tests {
         test_with_fake_python_binaries(&[], || async {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]").expect("write");
+            std::fs::write(dir.path().join("main.py"), "").expect("write");
 
             let mut config = pathfinder_common::config::PathfinderConfig::default();
             config.lsp.insert(
@@ -2231,6 +2384,8 @@ mod tests {
                 "[dependencies]\nfoo = \"1.0\"",
             )
             .expect("write");
+            std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+            std::fs::write(dir.path().join("src/lib.rs"), "fn main() {}").expect("write");
 
             let result = detect_languages(dir.path(), &make_ts_config())
                 .await
@@ -2265,6 +2420,9 @@ mod tests {
                 "<project><modelVersion>4.0.0</modelVersion></project>",
             )
             .expect("write pom.xml");
+            std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+            std::fs::write(dir.path().join("src/Main.java"), "public class Main {}")
+                .expect("write");
 
             let config = pathfinder_common::config::PathfinderConfig::default();
             let result = detect_languages(dir.path(), &config).await.expect("detect");
@@ -2297,6 +2455,9 @@ mod tests {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("build.gradle"), "plugins { id 'java' }\n")
                 .expect("write build.gradle");
+            std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+            std::fs::write(dir.path().join("src/Main.java"), "public class Main {}")
+                .expect("write");
 
             let config = pathfinder_common::config::PathfinderConfig::default();
             let result = detect_languages(dir.path(), &config).await.expect("detect");
@@ -2313,6 +2474,9 @@ mod tests {
             let dir = tempdir().expect("temp dir");
             std::fs::write(dir.path().join("build.gradle.kts"), "plugins { java }\n")
                 .expect("write build.gradle.kts");
+            std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+            std::fs::write(dir.path().join("src/Main.java"), "public class Main {}")
+                .expect("write");
 
             let config = pathfinder_common::config::PathfinderConfig::default();
             let result = detect_languages(dir.path(), &config).await.expect("detect");
@@ -2335,6 +2499,9 @@ mod tests {
                 "<project><modelVersion>4.0.0</modelVersion></project>",
             )
             .expect("write pom.xml");
+            std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+            std::fs::write(dir.path().join("src/Main.java"), "public class Main {}")
+                .expect("write");
 
             let config = pathfinder_common::config::PathfinderConfig::default();
             let result = detect_languages(dir.path(), &config).await.expect("detect");
@@ -2696,6 +2863,8 @@ mod tests {
             "rootProject.name = \"test\"",
         )
         .expect("write");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("src/Main.java"), "public class Main {}").expect("write");
 
         let result = detect_languages(dir.path(), &make_ts_config()).await;
 
@@ -2721,6 +2890,8 @@ mod tests {
             "rootProject.name = \"test\"",
         )
         .expect("write");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("src/Main.java"), "public class Main {}").expect("write");
 
         let result = detect_languages(dir.path(), &make_ts_config()).await;
 
@@ -2742,6 +2913,7 @@ mod tests {
     async fn test_detect_python_via_requirements_txt() {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("requirements.txt"), "flask==2.0").expect("write");
+        std::fs::write(dir.path().join("main.py"), "").expect("write");
 
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
@@ -2763,6 +2935,7 @@ mod tests {
             "from setuptools import setup; setup()",
         )
         .expect("write");
+        std::fs::write(dir.path().join("main.py"), "").expect("write");
 
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
@@ -2783,6 +2956,7 @@ mod tests {
         let sub = dir.path().join("apps").join("backend");
         std::fs::create_dir_all(&sub).expect("create dir");
         std::fs::write(sub.join("requirements.txt"), "flask==2.0").expect("write");
+        std::fs::write(sub.join("main.py"), "").expect("write");
 
         let venv_python = sub.join(".venv").join("bin").join("python");
         std::fs::create_dir_all(venv_python.parent().expect("parent")).expect("mkdir");

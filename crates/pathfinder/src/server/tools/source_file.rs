@@ -3,7 +3,7 @@
 use crate::server::helpers::{
     millis_to_u64, pathfinder_to_error_data, serialize_metadata, treesitter_error_to_error_data,
 };
-use crate::server::types::{ReadSourceFileMetadata, ReadSourceFileParams, SourceSymbol};
+use crate::server::types::{ReadParams, ReadSourceFileMetadata, SourceSymbol};
 use crate::server::PathfinderServer;
 
 use rmcp::model::{CallToolResult, Content, ErrorData};
@@ -131,15 +131,19 @@ impl PathfinderServer {
     ///
     /// Performs a sandbox check, then delegates to the `Surgeon` to extract
     /// the AST hierarchy and read the full source context.
-    #[tracing::instrument(skip(self, params), fields(file = %params.filepath))]
+    #[tracing::instrument(skip(self, params), fields(file = %params.filepath.as_deref().unwrap_or("")))]
     pub(crate) async fn read_source_file_impl(
         &self,
-        params: ReadSourceFileParams,
+        params: ReadParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
         tracing::info!(tool = "read_source_file", "read_source_file: start");
 
-        let file_path = std::path::Path::new(&params.filepath);
+        let filepath = params
+            .filepath
+            .as_ref()
+            .ok_or_else(|| rmcp::model::ErrorData::invalid_params("filepath is required", None))?;
+        let file_path = std::path::Path::new(filepath);
 
         if let Err(e) = self.sandbox.check(file_path) {
             tracing::warn!(tool = "read_source_file", error = %e, "sandbox check failed");
@@ -211,11 +215,11 @@ impl PathfinderServer {
     }
 
     /// Graceful fallback: read raw file content without AST parsing.
-    #[tracing::instrument(skip(self, params, start), fields(file = %params.filepath))]
+    #[tracing::instrument(skip(self, params, start), fields(file = %params.filepath.as_deref().unwrap_or("")))]
     async fn handle_unsupported_language_fallback(
         &self,
         file_path: &std::path::Path,
-        params: &ReadSourceFileParams,
+        params: &ReadParams,
         tree_sitter_ms: u128,
         start: std::time::Instant,
     ) -> Result<CallToolResult, ErrorData> {
@@ -279,7 +283,7 @@ fn build_supported_response(
     mut content: String,
     language: String,
     mut symbols: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>,
-    params: &ReadSourceFileParams,
+    params: &ReadParams,
     duration_ms: u128,
     tree_sitter_ms: u128,
 ) -> CallToolResult {
@@ -304,7 +308,7 @@ fn build_supported_response(
         "source_only" => (Some(content), vec![]),
         "symbols" => {
             let syms = map_symbols(symbols);
-            let tree_text = render_symbol_tree(&syms, &params.filepath);
+            let tree_text = render_symbol_tree(&syms, params.filepath.as_deref().unwrap_or(""));
             (Some(tree_text), syms)
         }
         "full" => (Some(content), map_symbols(symbols)),
@@ -499,11 +503,12 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadSourceFileParams {
-            filepath: ".git/HEAD".to_owned(),
+        let params = ReadParams {
+            filepath: Some(".git/HEAD".to_owned()),
             start_line: 1,
             end_line: None,
             detail_level: "full".to_owned(),
+            ..Default::default()
         };
         let result = server.read_source_file_impl(params).await;
         assert!(result.is_err(), "sandbox should deny .git paths");
@@ -556,11 +561,12 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadSourceFileParams {
-            filepath: "test.rs".to_owned(),
+        let params = ReadParams {
+            filepath: Some("test.rs".to_owned()),
             start_line: 1,
             end_line: None,
             detail_level: "full".to_owned(),
+            ..Default::default()
         };
 
         let result = server.read_source_file_impl(params).await;
@@ -623,11 +629,12 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadSourceFileParams {
-            filepath: "main.rs".to_owned(),
+        let params = ReadParams {
+            filepath: Some("main.rs".to_owned()),
             start_line: 1,
             end_line: None,
             detail_level: "compact".to_owned(),
+            ..Default::default()
         };
 
         let result = server.read_source_file_impl(params).await;
@@ -677,11 +684,12 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadSourceFileParams {
-            filepath: "query.sql".to_owned(),
+        let params = ReadParams {
+            filepath: Some("query.sql".to_owned()),
             start_line: 1,
             end_line: None,
             detail_level: "full".to_owned(),
+            ..Default::default()
         };
 
         let result = server.read_source_file_impl(params).await;
@@ -785,11 +793,12 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadSourceFileParams {
-            filepath: "config.yaml".to_owned(),
+        let params = ReadParams {
+            filepath: Some("config.yaml".to_owned()),
             start_line: 2,
             end_line: Some(3),
             detail_level: "full".to_owned(),
+            ..Default::default()
         };
 
         let result = server.read_source_file_impl(params).await;
@@ -873,11 +882,12 @@ mod tests {
         );
 
         // Verify YAML
-        let yaml_params = ReadSourceFileParams {
-            filepath: "app.yaml".to_owned(),
+        let yaml_params = ReadParams {
+            filepath: Some("app.yaml".to_owned()),
             start_line: 1,
             end_line: None,
             detail_level: "full".to_owned(),
+            ..Default::default()
         };
         let yaml_result = server.read_source_file_impl(yaml_params).await;
         assert!(yaml_result.is_ok());
@@ -894,11 +904,12 @@ mod tests {
         }
 
         // Verify TOML
-        let toml_params = ReadSourceFileParams {
-            filepath: "Cargo.toml".to_owned(),
+        let toml_params = ReadParams {
+            filepath: Some("Cargo.toml".to_owned()),
             start_line: 1,
             end_line: None,
             detail_level: "full".to_owned(),
+            ..Default::default()
         };
         let toml_result = server.read_source_file_impl(toml_params).await;
         assert!(toml_result.is_ok());
@@ -952,11 +963,12 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadSourceFileParams {
-            filepath: "empty.sql".to_owned(),
+        let params = ReadParams {
+            filepath: Some("empty.sql".to_owned()),
             start_line: 1,
             end_line: None,
             detail_level: "full".to_owned(),
+            ..Default::default()
         };
 
         let result = server.read_source_file_impl(params).await;

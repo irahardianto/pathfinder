@@ -3,7 +3,7 @@
 use crate::server::helpers::{
     io_error_data, language_from_path, millis_to_u64, pathfinder_to_error_data, serialize_metadata,
 };
-use crate::server::types::ReadFileParams;
+use crate::server::types::ReadParams;
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
 use rmcp::model::{CallToolResult, ErrorData};
@@ -18,17 +18,27 @@ impl PathfinderServer {
     /// Sandbox-checks, reads the file, and paginates by `start_line`/`max_lines`.
     pub(crate) async fn read_file_impl(
         &self,
-        params: ReadFileParams,
+        params: ReadParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
-        let relative_path = Path::new(&params.filepath);
+        let filepath = params
+            .filepath
+            .as_ref()
+            .ok_or_else(|| rmcp::model::ErrorData::invalid_params("filepath is required", None))?;
+        let relative_path = Path::new(filepath);
         let absolute_path = self.workspace_root.resolve(relative_path);
+
+        let max_lines = if let Some(end) = params.end_line {
+            end.saturating_sub(params.start_line) + 1
+        } else {
+            params.max_lines_per_file
+        };
 
         tracing::info!(
             tool = "read_file",
-            filepath = %params.filepath,
+            filepath = %filepath,
             start_line = params.start_line,
-            max_lines = params.max_lines,
+            max_lines = max_lines,
             "read_file: start"
         );
 
@@ -71,7 +81,7 @@ impl PathfinderServer {
         let total_lines = u32::try_from(all_lines.len()).unwrap_or(u32::MAX);
         let file_size_bytes = u64::try_from(raw_content.len()).unwrap_or(u64::MAX);
         let start_idx = params.start_line.saturating_sub(1) as usize;
-        let end_idx = (start_idx + params.max_lines as usize).min(all_lines.len());
+        let end_idx = (start_idx + max_lines as usize).min(all_lines.len());
         let page_lines = &all_lines[start_idx..end_idx];
         let lines_returned = u32::try_from(page_lines.len()).unwrap_or(u32::MAX);
         let truncated = end_idx < all_lines.len();
@@ -90,7 +100,7 @@ impl PathfinderServer {
 
         tracing::info!(
             tool = "read_file",
-            filepath = %params.filepath,
+            filepath = %filepath,
             total_lines,
             lines_returned,
             truncated,

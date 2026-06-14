@@ -23,7 +23,7 @@ impl PathfinderServer {
     #[tracing::instrument(skip(self, params), fields(language = ?params.language))]
     pub(crate) async fn lsp_health_impl(
         &self,
-        params: crate::server::types::LspHealthParams,
+        params: crate::server::types::HealthParams,
     ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
         // IW-4: Handle action="restart" before the normal health query flow.
         if params.action.as_deref() == Some("restart") {
@@ -31,8 +31,7 @@ impl PathfinderServer {
                 Some(l) => l.clone(),
                 None => {
                     return Err(pathfinder_to_error_data(&PathfinderError::IoError {
-                        message: "health action='restart' requires 'language' to be set"
-                            .to_owned(),
+                        message: "health action='restart' requires 'language' to be set".to_owned(),
                     }));
                 }
             };
@@ -350,9 +349,8 @@ impl PathfinderServer {
                     crate::server::types::DegradedToolInfo {
                         tool: "trace".to_owned(),
                         severity: "unavailable".to_owned(),
-                        description:
-                            "No LSP available. Use search for manual reference search."
-                                .to_owned(),
+                        description: "No LSP available. Use search for manual reference search."
+                            .to_owned(),
                     },
                     crate::server::types::DegradedToolInfo {
                         tool: "inspect".to_owned(),
@@ -895,7 +893,7 @@ mod tests {
 
         // MockLawyer returns empty capability_status, so no languages should be returned
         // This tests the structure exists and doesn't panic
-        let params = crate::server::types::LspHealthParams::default();
+        let params = crate::server::types::HealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
         let val = unpack_health(call_res);
@@ -934,7 +932,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("go".to_string()),
         };
@@ -981,7 +979,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -1028,7 +1026,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams::default();
+        let params = crate::server::types::HealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
         let val = unpack_health(call_res);
@@ -1087,7 +1085,7 @@ mod tests {
             preview: "fn main()".to_string(),
         })));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -1156,7 +1154,7 @@ mod tests {
         // Mock failed goto_definition response (LSP is not responsive)
         lawyer.set_goto_definition_result(Err(pathfinder_lsp::LspError::ConnectionLost));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -1226,7 +1224,7 @@ mod tests {
             preview: "fn main()".to_string(),
         })));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -1291,7 +1289,7 @@ mod tests {
             preview: "fn main()".to_string(),
         })));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -1587,7 +1585,7 @@ mod tests {
             },
         ]);
 
-        let params = crate::server::types::LspHealthParams::default();
+        let params = crate::server::types::HealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
         let val = unpack_health(call_res);
@@ -1645,7 +1643,7 @@ mod tests {
         ]);
 
         // Filter by language = python
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("python".to_string()),
         };
@@ -1694,7 +1692,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("go".to_string()),
         };
@@ -1785,7 +1783,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -1833,7 +1831,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("go".to_string()),
         };
@@ -1880,7 +1878,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -1922,7 +1920,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("python".to_string()),
         };
@@ -1976,7 +1974,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2050,7 +2048,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2107,7 +2105,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2163,7 +2161,7 @@ mod tests {
             timeout_ms: 10000,
         }));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2226,7 +2224,7 @@ mod tests {
 
         // First call - should probe and cache
         let result1 = server
-            .lsp_health_impl(crate::server::types::LspHealthParams {
+            .lsp_health_impl(crate::server::types::HealthParams {
                 action: None,
                 language: Some("rust".to_string()),
             })
@@ -2244,7 +2242,7 @@ mod tests {
         // Second call - should use cache (no second probe)
         let call_count_before = lawyer.goto_definition_call_count();
         let result2 = server
-            .lsp_health_impl(crate::server::types::LspHealthParams {
+            .lsp_health_impl(crate::server::types::HealthParams {
                 action: None,
                 language: Some("rust".to_string()),
             })
@@ -2305,7 +2303,7 @@ mod tests {
             preview: "fn main()".to_string(),
         })));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2367,7 +2365,7 @@ mod tests {
             timeout_ms: 5000,
         }));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2579,7 +2577,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2640,7 +2638,7 @@ mod tests {
             preview: "fn main()".to_string(),
         })));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2709,7 +2707,7 @@ mod tests {
             },
         ]));
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
         };
@@ -2801,7 +2799,7 @@ mod tests {
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: Some("restart".to_string()),
             language: None,
         };
@@ -2815,7 +2813,7 @@ mod tests {
         let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::LspHealthParams {
+        let params = crate::server::types::HealthParams {
             action: Some("restart".to_string()),
             language: Some("rust".to_string()),
         };
@@ -2854,7 +2852,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams::default();
+        let params = crate::server::types::HealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
         let val = unpack_health(call_res);
@@ -2905,7 +2903,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams::default();
+        let params = crate::server::types::HealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
         let val = unpack_health(call_res);
@@ -2956,7 +2954,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams::default();
+        let params = crate::server::types::HealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
 
@@ -3024,7 +3022,7 @@ mod tests {
             },
         )]));
 
-        let params = crate::server::types::LspHealthParams::default();
+        let params = crate::server::types::HealthParams::default();
         let result = server.lsp_health_impl(params).await;
         let call_res = result.expect("should succeed");
 

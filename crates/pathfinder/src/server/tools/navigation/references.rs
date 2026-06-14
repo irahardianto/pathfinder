@@ -36,7 +36,7 @@ impl PathfinderServer {
         symbol_name: &str,
         definition_path: &std::path::Path,
         definition_scope: &pathfinder_common::types::SymbolScope,
-        params: &crate::server::types::FindAllReferencesParams,
+        params: &crate::server::types::TraceParams,
     ) -> Option<(Vec<crate::server::types::ReferenceLocation>, usize)> {
         let query = format!(r"\b{}\b", regex::escape(symbol_name));
 
@@ -85,17 +85,16 @@ impl PathfinderServer {
         // definition_scope.start_line is 0-indexed, convert to 1-indexed for comparison with search results
         let definition_line_1indexed = (definition_scope.start_line + 1) as u64;
 
-        let search_params = crate::server::types::SearchCodebaseParams {
+        let search_params = crate::server::types::SearchParams {
             query,
-            is_regex: true,
+            mode: crate::server::types::SearchMode::Regex,
             path_glob: "**/*".to_string(),
-            filter_mode: pathfinder_common::types::FilterMode::CodeOnly,
-            max_results: params.max_results,
+            max_results: params.max_references,
             context_lines: 0,
             known_files: vec![],
-            group_by_file: false,
             exclude_glob: String::new(),
             offset: params.offset,
+            kind: None,
         };
 
         let result = match self.search_codebase_impl(search_params).await {
@@ -207,7 +206,7 @@ impl PathfinderServer {
     #[tracing::instrument(skip(self, params))]
     pub(crate) async fn find_all_references_impl(
         &self,
-        params: crate::server::types::FindAllReferencesParams,
+        params: crate::server::types::TraceParams,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
@@ -386,7 +385,8 @@ impl PathfinderServer {
                         };
 
                         let offset = usize::try_from(params.offset).unwrap_or(0);
-                        let max_results = usize::try_from(params.max_results).unwrap_or(50).max(1);
+                        let max_results =
+                            usize::try_from(params.max_references).unwrap_or(50).max(1);
 
                         let (paginated_refs, files_referenced, total_references) =
                             if let Some((refs, file_count)) = grep_result {
@@ -494,7 +494,8 @@ impl PathfinderServer {
                         };
 
                         let offset = usize::try_from(params.offset).unwrap_or(0);
-                        let max_results = usize::try_from(params.max_results).unwrap_or(50).max(1);
+                        let max_results =
+                            usize::try_from(params.max_references).unwrap_or(50).max(1);
 
                         let (paginated_refs, files_referenced, total_references) =
                             if let Some((refs, file_count)) = grep_result {
@@ -578,7 +579,7 @@ impl PathfinderServer {
                 let total_references = references.len() + implementations.len();
                 let offset = usize::try_from(params.offset).unwrap_or(0);
                 // Item 4: Guard against max_results=0 which causes infinite pagination loops.
-                let max_results = usize::try_from(params.max_results).unwrap_or(50).max(1);
+                let max_results = usize::try_from(params.max_references).unwrap_or(50).max(1);
                 let truncated = total_references > offset.saturating_add(max_results);
 
                 // Paginate implementations first, then references (matches display order)
@@ -952,10 +953,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -990,10 +992,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 3, // Limit to 3
+            max_references: 3, // Limit to 3
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1035,10 +1038,11 @@ mod tests {
             lawyer,
         );
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1071,10 +1075,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1110,10 +1115,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1173,10 +1179,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1246,10 +1253,11 @@ mod tests {
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         // offset=2 skips both implementations
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 2,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1320,10 +1328,11 @@ mod tests {
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         // offset=3: skip 1 impl + 2 refs, get next 2 refs
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 2,
+            max_references: 2,
             offset: 3,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1357,10 +1366,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1386,10 +1396,11 @@ mod tests {
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         // Use path outside workspace (sandbox denies)
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "/etc/passwd::function".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         assert!(
@@ -1428,10 +1439,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1507,10 +1519,11 @@ mod tests {
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         // offset=100 is way past the 6 total items
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 100,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1586,10 +1599,11 @@ mod tests {
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
         // Total = 5, offset=0, max_results=5 → exactly fits → NOT truncated
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 5,
+            max_references: 5,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1645,10 +1659,11 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1755,10 +1770,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1867,10 +1883,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -1957,10 +1974,11 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2048,10 +2066,11 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2182,10 +2201,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2312,10 +2332,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/components/Auth.vue::useAuth".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");
@@ -2361,10 +2382,11 @@ mod tests {
 
         let definition_path = std::path::Path::new("src/main.invalid_regex");
         let definition_scope = super::super::test_helpers::make_scope();
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/main.invalid_regex::main".to_string(),
-            max_results: 100,
+            max_references: 100,
             offset: 0,
+            ..Default::default()
         };
 
         let res = server
@@ -2423,10 +2445,11 @@ mod tests {
 
         let definition_path = std::path::Path::new("src/main.rs");
         let definition_scope = super::super::test_helpers::make_scope();
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/main.rs::main".to_string(),
-            max_results: 100,
+            max_references: 100,
             offset: 0,
+            ..Default::default()
         };
 
         let fallback_res = server
@@ -2478,10 +2501,11 @@ mod tests {
             std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
         }
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/main.rs::main".to_string(),
-            max_results: 100,
+            max_references: 100,
             offset: 0,
+            ..Default::default()
         };
 
         lawyer.references_result.lock().unwrap().replace(Ok(vec![
@@ -2582,10 +2606,11 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = crate::server::types::FindAllReferencesParams {
+        let params = crate::server::types::TraceParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            max_results: 50,
+            max_references: 50,
             offset: 0,
+            ..Default::default()
         };
         let result = server.find_all_references_impl(params).await;
         let call_res = result.expect("should succeed");

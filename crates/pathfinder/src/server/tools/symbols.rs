@@ -4,11 +4,23 @@ use crate::server::helpers::{
     millis_to_u64, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
     serialize_metadata,
 };
-use crate::server::types::ReadSymbolScopeParams;
+use crate::server::types::InspectParams;
 use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, Content, ErrorData};
 
 impl PathfinderServer {
+    /// Consolidated `inspect` handler.
+    pub(crate) async fn inspect_impl(
+        &self,
+        params: InspectParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        if params.include_dependencies {
+            self.read_with_deep_context_impl(params).await
+        } else {
+            self.read_symbol_scope_impl(params).await
+        }
+    }
+
     /// Core logic for the `read_symbol_scope` tool.
     ///
     /// Parses the semantic path, performs a sandbox check, then delegates
@@ -16,7 +28,7 @@ impl PathfinderServer {
     #[tracing::instrument(skip(self, params), fields(semantic_path = %params.semantic_path))]
     pub(crate) async fn read_symbol_scope_impl(
         &self,
-        params: ReadSymbolScopeParams,
+        params: InspectParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
@@ -146,8 +158,9 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadSymbolScopeParams {
+        let params = InspectParams {
             semantic_path: "test.rs::test".to_owned(),
+            ..Default::default()
         };
 
         let result = server.read_symbol_scope_impl(params).await;

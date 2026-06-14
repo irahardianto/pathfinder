@@ -6,10 +6,10 @@
 //! - [`helpers`] — error conversion, stub builder, language detection
 //! - [`types`] — all parameter and response structs
 //! - [`tools`] — handler logic:
-//!   - [`tools::consolidated`] — 7 consolidated tool entry points:
-//!     `explore`, `search`, `read`, `inspect`, `locate`, `trace`, `health`
-//!   - Legacy impl modules (`search`, `repo_map`, `navigation`, etc.) contain
-//!     the underlying implementations delegated to by consolidated handlers.
+//!   - The `#[tool_router]` impl block below registers 7 consolidated tools:
+//!     `explore`, `search`, `read`, `inspect`, `locate`, `trace`, `health`.
+//!   - Submodules (`search`, `repo_map`, `navigation`, etc.) contain
+//!     the underlying implementations delegated to by these handlers.
 
 /// Duration after which a negative probe cache entry expires.
 /// Allows re-probing an LSP that was still starting when first checked.
@@ -69,8 +69,7 @@ mod tools;
 pub mod types;
 
 use types::{
-    ExploreParams, HealthParams, InspectParams, LocateParams, ReadParams, SearchParams,
-    TraceParams,
+    ExploreParams, HealthParams, InspectParams, LocateParams, ReadParams, SearchParams, TraceParams,
 };
 
 use pathfinder_common::config::PathfinderConfig;
@@ -233,7 +232,7 @@ Example: `explore(path=\"src/\", detail=\"files\", depth=5)`"
         &self,
         Parameters(params): Parameters<ExploreParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.explore_impl(params).await
+        self.get_repo_map_impl(params).await
     }
 
     #[tool(
@@ -353,6 +352,7 @@ Parameter guidance:
   - `\"overview\"` — combined: source + callers + callees + references in one call. Uses `max_references` for both callers/callees and references caps.
 - `max_depth=3` (default): For call hierarchy traversal. Increase to 4-5 for large API changes.
 - `max_references=50` (default): Cap output for all scopes. In `overview` mode, applies to both caller/callee and reference limits.
+- `offset`: Pagination offset. Applies to `scope=\"references\"` only; ignored for `callers` and `overview`.
 
 LSP-powered. When `degraded=true`: results are best-effort, not confirmed-zero.
 
@@ -403,17 +403,13 @@ impl ServerHandler for PathfinderServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::server::types::{
-        GetRepoMapParams, ReadFileParams, ReadSymbolScopeParams, SearchCodebaseParams,
-    };
-    use pathfinder_common::types::FilterMode;
+    use crate::server::types::{Detail, ExploreParams, InspectParams, ReadParams, SearchParams};
     use pathfinder_search::{MockScout, SearchMatch, SearchResult};
     use pathfinder_treesitter::mock::MockSurgeon;
     use pathfinder_treesitter::surgeon::{AccessLevel, ExtractedSymbol, SymbolKind};
     use rmcp::model::ErrorCode;
     use std::fs;
     use tempfile::tempdir;
-
 
     #[tokio::test]
     async fn test_get_repo_map_success() {
@@ -446,8 +442,9 @@ mod tests {
             Arc::new(mock_surgeon),
         );
 
-        let params = GetRepoMapParams {
+        let params = ExploreParams {
             path: ".".to_owned(),
+            detail: Detail::Symbols,
             max_tokens: 16_000,
             depth: 3,
             visibility: pathfinder_common::types::Visibility::Public,
@@ -455,7 +452,6 @@ mod tests {
             changed_since: String::default(),
             include_extensions: vec![],
             exclude_extensions: vec![],
-            include_tests: true,
         };
 
         let result = server.get_repo_map_impl(params).await;
@@ -510,7 +506,7 @@ mod tests {
             Arc::new(mock_surgeon),
         );
 
-        let params = GetRepoMapParams {
+        let params = ExploreParams {
             visibility: pathfinder_common::types::Visibility::All,
             ..Default::default()
         };
@@ -542,7 +538,7 @@ mod tests {
             Arc::new(mock_surgeon),
         );
 
-        let params = GetRepoMapParams {
+        let params = ExploreParams {
             path: ".env".to_string(), // Sandbox should deny this
             ..Default::default()
         };
@@ -611,9 +607,9 @@ mod tests {
             Arc::new(mock_scout.clone()),
             mock_surgeon.clone(),
         );
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "test_query".to_owned(),
-            is_regex: true,
+            mode: crate::server::types::SearchMode::Regex,
             ..Default::default()
         };
 
@@ -658,7 +654,7 @@ mod tests {
             Arc::new(mock_scout),
             Arc::new(MockSurgeon::new()),
         );
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "test".to_owned(),
             ..Default::default()
         };
@@ -739,9 +735,8 @@ mod tests {
         let server =
             PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "line".to_owned(),
-            filter_mode: FilterMode::CodeOnly,
             ..Default::default()
         };
 
@@ -760,130 +755,6 @@ mod tests {
         // total_matches reflects the FILTERED count (after filtering)
         assert_eq!(result.total_matches, 2);
         // No degraded flag — filtering was real
-        assert!(!result.degraded);
-    }
-
-    #[tokio::test]
-    async fn test_search_codebase_filter_mode_comments_only_keeps_comments() {
-        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        let mock_scout = MockScout::default();
-        mock_scout.set_result(Ok(SearchResult {
-            matches: vec![
-                make_search_match("src/b.go", 1, "func HelloWorld() {}"),
-                make_search_match("src/b.go", 2, "// HelloWorld says hello"),
-                make_search_match("src/b.go", 3, r#"msg := "Hello World""#),
-            ],
-            total_matches: 3,
-            truncated: false,
-            files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
-        }));
-
-        let mock_surgeon = Arc::new(MockSurgeon::new());
-        mock_surgeon
-            .enclosing_symbol_results
-            .lock()
-            .unwrap()
-            .extend([Ok(None), Ok(None), Ok(None)]);
-        mock_surgeon
-            .enclosing_symbol_detail_results
-            .lock()
-            .unwrap()
-            .extend([Ok(None), Ok(None), Ok(None)]);
-        mock_surgeon
-            .node_type_at_position_results
-            .lock()
-            .unwrap()
-            .extend([
-                Ok("code".to_owned()),
-                Ok("comment".to_owned()),
-                Ok("string".to_owned()),
-            ]);
-
-        let server =
-            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
-
-        let params = SearchCodebaseParams {
-            query: "Hello".to_owned(),
-            filter_mode: FilterMode::CommentsOnly,
-            ..Default::default()
-        };
-
-        let result = server
-            .search_codebase_impl(params)
-            .await
-            .expect("should succeed")
-            .0;
-
-        // Comment and string matches should survive; code match should be dropped
-        assert_eq!(result.matches.len(), 2, "comments_only should drop code");
-        assert_eq!(result.matches[0].content, "// HelloWorld says hello");
-        assert_eq!(result.matches[1].content, r#"msg := "Hello World""#);
-        assert!(!result.degraded);
-    }
-
-    #[tokio::test]
-    async fn test_search_codebase_filter_mode_all_returns_everything() {
-        let ws = WorkspaceRoot::new(std::env::temp_dir()).expect("valid root");
-        let config = PathfinderConfig::default();
-        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-        let mock_scout = MockScout::default();
-        mock_scout.set_result(Ok(SearchResult {
-            matches: vec![
-                make_search_match("src/c.go", 1, "code"),
-                make_search_match("src/c.go", 2, "// comment"),
-                make_search_match("src/c.go", 3, r#"\"string\""#),
-            ],
-            total_matches: 3,
-            truncated: false,
-            files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
-        }));
-
-        let mock_surgeon = Arc::new(MockSurgeon::default());
-        // enclosing_symbol: all return None
-        mock_surgeon
-            .enclosing_symbol_results
-            .lock()
-            .unwrap()
-            .extend([Ok(None), Ok(None), Ok(None)]);
-        // enclosing_symbol_detail: all return None
-        mock_surgeon
-            .enclosing_symbol_detail_results
-            .lock()
-            .unwrap()
-            .extend([Ok(None), Ok(None), Ok(None)]);
-        // node_type_at_position: will use default "code" since queue is empty
-        // (FilterMode::All skips classification entirely — but mock still gets called;
-        // the default return value is "code" so no pre-configuration needed)
-
-        let server =
-            PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
-
-        let params = SearchCodebaseParams {
-            query: "test".to_owned(),
-            filter_mode: FilterMode::All,
-            ..Default::default()
-        };
-
-        let result = server
-            .search_codebase_impl(params)
-            .await
-            .expect("should succeed")
-            .0;
-
-        // All 3 matches returned, no filtering
-        assert_eq!(result.matches.len(), 3);
         assert!(!result.degraded);
     }
 
@@ -911,10 +782,11 @@ mod tests {
 
         // Full read
         let result = server
-            .read_file_impl(ReadFileParams {
-                filepath: filepath.to_owned(),
+            .read_file_impl(ReadParams {
+                filepath: Some(filepath.to_owned()),
                 start_line: 1,
-                max_lines: 500,
+                max_lines_per_file: 500,
+                ..Default::default()
             })
             .await
             .expect("should succeed");
@@ -927,10 +799,11 @@ mod tests {
 
         // Paginated read — lines 3-5
         let result2 = server
-            .read_file_impl(ReadFileParams {
-                filepath: filepath.to_owned(),
+            .read_file_impl(ReadParams {
+                filepath: Some(filepath.to_owned()),
                 start_line: 3,
-                max_lines: 3,
+                end_line: Some(5),
+                ..Default::default()
             })
             .await
             .expect("should succeed");
@@ -949,10 +822,11 @@ mod tests {
 
         // FILE_NOT_FOUND
         let result3 = server
-            .read_file_impl(ReadFileParams {
-                filepath: "nonexistent.yaml".to_owned(),
+            .read_file_impl(ReadParams {
+                filepath: Some("nonexistent.yaml".to_owned()),
                 start_line: 1,
-                max_lines: 500,
+                max_lines_per_file: 500,
+                ..Default::default()
             })
             .await;
         assert!(result3.is_err());
@@ -1004,8 +878,9 @@ mod tests {
             mock_surgeon.clone(),
         );
 
-        let params = ReadSymbolScopeParams {
+        let params = InspectParams {
             semantic_path: "src/auth.go::Login".to_owned(),
+            ..Default::default()
         };
 
         let result = server.read_symbol_scope_impl(params).await;
@@ -1061,8 +936,9 @@ mod tests {
             mock_surgeon,
         );
 
-        let params = ReadSymbolScopeParams {
+        let params = InspectParams {
             semantic_path: "src/auth.go::Login".to_owned(),
+            ..Default::default()
         };
 
         let Err(err) = server.read_symbol_scope_impl(params).await else {
@@ -1146,7 +1022,7 @@ mod tests {
         let server =
             PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "content".to_owned(),
             known_files: vec!["src/auth.ts".to_owned()],
             ..Default::default()
@@ -1245,7 +1121,7 @@ mod tests {
             PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
 
         // Pass with leading "./" — should still match "src/auth.ts"
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "stripped".to_owned(),
             known_files: vec!["./src/auth.ts".to_owned()],
             ..Default::default()
@@ -1341,10 +1217,9 @@ mod tests {
         let server =
             PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "line".to_owned(),
             known_files: vec!["src/auth.ts".to_owned()],
-            group_by_file: true,
             ..Default::default()
         };
 
@@ -1408,7 +1283,7 @@ mod tests {
             Arc::new(MockSurgeon::new()),
         );
 
-        let params = SearchCodebaseParams {
+        let params = SearchParams {
             query: "anything".to_owned(),
             exclude_glob: "**/*.test.*".to_owned(),
             ..Default::default()
@@ -1483,8 +1358,9 @@ mod tests {
         );
 
         // Navigation with NoOpLawyer should degrade gracefully
-        let params = crate::server::types::GetDefinitionParams {
-            semantic_path: "src/lib.rs::hello".to_owned(),
+        let params = crate::server::types::LocateParams {
+            semantic_path: Some("src/lib.rs::hello".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         // Should fail because NoOpLawyer returns NoLspAvailable and no grep fallback match
@@ -1507,10 +1383,11 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = crate::server::types::ReadFileParams {
-            filepath: "missing.txt".to_owned(),
+        let params = crate::server::types::ReadParams {
+            filepath: Some("missing.txt".to_owned()),
             start_line: 1,
-            max_lines: 100,
+            max_lines_per_file: 100,
+            ..Default::default()
         };
         let result = server.read_file_impl(params).await;
         let Err(err) = result else {
@@ -1545,10 +1422,11 @@ mod tests {
         );
 
         // Structurally valid params but semantically invalid (empty filepath).
-        let params = ReadFileParams {
-            filepath: String::new(),
+        let params = ReadParams {
+            filepath: Some(String::new()),
             start_line: 0,
-            max_lines: 500,
+            max_lines_per_file: 500,
+            ..Default::default()
         };
 
         let result = server.read_file_impl(params).await;

@@ -4,7 +4,7 @@ use crate::server::helpers::{
     format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
     require_symbol_target, serialize_metadata, treesitter_error_to_error_data,
 };
-use crate::server::types::{GetDefinitionParams, GetDefinitionResponse};
+use crate::server::types::{GetDefinitionResponse, LocateParams};
 use crate::server::PathfinderServer;
 use pathfinder_common::error::PathfinderError;
 use pathfinder_common::types::DegradedReason;
@@ -34,19 +34,20 @@ impl PathfinderServer {
     )]
     pub(crate) async fn get_definition_impl(
         &self,
-        params: GetDefinitionParams,
+        params: LocateParams,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
+        let semantic_path_str = params.semantic_path.clone().unwrap_or_default();
 
         tracing::info!(
             tool = "get_definition",
-            semantic_path = %params.semantic_path,
+            semantic_path = %semantic_path_str,
             "get_definition: start"
         );
 
         // Parse and validate the semantic path
-        let semantic_path = parse_semantic_path(&params.semantic_path)?;
-        require_symbol_target(&semantic_path, &params.semantic_path)?;
+        let semantic_path = parse_semantic_path(&semantic_path_str)?;
+        require_symbol_target(&semantic_path, &semantic_path_str)?;
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -217,7 +218,7 @@ impl PathfinderServer {
 
                 tracing::info!(
                     tool = "get_definition",
-                    semantic_path = %params.semantic_path,
+                    semantic_path = %semantic_path_str,
                     tree_sitter_ms,
                     lsp_ms,
                     duration_ms,
@@ -248,7 +249,7 @@ impl PathfinderServer {
 
                 tracing::info!(
                     tool = "get_definition",
-                    semantic_path = %params.semantic_path,
+                    semantic_path = %semantic_path_str,
                     tree_sitter_ms,
                     lsp_ms,
                     duration_ms,
@@ -264,7 +265,7 @@ impl PathfinderServer {
                 };
 
                 Err(pathfinder_to_error_data(&PathfinderError::SymbolNotFound {
-                    semantic_path: params.semantic_path,
+                    semantic_path: semantic_path_str,
                     did_you_mean: did_you_mean_suggestions,
                     retry_after_seconds: retry_after,
                 }))
@@ -320,7 +321,7 @@ impl PathfinderServer {
                 // LSP timed out — attempt grep-based fallback
                 tracing::info!(
                     tool = "get_definition",
-                    semantic_path = %params.semantic_path,
+                    semantic_path = %semantic_path_str,
                     "get_definition: LSP timed out — attempting grep-based fallback"
                 );
 
@@ -348,7 +349,7 @@ impl PathfinderServer {
 
                 tracing::warn!(
                     tool = "get_definition",
-                    semantic_path = %params.semantic_path,
+                    semantic_path = %semantic_path_str,
                     "get_definition: LSP timed out and grep fallback found no match"
                 );
                 Err(pathfinder_to_error_data(&PathfinderError::LspError {
@@ -793,7 +794,7 @@ impl PathfinderServer {
 mod tests {
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
     use super::*;
-    use crate::server::types::GetDefinitionParams;
+    use crate::server::types::LocateParams;
     use crate::server::PathfinderServer;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
@@ -829,8 +830,9 @@ mod tests {
         })));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
 
         let result = server.get_definition_impl(params).await;
@@ -868,8 +870,9 @@ mod tests {
             lawyer,
         );
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         // Should return NO_LSP_AVAILABLE error
@@ -891,8 +894,9 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: String::default(), // empty is truly invalid
+        let params = LocateParams {
+            semantic_path: Some(String::default()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         assert!(result.is_err());
@@ -904,8 +908,9 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: ".git/objects/abc::def".to_owned(), // sandbox should deny
+        let params = LocateParams {
+            semantic_path: Some(".git/objects/abc::def".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Err(err) = result else {
@@ -938,8 +943,9 @@ mod tests {
             .set_goto_definition_result(Err(LspError::Protocol("LSP protocol error".to_string())));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
 
         let result = server.get_definition_impl(params).await;
@@ -1012,8 +1018,9 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Ok(res) = result else {
@@ -1082,8 +1089,9 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Ok(res) = result else {
@@ -1119,8 +1127,9 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Err(err) = result else {
@@ -1193,8 +1202,9 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Ok(res) = result else {
@@ -1232,8 +1242,9 @@ mod tests {
         })));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
 
         let _ = server.get_definition_impl(params).await;
@@ -1262,8 +1273,9 @@ mod tests {
         lawyer.set_goto_definition_result(Err(LspError::Protocol("LSP crashed".to_string())));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
 
         let _ = server.get_definition_impl(params).await;
@@ -1330,8 +1342,9 @@ mod tests {
         let lawyer = Arc::new(MockLawyer::default());
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Err(err) = result else {
@@ -1418,8 +1431,9 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let call_res = result.expect("should succeed via grep fallback");
@@ -1474,8 +1488,9 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let call_res = result.expect("should succeed via grep fallback");
@@ -1541,8 +1556,9 @@ mod tests {
         let server =
             PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Ok(res) = result else {
@@ -1633,8 +1649,9 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Ok(res) = result else {
@@ -1675,8 +1692,9 @@ mod tests {
         })));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
-        let params = GetDefinitionParams {
-            semantic_path: "src/auth.rs::login".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/auth.rs::login".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let call_res = result.expect("should succeed on retry");
@@ -1766,8 +1784,9 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/mystruct.rs::MyStruct.my_method".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/mystruct.rs::MyStruct.my_method".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         match &result {
@@ -1929,8 +1948,9 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = GetDefinitionParams {
-            semantic_path: "src/sandbox.rs::Sandbox.check".to_owned(),
+        let params = LocateParams {
+            semantic_path: Some("src/sandbox.rs::Sandbox.check".to_owned()),
+            ..Default::default()
         };
         let result = server.get_definition_impl(params).await;
         let Ok(res) = result else {

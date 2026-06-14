@@ -11,127 +11,6 @@ use pathfinder_common::types::{ActionableGuidance, DegradedReason};
 use rmcp::schemars;
 use rmcp::serde::{self, Deserialize, Serialize};
 
-// ── Legacy Tool Parameter Types ─────────────────────────────────────
-// These param structs are internal to the `_impl` methods (e.g.,
-// `search_codebase_impl`, `get_repo_map_impl`). Agents interact with
-// the consolidated param types below (ExploreParams, SearchParams, etc.)
-// which are defined in the "Consolidated Tool Parameter Types" section.
-
-/// Parameters for `search_codebase`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct SearchCodebaseParams {
-    /// Search pattern (literal or regex).
-    pub query: String,
-    /// Treat query as regex.
-    #[serde(default)]
-    pub is_regex: bool,
-    /// Limit search scope (e.g., `src/**/*.ts`).
-    #[serde(default = "default_path_glob")]
-    pub path_glob: String,
-    /// Filter mode: `code_only`, `comments_only`, or `all`.
-    ///
-    /// Uses Tree-sitter node classification to filter matches by context.
-    /// Defaults to `code_only` (exclude comments and string literals).
-    #[serde(default)]
-    pub filter_mode: pathfinder_common::types::FilterMode,
-    /// Maximum matches returned.
-    #[serde(default = "default_max_results")]
-    pub max_results: u32,
-    /// Lines of context above/below each match.
-    #[serde(default = "default_context_lines")]
-    pub context_lines: u32,
-    /// File paths already in the agent's context.
-    ///
-    /// For matches in these files, only minimal metadata is returned
-    /// (`file`, `line`, `column`, `enclosing_semantic_path`, `version_hash`).
-    /// The full `content` and context lines are omitted to save tokens.
-    #[serde(default)]
-    pub known_files: Vec<String>,
-    /// Group matches by file in the response.
-    ///
-    /// When `true`, the response includes `file_groups` instead of (or in addition to)
-    /// the flat `matches` list. Each group contains all matches for one file with a
-    /// single `version_hash` at group level.
-    #[serde(default)]
-    pub group_by_file: bool,
-    /// Glob pattern for files to exclude from search (e.g., `**/*.test.*`).
-    ///
-    /// Applied before search — not as a post-filter — so excluded files are
-    /// never read. Can be combined with `path_glob` include patterns.
-    #[serde(default)]
-    pub exclude_glob: String,
-    /// Number of matches to skip before returning results (for pagination).
-    /// Use with `max_results` to page through large result sets.
-    #[serde(default)]
-    pub offset: u32,
-}
-
-/// Parameters for `get_repo_map`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetRepoMapParams {
-    /// Directory to map.
-    #[serde(default = "default_repo_map_path")]
-    pub path: String,
-    /// Total token budget for the entire skeleton output. Default: 16000.
-    ///
-    /// When `coverage_percent` in the response is low, increase this value
-    /// to include more files in the map.
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
-    /// Max directory traversal depth (default: 5).
-    ///
-    /// Increase this value when `coverage_percent` in the response is low
-    /// or when your project has deeply-nested source files (e.g. a depth 6+
-    /// monorepo). The walker stops early on shallow repos, so over-provisioning
-    /// is safe and nearly free.
-    #[serde(default = "default_depth")]
-    pub depth: u32,
-    /// Visibility filter: `public` or `all`.
-    #[serde(default)]
-    pub visibility: pathfinder_common::types::Visibility,
-    /// Per-file token cap before a file skeleton is collapsed to a summary stub.
-    ///
-    /// When the rendered skeleton of an individual file exceeds this limit, the
-    /// file is replaced with a truncated stub showing only class/struct names and
-    /// method counts. Increase this value when files show `[TRUNCATED DUE TO SIZE]`
-    /// in the output. Default: 2000.
-    #[serde(default = "default_max_tokens_per_file")]
-    pub max_tokens_per_file: u32,
-    /// Git ref or duration to show only recently modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`).
-    #[serde(default)]
-    pub changed_since: String,
-    /// Only include files with these extensions. Mutually exclusive with `exclude_extensions`.
-    #[serde(default)]
-    pub include_extensions: Vec<String>,
-    /// Exclude files with these extensions. Mutually exclusive with `include_extensions`.
-    #[serde(default)]
-    pub exclude_extensions: Vec<String>,
-    /// Include test functions and test modules regardless of visibility filter.
-    ///
-    /// When `true` (default), symbols inside `mod tests {}` blocks and functions with
-    /// test attributes are always included, even with `visibility="public"`.
-    /// When `false`, visibility rules are strictly applied.
-    #[serde(default = "default_true")]
-    pub include_tests: bool,
-}
-
-/// Parameters for `symbol_overview`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SymbolOverviewParams {
-    /// Semantic path (e.g., `src/auth.ts::AuthService.login`).
-    /// MUST include file path and '::'.
-    pub semantic_path: String,
-    /// Filter dependencies to workspace/project files only.
-    #[serde(default)]
-    pub project_only: Option<bool>,
-    /// Maximum number of callers/callees to return per direction.
-    #[serde(default = "default_max_references")]
-    pub max_callers_callees: u32,
-    /// Maximum number of references to return.
-    #[serde(default = "default_max_references")]
-    pub max_references: u32,
-}
-
 /// Response for `symbol_overview`.
 #[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SymbolOverviewResponse {
@@ -213,133 +92,9 @@ pub struct SymbolOverviewReference {
     pub snippet: String,
 }
 
-/// Parameters for `read_symbol_scope`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadSymbolScopeParams {
-    /// Semantic path (e.g., `src/auth.ts::AuthService.login`).
-    pub semantic_path: String,
-}
-
-/// Parameters for `read_with_deep_context`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadWithDeepContextParams {
-    /// Semantic path (e.g., `src/auth.ts::AuthService.login`). MUST include file path and '::'.
-    pub semantic_path: String,
-    /// Filter dependencies to workspace/project files only.
-    ///
-    /// When `true` (default), excludes stdlib and external library dependencies
-    /// (e.g., `Vec::push`, `String::clone` from Rust stdlib, or npm packages).
-    /// When `false`, includes all references including stdlib/external.
-    #[serde(default)]
-    pub project_only: Option<bool>,
-    /// Maximum number of dependencies (callee signatures) to return.
-    /// Prevents context overflow on large functions. Default: 50.
-    #[serde(default = "default_max_dependencies")]
-    pub max_dependencies: u32,
-    /// Include file-level import statements in the response.
-    ///
-    /// When `true`, the `imports` field in the response will contain the import/using
-    /// statements from the file. Useful for languages with verbose package paths
-    /// (Java, C#, Kotlin) where imports clarify what types are in scope.
-    /// Default: `false` to avoid unnecessary output for languages without verbose imports.
-    #[serde(default)]
-    pub include_imports: bool,
-}
-
-impl Default for ReadWithDeepContextParams {
-    fn default() -> Self {
-        Self {
-            semantic_path: String::default(),
-            project_only: Some(true),
-            max_dependencies: default_max_dependencies(),
-            include_imports: false,
-        }
-    }
-}
-
-/// Parameters for `get_definition`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetDefinitionParams {
-    /// Semantic path to the reference (e.g., `src/auth.ts::AuthService.login`).
-    pub semantic_path: String,
-}
-
-/// Parameters for `find_callers_callees` (formerly `analyze_impact`).
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct FindCallersCalleesParams {
-    /// Semantic path to the target (e.g., `src/mod.rs::func`).
-    pub semantic_path: String,
-    /// Traversal depth (max: 5).
-    #[serde(default = "default_max_depth")]
-    pub max_depth: u32,
-    /// Filter references to workspace/project files only.
-    ///
-    /// When `true` (default), excludes stdlib and external library references
-    /// (e.g., `Vec::push`, `String::clone` from Rust stdlib, or npm packages).
-    /// When `false`, includes all references including stdlib/external.
-    #[serde(default)]
-    pub project_only: Option<bool>,
-    /// Maximum total references (incoming + outgoing) to return.
-    /// Prevents context overflow on large codebases. Default: 50.
-    #[serde(default = "default_max_references")]
-    pub max_references: u32,
-    /// When `true`, also search for test functions that cover this symbol.
-    /// Returns test references in a separate `test_callers` field.
-    /// Default: `false`.
-    #[serde(default)]
-    pub include_test_coverage: bool,
-}
-
-impl Default for FindCallersCalleesParams {
-    fn default() -> Self {
-        Self {
-            semantic_path: String::default(),
-            max_depth: default_max_depth(),
-            project_only: Some(true),
-            max_references: default_max_references(),
-            include_test_coverage: false,
-        }
-    }
-}
-
-/// Parameters for `read_file`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadFileParams {
-    /// Relative file path.
-    #[serde(alias = "path")]
-    pub filepath: String,
-    /// First line to return (1-indexed).
-    #[serde(default = "default_start_line")]
-    pub start_line: u32,
-    /// Maximum lines to return.
-    #[serde(default = "default_max_lines")]
-    pub max_lines: u32,
-}
-
-/// Parameters for `read_source_file`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadSourceFileParams {
-    /// Relative file path.
-    #[serde(alias = "path")]
-    pub filepath: String,
-    /// Detail level: `"source_only"`, `"compact"`, `"symbols"`, or `"full"`.
-    /// - `"source_only"` — source code only, no symbol metadata (lowest token cost)
-    /// - `"compact"` (default) — source + flat symbol list
-    /// - `"symbols"` — symbol tree only, no source
-    /// - `"full"` — source + nested symbol tree
-    #[serde(default = "default_detail_level")]
-    pub detail_level: String,
-    /// First line to return (1-indexed).
-    #[serde(default = "default_start_line")]
-    pub start_line: u32,
-    /// Last line to return (1-indexed, inclusive).
-    #[serde(default)]
-    pub end_line: Option<u32>,
-}
-
 // ── Legacy Response Types ───────────────────────────────────────────
-// These response structs are returned by `_impl` methods and serialized
-// into MCP responses by the consolidated handlers in `tools/consolidated.rs`.
+// These response structs are returned by the underlying `_impl` methods
+// and serialized into MCP responses by the `#[tool_router]` handlers in `server.rs`.
 
 /// The response for `search_codebase`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -825,16 +580,6 @@ pub struct FindCallersCalleesMetadata {
 
 // ── Get Semantic Path Tool Types ────────────────────────────────────────
 
-/// Parameters for `get_semantic_path`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetSemanticPathParams {
-    /// Relative path to the file (e.g., `src/auth.ts`).
-    #[serde(alias = "path")]
-    pub file: String,
-    /// 1-indexed line number to resolve.
-    pub line: u32,
-}
-
 /// Result for `get_semantic_path`.
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetSemanticPathResult {
@@ -856,19 +601,6 @@ pub struct GetSemanticPathResult {
 }
 
 // ── Find All References Tool Types ─────────────────────────────────────
-
-/// Parameters for `find_all_references`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct FindAllReferencesParams {
-    /// Semantic path to the target symbol (e.g., `src/mod.rs::func`).
-    pub semantic_path: String,
-    /// Maximum number of references to return. Default: 50.
-    #[serde(default = "default_max_references")]
-    pub max_results: u32,
-    /// Number of results to skip (for pagination).
-    #[serde(default)]
-    pub offset: u32,
-}
 
 /// The metadata embedded in `structured_content` for `find_all_references`.
 #[derive(Debug, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -945,22 +677,6 @@ pub struct DegradedToolInfo {
     pub severity: String,
     /// Human-readable description of the fallback behavior and limitations.
     pub description: String,
-}
-
-/// Parameters for `lsp_health`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct LspHealthParams {
-    /// Optional language to check (e.g., "rust", "typescript").
-    /// If omitted, checks all available languages.
-    #[serde(default)]
-    pub language: Option<String>,
-    /// IW-4: Optional action to perform.
-    ///
-    /// - `"restart"`: Force-restart the LSP process for the specified language.
-    ///   `language` must be set when using `"restart"`.
-    ///   Returns updated health status after the restart attempt.
-    #[serde(default)]
-    pub action: Option<String>,
 }
 
 /// The response for `lsp_health`.
@@ -1073,29 +789,6 @@ pub struct LspLanguageHealth {
     pub degraded_tools: Vec<DegradedToolInfo>,
 }
 
-// ── find_symbol tool types ─────────────────────────────────────────
-
-/// Parameters for `find_symbol`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct FindSymbolParams {
-    /// Bare symbol name to search for (e.g., [`AuthService`]).
-    pub name: String,
-    /// Optional filter by symbol kind (e.g., `class`, `function`, `struct`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// Optional glob pattern to limit search scope (e.g., `src/**/*.ts`).
-    #[serde(default = "default_path_glob")]
-    pub path_glob: String,
-    /// Maximum results to return (default 10).
-    #[serde(default = "find_symbol_default_max_results")]
-    pub max_results: u32,
-}
-
-#[must_use]
-pub const fn find_symbol_default_max_results() -> u32 {
-    10
-}
-
 /// A single symbol found by `find_symbol`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct FoundSymbol {
@@ -1123,26 +816,6 @@ pub struct FindSymbolResponse {
     /// Time taken in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-}
-
-// ── read_files tool types ─────────────────────────────────────────
-
-/// Parameters for `read_files`.
-#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadFilesParams {
-    /// File paths to read (max 10 per call).
-    pub paths: Vec<String>,
-    /// Detail level for source files: `source_only`, `compact`, `full`.
-    #[serde(default = "read_files_default_detail_level")]
-    pub detail_level: String,
-    /// Maximum lines per file (default 500).
-    #[serde(default = "default_max_lines")]
-    pub max_lines_per_file: u32,
-}
-
-#[must_use]
-pub fn read_files_default_detail_level() -> String {
-    "source_only".to_string()
 }
 
 /// Result for a single file in `read_files`.
@@ -1187,10 +860,10 @@ pub(crate) fn is_false(b: &bool) -> bool {
     !b
 }
 
-// ── Consolidated Tool Parameter Types (Phase 1) ────────────────────
+// ── Consolidated Tool Parameter Types ───────────────────────────────
 //
-// These new param structs replace the old per-tool structs above.
-// Old types are kept until the new tool handlers are wired up.
+// These param structs are used by the 7 consolidated tool handlers
+// registered in the `#[tool_router]` impl block in `server.rs`.
 
 /// Detail level for the `explore` tool.
 #[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
@@ -1305,7 +978,7 @@ pub struct SearchParams {
 /// Accepts either a single file via `filepath` or multiple files via `paths`.
 /// Exactly one of the two must be provided; the handler validates this at runtime.
 /// File type (source vs config) is auto-detected from the extension.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadParams {
     /// Single file path. Use this for reading one file.
     /// Mutually exclusive with `paths`.
@@ -1477,16 +1150,8 @@ pub const fn default_max_tokens_per_file() -> u32 {
     2_000
 }
 #[must_use]
-pub const fn default_depth() -> u32 {
-    5
-}
-#[must_use]
 pub const fn default_max_depth() -> u32 {
     3
-}
-#[must_use]
-pub const fn default_max_callers_callees() -> u32 {
-    20
 }
 #[must_use]
 pub const fn default_max_references() -> u32 {
@@ -1509,10 +1174,6 @@ pub fn default_detail_level() -> String {
     "compact".to_string()
 }
 #[must_use]
-pub const fn default_true() -> bool {
-    true
-}
-#[must_use]
 pub const fn default_explore_depth() -> u32 {
     3
 }
@@ -1523,24 +1184,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_read_with_deep_context_params_default() {
-        let params = ReadWithDeepContextParams::default();
-        assert_eq!(params.semantic_path, "");
-        assert_eq!(params.project_only, Some(true));
-        assert_eq!(params.max_dependencies, 50);
-    }
-
-    #[test]
-    fn test_find_callers_callees_params_default() {
-        let params = FindCallersCalleesParams::default();
-        assert_eq!(params.semantic_path, "");
-        assert_eq!(params.max_depth, 3);
-        assert_eq!(params.project_only, Some(true));
-        assert_eq!(params.max_references, 50);
-        assert!(!params.include_test_coverage);
-    }
-
-    #[test]
     fn test_default_value_helpers() {
         assert_eq!(default_path_glob(), "**/*");
         assert_eq!(default_max_results(), 50);
@@ -1548,15 +1191,12 @@ mod tests {
         assert_eq!(default_repo_map_path(), ".");
         assert_eq!(default_max_tokens(), 16_000);
         assert_eq!(default_max_tokens_per_file(), 2_000);
-        assert_eq!(default_depth(), 5);
         assert_eq!(default_max_depth(), 3);
-        assert_eq!(default_max_callers_callees(), 20);
         assert_eq!(default_max_references(), 50);
         assert_eq!(default_max_dependencies(), 50);
         assert_eq!(default_start_line(), 1);
         assert_eq!(default_max_lines(), 500);
         assert_eq!(default_detail_level(), "compact");
-        assert!(default_true());
     }
 
     #[test]
@@ -1564,15 +1204,8 @@ mod tests {
         let json_data = serde_json::json!({
             "path": "src/lib.rs",
             "start_line": 10,
-            "max_lines": 20
         });
-        let read_file_params: ReadFileParams = serde_json::from_value(json_data).unwrap();
-        assert_eq!(read_file_params.filepath, "src/lib.rs");
-
-        let json_data_sf = serde_json::json!({
-            "path": "src/main.rs"
-        });
-        let read_sf_params: ReadSourceFileParams = serde_json::from_value(json_data_sf).unwrap();
-        assert_eq!(read_sf_params.filepath, "src/main.rs");
+        let read_params: ReadParams = serde_json::from_value(json_data).unwrap();
+        assert_eq!(read_params.filepath, Some("src/lib.rs".to_string()));
     }
 }

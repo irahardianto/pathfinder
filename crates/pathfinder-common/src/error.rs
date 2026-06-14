@@ -348,14 +348,8 @@ mod tests {
             issue: "this tool requires a symbol target — use 'file.rs::symbol' format".into(),
         };
         let hint = err.hint().expect("should have hint");
-        assert!(
-            hint.contains("read"),
-            "hint should suggest read: {hint}"
-        );
-        assert!(
-            hint.contains("read"),
-            "hint should suggest read: {hint}"
-        );
+        assert!(hint.contains("read"), "hint should suggest read: {hint}");
+        assert!(hint.contains("read"), "hint should suggest read: {hint}");
     }
 
     // ── GAP-008: LSP error hints ────────────────────────────────────
@@ -617,10 +611,7 @@ mod tests {
             path: "data.xyz".into(),
         };
         let hint = err.hint().expect("UNSUPPORTED_LANGUAGE should have a hint");
-        assert!(
-            hint.contains("read"),
-            "hint should mention read: {hint}"
-        );
+        assert!(hint.contains("read"), "hint should mention read: {hint}");
     }
 
     #[test]

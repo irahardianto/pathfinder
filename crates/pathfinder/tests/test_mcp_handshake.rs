@@ -161,13 +161,7 @@ async fn test_handshake_tools_list_contains_expected_tools() {
         .collect();
 
     let expected_tools = [
-        "explore",
-        "search",
-        "read",
-        "inspect",
-        "locate",
-        "trace",
-        "health",
+        "explore", "search", "read", "inspect", "locate", "trace", "health",
     ];
 
     for expected in &expected_tools {

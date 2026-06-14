@@ -8,7 +8,7 @@ use crate::server::helpers::{
     format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
     require_symbol_target, serialize_metadata,
 };
-use crate::server::types::ReadWithDeepContextParams;
+use crate::server::types::InspectParams;
 use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
 use pathfinder_lsp::LspError;
@@ -399,7 +399,7 @@ impl PathfinderServer {
     )]
     pub(crate) async fn read_with_deep_context_impl(
         &self,
-        params: ReadWithDeepContextParams,
+        params: InspectParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
@@ -482,7 +482,7 @@ impl PathfinderServer {
             }
         };
 
-        let project_only = params.project_only.unwrap_or(true);
+        let project_only = true;
         let max_dependencies = params.max_dependencies;
 
         let lsp_start = std::time::Instant::now();
@@ -730,7 +730,7 @@ impl PathfinderServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::super::test_helpers::{make_scope, make_server_with_lawyer, make_temp_workspace};
-    use crate::server::types::ReadWithDeepContextParams;
+    use crate::server::types::InspectParams;
     use crate::server::PathfinderServer;
     use pathfinder_common::config::PathfinderConfig;
     use pathfinder_common::sandbox::Sandbox;
@@ -766,7 +766,7 @@ mod tests {
             lawyer,
         );
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -828,7 +828,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -888,7 +888,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -932,7 +932,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -969,7 +969,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -1013,7 +1013,7 @@ mod tests {
         lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -1074,7 +1074,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             max_dependencies: 2, // cap below the 5 available
             ..Default::default()
@@ -1171,7 +1171,7 @@ mod tests {
             Arc::new(pathfinder_lsp::NoOpLawyer),
         );
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -1234,7 +1234,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -1299,7 +1299,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
@@ -1371,9 +1371,8 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
-            project_only: Some(true),
             ..Default::default()
         };
         let result = server.read_with_deep_context_impl(params).await;
@@ -1445,7 +1444,7 @@ mod tests {
 
         let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
-        let params = ReadWithDeepContextParams {
+        let params = InspectParams {
             semantic_path: "src/auth.rs::login".to_owned(),
             ..Default::default()
         };
