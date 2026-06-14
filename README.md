@@ -51,7 +51,7 @@ Pathfinder solves these problems by providing:
 
 ### Key Features
 
-- 🛠️ **14 MCP Tools** — covering code navigation, semantic discovery, file reading, impact analysis, and batch operations.
+- 🛠️ **7 MCP Tools** — covering code exploration, semantic search, file reading, symbol inspection, navigation, impact tracing, and LSP health.
 - 🌐 **8 Languages** — native Tree-sitter support for Go, Java, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
 - ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
@@ -150,7 +150,7 @@ Pathfinder communicates over **stdio** using the MCP protocol. Logs are emitted 
 
 Pathfinder ships with a set of **agent directives** — pre-written rules and skills that teach your AI agent how to use Pathfinder tools correctly, reliably, and efficiently. Without these, the agent falls back to generic file-reading behaviour and misses most of Pathfinder's value.
 
-> **Why this matters:** An AI agent that doesn't know about semantic paths or the difference between `read_source_file` and `read_file` will make avoidable mistakes — calling the wrong tool, constructing malformed paths, or wasting context reading entire files for single symbols. The directives encode all of this knowledge directly into the agent's system context.
+> **Why this matters:** An AI agent that doesn't know about semantic paths or the difference between `read` for a source file vs a config file will make avoidable mistakes — calling the wrong tool, constructing malformed paths, or wasting context reading entire files for single symbols. The directives encode all of this knowledge directly into the agent's system context.
 
 ### What's Included
 
@@ -203,36 +203,34 @@ For any MCP-compatible client, the minimum effective setup is to inject the **AG
 <!-- TOOLS -->
 ## Tools
 
-Pathfinder exposes 14 tools organized into four categories. Every tool operates within the workspace sandbox and returns structured JSON responses.
+Pathfinder exposes 7 tools. Every tool operates within the workspace sandbox and returns structured JSON responses.
 
-### 🔍 Search & Navigation
-
-| Tool | Description |
-|---|---|
-| `search_codebase` | Search for text patterns with AST-aware filtering. Set `filter_mode` to `code_only` (default), `comments_only`, or `all`. Use `is_regex=true` for multi-pattern searches. Token-efficiency parameters: `known_files` (suppress content for already-read files), `group_by_file`, `exclude_glob`. Returns matching lines with context and `enclosing_semantic_path` + `version_hash` per match. |
-| `get_repo_map` | Generate a structural skeleton of the project — an indented tree of classes, functions, and type signatures with semantic path annotations. Token-budgeted for LLM context windows. Supports `changed_since` (git ref/duration), `include_extensions`, and `exclude_extensions` for focused exploration. Returns `version_hashes` per file and `capabilities.lsp.per_language` for upfront LSP status. |
-| `read_symbol_scope` | Extract the exact source code of a single symbol (function, class, method) by its semantic path. Returns code, line range, and version hash. |
-| `read_source_file` | Read an entire source file and extract its complete AST symbol hierarchy. Supports four detail levels: `source_only` (source code only, lowest token cost), `compact` (default — source + flat symbol list), `symbols` (symbol tree only, no source), `full` (source + complete nested AST). Use `start_line`/`end_line` to restrict output to a region of interest. **AST-only** — only call on source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.vue`, `.jsx`, `.js`, `.java`); use `read_file` for config/docs files. |
-| `read_with_deep_context` | Read a symbol's source code **plus** the signatures of all functions it calls. Ideal for understanding a function's full dependency graph before refactoring. |
-| `get_definition` | Jump to where a symbol is defined. Provide a semantic path to a reference and get the definition's file, line, and a code preview. |
-| `find_callers_callees` | Find all callers of a symbol (incoming) and all symbols it calls (outgoing). Essential for understanding the blast radius of a change and tracing call chains. |
-| `find_all_references` | Find all references to a symbol across the entire codebase — every usage including function calls, field accesses, imports, and type annotations. LSP-powered with grep fallback. |
-| `find_symbol` | Resolve a bare symbol name to its `file::symbol` semantic path(s). Use when you know a symbol's name but not its file. Filter by `kind` (e.g., `class`, `function`, `struct`). Faster than `get_repo_map` + `search_codebase` for symbol lookup. |
-| `symbol_overview` | Get comprehensive symbol information in one call: source code, callers, callees, and all references. Combines `read_symbol_scope` + `find_callers_callees` + `find_all_references`. Ideal for initial analysis before refactoring. |
-| `lsp_health` | Check per-language LSP readiness — including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use this to diagnose why a navigation tool returned degraded results. Supports `action="restart"` to force-restart a stuck LSP. |
-
-### 📁 File Reading
+### 🗺️ Exploration & Search
 
 | Tool | Description |
 |---|---|
-| `read_file` | Read raw file content with pagination (`start_line`, `max_lines`). Best for configuration files (YAML, TOML, Dockerfile). For source code, prefer `read_symbol_scope`. |
-| `read_files` | Batch read multiple files in a single call with per-file error resilience. AST-parsed for source files, raw content for config files. Max 10 files per call. Supports `detail_level` and `max_lines_per_file` controls. |
+| `explore` | Get the structural skeleton of the project — directory tree, file listing, or full AST symbol hierarchy. Three detail levels: `structure` (dirs + package files), `files` (dirs + all filenames), `symbols` (default — full AST hierarchy). Token-budgeted with configurable `depth` and `max_tokens`. Supports `changed_since`, `include_extensions`, and `exclude_extensions` for focused exploration. |
+| `search` | Search for text patterns, regex, or resolve symbol names across the codebase. Three modes: `text` (default — literal search), `regex` (pattern search), `symbol` (resolve bare name to semantic paths). AST-aware filtering (code-only by default). Token-efficiency parameters: `known_files`, `exclude_glob`, `path_glob`. |
+
+### 📖 Reading & Inspection
+
+| Tool | Description |
+|---|---|
+| `read` | Read file contents — single file or batch (max 10). Auto-detects source vs config files. Source files (.rs, .ts, .go, .py, .vue, .js, .java) get AST-parsed content with detail levels (`source_only`, `compact`, `symbols`, `full`). Config files get raw content. Supports `start_line`/`end_line` for line ranges. |
+| `inspect` | Extract a symbol's source code by semantic path, optionally with its dependency graph. Default: source only (fast, Tree-sitter). With `include_dependencies=true`: also fetches callee signatures (LSP-powered). |
+
+### 🧭 Navigation & Tracing
+
+| Tool | Description |
+|---|---|
+| `locate` | Jump to a symbol's definition, or resolve a file+line to its semantic path. Two auto-detected modes: provide `semantic_path` for definition lookup, or `file`+`line` for semantic path resolution. LSP-powered with ripgrep fallback. |
+| `trace` | Trace a symbol's relationships — callers/callees, all references, or full overview. Three scopes: `callers` (default — call hierarchy), `references` (all usages including imports, type annotations), `overview` (combined source + callers + callees + references). Essential for understanding blast radius before refactoring. |
 
 ### 🔧 Utility
 
 | Tool | Description |
 |---|---|
-| `get_semantic_path` | Convert a file path + line number to the semantic path of the enclosing symbol. Essential for bridging grep results, stack traces, and error messages to Pathfinder's semantic path system. Tree-sitter powered. |
+| `health` | Check per-language LSP readiness — including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use to diagnose why navigation tools returned degraded results. Supports `action="restart"` to force-restart a stuck LSP. |
 
 <!-- ARCHITECTURE -->
 ## Architecture
@@ -250,8 +248,9 @@ pathfinder/
 │   │           ├── types.rs     # Parameter & response types
 │   │           ├── helpers.rs   # Shared utilities
 │   │           └── tools/       # One module per tool category
+│   │               ├── consolidated.rs  # 7-tool consolidated handlers
 │   │               ├── search.rs
-│   │               ├── navigation.rs
+│   │               ├── navigation/      # LSP-backed navigation
 │   │               ├── file_ops.rs
 │   │               ├── repo_map.rs
 │   │               ├── source_file.rs
@@ -338,7 +337,7 @@ To maximise navigation coverage, install the language server(s) for your project
 
 > **Vue note:** Pathfinder handles Vue SFC parsing internally with Tree-sitter. The `typescript-language-server` validates the `<script>` block — no separate `volar` or `vue-language-server` installation is required.
 
-> **Concurrent LSP handling:** When Pathfinder detects a concurrent LSP instance (e.g., your IDE is already running `gopls`), it automatically isolates build caches to avoid lock contention. Isolated caches are stored under `.pathfinder/` in your project root, which is automatically added to `.gitignore`. Use the `lsp_health` tool to check per-language readiness, including `navigation_ready` (LSP navigation works), `indexing_status` (background indexing state), and `degraded_tools` (which tools lose LSP support for a given language).
+> **Concurrent LSP handling:** When Pathfinder detects a concurrent LSP instance (e.g., your IDE is already running `gopls`), it automatically isolates build caches to avoid lock contention. Isolated caches are stored under `.pathfinder/` in your project root, which is automatically added to `.gitignore`. Use the `health` tool to check per-language readiness, including `navigation_ready` (LSP navigation works), `indexing_status` (background indexing state), and `degraded_tools` (which tools lose LSP support for a given language).
 
 <!-- OBSERVABILITY -->
 ## Observability
@@ -349,7 +348,7 @@ Pathfinder emits structured JSON logs to stderr with per-engine timing breakdown
 {
   "timestamp": "2026-03-31T05:30:00Z",
   "level": "INFO",
-  "message": "search_codebase completed",
+  "message": "search completed",
   "ripgrep_ms": 12,
   "tree_sitter_parse_ms": 45,
   "total_matches": 23,
@@ -386,22 +385,23 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] Search intelligence: `known_files`, `group_by_file`, `exclude_glob` (E4)
 - [x] LSP integration for go-to-definition and call hierarchy navigation
 - [x] LSP lifecycle management (auto-start, crash recovery, idle termination)
-- [x] Proactive capability reporting via `get_repo_map` (`capabilities.lsp.per_language`)
-- [x] Two-phase LSP readiness model (navigation vs indexing) with `lsp_health` tool
+- [x] Proactive capability reporting via `explore` (`capabilities.lsp.per_language`)
+- [x] Two-phase LSP readiness model (navigation vs indexing) with `health` tool
 - [x] Concurrent LSP cache isolation (Go, TypeScript, Python, Rust)
 - [x] Probe-based readiness fallback with TTL-cached results
 - [x] 3-tier sandbox security model
 - [x] Per-engine observability and telemetry
-- [x] `get_repo_map` temporal filtering (`changed_since`) and extension filters (E6)
-- [x] `read_source_file` with source_only/compact/symbols/full detail modes and line range filtering (E2)
+- [x] `explore` temporal filtering (`changed_since`) and extension filters (E6)
+- [x] `read` with source_only/compact/symbols/full detail modes and line range filtering (E2)
 - [x] Pre-built binaries via Homebrew tap and cargo install
 - [x] Java language support (Tree-sitter + jdtls LSP integration)
-- [x] `find_all_references` tool (LSP `textDocument/references`)
-- [x] `find_callers_callees` tool (renamed from `analyze_impact` for clarity)
-- [x] `find_symbol` tool — resolve bare symbol names to semantic paths
-- [x] `read_files` tool — batch multi-file reading with per-file error resilience
-- [x] `symbol_overview` tool — composite source + callers + callees + references in one call
-- [x] `get_semantic_path` tool — convert file:line locations to semantic paths
+- [x] `trace(scope="references")` — LSP `textDocument/references`
+- [x] `trace(scope="callers")` — call hierarchy (renamed from `analyze_impact`)
+- [x] `search(mode="symbol")` — resolve bare symbol names to semantic paths
+- [x] `read(paths=[...])` — batch multi-file reading with per-file error resilience
+- [x] `trace(scope="overview")` — composite source + callers + callees + references
+- [x] `locate(file, line)` — convert file:line locations to semantic paths
+- [x] 14→7 tool consolidation for cleaner agent interface
 - [ ] Additional language support (C/C++, C#, Kotlin, etc.)
 - [ ] Custom LSP server command overrides via configuration file
 

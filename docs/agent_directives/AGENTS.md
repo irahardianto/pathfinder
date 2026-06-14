@@ -14,20 +14,16 @@ Check once per session.
 
 | Task | Tool | Notes |
 |---|---|---|
-| Project skeleton | `get_repo_map` | Returns semantic paths — copy-paste into other tools |
-| Search code | `search_codebase` | AST-filtered, returns `enclosing_semantic_path`. Check `coverage_percent`. |
-| Read one symbol | `read_symbol_scope` | Exact function/class extraction |
-| Read full file + AST | `read_source_file` | Source files only; use `read_file` for config. `detail_level="source_only"` for minimal tokens. |
-| Symbol + dependencies | `read_with_deep_context` | LSP-powered callee signatures |
-| Jump to definition | `get_definition` | LSP with ripgrep fallback |
-| Find callers and callees | `find_callers_callees` | Callers + callees via LSP call hierarchy. Default max_depth=3. |
-| Find all references | `find_all_references` | All usages including non-call references (field access, imports, type annotations) |
-| Resolve symbol by name | `find_symbol` | Bare name → file::symbol paths. Filter by `kind` ("class", "function", "struct"). |
-| Batch read files | `read_files` | Multiple files in one call. AST for source files, raw for config. Max 10 files. |
-| Symbol overview | `symbol_overview` | Source + callers + callees + references in one call |
-| LSP status | `lsp_health` | Check when navigation returns `degraded: true` |
-| Read config file | `read_file` | For YAML, TOML, JSON, .env, Dockerfile |
-| Location → semantic path | `get_semantic_path` | File:line → semantic path. For stack traces, grep results, error messages. |
+| Project skeleton | `explore` | Three detail levels: `structure` (dirs only), `files` (dirs + filenames), `symbols` (default — full AST). Configurable `depth` (default 3) and `max_tokens`. |
+| Search code | `search` | Three modes: `text` (default), `regex`, `symbol`. AST-filtered (code-only). Returns `enclosing_semantic_path`. Check `coverage_percent`. |
+| Read file(s) | `read` | Single file (`filepath`) or batch (`paths`, max 10). Auto-detects source vs config. Source files get AST parsing with `detail_level`. Supports `start_line`/`end_line`. |
+| Read one symbol | `inspect` | Extract symbol source by semantic path. Default: source only (fast). With `include_dependencies=true`: also fetches callee signatures (LSP-powered). |
+| Jump to definition | `locate` | Provide `semantic_path` for definition lookup. LSP with ripgrep fallback. |
+| Location → semantic path | `locate` | Provide `file` + `line` for semantic path resolution. For stack traces, grep results, error messages. |
+| Find callers and callees | `trace` | `scope="callers"` (default). Callers + callees via LSP call hierarchy. `max_depth` (default 3, clamped 1–5). |
+| Find all references | `trace` | `scope="references"`. All usages including non-call references (field access, imports, type annotations). |
+| Symbol overview | `trace` | `scope="overview"`. Source + callers + callees + references in one call. |
+| LSP status | `health` | Check when navigation returns `degraded: true`. Supports `action="restart"` for stuck LSPs. |
 
 ### Addressing
 
@@ -35,7 +31,7 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 ### Degraded Mode
 
-`get_definition`, `find_callers_callees`, `read_with_deep_context`, `find_all_references`, `symbol_overview` use LSP. When `degraded: true`:
+`locate`, `trace`, `inspect(include_dependencies=true)` use LSP. When `degraded: true`:
 - Text output starts with: `⚠️ DEGRADED ({reason}) — {tool-specific guidance}`
 - Results are best-effort — never treat empty as confirmed-zero
 - Check `degraded_reason` and `lsp_readiness`
@@ -44,11 +40,10 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 | Parameter | Tool | Default | Purpose |
 |---|---|---|---|
-| `project_only` | `find_callers_callees`, `read_with_deep_context` | `true` | Filter out stdlib/vendor noise |
-| `max_references` | `find_callers_callees` | `50` | Cap total BFS references |
-| `max_depth` | `find_callers_callees` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. |
-| `max_dependencies` | `read_with_deep_context` | `50` | Cap outgoing dependency entries |
-| `max_tokens` | `get_repo_map` | auto | Auto-scales for monorepos |
+| `max_references` | `trace` | `50` | Cap total references. In `overview` scope, controls both callers/callees and references. |
+| `max_depth` | `trace` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. `scope="callers"` only. |
+| `max_tokens` | `explore` | auto | Auto-scales for monorepos |
+| `max_results` | `search` | `50` | Cap search matches. Applies to all modes including `symbol`. |
 
 When `references_truncated` or `dependencies_truncated` is true, increase the corresponding limit.
 

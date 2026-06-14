@@ -18,7 +18,7 @@ plugin system, detection pipeline, and how to extend the system for new language
 ## Agnostic Channel Design
 
 Pathfinder uses a language-agnostic LSP integration layer. All tool handlers
-(`get_definition`, `find_callers_callees`, `find_all_references`, etc.) interact with LSP
+(`locate`, `trace`, `trace(scope="references")`, etc.) interact with LSP
 servers through a single trait boundary.
 
 ### Lawyer Trait
@@ -214,15 +214,15 @@ typescript_plugins = ["@vue/typescript-plugin"]
 
 ## Health and Observability
 
-### `lsp_health` Tool
+### `health` Tool
 
-The `lsp_health` tool provides a comprehensive view of all LSP servers.
+The `health` tool provides a comprehensive view of all LSP servers.
 It uses a **two-phase readiness model** (LSP-HEALTH-001) that separates
 navigation capability from indexing completion.
 
 **Per-language information:**
 - Status: `ready`, `warming_up`, `starting`, `unavailable`
-- `navigation_ready`: Whether navigation tools (`get_definition`, `find_callers_callees`)
+- `navigation_ready`: Whether navigation tools (`locate`, `trace`)
   are functional. `true` once the LSP `initialize` handshake completes with
   `definitionProvider: true`. Independent of indexing status.
 - `indexing_status`: `"complete"`, `"in_progress"`, or absent. Background
@@ -283,7 +283,7 @@ LSPs (gopls, tsserver, pyright) often don't emit these, causing permanent
 ### Missing Language Detection
 
 When marker files exist but no LSP binary is found on PATH:
-- Language appears in `lsp_health` as "unavailable"
+- Language appears in `health` as "unavailable"
 - Install hint provides actionable commands
 - All tools listed as degraded
 
@@ -324,8 +324,8 @@ These properties hold for ALL languages. Violating them reintroduces bugs
 that took weeks to diagnose.
 
 1. **Single Lawyer trait, single LspClient**. All languages share the same
-code path through `goto_definition`, `find_callers_callees`, `read_with_deep_context`,
-and `find_all_references`. There is no per-language branching in tool handlers.
+code path through `goto_definition`, `call_hierarchy`, `references`,
+and `call_hierarchy_prepare`. There is no per-language branching in tool handlers.
 
 2. **Column indexing is 0-based, UTF-16 offset**. LSP uses 0-based columns.
 Tree-sitter uses 0-based columns. The `name_column` field in `SymbolInfo` must
@@ -362,7 +362,7 @@ in `spawn_lsp_child()` and update the warning message in
 
 9. **Probe results must be cached with TTL**. The probe sends real LSP requests
 (`goto_definition`) which are expensive. Never re-probe on every
-`lsp_health` call — cache successful results indefinitely and negative
+`health` call — cache successful results indefinitely and negative
 results with a 60s TTL to allow the LSP to finish starting.
 
 10. **`navigation_ready` flows from `supports_definition`**. The
@@ -458,7 +458,7 @@ tree-sitter, health probes, and tests.
      detected: Vec<LanguageLsp>    missing: Vec<MissingLanguage>
            |                             |
            v                             v
-    LspClient.warm_start()       lsp_health (unavailable)
+    LspClient.warm_start()       health (unavailable)
            |                             + install_hint
            v
     spawn_and_initialize(plugins)
@@ -472,7 +472,7 @@ tree-sitter, health probes, and tests.
   _provider   _provider      (Pull|Push|None)
      |            |            |
      v            v            v
-  lsp_health response (per-language capabilities)
+  health response (per-language capabilities)
      |
      v
   Tool handlers use Lawyer trait (no per-language code)
@@ -618,7 +618,7 @@ These are used by the probe-based readiness check. When an LSP has been running
 for 10+ seconds but still shows "warming_up" (because it doesn't emit `$/progress`
 notifications), Pathfinder sends a lightweight `goto_definition` probe to one of
 these files. If the probe succeeds, status is upgraded to "ready" and the result
-is cached for subsequent `lsp_health` calls.
+is cached for subsequent `health` calls.
 
 **Recursive scan fallback:** If no hardcoded candidate is found, `find_probe_file`
 automatically falls back to a depth-4 recursive scan of the workspace, looking for
@@ -714,7 +714,7 @@ include the new language in the `isolation_desc` match arm.
 
 No code changes needed — the two-phase readiness model is automatic. But verify:
 1. Start Pathfinder with the new language's workspace
-2. Call `lsp_health` immediately after start
+2. Call `health` immediately after start
 3. Check that `navigation_ready` becomes `true` after `initialize` completes
 4. Check that `indexing_status` eventually reaches `"complete"` (either via
    `WorkDoneProgressEnd` or the 30-second timeout fallback)
@@ -738,9 +738,9 @@ However, you should VERIFY which strategy the new LSP uses:
 | gopls | Push | Only `textDocumentSync`, no `diagnosticProvider` |
 | typescript-language-server | Push | Only `textDocumentSync`, no `diagnosticProvider` |
 | pyright-langserver | Push (likely) | Only `textDocumentSync` |
-| jdtls (Java) | Unknown | Test empirically with `lsp_health` |
+| jdtls (Java) | Unknown | Test empirically with `health` |
 
-To verify: start Pathfinder, open a workspace for the language, call `lsp_health`.
+To verify: start Pathfinder, open a workspace for the language, call `health`.
 The response shows `diagnostics_strategy` per language.
 
 **If the LSP supports PULL diagnostics** (advertises `diagnosticProvider`):
@@ -756,7 +756,7 @@ The response shows `diagnostics_strategy` per language.
 
 **If the LSP supports NEITHER** (no `textDocumentSync`, no `diagnosticProvider`):
 - No extra work needed. Validation is skipped with reason `no_diagnostics_support`.
-- `lsp_health` shows `diagnostics_strategy: "none"`.
+- `health` shows `diagnostics_strategy: "none"`.
 - `degraded_tools` includes `validate_only`.
 
 ---
@@ -813,7 +813,7 @@ These are bugs that have actually occurred. Do not reintroduce them.
    Without isolation, concurrent LSP instances share build caches and fight
    over locks, causing both to stall.
 
-10. **Re-probing on every `lsp_health` call**.
+10. **Re-probing on every `health` call**.
     The probe sends real LSP requests which are expensive. Always cache
     probe results. Positive results are cached indefinitely; negative results
     are cached with a 60s TTL to allow the LSP to finish starting and be
@@ -844,18 +844,18 @@ For each new language or plugin, verify ALL of these:
 - [ ] `spawn_and_initialize` succeeds (LSP starts without error)
 - [ ] `goto_definition` resolves a known symbol
 - [ ] `call_hierarchy_prepare` works or returns `UnsupportedCapability`
-- [ ] Diagnostics strategy auto-detected correctly (check `lsp_health`)
+- [ ] Diagnostics strategy auto-detected correctly (check `health`)
 - [ ] `validate_only` produces a result (not always "skipped")
 - [ ] Push diagnostics collected within timeout (if applicable)
 
 **Health and Observability:**
-- [ ] `lsp_health` shows correct `status` (ready/warming_up/unavailable)
-- [ ] `lsp_health` shows correct `navigation_ready` (true after initialize)
-- [ ] `lsp_health` shows correct `indexing_status` (eventually reaches "complete")
-- [ ] `lsp_health` shows correct `diagnostics_strategy`
-- [ ] `lsp_health` shows correct `supports_*` capabilities
-- [ ] `lsp_health` shows correct `degraded_tools`
-- [ ] `lsp_health` shows correct `install_hint` when binary missing
+- [ ] `health` shows correct `status` (ready/warming_up/unavailable)
+- [ ] `health` shows correct `navigation_ready` (true after initialize)
+- [ ] `health` shows correct `indexing_status` (eventually reaches "complete")
+- [ ] `health` shows correct `diagnostics_strategy`
+- [ ] `health` shows correct `supports_*` capabilities
+- [ ] `health` shows correct `degraded_tools`
+- [ ] `health` shows correct `install_hint` when binary missing
 - [ ] Probe upgrades "warming_up" to "ready" after 10s (if LSP doesn't emit progress)
 - [ ] `probe_verified` field is `true` only after a successful probe
 - [ ] Probe results cached with TTL (positive indefinitely, negative 60s)

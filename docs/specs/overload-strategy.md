@@ -51,7 +51,7 @@ Treat all overloads as a single addressable unit. The edit applies to the entire
 
 2. **Backward compatibility.** A path without a suffix (e.g., `Service.execute`) continues to resolve to the **first** occurrence. Existing agents and scripts continue to work.
 
-3. **Discoverability.** `get_repo_map` and `read_source_file` return all overload variants in the symbol list, so agents can discover and enumerate them.
+3. **Discoverability.** `explore` and `read` return all overload variants in the symbol list, so agents can discover and enumerate them.
 
 4. **Consistency with Vue multi-zone indexing.** The `[nth]` suffix pattern is already established in Pathfinder for other disambiguation needs (e.g., `div[2]` in JSX/TSX symbol paths). Reusing the same convention reduces the cognitive surface area.
 
@@ -76,7 +76,7 @@ When multiple same-named symbols are detected, suffix ALL of them:
 When an agent queries `Service.execute` (no suffix), resolve it to `execute[1]`. This preserves backward compatibility and means agents do not need to know about overloads to access the most common (first-defined) variant.
 
 ### Rule 4: Expose All Variants in Symbol Output
-`get_repo_map`, `read_source_file`, and `search_codebase` must enumerate ALL overloads as distinct symbols. Agents must be able to discover them without prior knowledge.
+`explore`, `read`, and `search` must enumerate ALL overloads as distinct symbols. Agents must be able to discover them without prior knowledge.
 
 ### Rule 5: `did_you_mean` Includes Overloads
 When `SYMBOL_NOT_FOUND` occurs for an overloaded name, `did_you_mean` suggestions must include all known overloads:
