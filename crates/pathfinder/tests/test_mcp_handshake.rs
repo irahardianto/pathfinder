@@ -128,7 +128,7 @@ async fn test_handshake_returns_server_info() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), service.waiting()).await;
 }
 
-/// Verify that `tools/list` returns all 14 registered tools.
+/// Verify that `tools/list` returns all 7 registered tools.
 #[tokio::test]
 async fn test_handshake_tools_list_contains_expected_tools() {
     let bundle = create_test_server();
@@ -161,20 +161,13 @@ async fn test_handshake_tools_list_contains_expected_tools() {
         .collect();
 
     let expected_tools = [
-        "search_codebase",
-        "get_repo_map",
-        "read_symbol_scope",
-        "read_source_file",
-        "read_with_deep_context",
-        "get_definition",
-        "find_symbol",
-        "find_callers_callees",
-        "find_all_references",
-        "symbol_overview",
-        "lsp_health",
-        "read_file",
-        "read_files",
-        "get_semantic_path",
+        "explore",
+        "search",
+        "read",
+        "inspect",
+        "locate",
+        "trace",
+        "health",
     ];
 
     for expected in &expected_tools {

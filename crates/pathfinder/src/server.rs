@@ -5,13 +5,11 @@
 //! # Module Layout
 //! - [`helpers`] — error conversion, stub builder, language detection
 //! - [`types`] — all parameter and response structs
-//! - [`tools`] — handler logic, one submodule per tool group:
-//!   - [`tools::search`] — `search_codebase`
-//!   - [`tools::repo_map`] — `get_repo_map`
-//!   - [`tools::symbols`] — `read_symbol_scope`, `read_with_deep_context`
-//!   - [`tools::navigation`] — `get_definition`, `find_callers_callees`
-//!   - [`tools::file_ops`] — `read_file`
-//!   - [`tools::source_file`] — `read_source_file`
+//! - [`tools`] — handler logic:
+//!   - [`tools::consolidated`] — 7 consolidated tool entry points:
+//!     `explore`, `search`, `read`, `inspect`, `locate`, `trace`, `health`
+//!   - Legacy impl modules (`search`, `repo_map`, `navigation`, etc.) contain
+//!     the underlying implementations delegated to by consolidated handlers.
 
 /// Duration after which a negative probe cache entry expires.
 /// Allows re-probing an LSP that was still starting when first checked.
@@ -71,10 +69,8 @@ mod tools;
 pub mod types;
 
 use types::{
-    FindAllReferencesParams, FindCallersCalleesParams, FindSymbolParams, GetDefinitionParams,
-    GetRepoMapParams, GetSemanticPathParams, LspHealthParams, ReadFileParams, ReadFilesParams,
-    ReadSourceFileParams, ReadSymbolScopeParams, ReadWithDeepContextParams, SearchCodebaseParams,
-    SearchCodebaseResponse, SymbolOverviewParams,
+    ExploreParams, HealthParams, InspectParams, LocateParams, ReadParams, SearchParams,
+    TraceParams,
 };
 
 use pathfinder_common::config::PathfinderConfig;
@@ -85,7 +81,7 @@ use pathfinder_search::{RipgrepScout, Scout};
 use pathfinder_treesitter::{Surgeon, TreeSitterSurgeon};
 
 use rmcp::handler::server::tool::ToolRouter;
-use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
@@ -112,7 +108,7 @@ pub struct PathfinderServer {
     /// responds to a probe, it stays "ready" for the session.
     ///
     /// Negative results (false) are cached with a TTL of 60s. This prevents
-    /// hammering a still-starting LSP with probes on every `lsp_health` call,
+    /// hammering a still-starting LSP with probes on every `health` call,
     /// while allowing recovery once the LSP finishes initializing.
     probe_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, ProbeCacheEntry>>>,
 }
@@ -137,7 +133,7 @@ impl PathfinderServer {
                 Ok(client) => {
                     // Kick off background initialization so LSP processes are
                     // already loading while the agent issues its first non-LSP
-                    // tool calls (get_repo_map, search_codebase, etc.).
+                    // tool calls (explore, search, etc.).
                     client.warm_start();
                     tracing::info!(
                         workspace = %workspace_root.path().display(),
@@ -209,359 +205,185 @@ impl PathfinderServer {
     }
 }
 
-// ── Tool Router (defines all 14 tools) ──────────────────────────────
+// ── Tool Router (defines all 7 consolidated tools) ─────────────────
 
 #[tool_router]
 impl PathfinderServer {
     #[tool(
-        name = "search_codebase",
-        description = "Search for text or regex patterns across source code. Returns matching lines with `enclosing_semantic_path` (the symbol containing the match).
-
-Use when: Finding text/patterns across the codebase, finding where functions are called or mentioned.
-Alternative: Use `find_symbol` to resolve a bare name to semantic paths. Use `get_definition` to jump to where a symbol is defined (not just mentioned).
-
-Parameter guidance:
-- `max_results=50` (default): Increase for exhaustive searches; decrease for quick lookups.
-- `filter_mode=\"code_only\"` (default): Use \"all\" to include comments/strings.
-- `group_by_file=true`: Consolidate matches (recommended for multi-match edits).
-
-Common issues:
-- Too many matches: Narrow with `path_glob=\"**/*.rs\"` or similar.
-- No matches: Try `filter_mode=\"all\"` (match may be in comment/string).
-- `degraded=true` results: Use `search_codebase` as fallback when LSP tools return degraded.
-
-Examples:
-- `search_codebase(query=\"login\", path_glob=\"**/*.rs\", filter_mode=\"code_only\")`
-- `search_codebase(query=\"TODO|FIXME\", is_regex=true)`"
-    )]
-    async fn search_codebase(
-        &self,
-        Parameters(params): Parameters<SearchCodebaseParams>,
-    ) -> Result<Json<SearchCodebaseResponse>, ErrorData> {
-        self.search_codebase_impl(params).await
-    }
-
-    #[tool(
-        name = "get_repo_map",
-        description = "Get the structural skeleton of the project — an indented tree of symbols with their semantic paths.
+        name = "explore",
+        description = "Get the structural skeleton of the project — directory tree, file listing, or full symbol hierarchy.
 
 Use when: Exploring project structure, discovering available symbols, or planning navigation.
-Alternative: Use `read_source_file(detail_level=\"symbols\")` for a single file's structure. Use `find_symbol` to locate a specific symbol by name.
+Alternative: Use `read` for a single file's content. Use `search(mode=\"symbol\")` to locate a symbol by name.
 
 IMPORTANT: Copy-paste the exact semantic paths from the output into other Pathfinder tools.
 
-Navigation quick reference:
-- Find a symbol's file: find_symbol(name=\"SymbolName\")
-- Read one function: read_symbol_scope(semantic_path=\"file.rs::function\")
-- Read full file: read_source_file(filepath=\"file.rs\")
-- Find definition: get_definition(semantic_path=\"file.rs::symbol\")
-- Find all callers: find_callers_callees(semantic_path=\"file.rs::symbol\")
-- Find all usages: find_all_references(semantic_path=\"file.rs::symbol\")
-- Search code: search_codebase(query=\"pattern\")
+Parameter guidance:
+- `detail`: Controls output verbosity.
+  - `\"structure\"` — directory tree + package manager files only (cheapest).
+  - `\"files\"` — directory tree + all filenames (no symbols).
+  - `\"symbols\"` (default) — full AST symbol hierarchy.
+- `depth=3` (default): Increase for deeply-nested monorepos.
+- `max_tokens=16000` (default): Increase for more coverage.
+- `visibility`: `\"public\"` (default) or `\"all\"` (includes private/internal).
+
+Example: `explore(path=\"src/\", detail=\"files\", depth=5)`"
+    )]
+    async fn explore(
+        &self,
+        Parameters(params): Parameters<ExploreParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.explore_impl(params).await
+    }
+
+    #[tool(
+        name = "search",
+        description = "Search for text patterns, regex, or resolve symbol names across the codebase.
+
+Use when: Finding text/patterns, locating function calls, or resolving a bare symbol name to its semantic path.
 
 Parameter guidance:
-- `max_tokens` (default 16000): Total token budget. Increase for more coverage.
-- `max_tokens_per_file` (default 2000): Per-file cap. Increase if files show [TRUNCATED].
-- `visibility`: \"public\" (default) or \"all\" (includes private/internal).
-- `changed_since`: Filter to recently modified files (e.g., '3h', 'HEAD~5').
+- `mode`: Controls search behavior.
+  - `\"text\"` (default) — literal text search.
+  - `\"regex\"` — regex pattern search.
+  - `\"symbol\"` — resolve bare symbol name to `file::symbol` semantic paths. Use `kind` to filter (e.g., `\"function\"`, `\"class\"`).
+- `path_glob`: Limit scope (e.g., `\"**/*.rs\"`).
+- `max_results=50` (default): Cap returned matches. Applies to all modes including `symbol`.
+- `known_files`: Suppress full content for files already in context.
 
-Example: `get_repo_map(path=\"src/\", visibility=\"all\")`"
+Examples:
+- `search(query=\"login\", path_glob=\"**/*.rs\")` — text search
+- `search(query=\"TODO|FIXME\", mode=\"regex\")` — regex search
+- `search(query=\"AuthService\", mode=\"symbol\", kind=\"class\")` — symbol lookup"
     )]
-    async fn get_repo_map(
+    async fn search(
         &self,
-        Parameters(params): Parameters<GetRepoMapParams>,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.search_impl(params).await
+    }
+
+    #[tool(
+        name = "read",
+        description = "Read file contents — single file or batch. Auto-detects source vs config files.
+
+Use when: Reading any file. Source files (.rs, .ts, .go, .py, .vue, .js, .java) get AST-parsed content. Config files (.yaml, .toml, .json, .env) get raw content.
+
+Parameter guidance:
+- `filepath`: Single file path. Use for reading one file.
+- `paths`: Array of file paths (max 10). Use for batch reading.
+  Exactly one of `filepath` or `paths` must be provided.
+- `detail_level`: `\"source_only\"` (lowest tokens), `\"compact\"` (default), `\"symbols\"` (tree only), `\"full\"` (source + nested AST).
+- `start_line`/`end_line`: Restrict output to a line range.
+
+Examples:
+- `read(filepath=\"src/auth.ts\", detail_level=\"compact\")` — single source file
+- `read(filepath=\".env\")` — config file (raw content)
+- `read(paths=[\"src/auth.ts\", \"src/config.ts\"])` — batch read"
+    )]
+    async fn read(
+        &self,
+        Parameters(params): Parameters<ReadParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.read_impl(params).await
+    }
+
+    #[tool(
+        name = "inspect",
+        description = "Extract a symbol's source code by semantic path, optionally with its dependency graph.
+
+Use when: You know the exact symbol and want its source code. Optionally includes signatures of all functions it calls.
+Alternative: Use `read` for full file content.
+
+IMPORTANT: `semantic_path` MUST include file path + '::' (e.g., `src/auth.ts::AuthService.login`).
+
+Parameter guidance:
+- `include_dependencies=false` (default): Source code only (fast, Tree-sitter).
+- `include_dependencies=true`: Source + callee signatures (LSP-powered, may take 5–30s on first call).
+- `max_dependencies=50` (default): Cap dependency output.
+
+Examples:
+- `inspect(semantic_path=\"src/auth.ts::AuthService.login\")` — source only
+- `inspect(semantic_path=\"src/auth.ts::AuthService.login\", include_dependencies=true)` — with deps"
+    )]
+    async fn inspect(
+        &self,
+        Parameters(params): Parameters<InspectParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.inspect_impl(params).await
+    }
+
+    #[tool(
+        name = "locate",
+        description = "Jump to a symbol's definition, or resolve a file+line to its semantic path.
+
+Use when: Navigating to where a symbol is defined, or converting stack trace locations to semantic paths.
+
+Two modes (auto-detected from input):
+1. **Definition lookup**: Provide `semantic_path` → returns definition file, line, column, and code preview.
+2. **Semantic path resolution**: Provide `file` + `line` → returns the `file::symbol` semantic path of the enclosing symbol.
+
+Exactly one mode must be specified.
+
+LSP-powered with ripgrep fallback. Check `degraded` in response.
+
+Examples:
+- `locate(semantic_path=\"src/auth.ts::AuthService.login\")` — jump to definition
+- `locate(file=\"src/auth.ts\", line=42)` — resolve to semantic path"
+    )]
+    async fn locate(
+        &self,
+        Parameters(params): Parameters<LocateParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.locate_impl(params).await
+    }
+
+    #[tool(
+        name = "trace",
+        description = "Trace a symbol's relationships — callers/callees, all references, or full overview.
+
+ALWAYS run this before recommending a refactor to check for unexpected callers.
+
+Use when: Understanding blast radius, finding all usages, or getting a complete picture before refactoring.
+
+Parameter guidance:
+- `scope`: What to trace.
+  - `\"callers\"` (default) — call hierarchy: who calls this and what it calls. Use `max_depth` to control traversal.
+  - `\"references\"` — all references: calls, imports, type annotations, field access.
+  - `\"overview\"` — combined: source + callers + callees + references in one call. Uses `max_references` for both callers/callees and references caps.
+- `max_depth=3` (default): For call hierarchy traversal. Increase to 4-5 for large API changes.
+- `max_references=50` (default): Cap output for all scopes. In `overview` mode, applies to both caller/callee and reference limits.
+
+LSP-powered. When `degraded=true`: results are best-effort, not confirmed-zero.
+
+Examples:
+- `trace(semantic_path=\"src/auth.ts::AuthService.login\")` — callers/callees
+- `trace(semantic_path=\"src/auth.ts::AuthService.login\", scope=\"references\")` — all usages
+- `trace(semantic_path=\"src/auth.ts::AuthService.login\", scope=\"overview\")` — full picture"
+    )]
+    async fn trace(
+        &self,
+        Parameters(params): Parameters<TraceParams>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        self.trace_impl(params).await
+    }
+
+    #[tool(
+        name = "health",
+        description = "Check LSP health and readiness per language.
+
+Use when: Diagnosing why navigation tools returned degraded results, or checking LSP status.
+
+Pass `language` to check a specific language, or omit to check all.
+Pass `action=\"restart\"` with `language` to force-restart a stuck LSP process.
+
+Example: `health(language=\"rust\")`"
+    )]
+    async fn health(
+        &self,
+        Parameters(params): Parameters<HealthParams>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
-        self.get_repo_map_impl(params).await
-    }
-
-    #[tool(
-        name = "read_symbol_scope",
-        description = "Extract the exact source code of one symbol (function, class, method) by semantic path.
-
-Use when: You know the exact symbol and want only its source code (no surrounding context).
-Alternative: Use `read_source_file` for full file content, or `read_file` for config/non-source files.
-
-IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/auth.ts::AuthService.login').
-
-Example: `read_symbol_scope(semantic_path=\"src/auth.ts::AuthService.login\")`
-
-Error format:
-- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint` with recovery guidance. Use `find_symbol(name=...)` or `search_codebase(query=...)` to locate the correct path.
-- FILE_NOT_FOUND: includes `details.path`. Use `search_codebase(query=\"...\")` to find the correct path.
-- INVALID_SEMANTIC_PATH: includes `details.issue`. Ensure path uses `file::symbol` format.
-
-Common issues:
-- SYMBOL_NOT_FOUND: Use `find_symbol(name=\"SymbolName\")` to discover the correct path, or `read_source_file(filepath, detail_level=\"symbols\")` to see available symbols.
-- FILE_NOT_FOUND: Use `search_codebase` to find the correct path."
-    )]
-    async fn read_symbol_scope(
-        &self,
-        Parameters(params): Parameters<ReadSymbolScopeParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.read_symbol_scope_impl(params).await
-    }
-
-    #[tool(
-        name = "read_source_file",
-        description = "Read an entire file with optional AST symbol hierarchy. For supported languages, returns source, language, and nested symbol tree with semantic paths. For unsupported languages (.sql, .yaml, .toml, etc.), gracefully returns raw content with `unsupported_language: true` in metadata.
-
-Use when: You need to explore a file's structure, find symbols in a file, or read a large file efficiently. Also works for config files and non-source types when you want consistent response format.
-Alternative: Use `read_symbol_scope` for a single symbol, or `read_file` for raw config-only reading with line counts.
-
-Supported languages for AST parsing: .rs, .ts, .tsx, .go, .py, .vue, .jsx, .js. Other file types return raw content only.
-
-Parameter guidance:
-- `detail_level`: \"source_only\" (lowest tokens), \"compact\" (default, source + flat symbols when available), \"symbols\" (tree only), \"full\" (source + nested AST when available).
-- `start_line`/`end_line`: Restrict output to a line range. Works for both supported and unsupported languages.
-
-Example: `read_source_file(filepath=\"src/auth.ts\", detail_level=\"compact\")`"
-    )]
-    async fn read_source_file(
-        &self,
-        Parameters(params): Parameters<ReadSourceFileParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.read_source_file_impl(params).await
-    }
-
-    #[tool(
-        name = "read_with_deep_context",
-        description = "Read a symbol's source code PLUS the signatures of all functions it calls — its dependency graph in one call.
-
-Use when: Understanding what a function calls and how it fits into the codebase.
-Alternative: Use `read_symbol_scope` for source only (no deps), or `symbol_overview` for comprehensive info.
-
-IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login').
-
-LSP-powered; first call may take 5–30s during LSP warmup. Check `degraded` in response — if true, dependencies may be incomplete. Source code is always returned even when degraded.
-
-Error format:
-- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
-- FILE_NOT_FOUND: includes `details.path`. Use `search_codebase` to find the correct path.
-
-Common issues:
-- No dependencies found with `degraded=true`: LSP not ready. Source code is still valid, but dependencies are heuristic or missing.
-- SYMBOL_NOT_FOUND: Use `find_symbol(name=\"SymbolName\")` to discover the correct path.
-- DEGRADED results: Check `lsp_health` for warmup status. Use `search_codebase(query=\"function_name\")` as heuristic fallback.
-
-Example: `read_with_deep_context(semantic_path=\"src/auth.ts::AuthService.login\")`"
-    )]
-    async fn read_with_deep_context(
-        &self,
-        Parameters(params): Parameters<ReadWithDeepContextParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.read_with_deep_context_impl(params).await
-    }
-
-    #[tool(
-        name = "get_definition",
-        description = "Jump to where a symbol is defined. Returns the definition's file, line, column, and a code preview.
-
-Use when: You need to navigate to a symbol's definition site.
-Alternative: Use `find_symbol` when you don't know which file defines it.
-
-IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/auth.ts::AuthService.login'). If you don't know which file defines a symbol, use `find_symbol` first.
-
-LSP-powered — follows imports, re-exports, and type aliases across files. Falls back to ripgrep when LSP is unavailable. Check `degraded` in response. When SYMBOL_NOT_FOUND includes `retry_after_seconds`, the LSP is still warming up — retry after the indicated delay.
-
-Error format:
-- SYMBOL_NOT_FOUND: includes `details.did_you_mean`, `details.retry_after_seconds`, and `hint`. Check `did_you_mean` for alternatives; retry after `retry_after_seconds` if LSP is warming up.
-- FILE_NOT_FOUND: includes `details.path`. Use `search_codebase` to find the correct path.
-
-Common issues:
-- Returns wrong definition: Grep fallback found a similar name. Check `degraded_reason`. Wait for LSP warmup and retry.
-- Returns no results: Symbol may be in a different file. Use `find_symbol(name=\"SymbolName\")` to locate it.
-- SYMBOL_NOT_FOUND: Use `find_symbol(name=\"SymbolName\")` to discover the correct path, or `read_source_file(filepath, detail_level=\"symbols\")` to see available symbols.
-
-Example: `get_definition(semantic_path=\"src/auth.ts::AuthService.login\")`"
-    )]
-    async fn get_definition(
-        &self,
-        Parameters(params): Parameters<GetDefinitionParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.get_definition_impl(params).await
-    }
-
-    #[tool(
-        name = "find_symbol",
-        description = "Resolve a bare symbol name to its file::symbol semantic path(s). Use when you know a symbol's name but not its file. Returns matching definitions with file, line, kind, and a code preview.
-
-Use when: You know a symbol name but not its file path, or need to discover the semantic path for other tools.
-Alternative: Use `get_definition` when you already have the full semantic_path. Use `search_codebase` for text pattern matching.
-
-Filter by `kind` (e.g. \"class\", \"function\", \"struct\") to narrow results. Use `path_glob` to limit search scope. Faster than `get_repo_map` + `search_codebase` for symbol lookup.
-
-Example: `find_symbol(name=\"AuthService\", kind=\"class\")`"
-    )]
-    async fn find_symbol(
-        &self,
-        Parameters(params): Parameters<FindSymbolParams>,
-    ) -> Result<Json<types::FindSymbolResponse>, ErrorData> {
-        self.find_symbol_impl(params).await
-    }
-
-    #[tool(
-        name = "find_callers_callees",
-        description = "Find all callers (incoming) and callees (outgoing) of a symbol — who calls this function and what does it call? Use this to understand the blast radius before refactoring.
-
-ALWAYS run this tool before recommending a refactor to check for unexpected callers.
-
-Use when: Understanding blast radius before refactoring. Shows who calls this symbol and what it calls.
-Alternative: Use `find_all_references` for exhaustive reference enumeration (including non-call references).
-
-IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/mod.rs::func'). If unsure of the path, use `find_symbol(name=\"func\")` to discover it first.
-
-Parameter guidance:
-- `max_depth=3` (default): Standard refactoring. Shows direct + 1-hop callers/callees.
-- `max_depth=4-5`: Large-scale API changes. Shows full transitive blast radius.
-- `max_references=50` (default): Caps output to prevent context overflow. Increase to 100-200 for exhaustive analysis on small codebases.
-- `project_only=true` (default): Excludes stdlib/vendor references.
-
-LSP-backed with grep fallback. Check `degraded` flag in response:
-- `degraded=false`: LSP-confirmed, authoritative results
-- `degraded=true`: grep heuristic, may over/under-count. Use `search_codebase` to verify.
-- When `degraded=true`, `incoming`/`outgoing` are `null` (not `[]`) — do NOT treat empty as \"confirmed no callers\". When not degraded: empty arrays `[]` = LSP confirmed zero callers/callees.
-
-Error format:
-- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
-- FILE_NOT_FOUND: includes `details.path`.
-
-Example: `find_callers_callees(semantic_path=\"src/auth.ts::AuthService.login\", max_depth=3)`"
-    )]
-    async fn find_callers_callees(
-        &self,
-        Parameters(params): Parameters<FindCallersCalleesParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.find_callers_callees_impl(params).await
-    }
-
-    #[tool(
-        name = "find_all_references",
-        description = "Find all references to a symbol across the entire codebase. Uses LSP textDocument/references to find all usages (function calls, field accesses, imports, etc.). Unlike `find_callers_callees` (call hierarchy only), this returns every reference including type annotations, imports, and field access.
-
-Use when: Finding all usages of a symbol (not just callers), or when `find_callers_callees` misses references.
-Alternative: Use `find_callers_callees` for call hierarchy (incoming/outgoing callers). Use `search_codebase` for text pattern matching.
-
-Supports `max_results` (default 50) and `offset` for pagination through large result sets. IMPORTANT: semantic_path MUST include file path + '::' (e.g., 'src/mod.rs::func'). LSP-powered. When degraded, use `search_codebase` as fallback.
-
-Error format:
-- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
-- FILE_NOT_FOUND: includes `details.path`.
-
-Common issues:
-- Empty results with `degraded=true`: LSP not ready. Results are unknown, NOT confirmed zero.
-- Too many results: Use `max_results` to cap output.
-- Missing references: Use `search_codebase(query=\"symbol_name\")` as heuristic fallback.
-- SYMBOL_NOT_FOUND: Use `find_symbol(name=\"SymbolName\")` to discover the correct path.
-
-Example: `find_all_references(semantic_path=\"src/auth.ts::AuthService.login\", max_results=50)`"
-    )]
-    async fn find_all_references(
-        &self,
-        Parameters(params): Parameters<FindAllReferencesParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.find_all_references_impl(params).await
-    }
-
-    #[tool(
-        name = "symbol_overview",
-        description = "Get comprehensive information about a symbol in one call: source code, callers, callees, and references. Combines `read_symbol_scope` + `find_callers_callees` + `find_all_references`.
-
-Use when: Initial analysis before refactoring, or when you need a complete picture of a symbol.
-Alternative: Use individual tools (`read_symbol_scope`, `find_callers_callees`, `find_all_references`) for more control over parameters.
-
-Use `project_only=true` (default) to filter out stdlib/vendor references. Use `max_callers_callees` and `max_references` to cap output. IMPORTANT: semantic_path MUST include file path + '::' (e.g. 'src/mod.rs::func'). When degraded, partial results are returned with LSP fallback indicators.
-
-Error format:
-- SYMBOL_NOT_FOUND: includes `details.did_you_mean` and `hint`. Use `find_symbol(name=...)` to discover the correct path.
-- FILE_NOT_FOUND: includes `details.path`.
-
-Common issues:
-- Partial results with `degraded=true`: LSP not ready. Source code is always valid; callers/callees/references may be incomplete.
-- SYMBOL_NOT_FOUND: Use `find_symbol(name=\"SymbolName\")` to discover the correct path.
-- Callers/callees are null (not empty arrays): LSP degraded. Use `search_codebase` as fallback.
-
-Example: `symbol_overview(semantic_path=\"src/auth.ts::AuthService.login\")`"
-    )]
-    async fn symbol_overview(
-        &self,
-        Parameters(params): Parameters<SymbolOverviewParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.symbol_overview_impl(params).await
-    }
-
-    #[tool(
-        name = "lsp_health",
-        description = "Check LSP health per language. Returns overall status (ready / warming_up / starting / unavailable) and per-language details including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`.
-
-Use when: Diagnosing why a navigation tool returned degraded results, or checking if LSP is ready before calling navigation tools.
-Alternative: Individual tool responses include `degraded` and `lsp_readiness` fields.
-
-Pass `language` to check a specific language, or omit to check all. Pass `action=\"restart\"` with `language` to force-restart a stuck LSP process.
-
-Example: `lsp_health(language=\"rust\")`"
-    )]
-    async fn lsp_health(
-        &self,
-        Parameters(params): Parameters<LspHealthParams>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
-        self.lsp_health_impl(params).await
-    }
-
-    #[tool(
-        name = "read_file",
-        description = "Read raw file content with optional pagination (start_line, max_lines).
-
-Use when: Reading config files (.env, YAML, TOML, Dockerfile, package.json) or non-source files.
-Alternative: Use `read_source_file` for source code with AST metadata. Use `read_symbol_scope` for a single symbol.
-
-Example: `read_file(filepath=\".env\", start_line=1, max_lines=50)`"
-    )]
-    async fn read_file(
-        &self,
-        Parameters(params): Parameters<ReadFileParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.read_file_impl(params).await
-    }
-
-    #[tool(
-        name = "read_files",
-        description = "Batch read multiple files in a single call with per-file error resilience. Max 10 files per call.
-
-Use when: Reading multiple files at once (e.g., comparing implementations, gathering context from several files).
-Alternative: Use `read_file` for a single file, or `read_source_file` for source files with full AST metadata.
-
-For source files (.rs, .ts, .tsx, .go, .py, .vue, .js, .jsx), returns AST-parsed content. For config files (.json, .yaml, .toml, .env, Dockerfile), returns raw content.
-
-Parameter guidance:
-- `detail_level`: \"source_only\" (lowest tokens), \"compact\" (default), \"full\" (AST + source).
-- `max_lines_per_file`: Cap output per file (default 500).
-
-Example: `read_files(paths=[\"src/auth.ts\", \"src/config.ts\"], detail_level=\"compact\")`"
-    )]
-    async fn read_files(
-        &self,
-        Parameters(params): Parameters<ReadFilesParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.read_files_impl(params).await
-    }
-
-    #[tool(
-        name = "get_semantic_path",
-        description = "Resolve a file path + line number to the semantic path of the innermost enclosing symbol.
-
-Use when: You have a file + line number (e.g. from a stack trace, diff hunk, or LSP location) and need the semantic path to use with other Pathfinder tools like `read_symbol_scope`, `find_callers_callees`, or `symbol_overview`.
-
-The returned `semantic_path` is in `file::symbol` format (e.g., `src/auth.rs::AuthService.login`). When the line is not inside any named symbol (e.g., a module-level import or blank line), `semantic_path` is null — use `read_source_file(filepath, detail_level=\"symbols\")` to see available symbols.
-
-Tree-sitter powered. Supported languages: .rs, .ts, .tsx, .go, .py, .vue, .js, .jsx, .java.
-
-Example: `get_semantic_path(file=\"src/auth.ts\", line=42)`"
-    )]
-    async fn get_semantic_path(
-        &self,
-        Parameters(params): Parameters<GetSemanticPathParams>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        self.get_semantic_path_impl(params).await
+        self.health_impl(params).await
     }
 }
 
@@ -581,6 +403,9 @@ impl ServerHandler for PathfinderServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::server::types::{
+        GetRepoMapParams, ReadFileParams, ReadSymbolScopeParams, SearchCodebaseParams,
+    };
     use pathfinder_common::types::FilterMode;
     use pathfinder_search::{MockScout, SearchMatch, SearchResult};
     use pathfinder_treesitter::mock::MockSurgeon;
@@ -588,6 +413,7 @@ mod tests {
     use rmcp::model::ErrorCode;
     use std::fs;
     use tempfile::tempdir;
+
 
     #[tokio::test]
     async fn test_get_repo_map_success() {
