@@ -1,7 +1,7 @@
 //! Shared helper functions for Pathfinder MCP tool handlers.
 //!
 //! Contains error conversion utilities and the file-language detector
-//! used by `read_file`.
+//! used by `read` (config file mode).
 
 use pathfinder_common::error::PathfinderError;
 use pathfinder_common::types::SemanticPath;

@@ -11,7 +11,11 @@ use pathfinder_common::types::{ActionableGuidance, DegradedReason};
 use rmcp::schemars;
 use rmcp::serde::{self, Deserialize, Serialize};
 
-// ── Tool Parameter Types ────────────────────────────────────────────
+// ── Legacy Tool Parameter Types ─────────────────────────────────────
+// These param structs are internal to the `_impl` methods (e.g.,
+// `search_codebase_impl`, `get_repo_map_impl`). Agents interact with
+// the consolidated param types below (ExploreParams, SearchParams, etc.)
+// which are defined in the "Consolidated Tool Parameter Types" section.
 
 /// Parameters for `search_codebase`.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
@@ -333,7 +337,9 @@ pub struct ReadSourceFileParams {
     pub end_line: Option<u32>,
 }
 
-// ── Response Types ──────────────────────────────────────────────────
+// ── Legacy Response Types ───────────────────────────────────────────
+// These response structs are returned by `_impl` methods and serialized
+// into MCP responses by the consolidated handlers in `tools/consolidated.rs`.
 
 /// The response for `search_codebase`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -928,7 +934,7 @@ pub struct ReferenceLocation {
 /// format with machine-readable severity and human-readable descriptions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DegradedToolInfo {
-    /// Tool name (e.g., `"find_callers_callees"`, `"get_definition"`, `"read_with_deep_context"`).
+    /// Tool name (e.g., `"trace"`, `"locate"`, `"inspect"`).
     pub tool: String,
     /// Severity of degradation:
     ///
@@ -992,13 +998,13 @@ pub struct LspLanguageHealth {
     /// How diagnostics work for this language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics_strategy: Option<String>,
-    /// Whether call hierarchy is supported (affects `find_callers_callees`, `read_with_deep_context`).
+    /// Whether call hierarchy is supported (affects `trace`, `inspect` with dependencies).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_call_hierarchy: Option<bool>,
     /// Whether diagnostics are supported (affects LSP health quality).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_diagnostics: Option<bool>,
-    /// Whether definition is supported (affects `get_definition`).
+    /// Whether definition is supported (affects `locate`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_definition: Option<bool>,
     /// Background indexing status: `"complete"`, `"in_progress"`, or None.
@@ -1011,7 +1017,7 @@ pub struct LspLanguageHealth {
     pub indexing_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_duration_secs: Option<u64>,
-    /// Whether navigation (`get_definition`, `find_callers_callees`) is functional.
+    /// Whether navigation (`locate`, `trace`) is functional.
     ///
     /// `true` once the LSP initialize handshake completes with `definitionProvider: true`.
     /// Independent of `indexing_status` — navigation works during indexing but
@@ -1027,7 +1033,7 @@ pub struct LspLanguageHealth {
     /// When true, the agent can trust the status.
     #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
     pub probe_verified: bool,
-    /// Whether navigation (`get_definition`, `find_all_references`) was confirmed by a live probe.
+    /// Whether navigation (`locate`, `trace`) was confirmed by a live probe.
     ///
     /// `true` only when a live `goto_definition` probe request succeeded — meaning the LSP
     /// returned a real location, not just that it advertised the capability in the initialize
@@ -1181,6 +1187,269 @@ pub(crate) fn is_false(b: &bool) -> bool {
     !b
 }
 
+// ── Consolidated Tool Parameter Types (Phase 1) ────────────────────
+//
+// These new param structs replace the old per-tool structs above.
+// Old types are kept until the new tool handlers are wired up.
+
+/// Detail level for the `explore` tool.
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Detail {
+    /// Directory tree + package manager files only.
+    Structure,
+    /// Directory tree + all filenames (no symbols).
+    Files,
+    /// Full AST symbol hierarchy (current behavior).
+    #[default]
+    Symbols,
+}
+
+/// Parameters for the `explore` tool (replaces `get_repo_map`).
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExploreParams {
+    /// Directory to map.
+    #[serde(default = "default_repo_map_path")]
+    pub path: String,
+    /// Level of detail to include in the output.
+    #[serde(default)]
+    pub detail: Detail,
+    /// Total token budget for the entire skeleton output. Default: 16000.
+    ///
+    /// When `coverage_percent` in the response is low, increase this value
+    /// to include more files in the map.
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    /// Max directory traversal depth (default: 3).
+    ///
+    /// Increase when `coverage_percent` is low or the project has deeply-nested
+    /// source files. The walker stops early on shallow repos, so over-provisioning
+    /// is safe and nearly free.
+    #[serde(default = "default_explore_depth")]
+    pub depth: u32,
+    /// Visibility filter: `public` or `all`.
+    #[serde(default)]
+    pub visibility: pathfinder_common::types::Visibility,
+    /// Per-file token cap before a file skeleton is collapsed to a summary stub.
+    ///
+    /// When the rendered skeleton of an individual file exceeds this limit, the
+    /// file is replaced with a truncated stub showing only class/struct names and
+    /// method counts. Default: 2000.
+    #[serde(default = "default_max_tokens_per_file")]
+    pub max_tokens_per_file: u32,
+    /// Git ref or duration to show only recently modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`).
+    #[serde(default)]
+    pub changed_since: String,
+    /// Only include files with these extensions. Mutually exclusive with `exclude_extensions`.
+    #[serde(default)]
+    pub include_extensions: Vec<String>,
+    /// Exclude files with these extensions. Mutually exclusive with `include_extensions`.
+    #[serde(default)]
+    pub exclude_extensions: Vec<String>,
+}
+
+/// Search mode for the `search` tool.
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    /// Text search (default).
+    #[default]
+    Text,
+    /// Symbol name resolution.
+    Symbol,
+    /// Regex search.
+    Regex,
+}
+
+/// Parameters for the `search` tool (merges `search_codebase` + `find_symbol`).
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchParams {
+    /// Search pattern (literal text, regex, or symbol name depending on `mode`).
+    pub query: String,
+    /// Search mode: `text` (default), `symbol`, or `regex`.
+    #[serde(default)]
+    pub mode: SearchMode,
+    /// Limit search scope (e.g., `src/**/*.ts`).
+    #[serde(default = "default_path_glob")]
+    pub path_glob: String,
+    /// Maximum matches returned. Default: 50.
+    ///
+    /// Applies to all modes including `symbol`. When `mode="symbol"`, this caps
+    /// the number of resolved symbol matches returned.
+    #[serde(default = "default_max_results")]
+    pub max_results: u32,
+    /// Lines of context above/below each match (text/regex modes only).
+    #[serde(default = "default_context_lines")]
+    pub context_lines: u32,
+    /// File paths already in the agent's context.
+    ///
+    /// For matches in these files, only minimal metadata is returned.
+    /// Full content and context lines are omitted to save tokens.
+    #[serde(default)]
+    pub known_files: Vec<String>,
+    /// Glob pattern for files to exclude from search (e.g., `**/*.test.*`).
+    #[serde(default)]
+    pub exclude_glob: String,
+    /// Number of matches to skip before returning results (for pagination).
+    /// Use with `max_results` to page through large result sets.
+    #[serde(default)]
+    pub offset: u32,
+    /// Optional filter by symbol kind (e.g., `class`, `function`, `struct`).
+    /// Only used when `mode` is `symbol`.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Parameters for the `read` tool (merges `read_file` + `read_source_file` + `read_files`).
+///
+/// Accepts either a single file via `filepath` or multiple files via `paths`.
+/// Exactly one of the two must be provided; the handler validates this at runtime.
+/// File type (source vs config) is auto-detected from the extension.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadParams {
+    /// Single file path. Use this for reading one file.
+    /// Mutually exclusive with `paths`.
+    #[serde(default, alias = "path")]
+    pub filepath: Option<String>,
+    /// Multiple file paths (max 10). Use this for batch reading.
+    /// Mutually exclusive with `filepath`.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+    /// Detail level for source files: `source_only`, `compact`, `symbols`, or `full`.
+    /// Ignored for config/non-source files (always raw content).
+    #[serde(default = "default_detail_level")]
+    pub detail_level: String,
+    /// First line to return (1-indexed). Single-file mode only.
+    #[serde(default = "default_start_line")]
+    pub start_line: u32,
+    /// Last line to return (1-indexed, inclusive). Single-file mode only.
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// Maximum lines per file (batch mode). Default: 500.
+    #[serde(default = "default_max_lines")]
+    pub max_lines_per_file: u32,
+}
+
+/// Parameters for the `inspect` tool (merges `read_symbol_scope` + `read_with_deep_context`).
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct InspectParams {
+    /// Semantic path (e.g., `src/auth.ts::AuthService.login`). MUST include file path and '::'.
+    pub semantic_path: String,
+    /// When `true`, also fetch callee signatures (dependency context).
+    /// Default: `false` (equivalent to old `read_symbol_scope` behavior).
+    #[serde(default)]
+    pub include_dependencies: bool,
+    /// Maximum number of dependencies (callee signatures) to return.
+    /// Only used when `include_dependencies` is `true`. Default: 50.
+    #[serde(default = "default_max_dependencies")]
+    pub max_dependencies: u32,
+    /// Include file-level import statements in the response.
+    ///
+    /// Useful for languages with verbose package paths (Java, C#, Kotlin)
+    /// where imports clarify what types are in scope.
+    /// Only used when `include_dependencies` is `true`. Default: `false`.
+    #[serde(default)]
+    pub include_imports: bool,
+}
+
+impl Default for InspectParams {
+    fn default() -> Self {
+        Self {
+            semantic_path: String::default(),
+            include_dependencies: false,
+            max_dependencies: default_max_dependencies(),
+            include_imports: false,
+        }
+    }
+}
+
+/// Parameters for the `locate` tool (merges `get_definition` + `get_semantic_path`).
+///
+/// Auto-detects mode from input:
+/// - If `semantic_path` is provided → jump to definition.
+/// - If `file` + `line` are provided → resolve to semantic path.
+///
+/// Exactly one mode must be specified; the handler validates this at runtime.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct LocateParams {
+    /// Semantic path to the reference (e.g., `src/auth.ts::AuthService.login`).
+    /// Provide this to jump to a symbol's definition.
+    #[serde(default)]
+    pub semantic_path: Option<String>,
+    /// Relative path to the file (e.g., `src/auth.ts`).
+    /// Provide together with `line` to resolve a location to its semantic path.
+    #[serde(default, alias = "path")]
+    pub file: Option<String>,
+    /// 1-indexed line number to resolve.
+    /// Provide together with `file` to resolve a location to its semantic path.
+    #[serde(default)]
+    pub line: Option<u32>,
+}
+
+/// Scope for the `trace` tool.
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceScope {
+    /// Call hierarchy — callers and callees (default).
+    #[default]
+    Callers,
+    /// All references (calls, imports, type annotations, etc.).
+    References,
+    /// Combined overview: source + callers + callees + references.
+    Overview,
+}
+
+/// Parameters for the `trace` tool (merges `find_callers_callees` + `find_all_references` + `symbol_overview`).
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TraceParams {
+    /// Semantic path to the target symbol (e.g., `src/mod.rs::func`). MUST include file path and '::'.
+    pub semantic_path: String,
+    /// What to trace: `callers` (default), `references`, or `overview`.
+    #[serde(default)]
+    pub scope: TraceScope,
+    /// Traversal depth for call hierarchy (max: 5). Only used with `scope=callers`.
+    #[serde(default = "default_max_depth")]
+    pub max_depth: u32,
+    /// Maximum total references to return.
+    /// Prevents context overflow on large codebases. Default: 50.
+    ///
+    /// In `overview` scope, this single parameter controls both the
+    /// callers/callees cap and the references cap (both set to this value).
+    #[serde(default = "default_max_references")]
+    pub max_references: u32,
+    /// Number of results to skip before returning (for pagination).
+    #[serde(default)]
+    pub offset: u32,
+}
+
+impl Default for TraceParams {
+    fn default() -> Self {
+        Self {
+            semantic_path: String::default(),
+            scope: TraceScope::default(),
+            max_depth: default_max_depth(),
+            max_references: default_max_references(),
+            offset: 0,
+        }
+    }
+}
+
+/// Parameters for the `health` tool (alias for `lsp_health`).
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct HealthParams {
+    /// Optional language to check (e.g., "rust", "typescript").
+    /// If omitted, checks all available languages.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Optional action to perform.
+    ///
+    /// - `"restart"`: Force-restart the LSP process for the specified language.
+    ///   `language` must be set when using `"restart"`.
+    ///   Returns updated health status after the restart attempt.
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
 // ── Default Value Functions ─────────────────────────────────────────
 
 #[must_use]
@@ -1242,6 +1511,10 @@ pub fn default_detail_level() -> String {
 #[must_use]
 pub const fn default_true() -> bool {
     true
+}
+#[must_use]
+pub const fn default_explore_depth() -> u32 {
+    3
 }
 
 #[cfg(test)]
