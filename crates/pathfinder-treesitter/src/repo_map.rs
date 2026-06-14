@@ -78,7 +78,7 @@ impl<'a> SkeletonConfig<'a> {
     }
 }
 
-/// The result of a `get_repo_map` generation.
+/// The result of an `explore` map generation.
 #[derive(Debug, Clone)]
 pub struct RepoMapResult {
     /// The repository skeleton representation.

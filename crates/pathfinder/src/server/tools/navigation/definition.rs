@@ -1,4 +1,4 @@
-//! `get_definition` tool handler and grep-based fallback strategies.
+//! `locate` tool handler (definition mode) and grep-based fallback strategies.
 
 use crate::server::helpers::{
     format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,

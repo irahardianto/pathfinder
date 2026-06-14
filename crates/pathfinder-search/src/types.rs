@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Parameters for a `search_codebase` call.
+/// Parameters for a `search` call.
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     /// Absolute path to the workspace root.
@@ -42,7 +42,7 @@ impl Default for SearchParams {
     }
 }
 
-/// A single match returned by `search_codebase`.
+/// A single match returned by `search`.
 ///
 /// Matches the JSON schema described in PRD §3.1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -68,7 +68,7 @@ pub struct SearchMatch {
     /// AST-derived semantic path enclosing this match.
     ///
     /// Initialised to `None` by `RipgrepScout`. Downstream AST enrichment
-    /// pipelines (e.g. the `search_codebase` handler's Tree-sitter pass)
+    /// pipelines (e.g. the `search` handler's Tree-sitter pass)
     /// populate this field before results are returned to the caller.
     pub enclosing_semantic_path: Option<String>,
     /// SHA-256 content fingerprint of the matched file.
@@ -89,7 +89,7 @@ pub struct SearchMatch {
     pub known: Option<bool>,
 }
 
-/// The result of a `search_codebase` call.
+/// The result of a `search` call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     /// All matches found, up to `max_results`.

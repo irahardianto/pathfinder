@@ -1,4 +1,4 @@
-//! `find_all_references` tool implementation.
+//! `trace` tool handler (references mode).
 //!
 //! Finds all usages of a symbol across the codebase using LSP
 //! `textDocument/references` with optional `textDocument/implementation`.
@@ -540,7 +540,7 @@ impl PathfinderServer {
                             format!("Found {total_references} references across {files_referenced} files (grep fallback, LSP still warming up).\n\n")
                         } else {
                             "LSP result unverified: zero references returned but LSP is still indexing. \
-                             Use search_codebase to find usages, or retry after lsp_health reports ready.\n"
+                             Use search to find usages, or retry after lsp_health reports ready.\n"
                                 .to_string()
                         };
 
@@ -756,7 +756,7 @@ impl PathfinderServer {
                 } else {
                     // Fallback unsuccessful - keep original behavior
                     let text = format!(
-                        "References unknown. Use search_codebase to manually find usages of `{}`\n",
+                        "References unknown. Use search to manually find usages of `{}`\n",
                         params.semantic_path
                     );
                     (
@@ -866,7 +866,7 @@ impl PathfinderServer {
                 } else {
                     // Fallback unsuccessful - keep original behavior
                     let text = format!(
-                        "References unknown. Use search_codebase to manually find usages of `{}`\n",
+                        "References unknown. Use search to manually find usages of `{}`\n",
                         params.semantic_path
                     );
                     (

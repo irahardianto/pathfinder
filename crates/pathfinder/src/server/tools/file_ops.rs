@@ -1,4 +1,4 @@
-//! File operation tools — `read_file`.
+//! File operation tools — `read` (config file mode).
 
 use crate::server::helpers::{
     io_error_data, language_from_path, millis_to_u64, pathfinder_to_error_data, serialize_metadata,

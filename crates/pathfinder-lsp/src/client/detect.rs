@@ -38,7 +38,7 @@ pub struct DetectionResult {
 
 /// A language whose marker files were found but whose LSP binary is not on PATH.
 ///
-/// Used to surface actionable install guidance in `lsp_health` responses.
+/// Used to surface actionable install guidance in `health` responses.
 #[derive(Debug, Clone)]
 pub struct MissingLanguage {
     /// Short language identifier (e.g., "rust", "python").

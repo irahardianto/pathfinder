@@ -157,7 +157,7 @@ pub trait Surgeon: Send + Sync {
     /// - `"string"` — the position is inside a string literal
     /// - `"code"` — all other positions (identifiers, operators, blocks, etc.)
     ///
-    /// Used by `search_codebase` to implement `filter_mode`:
+    /// Used by `search` to implement `filter_mode`:
     /// - `code_only` → keep matches where this returns `"code"`
     /// - `comments_only` → keep matches where this returns `"comment"` or `"string"`
     ///

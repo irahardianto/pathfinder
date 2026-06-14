@@ -1,4 +1,4 @@
-//! `read_source_file` tool — AST-based full file symbol extraction via Tree-sitter.
+//! `read` tool (source file mode) — AST-based full file symbol extraction via Tree-sitter.
 
 use crate::server::helpers::{
     millis_to_u64, pathfinder_to_error_data, serialize_metadata, treesitter_error_to_error_data,

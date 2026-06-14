@@ -1,6 +1,6 @@
 //! Pathfinder Search — The Scout Engine.
 //!
-//! Provides Ripgrep-powered text search for the `search_codebase` MCP tool.
+//! Provides Ripgrep-powered text search for the `search` MCP tool.
 //!
 //! # Architecture
 //!

@@ -1,7 +1,7 @@
-//! Symbol overview tool handler: `symbol_overview`.
+//! `trace` tool handler (overview mode).
 //!
 //! Composite tool that returns source + callers/callees + references in one call.
-//! Orchestrates `read_symbol_scope` + `find_callers_callees` + `find_all_references`.
+//! Orchestrates `read_symbol_scope_enriched` + `find_callers_callees_impl` + `find_all_references_impl`.
 
 use crate::server::helpers::{
     format_degraded_notice, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,

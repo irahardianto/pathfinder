@@ -165,7 +165,7 @@ pub trait Lawyer: Send + Sync {
 
     /// Retrieve languages whose markers were found but whose LSP binaries are not on PATH.
     ///
-    /// Used to surface actionable install guidance in `lsp_health` responses.
+    /// Used to surface actionable install guidance in `health` responses.
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage>;
 
     /// IW-4: Force-respawn the LSP process for `language_id`.
@@ -178,7 +178,7 @@ pub trait Lawyer: Send + Sync {
     /// PATCH-004: Check whether `warm_start` has completed.
     ///
     /// Returns `true` if all `warm_start` tasks have finished, `false` otherwise.
-    /// This is used by `lsp_health` to report accurate status.
+    /// This is used by `health` to report accurate status.
     /// Default implementation returns `false` (no `warm_start` has been triggered).
     fn is_warm_start_complete(&self) -> bool {
         false
@@ -186,7 +186,7 @@ pub trait Lawyer: Send + Sync {
 
     /// LT-4: Pre-warm LSP processes for specific languages.
     ///
-    /// Called after `get_repo_map` to start LSPs for languages found in the
+    /// Called after `explore` to start LSPs for languages found in the
     /// project skeleton before the agent explicitly requests LSP operations.
     ///
     /// PATCH-004: Returns `Vec<JoinHandle<()>>` for tracking `warm_start` completion.
@@ -209,7 +209,7 @@ pub trait Lawyer: Send + Sync {
 
     /// LT-4: Extend idle timer for a language without making an LSP request.
     ///
-    /// Called by `read_source_file` to prevent the LSP from timing out while
+    /// Called by `read` to prevent the LSP from timing out while
     /// the agent is actively reading files.
     ///
     /// Default implementation is a no-op.

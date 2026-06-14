@@ -1,9 +1,9 @@
-//! `get_semantic_path` tool handler.
+//! `locate` tool handler (`get_semantic_path` mode).
 //!
 //! Resolves a file path + 1-indexed line number to the semantic path of the
 //! innermost enclosing symbol (e.g. `src/auth.rs::AuthService.login`).
 //!
-//! This is the reverse of the `read_symbol_scope` tool. Agents that receive
+//! This is the reverse of the `inspect` tool. Agents that receive
 //! a stack trace, diff hunk, or LSP location (file + line) can use this tool
 //! to obtain the semantic path they need to call other Pathfinder tools.
 
@@ -13,7 +13,7 @@ use crate::server::PathfinderServer;
 use rmcp::model::{CallToolResult, ErrorData};
 
 impl PathfinderServer {
-    /// Core logic for the `get_semantic_path` tool.
+    /// Core logic for the `locate` tool (file+line → semantic path mode).
     ///
     /// Walks the Tree-sitter AST of the file at `params.file` and returns the
     /// semantic path of the symbol that encloses `params.line`.
@@ -101,7 +101,7 @@ impl PathfinderServer {
             None => format!(
                 "Line {line} in '{}' is not inside a named symbol.\n\n\
                  The line may be a module-level attribute, blank line, or top-level import. \
-                 Use `read_source_file(filepath=\"{}\", detail_level=\"symbols\")` to see \
+                 Use `read(filepath=\"{}\", detail_level=\"symbols\")` to see \
                  the available symbols in this file.\n\n\
                  [resolved in {duration_ms}ms]",
                 params.file, params.file

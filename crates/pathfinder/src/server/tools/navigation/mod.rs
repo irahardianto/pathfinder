@@ -1,15 +1,17 @@
-//! Navigation tool handlers: `get_definition`, `find_callers_callees`, and
-//! `read_with_deep_context`.
+//! Navigation tool handlers: `locate`, `trace`, and `inspect`.
 //!
-//! All three tools are LSP-powered but degrade gracefully when no language
-//! server is available. The tool responses include `"degraded": true` and
+//! Internal `_impl` methods: `get_definition_impl`, `find_callers_callees_impl`,
+//! `read_with_deep_context_impl`, `find_all_references_impl`, `symbol_overview_impl`.
+//!
+//! All are LSP-powered but degrade gracefully when no language server is
+//! available. The tool responses include `"degraded": true` and
 //! `"degraded_reason"` fields to signal the fallback mode to agents.
 //!
 //! # Degraded Mode
 //! When the `Lawyer` returns `LspError::NoLspAvailable`:
-//! - `get_definition` — returns an error response (`LSP_REQUIRED`)
-//! - `find_callers_callees` — returns `null` caller/callee lists with `degraded: true`
-//! - `read_with_deep_context` — returns the symbol scope only, no dependencies
+//! - `locate` — returns an error response (`LSP_REQUIRED`)
+//! - `trace(scope="callers")` — returns `null` caller/callee lists with `degraded: true`
+//! - `inspect(include_dependencies=true)` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{
     parse_semantic_path, pathfinder_to_error_data, treesitter_error_to_error_data,
@@ -435,7 +437,7 @@ fn java_resolve_pattern(candidate: &str) -> String {
 /// DELIVERABLE F: Build a regex pattern to find a candidate function's definition.
 ///
 /// Used by grep fallback for outgoing dependency discovery in both
-/// `read_with_deep_context` and `find_callers_callees`.
+/// `inspect` (deep context) and `trace` (callers/callees).
 fn candidate_definition_pattern(language: &str, candidate: &str) -> String {
     let escaped = regex::escape(candidate);
     match language {

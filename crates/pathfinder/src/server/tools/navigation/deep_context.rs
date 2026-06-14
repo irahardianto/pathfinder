@@ -1,4 +1,4 @@
-//! `read_with_deep_context` tool handler.
+//! `inspect` tool handler (deep context mode).
 //!
 //! Returns the symbol's source code enriched with LSP call-hierarchy
 //! dependencies. Degrades gracefully to symbol scope only when no LSP
@@ -780,7 +780,7 @@ mod tests {
             serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
         assert!(
-            text_content.starts_with("DEGRADED (grep_fallback_dependencies) — results are heuristic (grep-based), verify manually — fallback: use search_codebase for authoritative results\n\n0 dependencies loaded\n\nfn login() { }"),
+            text_content.starts_with("DEGRADED (grep_fallback_dependencies) — results are heuristic (grep-based), verify manually — fallback: use search for authoritative results\n\n0 dependencies loaded\n\nfn login() { }"),
             "text_content: {text_content}"
         );
         assert!(val.degraded);

@@ -1,4 +1,4 @@
-//! `find_symbol` tool — Resolve a bare symbol name to its `file::symbol` semantic path(s).
+//! `search` tool (symbol mode) — Resolve a bare symbol name to its `file::symbol` semantic path(s).
 
 use crate::server::helpers::io_error_data;
 use crate::server::types::{FindSymbolParams, FindSymbolResponse, FoundSymbol};

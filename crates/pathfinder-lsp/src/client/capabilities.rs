@@ -49,17 +49,17 @@ impl DiagnosticsStrategy {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DetectedCapabilities {
-    /// Server supports `textDocument/definition` (`get_definition`,
-    /// `read_with_deep_context`). Falls back to Tree-sitter heuristic if false.
+    /// Server supports `textDocument/definition` (`locate`,
+    /// `inspect`). Falls back to Tree-sitter heuristic if false.
     pub definition_provider: bool,
-    /// Server supports `textDocument/references` (`find_callers_callees`).
+    /// Server supports `textDocument/references` (`trace`).
     /// Falls back to Tree-sitter heuristic if false.
     pub references_provider: bool,
     /// Server supports `textDocument/implementation` (`goto_implementation`).
     /// Falls back to Tree-sitter heuristic if false.
     pub implementation_provider: bool,
     /// Server supports `callHierarchy/incomingCalls` + `outgoingCalls`
-    /// (`find_callers_callees`). Falls back to Tree-sitter scan for outgoing only.
+    /// (`trace`). Falls back to Tree-sitter scan for outgoing only.
     pub call_hierarchy_provider: bool,
     /// Server supports `textDocument/formatting` (edit tools refinement).
     /// Tree-sitter indentation baseline is always applied first.

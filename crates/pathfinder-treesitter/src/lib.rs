@@ -2,7 +2,7 @@
 //!
 //! This crate provides the [`Surgeon`] trait and its default implementation,
 //! orchestrating tree-sitter parsers, queries, and AST caching for multiple
-//! languages. It enables features like `read_symbol_scope` and semantic path
+//! languages. It enables features like `inspect` (symbol scope) and semantic path
 //! resolution.
 
 /// Module for cache functionality.

@@ -1,4 +1,4 @@
-//! `get_repo_map` tool — AST-based repository skeleton with token budgeting.
+//! `explore` tool — AST-based repository skeleton with token budgeting.
 
 use crate::server::helpers::{
     format_degraded_notice, millis_to_u64, pathfinder_to_error_data, serialize_metadata,

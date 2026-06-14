@@ -1,6 +1,6 @@
 //! LSP health check and probe-based readiness verification.
 //!
-//! Provides `lsp_health_impl` which reports per-language LSP status
+//! Provides `lsp_health_impl` (internal) which reports per-language LSP status
 //! (`ready`, `warming_up`, `starting`, `unavailable`, `degraded`) along with
 //! capability signals and degraded tool information.
 
@@ -16,8 +16,8 @@ const LIVENESS_PROBE_INTERVAL_SECS: u64 = 120;
 impl PathfinderServer {
     /// Check LSP health status.
     ///
-    /// Tests whether LSP navigation tools (`get_definition`, `find_callers_callees`,
-    /// `read_with_deep_context`) will return real data or degraded results.
+    /// Tests whether LSP navigation tools (`locate`, `trace`, `inspect`)
+    /// will return real data or degraded results.
     /// Agents should call this once at session start to choose their strategy.
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip(self, params), fields(language = ?params.language))]
@@ -31,7 +31,7 @@ impl PathfinderServer {
                 Some(l) => l.clone(),
                 None => {
                     return Err(pathfinder_to_error_data(&PathfinderError::IoError {
-                        message: "lsp_health action='restart' requires 'language' to be set"
+                        message: "health action='restart' requires 'language' to be set"
                             .to_owned(),
                     }));
                 }
@@ -65,7 +65,7 @@ impl PathfinderServer {
             // indexing_complete is an ADDITIONAL signal, not a requirement.
             let (status_str, uptime) = if status.navigation_ready == Some(true) {
                 // Navigation is functional — report ready regardless of indexing status.
-                // This makes get_definition, find_callers_callees available immediately after
+                // This makes locate, trace, inspect available immediately after
                 // initialize completes, without waiting for WorkDoneProgressEnd.
                 ("ready", status.uptime_seconds.map(format_uptime))
             } else if status.navigation_ready == Some(false)
@@ -348,14 +348,14 @@ impl PathfinderServer {
                 indexing_progress_percent: None,
                 degraded_tools: vec![
                     crate::server::types::DegradedToolInfo {
-                        tool: "find_callers_callees".to_owned(),
+                        tool: "trace".to_owned(),
                         severity: "unavailable".to_owned(),
                         description:
-                            "No LSP available. Use search_codebase for manual reference search."
+                            "No LSP available. Use search for manual reference search."
                                 .to_owned(),
                     },
                     crate::server::types::DegradedToolInfo {
-                        tool: "read_with_deep_context".to_owned(),
+                        tool: "inspect".to_owned(),
                         severity: "unavailable".to_owned(),
                         description:
                             "No LSP available. Returns source only, no dependency signatures."
@@ -389,7 +389,7 @@ impl PathfinderServer {
                 && lang_health.supports_definition == Some(true)
             {
                 known_limitations.push(format!(
-                    "{}: call hierarchy not supported — find_callers_callees uses grep fallback (less accurate)",
+                    "{}: call hierarchy not supported — trace uses grep fallback (less accurate)",
                     lang_health.language
                 ));
             }
@@ -406,7 +406,7 @@ impl PathfinderServer {
         for lang_health in &languages {
             if lang_health.navigation_ready.is_none() && lang_health.status != "unavailable" {
                 known_limitations.push(format!(
-                    "{}: dynamic capability registration may still be in progress — retry lsp_health in a few seconds",
+                    "{}: dynamic capability registration may still be in progress — retry health in a few seconds",
                     lang_health.language
                 ));
             }
@@ -481,7 +481,7 @@ impl PathfinderServer {
                 }
                 if !reasons.is_empty() {
                     lang_lines.push(format!(
-                        "  → Reason: {}. Use search_codebase as fallback.",
+                        "  → Reason: {}. Use search as fallback.",
                         reasons.join(", ")
                     ));
                 }
@@ -769,26 +769,26 @@ pub(super) fn compute_degraded_tools(
     if warming_up {
         // LSP is starting or indexing — all navigation tools operate in degraded mode.
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "get_definition".to_owned(),
+            tool: "locate".to_owned(),
             severity: "warming_up".to_owned(),
             description: "LSP still initializing. Uses grep heuristic until navigation_ready=true."
                 .to_owned(),
         });
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "find_callers_callees".to_owned(),
+            tool: "trace".to_owned(),
             severity: "warming_up".to_owned(),
             description: "LSP still initializing. Uses grep fallback until navigation_ready=true."
                 .to_owned(),
         });
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "read_with_deep_context".to_owned(),
+            tool: "inspect".to_owned(),
             severity: "warming_up".to_owned(),
             description:
                 "LSP still initializing. Returns source only (no dep signatures) until ready."
                     .to_owned(),
         });
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "find_all_references".to_owned(),
+            tool: "trace(scope=\"references\")".to_owned(),
             severity: "warming_up".to_owned(),
             description: "LSP still initializing. Reference results may be incomplete until ready."
                 .to_owned(),
@@ -799,7 +799,7 @@ pub(super) fn compute_degraded_tools(
     // LSP is ready — only flag tools where specific capabilities are explicitly absent.
     if status.supports_definition != Some(true) {
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "get_definition".to_owned(),
+            tool: "locate".to_owned(),
             severity: "grep_fallback".to_owned(),
             description:
                 "Uses ripgrep heuristic instead of LSP. May find wrong definition or miss re-exports."
@@ -809,17 +809,17 @@ pub(super) fn compute_degraded_tools(
 
     if status.supports_call_hierarchy != Some(true) {
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "find_callers_callees".to_owned(),
+            tool: "trace(scope=\"callers\")".to_owned(),
             severity: "grep_fallback".to_owned(),
             description:
                 "Uses text search instead of call hierarchy. May over/under-count references."
                     .to_owned(),
         });
         degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "read_with_deep_context".to_owned(),
+            tool: "inspect(include_dependencies=true)".to_owned(),
             severity: "unavailable".to_owned(),
             description:
-                "Returns source only, no dependency signatures. Use search_codebase as alternative."
+                "Returns source only, no dependency signatures. Use search as alternative."
                     .to_owned(),
         });
     }
@@ -1706,42 +1706,42 @@ mod tests {
         let go_health = &val.languages[0];
         assert_eq!(go_health.language, "go");
 
-        // Check that degraded_tools contains find_callers_callees with correct severity
-        let find_callers_callees = go_health
+        // Check that degraded_tools contains trace (callers) with correct severity
+        let trace_callers = go_health
             .degraded_tools
             .iter()
-            .find(|t| t.tool == "find_callers_callees");
+            .find(|t| t.tool == "trace(scope=\"callers\")");
         assert!(
-            find_callers_callees.is_some(),
-            "degraded_tools should include find_callers_callees when call hierarchy unsupported"
+            trace_callers.is_some(),
+            "degraded_tools should include trace(scope=callers) when call hierarchy unsupported"
         );
-        let fc = find_callers_callees.unwrap();
+        let fc = trace_callers.unwrap();
         assert_eq!(
             fc.severity, "grep_fallback",
-            "find_callers_callees should have severity=grep_fallback"
+            "trace(scope=callers) should have severity=grep_fallback"
         );
         assert!(
             fc.description.contains("text search"),
-            "find_callers_callees description should mention text search fallback"
+            "trace(scope=callers) description should mention text search fallback"
         );
 
-        // Check that degraded_tools contains read_with_deep_context with correct severity
+        // Check that degraded_tools contains inspect(include_dependencies=true) with correct severity
         let rwdc = go_health
             .degraded_tools
             .iter()
-            .find(|t| t.tool == "read_with_deep_context");
+            .find(|t| t.tool == "inspect(include_dependencies=true)");
         assert!(
             rwdc.is_some(),
-            "degraded_tools should include read_with_deep_context when call hierarchy unsupported"
+            "degraded_tools should include inspect(include_dependencies=true) when call hierarchy unsupported"
         );
         let rwdc = rwdc.unwrap();
         assert_eq!(
             rwdc.severity, "unavailable",
-            "read_with_deep_context should have severity=unavailable"
+            "inspect(include_dependencies=true) should have severity=unavailable"
         );
         assert!(
             rwdc.description.contains("source only"),
-            "read_with_deep_context description should mention source-only limitation"
+            "inspect(include_dependencies=true) description should mention source-only limitation"
         );
 
         // validate_only no longer exists — degraded_tools only contains LSP navigation tools
@@ -2785,14 +2785,14 @@ mod tests {
         };
         let degraded = compute_degraded_tools(&status);
         assert_eq!(degraded.len(), 1);
-        assert_eq!(degraded[0].tool, "get_definition");
+        assert_eq!(degraded[0].tool, "locate");
 
         status.supports_definition = Some(true);
         status.supports_call_hierarchy = Some(false);
         let degraded2 = compute_degraded_tools(&status);
         assert_eq!(degraded2.len(), 2);
-        assert_eq!(degraded2[0].tool, "find_callers_callees");
-        assert_eq!(degraded2[1].tool, "read_with_deep_context");
+        assert_eq!(degraded2[0].tool, "trace(scope=\"callers\")");
+        assert_eq!(degraded2[1].tool, "inspect(include_dependencies=true)");
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! `find_callers_callees` tool handler (formerly `analyze_impact`).
+//! `trace` tool handler (callers/callees mode).
 //!
 //! LSP-powered call-hierarchy BFS with grep-based fallback when no language
 //! server is available. Tool responses include `"degraded": true` and
@@ -1085,10 +1085,10 @@ impl PathfinderServer {
             text_parts.push(String::new());
             if symbol_name.is_empty() {
                 text_parts
-                    .push("   Workaround: Use search_codebase to find usages manually.".to_owned());
+                    .push("   Workaround: Use search to find usages manually.".to_owned());
             } else {
                 text_parts.push(format!(
-                    "   Workaround: Use search_codebase(query=\"{symbol_name}\") to find usages manually."
+                    "   Workaround: Use search(query=\"{symbol_name}\") to find usages manually."
                 ));
             }
             text_parts.push("   Reference counts below are heuristic only:".to_owned());

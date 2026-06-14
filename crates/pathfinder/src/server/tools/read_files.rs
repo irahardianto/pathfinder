@@ -1,4 +1,4 @@
-//! `read_files` tool — batch read multiple files in a single call.
+//! `read` tool (batch mode) — batch read multiple files in a single call.
 
 use crate::server::helpers::{language_from_path, serialize_metadata};
 use crate::server::types::{FileResult, ReadFilesParams, ReadFilesResponse};
@@ -9,7 +9,7 @@ use tokio::task::JoinSet;
 
 const READ_FILES_CONCURRENCY: usize = 5;
 
-/// Source file extensions that get AST-based processing via `read_source_file`.
+/// Source file extensions that get AST-based processing via `read_source_file_impl`.
 ///
 /// Matches `SupportedLanguage::detect` in `crates/pathfinder-treesitter/src/language.rs`.
 const SOURCE_FILE_EXTENSIONS: &[&str] = &[

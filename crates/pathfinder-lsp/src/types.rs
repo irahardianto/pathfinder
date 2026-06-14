@@ -14,7 +14,7 @@ pub enum IndexingCompletionSource {
 
 /// Language server status for a single LSP language slot.
 ///
-/// Returned by the `get_repo_map` and validation tools to communicate the
+/// Returned by the `explore` tool and validation tools to communicate the
 /// current health of the associated language server process.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LspLanguageStatus {
@@ -22,7 +22,7 @@ pub struct LspLanguageStatus {
     pub validation: bool,
     /// Reason explaining the validation status.
     pub reason: String,
-    /// Whether the LSP is ready for navigation operations (`get_definition`, `find_callers_callees`).
+    /// Whether the LSP is ready for navigation operations (`locate`, `trace`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub navigation_ready: Option<bool>,
     /// Whether the LSP has completed initial workspace indexing.
@@ -34,10 +34,10 @@ pub struct LspLanguageStatus {
     /// How this LSP provides diagnostics ("pull", "push", or "none").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics_strategy: Option<String>,
-    /// LSP supports textDocument/definition (`get_definition`).
+    /// LSP supports textDocument/definition (`locate`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_definition: Option<bool>,
-    /// LSP supports textDocument/prepareCallHierarchy (`find_callers_callees`, `read_with_deep_context`).
+    /// LSP supports textDocument/prepareCallHierarchy (`trace`, `inspect`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_call_hierarchy: Option<bool>,
     /// LSP supports textDocument/diagnostic or publishDiagnostics (diagnostic health reporting).

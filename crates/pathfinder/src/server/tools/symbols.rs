@@ -1,4 +1,4 @@
-//! `read_symbol_scope` tool — AST-based symbol extraction via Tree-sitter.
+//! `inspect` tool (symbol scope mode) — AST-based symbol extraction via Tree-sitter.
 
 use crate::server::helpers::{
     millis_to_u64, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
