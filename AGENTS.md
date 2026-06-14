@@ -377,20 +377,13 @@ Check once per session.
 
 | Task | Tool | Notes |
 |---|---|---|
-| Project skeleton | `get_repo_map` | Returns semantic paths — copy-paste into other tools |
-| Search code | `search_codebase` | AST-filtered, returns `enclosing_semantic_path`. Check `coverage_percent`. |
-| Read one symbol | `read_symbol_scope` | Exact function/class extraction |
-| Read full file + AST | `read_source_file` | Source files only; use `read_file` for config. `detail_level="source_only"` for minimal tokens. |
-| Symbol + dependencies | `read_with_deep_context` | LSP-powered callee signatures |
-| Jump to definition | `get_definition` | LSP with ripgrep fallback |
-| Find callers and callees | `find_callers_callees` | Callers + callees via LSP call hierarchy. Default max_depth=3. |
-| Find all references | `find_all_references` | All usages including non-call references (field access, imports, type annotations) |
-| Resolve symbol by name | `find_symbol` | Bare name → file::symbol paths. Filter by `kind` ("class", "function", "struct"). |
-| Batch read files | `read_files` | Multiple files in one call. AST for source files, raw for config. Max 10 files. |
-| Symbol overview | `symbol_overview` | Source + callers + callees + references in one call |
-| LSP status | `lsp_health` | Check when navigation returns `degraded: true` |
-| Read config file | `read_file` | For YAML, TOML, JSON, .env, Dockerfile |
-| Location → semantic path | `get_semantic_path` | File:line → semantic path. For stack traces, grep results, error messages. |
+| Project skeleton | `explore` | Get structural skeleton of the project — directory tree, file listing, or full symbol hierarchy. |
+| Search code | `search` | Search for text patterns, regex, or resolve symbol names across the codebase. |
+| Read one symbol / dependency | `inspect` | Read symbol source code and optionally its callee signatures (dependency context). |
+| Trace call graph / references | `trace` | Trace call hierarchy (callers/callees), find all references, or get a combined symbol overview. |
+| Read file content | `read` | Read raw file contents, format-aware source file content (with line mapping and AST symbols), or batch read multiple files. |
+| Jump to definition / resolve path | `locate` | Jump to a symbol's definition, or convert a file and line number to a semantic path (for stack traces/grep). |
+| Check LSP health | `health` | Check per-language LSP readiness, capabilities, indexing progress, and degraded tools. |
 
 ### Addressing
 
@@ -398,7 +391,7 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 ### Degraded Mode
 
-`get_definition`, `find_callers_callees`, `read_with_deep_context`, `find_all_references`, `symbol_overview` use LSP. When `degraded: true`:
+`locate` (definition mode), `trace`, `inspect` (with dependencies) use LSP. When `degraded: true`:
 - Text output starts with: `⚠️ DEGRADED ({reason}) — {tool-specific guidance}`
 - Results are best-effort — never treat empty as confirmed-zero
 - Check `degraded_reason` and `lsp_readiness`
@@ -407,13 +400,12 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 | Parameter | Tool | Default | Purpose |
 |---|---|---|---|
-| `project_only` | `find_callers_callees`, `read_with_deep_context` | `true` | Filter out stdlib/vendor noise |
-| `max_references` | `find_callers_callees` | `50` | Cap total BFS references |
-| `max_depth` | `find_callers_callees` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. |
-| `max_dependencies` | `read_with_deep_context` | `50` | Cap outgoing dependency entries |
-| `max_tokens` | `get_repo_map` | auto | Auto-scales for monorepos |
+| `max_references` | `trace` | `50` | Cap total references/callers returned. |
+| `max_depth` | `trace` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. `scope="callers"` only. |
+| `max_dependencies` | `inspect` | `50` | Cap outgoing dependency entries returned with `include_dependencies=true`. |
+| `max_tokens` | `explore` | auto | Auto-scales skeleton output token budget for the repository. |
 
-When `references_truncated` or `dependencies_truncated` is true, increase the corresponding limit.
+When `references_truncated` or `dependencies_truncated` is true in response metadata, increase the corresponding limit.
 
 ### Fallback
 
