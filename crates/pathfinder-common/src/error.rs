@@ -149,7 +149,7 @@ impl PathfinderError {
 
                 if did_you_mean.is_empty() {
                     // No suggestions — the symbol might be in a different file than what the agent guessed.
-                    // Suggest find_symbol and search_codebase to locate the correct file.
+                    // Suggest search to locate the correct file.
                     let base_name = semantic_path
                         .split("::")
                         .last()
@@ -158,12 +158,12 @@ impl PathfinderError {
                         .next()
                         .unwrap_or(semantic_path);
                     Some(format!(
-                        "Symbol not found in the specified file. Use find_symbol(name=\"{base_name}\") to locate the correct file, or search_codebase(query=\"{base_name}\") to search the entire workspace.{}",
+                        "Symbol not found in the specified file. Use search(mode=\"symbol\", query=\"{base_name}\") to locate the correct file, or search(query=\"{base_name}\") to search the entire workspace.{}",
                         separator_hint.unwrap_or("")
                     ))
                 } else {
                     Some(format!(
-                        "Did you mean: {}? Use search_codebase if the symbol is in a different file, or read_source_file to see available symbols in this file.{}",
+                        "Did you mean: {}? Use search if the symbol is in a different file, or read to see available symbols in this file.{}",
                         did_you_mean.join(", "),
                         separator_hint.unwrap_or("")
                     ))
@@ -173,18 +173,18 @@ impl PathfinderError {
                 Some("File is outside workspace sandbox. Check .pathfinderignore rules.".to_owned())
             }
             Self::UnsupportedLanguage { .. } => Some(
-                "No tree-sitter grammar for this file type. Use read_file for raw content."
+                "No tree-sitter grammar for this file type. Use read for raw content."
                     .to_owned(),
             ),
             Self::FileNotFound { .. } => Some(
                 "Verify the file path is relative to the workspace root and the file exists. \
-                 Use search_codebase(query=\"...\") to find the correct path, or get_repo_map to see all files."
+                 Use search(query=\"...\") to find the correct path, or explore to see all files."
                     .to_owned(),
             ),
             Self::InvalidSemanticPath { input, issue } => {
                 if issue.contains("symbol target") {
                     Some(format!(
-                        "'{input}' is a file path without a symbol target. This tool requires 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). If you want the full file content without symbol resolution, use read_source_file(filepath=\"{input}\") for AST-aware reading, or read_file(filepath=\"{input}\") for raw content."
+                        "'{input}' is a file path without a symbol target. This tool requires 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). If you want the full file content without symbol resolution, use read(filepath=\"{input}\")."
                     ))
                 } else {
                     Some(format!(
@@ -200,33 +200,33 @@ impl PathfinderError {
                 let hint = if message.contains("timed out") || message.contains("timeout") {
                     format!(
                          "LSP timed out. The language server may still be indexing, under memory pressure, or deadlocked. \
-                          Workaround: use search_codebase + read_symbol_scope (tree-sitter) instead of \
-                          LSP-dependent tools (get_definition, find_callers_callees, read_with_deep_context). \
+                          Workaround: use search + inspect (tree-sitter) instead of \
+                          LSP-dependent tools (locate, trace, inspect). \
                          Original error: {message}"
                     )
                 } else if message.contains("connection lost") || message.contains("crashed") {
                     format!(
                         "LSP process crashed or disconnected. Pathfinder will attempt to restart it. \
-                         Workaround: use tree-sitter-based tools (search_codebase, read_symbol_scope, read_source_file). \
+                         Workaround: use tree-sitter-based tools (search, inspect, read). \
                          Original error: {message}"
                     )
                 } else {
                     format!(
-                        "LSP error: {message}. Workaround: use search_codebase for text-based navigation \
-                         or check lsp_health for current status."
+                        "LSP error: {message}. Workaround: use search for text-based navigation \
+                         or check health for current status."
                     )
                 };
                 Some(hint)
             }
              Self::LspTimeout { timeout_ms } => Some(format!(
                 "LSP timed out after {timeout_ms}ms. The language server may still be indexing, under memory pressure, or deadlocked. \
-                 Workaround: use search_codebase + read_symbol_scope (tree-sitter) instead of \
-                 LSP-dependent tools (get_definition, find_callers_callees, read_with_deep_context). \
-                 Check lsp_health for current status."
+                 Workaround: use search + inspect (tree-sitter) instead of \
+                 LSP-dependent tools (locate, trace, inspect). \
+                 Check health for current status."
             )),
             Self::NoLspAvailable { language } => Some(format!(
                 "No LSP available for {language}. Install a language server to enable LSP-dependent features. \
-                 Tree-sitter tools (read_symbol_scope, search_codebase, read_source_file) still work without LSP."
+                 Tree-sitter tools (inspect, search, read) still work without LSP."
             )),
             _ => None,
         }
@@ -349,12 +349,12 @@ mod tests {
         };
         let hint = err.hint().expect("should have hint");
         assert!(
-            hint.contains("read_source_file"),
-            "hint should suggest read_source_file: {hint}"
+            hint.contains("read"),
+            "hint should suggest read: {hint}"
         );
         assert!(
-            hint.contains("read_file"),
-            "hint should suggest read_file: {hint}"
+            hint.contains("read"),
+            "hint should suggest read: {hint}"
         );
     }
 
@@ -367,8 +367,8 @@ mod tests {
         };
         let hint = err.hint().expect("LspError should have a hint");
         assert!(
-            hint.contains("search_codebase"),
-            "hint should mention search_codebase: {hint}"
+            hint.contains("search"),
+            "hint should mention search: {hint}"
         );
         assert!(
             hint.contains("tree-sitter"),
@@ -387,7 +387,7 @@ mod tests {
             "hint should mention crash: {hint}"
         );
         assert!(
-            hint.contains("read_source_file"),
+            hint.contains("read"),
             "hint should mention tree-sitter tools: {hint}"
         );
     }
@@ -399,12 +399,12 @@ mod tests {
         };
         let hint = err.hint().expect("LspError should have a hint");
         assert!(
-            hint.contains("search_codebase"),
-            "hint should mention search_codebase: {hint}"
+            hint.contains("search"),
+            "hint should mention search: {hint}"
         );
         assert!(
-            hint.contains("lsp_health"),
-            "hint should mention lsp_health: {hint}"
+            hint.contains("health"),
+            "hint should mention health: {hint}"
         );
     }
 
@@ -417,16 +417,16 @@ mod tests {
             "hint should include timeout duration: {hint}"
         );
         assert!(
-            hint.contains("search_codebase"),
-            "hint should mention search_codebase: {hint}"
+            hint.contains("search"),
+            "hint should mention search: {hint}"
         );
         assert!(
             hint.contains("tree-sitter"),
             "hint should mention tree-sitter: {hint}"
         );
         assert!(
-            hint.contains("lsp_health"),
-            "hint should mention lsp_health: {hint}"
+            hint.contains("health"),
+            "hint should mention health: {hint}"
         );
     }
 
@@ -442,8 +442,8 @@ mod tests {
             "hint should mention tree-sitter: {hint}"
         );
         assert!(
-            hint.contains("read_symbol_scope"),
-            "hint should mention read_symbol_scope: {hint}"
+            hint.contains("inspect"),
+            "hint should mention inspect: {hint}"
         );
     }
 
@@ -575,10 +575,10 @@ mod tests {
             .hint()
             .expect("should have hint even without suggestions");
         // When no suggestions, the symbol is likely in a different file.
-        // Hint should suggest search_codebase to find the correct file.
+        // Hint should suggest search to find the correct file.
         assert!(
-            hint.contains("search_codebase"),
-            "hint should suggest search_codebase to find the correct file: {hint}"
+            hint.contains("search"),
+            "hint should suggest search to find the correct file: {hint}"
         );
     }
 
@@ -618,8 +618,8 @@ mod tests {
         };
         let hint = err.hint().expect("UNSUPPORTED_LANGUAGE should have a hint");
         assert!(
-            hint.contains("read_file"),
-            "hint should mention read_file: {hint}"
+            hint.contains("read"),
+            "hint should mention read: {hint}"
         );
     }
 

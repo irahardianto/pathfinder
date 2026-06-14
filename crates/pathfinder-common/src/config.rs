@@ -132,7 +132,7 @@ pub struct SandboxConfig {
 /// Search tool defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
-    /// Maximum results returned by `search_codebase`.
+    /// Maximum results returned by `search`.
     #[serde(default = "default_max_results")]
     pub max_results: usize,
 
@@ -153,7 +153,7 @@ impl Default for SearchConfig {
 /// Repo map defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoMapConfig {
-    /// Default maximum tokens for `get_repo_map`.
+    /// Default maximum tokens for `explore`.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
 

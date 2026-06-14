@@ -298,8 +298,8 @@ pub struct SymbolScope {
     /// The zero-indexed column where the symbol's **name identifier** begins.
     ///
     /// For `pub fn dedent(code: &str)`, this is the column of the `d` in `dedent`
-    /// (not the `p` in `pub`). Used by LSP navigation tools (`get_definition`,
-    /// `find_callers_callees`, `read_with_deep_context`) to position the cursor on the
+    /// (not the `p` in `pub`). Used by LSP navigation tools (`locate`,
+    /// `trace`, `inspect`) to position the cursor on the
     /// symbol name, which is required for rust-analyzer to resolve the symbol.
     pub name_column: usize,
     /// The language of the file.
@@ -404,7 +404,7 @@ impl WorkspaceRoot {
     }
 }
 
-/// Filter mode for `search_codebase`.
+/// Filter mode for `search`.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -419,7 +419,7 @@ pub enum FilterMode {
     All,
 }
 
-/// Visibility filter for `get_repo_map`.
+/// Visibility filter for `explore`.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -484,13 +484,13 @@ pub enum DegradedReason {
     GrepFallbackImplScoped,
     /// Grep fallback result from global search.
     GrepFallbackGlobal,
-    /// Grep fallback for `read_with_deep_context` dependencies via heuristic call parsing.
+    /// Grep fallback for `inspect` dependencies via heuristic call parsing.
     GrepFallbackDependencies,
     /// Language unsupported; filter was bypassed to return results.
     UnsupportedLanguageFilterBypassed,
     /// Language is not supported.
     UnsupportedLanguage,
-    /// Git error (e.g., `get_repo_map` `changed_since` filter failed).
+    /// Git error (e.g., `explore` `changed_since` filter failed).
     GitError,
 }
 
@@ -554,7 +554,7 @@ impl DegradedReason {
             DegradedReason::NoLsp => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("search_codebase".to_owned()),
+                fallback_tool: Some("search".to_owned()),
                 trust_level: "partial".to_owned(),
                 permanent: true,
             },
@@ -569,7 +569,7 @@ impl DegradedReason {
                 ActionableGuidance {
                     retry_recommended: true,
                     retry_after_seconds: Some(30),
-                    fallback_tool: Some("search_codebase".to_owned()),
+                    fallback_tool: Some("search".to_owned()),
                     trust_level: "heuristic".to_owned(),
                     permanent: false,
                 }
@@ -582,21 +582,21 @@ impl DegradedReason {
             | DegradedReason::GrepFallbackDependencies => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("search_codebase".to_owned()),
+                fallback_tool: Some("search".to_owned()),
                 trust_level: "heuristic".to_owned(),
                 permanent: true,
             },
             DegradedReason::UnsupportedLanguageFilterBypassed => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("read_file".to_owned()),
+                fallback_tool: Some("read".to_owned()),
                 trust_level: "partial".to_owned(),
                 permanent: true,
             },
             DegradedReason::UnsupportedLanguage => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("read_file".to_owned()),
+                fallback_tool: Some("read".to_owned()),
                 trust_level: "none".to_owned(),
                 permanent: true,
             },
@@ -921,7 +921,7 @@ mod tests {
         let g = DegradedReason::NoLsp.guidance();
         assert!(!g.retry_recommended);
         assert!(g.permanent);
-        assert_eq!(g.fallback_tool.as_deref(), Some("search_codebase"));
+        assert_eq!(g.fallback_tool.as_deref(), Some("search"));
         assert_eq!(g.trust_level, "partial");
     }
 
@@ -940,7 +940,7 @@ mod tests {
         let g = DegradedReason::LspErrorGrepFallback.guidance();
         assert!(!g.retry_recommended);
         assert!(g.permanent);
-        assert_eq!(g.fallback_tool.as_deref(), Some("search_codebase"));
+        assert_eq!(g.fallback_tool.as_deref(), Some("search"));
         assert_eq!(g.trust_level, "heuristic");
     }
 
