@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0](https://github.com/irahardianto/pathfinder/compare/v0.18.0...v0.19.0) - 2026-06-15
+
+### Added
+
+- *(hints)* add actionable zero-result hints to search, impact, and references tools
+- *(health)* add top-level indexing_complete boolean to lsp_health response
+
+### Fixed
+
+- *(lsp)* resolve monorepo TypeScript detection ambiguity via sibling_filter
+- *(source_file)* prepend filepath to semantic_path in symbol responses
+- *(search)* exclude binary and gitignored files from files_in_scope denominator
+
+### Other
+
+- *(pathfinder)* wrap SurgeonError::Io constructions in Arc::new
+- *(pathfinder-search)* extract filter_entry, fix gitignored/binary count logic, and fix win_dir prefix match bug
+- *(pathfinder-treesitter)* address audit findings and fix cache LRU bugs
+
 ## [0.18.0](https://github.com/irahardianto/pathfinder/compare/v0.17.1...v0.18.0) - 2026-06-14
 
 ### Added
