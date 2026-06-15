@@ -70,26 +70,10 @@ pub(crate) fn pathfinder_to_error_data(err: &PathfinderError) -> ErrorData {
         let _ = write!(detailed_message, " Hint: {hint}");
     }
 
-    // Include did_you_mean suggestions if present
-    if let Some(did_you_mean) = err_resp.details.get("did_you_mean") {
-        if let Some(arr) = did_you_mean.as_array() {
-            if !arr.is_empty() {
-                let suggestions: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(ToOwned::to_owned))
-                    .collect();
-                if !suggestions.is_empty() {
-                    let _ = write!(
-                        detailed_message,
-                        " Did you mean: {}?",
-                        suggestions.join(", ")
-                    );
-                }
-            }
-        }
-    }
-
-    // Include matches if present (for AmbiguousSymbol)
+    // Include matches if present (for AmbiguousSymbol).
+    // NOTE: did_you_mean suggestions for SymbolNotFound are already included in
+    // err_resp.hint (via PathfinderError::hint()) — do NOT add them here again
+    // or they will appear twice in detailed_message.
     if let Some(matches) = err_resp.details.get("matches") {
         if let Some(arr) = matches.as_array() {
             if !arr.is_empty() {
@@ -569,10 +553,11 @@ mod tests {
 
     #[test]
     fn test_pathfinder_to_error_data_message_formatting() {
+        // retry_after_seconds=None so hint contains "Did you mean: ..." text
         let err = PathfinderError::SymbolNotFound {
             semantic_path: "src/auth.ts::login".into(),
             did_you_mean: vec!["logout".to_owned(), "log_in".to_owned()],
-            retry_after_seconds: Some(5),
+            retry_after_seconds: None,
         };
         let error_data = pathfinder_to_error_data(&err);
 
@@ -580,5 +565,28 @@ mod tests {
         assert!(error_data.message.contains("SYMBOL_NOT_FOUND"));
         assert!(error_data.message.contains("Did you mean: logout, log_in?"));
         assert!(error_data.message.contains("Hint:"));
+    }
+
+    /// Regression: "Did you mean" must appear exactly once in the `detailed_message`.
+    ///
+    /// Previously, `pathfinder_to_error_data` appended `did_you_mean` BOTH from
+    /// `err_resp.hint` (which for `SymbolNotFound` already contains the suggestions)
+    /// AND from `err_resp.details.did_you_mean`, causing the string to appear twice.
+    #[test]
+    fn test_pathfinder_to_error_data_no_did_you_mean_duplication() {
+        let err = PathfinderError::SymbolNotFound {
+            semantic_path: "src/lib.rs::buildHealthHandler".into(),
+            did_you_mean: vec!["buildHealthHandler".to_owned()],
+            retry_after_seconds: None,
+        };
+        let error_data = pathfinder_to_error_data(&err);
+
+        // "Did you mean" must appear exactly once
+        let count = error_data.message.matches("Did you mean").count();
+        assert_eq!(
+            count, 1,
+            "Expected 'Did you mean' exactly once in message, found {count}. Full message: {}",
+            error_data.message
+        );
     }
 }
