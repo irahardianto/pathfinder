@@ -197,28 +197,36 @@ pub fn render_file_skeleton(
     (out, false)
 }
 
+/// Return the display prefix for a given `SymbolKind`.
+///
+/// Centralises the mapping in one place so that `render_symbols_recursive` and
+/// `render_truncated_file_skeleton` stay consistent without duplication.
+#[inline]
+fn symbol_prefix(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Test => "test ",
+        SymbolKind::Function => "func ",
+        SymbolKind::Class => "class ",
+        SymbolKind::Struct => "struct ",
+        SymbolKind::Method => "method ",
+        SymbolKind::Impl => "impl ",
+        SymbolKind::Constant => "const ",
+        SymbolKind::Interface => "interface ",
+        SymbolKind::Enum => "enum ",
+        SymbolKind::Module => "mod ",
+        // Vue SFC zone symbols
+        SymbolKind::Zone => "zone ",
+        SymbolKind::Component => "component ",
+        SymbolKind::HtmlElement => "element ",
+        SymbolKind::CssSelector => "selector ",
+        SymbolKind::CssAtRule => "at-rule ",
+    }
+}
+
 fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut String) {
     let indent = "  ".repeat(depth);
     for sym in symbols {
-        use crate::surgeon::SymbolKind;
-        let prefix = match sym.kind {
-            SymbolKind::Test => "test ",
-            SymbolKind::Function => "func ",
-            SymbolKind::Class => "class ",
-            SymbolKind::Struct => "struct ",
-            SymbolKind::Method => "method ",
-            SymbolKind::Impl => "impl ",
-            SymbolKind::Constant => "const ",
-            SymbolKind::Interface => "interface ",
-            SymbolKind::Enum => "enum ",
-            SymbolKind::Module => "mod ",
-            // Vue SFC zone symbols
-            SymbolKind::Zone => "zone ",
-            SymbolKind::Component => "component ",
-            SymbolKind::HtmlElement => "element ",
-            SymbolKind::CssSelector => "selector ",
-            SymbolKind::CssAtRule => "at-rule ",
-        };
+        let prefix = symbol_prefix(sym.kind);
 
         let declaration = format!("{}{}", prefix, sym.name);
         let _ = writeln!(out, "{}{} // {}", indent, declaration, sym.semantic_path);
@@ -231,28 +239,11 @@ fn render_symbols_recursive(symbols: &[ExtractedSymbol], depth: usize, out: &mut
 
 /// A fallback rendering that preserves top-level symbol names of all kinds with child counts.
 fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
-    use crate::surgeon::SymbolKind;
     use std::fmt::Write as _;
 
     let mut out = String::default();
     for sym in symbols {
-        let prefix = match sym.kind {
-            SymbolKind::Test => "test ",
-            SymbolKind::Function => "func ",
-            SymbolKind::Class => "class ",
-            SymbolKind::Struct => "struct ",
-            SymbolKind::Method => "method ",
-            SymbolKind::Impl => "impl ",
-            SymbolKind::Constant => "const ",
-            SymbolKind::Interface => "interface ",
-            SymbolKind::Enum => "enum ",
-            SymbolKind::Module => "mod ",
-            SymbolKind::Zone => "zone ",
-            SymbolKind::Component => "component ",
-            SymbolKind::HtmlElement => "element ",
-            SymbolKind::CssSelector => "selector ",
-            SymbolKind::CssAtRule => "at-rule ",
-        };
+        let prefix = symbol_prefix(sym.kind);
 
         let _ = writeln!(out, "{}{} // {}", prefix, sym.name, sym.semantic_path);
 
