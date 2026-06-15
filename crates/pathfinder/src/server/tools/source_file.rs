@@ -8,15 +8,18 @@ use crate::server::PathfinderServer;
 
 use rmcp::model::{CallToolResult, Content, ErrorData};
 
-fn map_symbols(syms: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>) -> Vec<SourceSymbol> {
+fn map_symbols(
+    syms: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>,
+    filepath: &str,
+) -> Vec<SourceSymbol> {
     syms.into_iter()
         .map(|s| SourceSymbol {
             name: s.name,
-            semantic_path: s.semantic_path,
+            semantic_path: format!("{}::{}", filepath, s.semantic_path),
             kind: format!("{:?}", s.kind),
             start_line: s.start_line + 1, // AST lines are 0-indexed, UI is 1-indexed
             end_line: s.end_line + 1,
-            children: map_symbols(s.children),
+            children: map_symbols(s.children, filepath),
         })
         .collect()
 }
@@ -78,11 +81,12 @@ fn render_recursive(symbols: &[SourceSymbol], prefix: &str, output: &mut Vec<Str
 
 fn map_symbols_compact(
     syms: Vec<pathfinder_treesitter::surgeon::ExtractedSymbol>,
+    filepath: &str,
 ) -> Vec<SourceSymbol> {
     syms.into_iter()
         .map(|s| SourceSymbol {
             name: s.name,
-            semantic_path: s.semantic_path,
+            semantic_path: format!("{}::{}", filepath, s.semantic_path),
             kind: format!("{:?}", s.kind),
             start_line: s.start_line + 1,
             end_line: s.end_line + 1,
@@ -304,15 +308,17 @@ fn build_supported_response(
         symbols = filter_symbols(symbols, start_idx, end_line_0);
     }
 
+    let filepath_str = params.filepath.as_deref().unwrap_or("");
+
     let (final_content, final_symbols) = match params.detail_level.as_str() {
         "source_only" => (Some(content), vec![]),
         "symbols" => {
-            let syms = map_symbols(symbols);
-            let tree_text = render_symbol_tree(&syms, params.filepath.as_deref().unwrap_or(""));
+            let syms = map_symbols(symbols, filepath_str);
+            let tree_text = render_symbol_tree(&syms, filepath_str);
             (Some(tree_text), syms)
         }
-        "full" => (Some(content), map_symbols(symbols)),
-        _ => (Some(content), map_symbols_compact(symbols)),
+        "full" => (Some(content), map_symbols(symbols, filepath_str)),
+        _ => (Some(content), map_symbols_compact(symbols, filepath_str)),
     };
 
     let metadata = ReadSourceFileMetadata {
@@ -402,16 +408,28 @@ mod tests {
             vec![make_symbol("child", 2, 5, vec![])],
         )];
 
-        let compact = map_symbols_compact(syms.clone());
+        let compact = map_symbols_compact(syms.clone(), "src/test.rs");
         assert_eq!(compact.len(), 1);
         assert!(
             compact[0].children.is_empty(),
             "Compact should drop children"
         );
+        assert_eq!(
+            compact[0].semantic_path, "src/test.rs::parent",
+            "Compact should prepend filepath"
+        );
 
-        let full = map_symbols(syms);
+        let full = map_symbols(syms, "src/test.rs");
         assert_eq!(full.len(), 1);
         assert_eq!(full[0].children.len(), 1, "Full should keep children");
+        assert_eq!(
+            full[0].semantic_path, "src/test.rs::parent",
+            "Full should prepend filepath"
+        );
+        assert_eq!(
+            full[0].children[0].semantic_path, "src/test.rs::child",
+            "Children should also have filepath prefix"
+        );
     }
 
     #[test]
