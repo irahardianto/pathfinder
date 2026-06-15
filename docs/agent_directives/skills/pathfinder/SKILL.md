@@ -1,6 +1,6 @@
 ---
 name: pathfinder
-description: "Session bootstrap + workflows for Pathfinder semantic navigation tools. Covers: discovery protocol, tool chaining patterns (explore, impact, audit, debug), search optimization, LSP degraded mode, and error recovery."
+description: "Session bootstrap + workflows for Pathfinder semantic navigation tools. Covers: discovery protocol, tool chaining patterns (explore, trace, audit, debug), search optimization, LSP degraded mode, and error recovery."
 ---
 
 # Pathfinder Skill
@@ -128,6 +128,7 @@ Bare file paths (no `::`) are valid only for whole-file operations like `read(fi
 | `exclude_glob` | `""` | Skip files before reading (e.g. `**/*.test.*`) |
 | `known_files` | `[]` | Files already in context — matches return metadata only, no content |
 | `max_results` | `50` | Cap results. Applies to all modes including symbol. |
+| `offset` | `0` | Skip N matches for pagination. Use with `max_results` to page through large result sets. |
 | `context_lines` | `2` | Context above/below matches (text/regex modes only) |
 
 **Coverage metadata:**
@@ -158,6 +159,7 @@ Use these parameters to prevent context-window overflow in large repos:
 |---|---|---|
 | `max_references` | `50` | Hard cap on total references returned. In `overview` scope, controls both callers/callees and references caps. |
 | `max_depth` | `3` | BFS traversal depth (clamped 1–5). Use 3 for standard refactoring, 4-5 for large-scale API changes. `scope="callers"` only. |
+| `offset` | `0` | Pagination offset. Applies to `scope="references"` only; ignored for `callers` and `overview`. |
 
 When `references_truncated: true` in the response, the budget was hit — either increase `max_references` or decrease `max_depth`.
 
@@ -166,6 +168,7 @@ When `references_truncated: true` in the response, the budget was hit — either
 | Parameter | Default | Effect |
 |---|---|---|
 | `max_dependencies` | `50` | Hard cap on outgoing dependency entries (with `include_dependencies=true`) |
+| `include_imports` | `false` | Include file-level import statements. Useful for Java, C#, Kotlin where imports clarify types in scope. Only used with `include_dependencies=true`. |
 
 When `dependencies_truncated: true` in the response, increase `max_dependencies` to see more.
 
@@ -173,7 +176,7 @@ When `dependencies_truncated: true` in the response, increase `max_dependencies`
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `max_tokens` | auto | Auto-scales for repos > 20 files: `clamp(file_count × 800, 16000, 48000)` |
+| `max_tokens` | `16000` | Default 16000. Handler auto-scales for repos over 20 files: `clamp(file_count × 800, 16000, 48000)` |
 | `depth` | `3` | Directory traversal depth. Use 1-2 for large repos, 5+ for small repos. |
 
 Check `max_tokens_used` in the response to see the effective budget applied.
@@ -298,7 +301,7 @@ For unsupported languages, use `read(filepath="...", detail_level="symbols")` in
 | Resolve a symbol name to its file | `search(mode="symbol", query="...")` |
 | Get full symbol overview | `trace(scope="overview")` (source + callers + callees + refs) |
 | See all callers of a function | `trace(scope="callers")` |
-| See all callees of a function | `inspect(include_dependencies=true)` or `trace(scope="callers")` |
+| See all callees of a function | `inspect(include_dependencies=true)` (preferred — source + callee signatures) or `trace(scope="callers")` (returns both callers AND callees) |
 | Find ALL references (including non-call) | `trace(scope="references")` |
 | Jump to a definition | `locate(semantic_path="...")` |
 | Find tech debt | `search(query="TODO\|FIXME", mode="regex")` |

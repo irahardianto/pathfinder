@@ -4,7 +4,7 @@
 
   [![CI](https://github.com/irahardianto/pathfinder/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/irahardianto/pathfinder/actions/workflows/ci.yml)
   [![DeepSource](https://app.deepsource.com/gh/irahardianto/pathfinder.svg/?label=code+coverage&show_trend=false&token=P_dCO6CVhJcHRXVQdoRMdPDE)](https://app.deepsource.com/gh/irahardianto/pathfinder/)
-  [![CodeQL](https://github.com/irahardianto/pathfinder/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/irahardianto/qurio/actions/workflows/github-code-scanning/codeql)
+  [![CodeQL](https://github.com/irahardianto/pathfinder/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/irahardianto/pathfinder/actions/workflows/github-code-scanning/codeql)
   [![Dependabot](https://badgen.net/badge/Dependabot/enabled/green?icon=dependabot)](https://dependabot.com/)
   [![SLSA Provenance](https://github.com/irahardianto/pathfinder/actions/workflows/slsa-provenance.yml/badge.svg)](https://github.com/irahardianto/pathfinder/actions/workflows/slsa-provenance.yml)
 
@@ -159,6 +159,7 @@ The directives live in [`docs/agent_directives/`](docs/agent_directives/) and mi
 ```
 docs/agent_directives/
 ├── AGENTS.md                   # Always-on routing rule: which Pathfinder tool to use for each action
+├── instructions.md             # MCP server instructions: semantic path format, tool selection guide
 └── skills/
     └── pathfinder/
         └── SKILL.md            # On-demand skill: concrete navigation workflows and error recovery
@@ -172,7 +173,7 @@ docs/agent_directives/
 
 **`skills/pathfinder/SKILL.md`** — a detailed on-demand skill the agent activates when it needs deeper guidance. It covers:
 - Step-by-step workflows for exploring, auditing, and debugging codebases
-- Efficient search with `filter_mode`, `exclude_glob`, `known_files`, `group_by_file`, and `is_regex`
+- Efficient search with `mode` (text/regex/symbol), `filter_mode`, `exclude_glob`, `known_files`, and `group_by_file`
 - Error recovery patterns for `SYMBOL_NOT_FOUND`, LSP degradation, and timeout scenarios
 
 ### Setup by Client
@@ -188,7 +189,13 @@ cp /path/to/pathfinder/docs/agent_directives/AGENTS.md .agents/
 cp -r /path/to/pathfinder/docs/agent_directives/skills/* .agents/skills/
 ```
 
-The routing rule runs on every agent turn automatically (`trigger: always_on`). The workflow skill is activated on demand when the agent needs detailed guidance.
+Optionally, copy the MCP server instructions for lightweight tool context on every session:
+
+```sh
+cp /path/to/pathfinder/docs/agent_directives/instructions.md ~/.gemini/antigravity/mcp/pathfinder/instructions.md
+```
+
+The routing rule runs on every agent turn automatically (`trigger: always_on`). The workflow skill is activated on demand when the agent needs detailed guidance. The `instructions.md` is loaded by Antigravity alongside the tool schemas for lightweight per-session context.
 
 #### Claude Desktop / Cursor / Other MCP Clients
 
@@ -243,21 +250,26 @@ pathfinder/
 │   ├── pathfinder/              # MCP server, CLI, tool routing
 │   │   └── src/
 │   │       ├── main.rs          # CLI entry point (clap)
+│   │       ├── server.rs        # MCP tool router (7 consolidated tools)
 │   │       └── server/
-│   │           ├── server.rs    # MCP tool router
 │   │           ├── types.rs     # Parameter & response types
 │   │           ├── helpers.rs   # Shared utilities
 │   │           └── tools/       # One module per tool category
-│   │               ├── consolidated.rs  # 7-tool consolidated handlers
-│   │               ├── search.rs
-│   │               ├── navigation/      # LSP-backed navigation
-│   │               ├── file_ops.rs
-│   │               ├── repo_map.rs
-│   │               ├── source_file.rs
-│   │               ├── symbols.rs
-│   │               ├── find_symbol.rs
-│   │               ├── read_files.rs
-│   │               └── semantic_path.rs
+│   │               ├── search.rs        # search tool handler
+│   │               ├── repo_map.rs      # explore tool handler
+│   │               ├── source_file.rs   # read tool handler (single file)
+│   │               ├── read_files.rs    # read tool handler (batch)
+│   │               ├── find_symbol.rs   # search(mode=symbol) handler
+│   │               ├── file_ops.rs      # file I/O utilities
+│   │               ├── symbols.rs       # symbol extraction
+│   │               ├── semantic_path.rs # locate(file+line) handler
+│   │               └── navigation/      # LSP-backed navigation
+│   │                   ├── definition.rs   # locate tool handler
+│   │                   ├── impact.rs       # trace(scope=callers) handler
+│   │                   ├── references.rs   # trace(scope=references) handler
+│   │                   ├── overview.rs     # trace(scope=overview) handler
+│   │                   ├── deep_context.rs # inspect(include_dependencies) handler
+│   │                   └── health.rs       # health tool handler
 │   │
 │   ├── pathfinder-common/       # Shared types, errors, config, sandbox
 │   ├── pathfinder-treesitter/   # The Surgeon — AST parsing & symbol extraction
@@ -265,6 +277,7 @@ pathfinder/
 │   └── pathfinder-lsp/          # The Lawyer — LSP client & lifecycle management
 │
 ├── docs/
+│   ├── agent_directives/        # AI agent rules and skills
 │   ├── requirements/            # PRD and specifications
 │   ├── research_logs/           # Design decisions and research
 │   └── audits/                  # Code audit findings

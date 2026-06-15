@@ -42,7 +42,8 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 |---|---|---|---|
 | `max_references` | `trace` | `50` | Cap total references. In `overview` scope, controls both callers/callees and references. |
 | `max_depth` | `trace` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. `scope="callers"` only. |
-| `max_tokens` | `explore` | auto | Auto-scales for monorepos |
+| `max_dependencies` | `inspect` | `50` | Cap outgoing dependency entries (with `include_dependencies=true`). |
+| `max_tokens` | `explore` | `16000` | Total token budget for skeleton output. Auto-scales based on repo size. |
 | `max_results` | `search` | `50` | Cap search matches. Applies to all modes including `symbol`. |
 
 When `references_truncated` or `dependencies_truncated` is true, increase the corresponding limit.
