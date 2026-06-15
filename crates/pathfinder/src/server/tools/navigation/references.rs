@@ -449,6 +449,7 @@ impl PathfinderServer {
                             warm_start_in_progress: Some(true),
                             duration_ms: Some(millis_to_u64(duration_ms)),
                             resolution_strategy: Some("grep_file_scoped".to_owned()),
+                            hint: None,
                         };
 
                         let mut result =
@@ -558,6 +559,7 @@ impl PathfinderServer {
                             warm_start_in_progress: Some(true),
                             duration_ms: Some(millis_to_u64(duration_ms)),
                             resolution_strategy: Some("lsp_unverified_warmup".to_owned()),
+                            hint: None,
                         };
 
                         let mut result =
@@ -678,6 +680,17 @@ impl PathfinderServer {
                         .to_string()
                 };
 
+                // P2-7: Hint for non-degraded zero-reference results.
+                let hint = if total_references == 0 {
+                    Some(
+                        "LSP confirmed zero references. This symbol may be unused, \
+                         an entry point, or only referenced via dynamic dispatch/reflection."
+                            .to_owned(),
+                    )
+                } else {
+                    None
+                };
+
                 let metadata = crate::server::types::FindAllReferencesMetadata {
                     references: Some(paginated),
                     total_references: Some(total_references),
@@ -690,6 +703,7 @@ impl PathfinderServer {
                     warm_start_in_progress: Some(false),
                     duration_ms: Some(millis_to_u64(duration_ms)),
                     resolution_strategy: Some("lsp_references".to_owned()),
+                    hint,
                 };
 
                 let mut result =
@@ -782,6 +796,7 @@ impl PathfinderServer {
                     warm_start_in_progress: None,
                     duration_ms: Some(millis_to_u64(duration_ms)),
                     resolution_strategy: Some(resolution_strategy.to_owned()),
+                    hint: None,
                 };
 
                 let mut result =
@@ -892,6 +907,7 @@ impl PathfinderServer {
                     warm_start_in_progress,
                     duration_ms: Some(millis_to_u64(duration_ms)),
                     resolution_strategy: Some(resolution_strategy.to_owned()),
+                    hint: None,
                 };
 
                 let mut result =
@@ -2625,5 +2641,86 @@ mod tests {
         let refs = val.references.unwrap_or_default();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].file, "src/main.rs");
+    }
+
+    // ── P2-7: Hint logic tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_hint_present_when_zero_references_non_degraded() {
+        // LSP returns zero references (non-degraded) → hint must be present
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_references_result(Ok(vec![]));
+        lawyer.set_goto_implementation_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::TraceParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_references: 50,
+            offset: 0,
+            ..Default::default()
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded, "should not be degraded");
+        assert_eq!(val.total_references, Some(0));
+        assert!(
+            val.hint.is_some(),
+            "hint must be present when zero references found (non-degraded)"
+        );
+        let hint = val.hint.unwrap();
+        assert!(
+            hint.contains("zero references"),
+            "hint must mention zero references, got: {hint}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hint_absent_when_references_exist() {
+        // LSP returns references → hint must be absent
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        lawyer.set_references_result(Ok(vec![ReferenceLocation {
+            file: "src/main.rs".into(),
+            line: 5,
+            column: 10,
+            snippet: "login()".into(),
+        }]));
+        lawyer.set_goto_implementation_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = crate::server::types::TraceParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_references: 50,
+            offset: 0,
+            ..Default::default()
+        };
+        let result = server.find_all_references_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindAllReferencesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded, "should not be degraded");
+        assert!(
+            val.hint.is_none(),
+            "hint must be absent when references exist"
+        );
     }
 }

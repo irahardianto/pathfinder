@@ -197,6 +197,17 @@ impl PathfinderServer {
                         filter_mode_name,
                         result.total_matches,
                     ))
+                } else if returned_count == 0 && result.total_matches == 0 {
+                    // P2-7: Zero total matches — help the agent recover.
+                    let mut msg = "No matches found. Check spelling, try a regex pattern, or broaden path_glob.".to_owned();
+                    if coverage_percent < 100 {
+                        use std::fmt::Write;
+                        let _ = write!(
+                            msg,
+                            " Note: only {coverage_percent}% of in-scope files were searched."
+                        );
+                    }
+                    Some(msg)
                 } else {
                     None
                 };
@@ -1144,5 +1155,51 @@ mod tests {
         };
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("invalid pattern"));
+    }
+
+    // ── P2-7: Zero-match hint tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_zero_total_matches_hint() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        // Create a file that won't match our search
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(ws_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let server =
+            PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+        let params = SearchParams {
+            query: "nonexistent_symbol_xyz_123".to_owned(),
+            mode: SearchMode::Text,
+            path_glob: "**/*.rs".to_owned(),
+            max_results: 10,
+            context_lines: 0,
+            known_files: vec![],
+            exclude_glob: String::default(),
+            offset: 0,
+            ..Default::default()
+        };
+
+        let result = server.search_codebase_impl(params).await;
+        let response = result.expect("search should succeed");
+
+        assert_eq!(response.0.total_matches, 0);
+        assert!(
+            response.0.hint.is_some(),
+            "hint should be present when zero total matches found"
+        );
+        let hint = response.0.hint.unwrap();
+        assert!(
+            hint.contains("No matches found"),
+            "hint should mention no matches, got: {hint}"
+        );
     }
 }

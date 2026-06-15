@@ -127,9 +127,9 @@ pub struct SearchCodebaseResponse {
     pub filtered_count: usize,
     /// Number of files that were actually searched.
     pub files_searched: usize,
-    /// Number of files matching the `path_glob` that were in scope for search.
+    /// Number of searchable files matching the `path_glob` (excludes binary and gitignored).
     /// When `files_searched < files_in_scope`, some files were skipped
-    /// (binary, .gitignored, or permission-denied).
+    /// due to permission issues or I/O errors.
     pub files_in_scope: usize,
     /// Percentage of in-scope files that were actually searched.
     /// 100% means exhaustive search; lower values indicate skipped files.
@@ -450,6 +450,10 @@ pub struct ReadWithDeepContextMetadata {
     /// and other OOP languages where imports clarify what types are in scope.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub imports: Vec<String>,
+    /// Source code of the symbol. Populated so agents parsing `structured_content`
+    /// have access to source alongside dependencies without parsing the text channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// The response for `get_definition`.
@@ -576,6 +580,11 @@ pub struct FindCallersCalleesMetadata {
     /// One of: `"found"`, `"not_found"`, `"unknown_degraded"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_coverage_status: Option<String>,
+    /// P2-7: Actionable hint when zero callers/callees are found and the result
+    /// is not degraded. Helps agents distinguish "genuinely unused" from common
+    /// false-negative scenarios.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 // ── Get Semantic Path Tool Types ────────────────────────────────────────
@@ -642,6 +651,11 @@ pub struct FindAllReferencesMetadata {
     /// One of: `lsp_references`, `grep_file_scoped`, `grep_impl_scoped`, `grep_global`, `grep_broad`, `treesitter_fallback`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution_strategy: Option<String>,
+    /// P2-7: Actionable hint when zero references are found and the result
+    /// is not degraded. Helps agents distinguish "genuinely unused" from common
+    /// false-negative scenarios like reflection or dynamic dispatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// A single reference location for `find_all_references`.
@@ -693,6 +707,13 @@ pub struct LspHealthResponse {
     /// This allows distinguishing "still warming up" from "`warm_start` finished
     /// but LSP didn't report readiness".
     pub warm_start_complete: bool,
+    /// P2-6: Whether ALL detected languages have finished background indexing.
+    ///
+    /// `true` when every language reports `indexing_status == "complete"` or has
+    /// no indexing information (language unavailable). `false` when any language
+    /// is still indexing. Agents can poll this single field instead of iterating
+    /// the `languages` array.
+    pub indexing_complete: bool,
     /// Spec 1.3: Known limitations of the current LSP setup.
     ///
     /// Populated with actionable limitations that agents should be aware of,

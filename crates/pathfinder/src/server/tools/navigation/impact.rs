@@ -934,7 +934,7 @@ impl PathfinderServer {
         let max_refs_usize = usize::try_from(max_references).unwrap_or(usize::MAX);
         let references_truncated = max_references > 0 && total_returned >= max_refs_usize;
 
-        let resolution_strategy = if engines.contains(&"lsp") {
+        let resolution_strategy = if !degraded && engines.contains(&"lsp") {
             Some("lsp_call_hierarchy".to_owned())
         } else if degraded {
             // Check which grep fallback was used based on degraded_reason
@@ -1045,6 +1045,24 @@ impl PathfinderServer {
             (None, None)
         };
 
+        // P2-7: Generate a hint when zero incoming callers and not degraded.
+        // Non-degraded + empty incoming = LSP confirmed zero callers, which could be
+        // an entry point, unused code, or dynamic dispatch that LSP can't trace.
+        //
+        // NOTE: The "both incoming AND outgoing empty" case is always degraded because
+        // the grep fallback at lines 570-615 sets `degraded=true` when both BFS results
+        // are empty (to guard against false negatives from LSP errors during traversal).
+        // Therefore we only hint on "incoming empty, outgoing non-empty" here.
+        let hint = if !degraded && incoming.as_ref().is_some_and(Vec::is_empty) {
+            Some(
+                "LSP confirmed zero incoming callers. This symbol may be an entry point, \
+                 unused, or only called via dynamic dispatch/reflection."
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+
         let metadata = crate::server::types::FindCallersCalleesMetadata {
             incoming,
             outgoing,
@@ -1060,6 +1078,7 @@ impl PathfinderServer {
             test_callers,
             test_coverage_status,
             duration_ms: Some(millis_to_u64(duration_ms)),
+            hint,
         };
 
         // Build honest text output based on actual results listing every
@@ -3531,6 +3550,16 @@ mod tests {
             .await
             .expect("success");
         let text = result.content[0].as_text().expect("must be text");
+
+        // BFS empty + grep empty = confirmed zero, should NOT be degraded.
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(result.structured_content.unwrap()).unwrap();
+        assert!(
+            val.degraded,
+            "both BFS results empty → grep fallback fires → must be degraded"
+        );
+
+        // Text should show DEGRADED notice
         assert!(
             text.text.contains("DEGRADED (lsp_warmup_grep_fallback)"),
             "Text output did not format zero results correctly: {}",
@@ -3744,6 +3773,194 @@ mod tests {
             val.degraded_reason,
             Some(DegradedReason::LspErrorGrepFallback),
             "LSP error must report LspErrorGrepFallback even when grep finds nothing"
+        );
+    }
+
+    // ── P2-7: Hint logic tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_hint_absent_when_both_callers_and_callees_empty() {
+        // When BFS returns empty for BOTH incoming AND outgoing, the grep fallback
+        // fires and always sets degraded=true (to guard against BFS errors vs genuine
+        // zero callers). Therefore hint must be None in this case.
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = TraceParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(
+            val.degraded,
+            "must be degraded when both BFS results are empty (grep fallback triggered)"
+        );
+        assert!(val.hint.is_none(), "hint must be absent when degraded");
+    }
+
+    #[tokio::test]
+    async fn test_hint_present_when_only_incoming_callers_empty() {
+        // LSP succeeds, incoming empty but outgoing has items → hint about "zero incoming callers"
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![]));
+        lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/validate.rs".into(),
+                line: 5,
+                column: 0,
+                data: None,
+            },
+            call_sites: vec![10],
+        }]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = TraceParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded, "should not be degraded");
+        assert!(
+            val.hint.is_some(),
+            "hint must be present when incoming callers are empty"
+        );
+        let hint = val.hint.unwrap();
+        assert!(
+            hint.contains("zero incoming callers"),
+            "hint must mention zero incoming callers, got: {hint}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hint_absent_when_callers_exist() {
+        // LSP succeeds, incoming has items → no hint
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+        let item = CallHierarchyItem {
+            name: "login".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 9,
+            column: 4,
+            data: None,
+        };
+        lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+        lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "main".into(),
+                kind: "function".into(),
+                detail: None,
+                file: "src/main.rs".into(),
+                line: 1,
+                column: 0,
+                data: None,
+            },
+            call_sites: vec![5],
+        }]));
+        lawyer.push_outgoing_call_result(Ok(vec![]));
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = TraceParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(!val.degraded, "should not be degraded");
+        assert!(val.hint.is_none(), "hint must be absent when callers exist");
+    }
+
+    #[tokio::test]
+    async fn test_hint_absent_when_degraded() {
+        // Degraded path — hint should always be None regardless of empty lists
+        let surgeon = Arc::new(MockSurgeon::new());
+        surgeon
+            .read_symbol_scope_results
+            .lock()
+            .unwrap()
+            .push(Ok(make_scope()));
+
+        let lawyer = Arc::new(MockLawyer::default());
+
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let params = TraceParams {
+            semantic_path: "src/auth.rs::login".to_owned(),
+            max_depth: 1,
+            ..Default::default()
+        };
+        let result = server.find_callers_callees_impl(params).await;
+        let call_res = result.expect("should succeed");
+        let val: crate::server::types::FindCallersCalleesMetadata =
+            serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+        assert!(val.degraded, "should be degraded (no LSP)");
+        assert!(
+            val.hint.is_none(),
+            "hint must be absent when degraded, even if lists are empty"
         );
     }
 }
