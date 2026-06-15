@@ -899,7 +899,7 @@ pub enum Detail {
     Symbols,
 }
 
-/// Parameters for the `explore` tool (replaces `get_repo_map`).
+/// Parameters for the `explore` tool.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExploreParams {
     /// Directory to map.
@@ -955,7 +955,7 @@ pub enum SearchMode {
     Regex,
 }
 
-/// Parameters for the `search` tool (merges `search_codebase` + `find_symbol`).
+/// Parameters for the `search` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
     /// Search pattern (literal text, regex, or symbol name depending on `mode`).
@@ -988,8 +988,19 @@ pub struct SearchParams {
     /// Use with `max_results` to page through large result sets.
     #[serde(default)]
     pub offset: u32,
-    /// Optional filter by symbol kind (e.g., `class`, `function`, `struct`).
-    /// Only used when `mode` is `symbol`.
+    /// Optional filter by symbol kind. Only used when `mode` is `symbol`.
+    ///
+    /// **Canonical values:** `function`, `class`, `struct`, `interface`, `enum`,
+    /// `constant`, `module`, `impl`.
+    ///
+    /// **Accepted aliases (all case-insensitive):**
+    /// - `method`, `fn` → treated as `function`
+    /// - `trait` → treated as `interface` (Rust traits, Go interfaces)
+    /// - `const`, `static`, `let` → treated as `constant`
+    /// - `mod`, `namespace` → treated as `module`
+    /// - `class` also matches `struct` and `interface` (broad OOP-style search)
+    ///
+    /// Example: `kind="trait"` finds Rust traits and Go interfaces.
     #[serde(default)]
     pub kind: Option<String>,
     /// Group matches by file path. Default: true.
@@ -1018,7 +1029,7 @@ impl Default for SearchParams {
     }
 }
 
-/// Parameters for the `read` tool (merges `read_file` + `read_source_file` + `read_files`).
+/// Parameters for the `read` tool.
 ///
 /// Accepts either a single file via `filepath` or multiple files via `paths`.
 /// Exactly one of the two must be provided; the handler validates this at runtime.
@@ -1048,7 +1059,7 @@ pub struct ReadParams {
     pub max_lines_per_file: u32,
 }
 
-/// Parameters for the `inspect` tool (merges `read_symbol_scope` + `read_with_deep_context`).
+/// Parameters for the `inspect` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct InspectParams {
     /// Semantic path (e.g., `src/auth.ts::AuthService.login`). MUST include file path and '::'.
@@ -1081,7 +1092,7 @@ impl Default for InspectParams {
     }
 }
 
-/// Parameters for the `locate` tool (merges `get_definition` + `get_semantic_path`).
+/// Parameters for the `locate` tool.
 ///
 /// Auto-detects mode from input:
 /// - If `semantic_path` is provided → jump to definition.
@@ -1117,7 +1128,7 @@ pub enum TraceScope {
     Overview,
 }
 
-/// Parameters for the `trace` tool (merges `find_callers_callees` + `find_all_references` + `symbol_overview`).
+/// Parameters for the `trace` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct TraceParams {
     /// Semantic path to the target symbol (e.g., `src/mod.rs::func`). MUST include file path and '::'.
@@ -1126,6 +1137,11 @@ pub struct TraceParams {
     #[serde(default)]
     pub scope: TraceScope,
     /// Traversal depth for call hierarchy (max: 5). Only used with `scope=callers`.
+    ///
+    /// Each depth level requires additional LSP round-trips, so deeper traversal is slower.
+    /// Use `max_depth=1` for a fast, shallow result (direct callers/callees only).
+    /// Use `max_depth=2` or `max_depth=3` for moderate transitive analysis.
+    /// Reserve `max_depth=4` or `max_depth=5` for large-scale architectural analysis.
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
     /// Maximum total references to return.
@@ -1152,7 +1168,7 @@ impl Default for TraceParams {
     }
 }
 
-/// Parameters for the `health` tool (alias for `lsp_health`).
+/// Parameters for the `health` tool.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct HealthParams {
     /// Optional language to check (e.g., "rust", "typescript").
@@ -1250,7 +1266,7 @@ mod tests {
         assert_eq!(default_start_line(), 1);
         assert_eq!(default_max_lines(), 500);
         assert_eq!(default_detail_level(), "compact");
-        assert_eq!(default_group_by_file(), true);
+        assert!(default_group_by_file());
         assert_eq!(default_filter_mode(), FilterMode::CodeOnly);
     }
 
