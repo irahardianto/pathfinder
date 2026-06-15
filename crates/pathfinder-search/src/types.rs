@@ -100,9 +100,9 @@ pub struct SearchResult {
     pub truncated: bool,
     /// Number of files that were actually searched.
     pub files_searched: usize,
-    /// Number of files that matched the `path_glob` and were in scope.
+    /// Number of searchable files that matched the `path_glob` (excludes binary and gitignored).
     /// When `files_searched < files_in_scope`, some files were skipped
-    /// (binary, .gitignored, or permission issues).
+    /// due to permission issues or I/O errors.
     pub files_in_scope: usize,
     /// Files skipped because they matched known binary extensions
     /// (e.g. `.png`, `.exe`, `.so`).

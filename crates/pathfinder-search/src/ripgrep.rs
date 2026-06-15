@@ -538,7 +538,7 @@ impl Scout for RipgrepScout {
 
             let matcher = RipgrepScout::build_matcher(params)?;
             let (files, binary_skipped, gitignored_skipped) = Self::walk_files(params)?;
-            let files_in_scope = files.len() + gitignored_skipped + binary_skipped;
+            let files_in_scope = files.len();
 
             let mut match_buf: Vec<SearchMatch> =
                 Vec::with_capacity(params.max_results.min(256));
@@ -1507,8 +1507,8 @@ mod missing_coverage_tests {
         );
         assert_eq!(result.files_searched, 1, "only main.rs should be searched");
         assert_eq!(
-            result.files_in_scope, 3,
-            "all 3 files in scope (main.rs + 2 binary)"
+            result.files_in_scope, 1,
+            "files_in_scope excludes binary files (only main.rs is searchable)"
         );
     }
 
@@ -1540,8 +1540,8 @@ mod missing_coverage_tests {
         );
         assert_eq!(result.files_searched, 1, "only main.rs should be searched");
         assert_eq!(
-            result.files_in_scope, 2,
-            "both main.rs and ignored.rs should be in scope (files matched glob)"
+            result.files_in_scope, 1,
+            "files_in_scope excludes gitignored (only main.rs is searchable)"
         );
     }
 }
@@ -1812,7 +1812,7 @@ mod batch03c_tests {
     // ── files_searched / files_in_scope accounting ────────────────────────
 
     #[tokio::test]
-    async fn test_search_files_in_scope_includes_binary() {
+    async fn test_search_files_in_scope_excludes_binary() {
         let dir = tempfile::tempdir().expect("create tempdir");
         std::fs::write(dir.path().join("app.rs"), "fn main() { findme(); }").unwrap();
         std::fs::write(dir.path().join("logo.png"), "PNG_DATA").unwrap();
@@ -1825,9 +1825,9 @@ mod batch03c_tests {
         let result = scout.search(&params).await.expect("search should succeed");
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.files_searched, 1, "only app.rs is searched");
-        assert!(
-            result.files_in_scope >= 2,
-            "files_in_scope must count both files: {}",
+        assert_eq!(
+            result.files_in_scope, 1,
+            "files_in_scope excludes binary: {}",
             result.files_in_scope
         );
         assert!(
