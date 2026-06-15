@@ -246,7 +246,7 @@ impl PathfinderServer {
                     "read_source_file: unsupported language + failed to read raw"
                 );
                 return Err(treesitter_error_to_error_data(
-                    pathfinder_treesitter::error::SurgeonError::Io(io_err),
+                    pathfinder_treesitter::error::SurgeonError::Io(std::sync::Arc::new(io_err)),
                 ));
             }
         };

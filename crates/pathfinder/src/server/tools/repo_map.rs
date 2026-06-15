@@ -460,7 +460,9 @@ mod tests {
             .generate_skeleton_results
             .lock()
             .unwrap()
-            .push(Err(SurgeonError::Io(std::io::Error::other("disk full"))));
+            .push(Err(SurgeonError::Io(std::sync::Arc::new(
+                std::io::Error::other("disk full"),
+            ))));
         let (server, _dir) = make_server(surgeon);
 
         let result = server.get_repo_map_impl(default_params()).await;
