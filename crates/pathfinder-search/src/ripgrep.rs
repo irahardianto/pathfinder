@@ -32,9 +32,8 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "tiff", "tif", "mp3", "mp4", "wav",
     "avi", "mov", "mkv", "flv", "wmv", "webm", "ogg", "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
     "tgz", "zst", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "exe",
-    "dll", "so", "dylib", "o", "a", "lib", "obj", "wasm", "class", "jar", "pyc", "pyo", "o",
-    "woff", "woff2", "ttf", "otf", "eot", "sqlite", "db", "mdb", "node", "bin", "dat", "idx",
-    "pack",
+    "dll", "so", "dylib", "o", "a", "lib", "obj", "wasm", "class", "jar", "pyc", "pyo", "woff",
+    "woff2", "ttf", "otf", "eot", "sqlite", "db", "mdb", "node", "bin", "dat", "idx", "pack",
 ];
 
 fn is_binary_extension(path: &std::path::Path) -> bool {
@@ -350,6 +349,63 @@ impl Sink for MatchCollector<'_> {
 #[derive(Default)]
 pub struct RipgrepScout;
 
+/// Per-entry filtering decision shared by both walkers in `walk_files`.
+///
+/// Returns `true` if the entry passes all filters and should be counted/collected.
+/// Returns `false` if the entry should be skipped.
+///
+/// Applies, in order:
+/// 1. Always-excluded directories (git internals, vendor dirs, IDE configs)
+/// 2. Path-glob include filter
+/// 3. Exclude-glob filter
+/// 4. Binary-extension filter
+///
+/// Extracted as a free function so it can be called consistently from both the
+/// pre-gitignore counting walk and the post-gitignore collection walk, preventing
+/// the filtering logic from drifting between the two.
+#[inline]
+fn filter_entry(
+    relative: &str,
+    path: &std::path::Path,
+    glob: &str,
+    glob_matcher: &globset::GlobSet,
+    exclude_matcher: Option<&globset::GlobSet>,
+) -> bool {
+    // 1. Always-excluded dirs (git internals, dependency directories, IDE configs).
+    //    Use both Unix (/) and Windows (\) path separators for cross-platform support.
+    //    Each entry in ALWAYS_EXCLUDED_DIRS ends with '/', e.g. ".git/".
+    //    We also check "<dir>\" so Windows-style paths are caught.
+    //    IMPORTANT: we must NOT strip the separator — ".git" would false-match ".github/".
+    if ALWAYS_EXCLUDED_DIRS.iter().any(|dir| {
+        let unix_dir = *dir;
+        let mut win_buf = String::with_capacity(unix_dir.len());
+        win_buf.push_str(&unix_dir[..unix_dir.len() - 1]);
+        win_buf.push('\\');
+        relative.starts_with(unix_dir) || relative.starts_with(&win_buf)
+    }) {
+        return false;
+    }
+
+    // 2. Path-glob include filter.
+    if !glob_matcher.is_match(relative) && glob != "**/*" {
+        return false;
+    }
+
+    // 3. Exclude-glob filter — skip files matching the exclusion pattern.
+    if let Some(excl_set) = exclude_matcher {
+        if excl_set.is_match(relative) {
+            return false;
+        }
+    }
+
+    // 4. Binary-extension filter.
+    if is_binary_extension(path) {
+        return false;
+    }
+
+    true
+}
+
 impl RipgrepScout {
     /// Build a `RegexMatcher` from `params`, respecting `is_regex`.
     /// Uses thread-local cache to avoid re-compiling the same pattern.
@@ -429,6 +485,9 @@ impl RipgrepScout {
         let mut binary_skipped: usize = 0;
         let mut total_files_without_gitignore: usize = 0;
 
+        // First walk: gitignore disabled — count how many non-binary files pass the glob filter.
+        // `total_files_without_gitignore` and `binary_skipped` are counted on the same population
+        // so the gitignored_skipped arithmetic below is consistent.
         for entry in walker_no_ignore.flatten() {
             let path = entry.path().to_path_buf();
             if !path.is_file() {
@@ -440,16 +499,19 @@ impl RipgrepScout {
                 Err(_) => continue,
             };
 
+            // Check always-excluded dirs, glob, exclude-glob — but NOT binary yet,
+            // so we can count binaries separately.
             if ALWAYS_EXCLUDED_DIRS.iter().any(|dir| {
                 let unix_dir = *dir;
-                let win_dir = &unix_dir[..unix_dir.len() - 1];
-                relative.starts_with(unix_dir) || relative.starts_with(win_dir)
+                let mut win_buf = String::with_capacity(unix_dir.len());
+                win_buf.push_str(&unix_dir[..unix_dir.len() - 1]);
+                win_buf.push('\\');
+                relative.starts_with(unix_dir) || relative.starts_with(&win_buf)
             }) {
                 continue;
             }
 
-            let matches: bool = glob_matcher.is_match(&relative);
-            if !matches && glob != "**/*" {
+            if !glob_matcher.is_match(&relative) && glob != "**/*" {
                 continue;
             }
 
@@ -459,65 +521,51 @@ impl RipgrepScout {
                 }
             }
 
+            // Count binary files separately from the total so gitignored_skipped is accurate.
+            // Previously binaries were silently skipped here without incrementing any counter,
+            // making the gitignored_skipped calculation subtract binary_skipped (from the second
+            // walk) from total_files_without_gitignore (which excluded binaries from the first
+            // walk) — a population mismatch. Now both populations exclude the same binaries.
             if is_binary_extension(&path) {
+                binary_skipped += 1;
                 continue;
             }
 
             total_files_without_gitignore += 1;
         }
 
+        // Second walk: gitignore enabled — collect files that actually pass all filters.
         for entry in walker.flatten() {
             let path = entry.path().to_path_buf();
             if !path.is_file() {
                 continue;
             }
 
-            // Compute relative path string for glob matching and output.
             let relative = match path.strip_prefix(&params.workspace_root) {
                 Ok(r) => r.to_string_lossy().to_string(),
                 Err(_) => continue,
             };
 
-            // Always exclude git internals, dependency directories, and IDE configs.
-            // These are never source code and cause false positives in grep fallback.
-            // Use both Unix (/) and Windows (\) path separators for cross-platform support.
-            if ALWAYS_EXCLUDED_DIRS.iter().any(|dir| {
-                let unix_dir = *dir;
-                // Convert "foo/" to "foo\" for Windows
-                let win_dir = &unix_dir[..unix_dir.len() - 1];
-                relative.starts_with(unix_dir) || relative.starts_with(win_dir)
-            }) {
-                continue;
+            if filter_entry(
+                &relative,
+                &path,
+                glob,
+                &glob_matcher,
+                exclude_matcher.as_ref(),
+            ) {
+                files.push((path, relative));
             }
-
-            // Apply path_glob filter if one was specified.
-            let matches: bool = glob_matcher.is_match(&relative);
-            if !matches && glob != "**/*" {
-                continue;
-            }
-
-            // Apply exclude_glob filter — skip files matching the exclusion pattern.
-            // This runs before any file I/O so excluded files are never read.
-            if let Some(ref excl_set) = exclude_matcher {
-                if excl_set.is_match(&relative) {
-                    continue;
-                }
-            }
-
-            // Skip known binary files before adding to search list.
-            if is_binary_extension(&path) {
-                binary_skipped += 1;
-                continue;
-            }
-
-            files.push((path, relative));
         }
 
         files.sort_by(|a, b| a.1.cmp(&b.1));
 
-        let gitignored_skipped = total_files_without_gitignore
-            .saturating_sub(files.len())
-            .saturating_sub(binary_skipped);
+        // gitignored_skipped = files that passed all filters without gitignore
+        //                      minus files that passed with gitignore.
+        // Since total_files_without_gitignore and files.len() both exclude binary files
+        // (total_files_without_gitignore filters out binaries in the first walk, and
+        // files.len() filters them out in the second walk), this difference represents
+        // exactly the non-binary files excluded by gitignore.
+        let gitignored_skipped = total_files_without_gitignore.saturating_sub(files.len());
         Ok((files, binary_skipped, gitignored_skipped))
     }
 }
@@ -632,17 +680,18 @@ impl Scout for RipgrepScout {
     }
 }
 
-// ── Unit Tests ───────────────────────────────────────────────────────
+// ── Shared test utilities ────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
-mod tests {
-    use super::*;
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+pub(crate) mod test_helpers {
     use std::io::Write;
     use tempfile::TempDir;
 
     /// Create a temporary workspace with the given files (path → content).
-    fn make_workspace(files: &[(&str, &str)]) -> TempDir {
+    ///
+    /// Shared by all test modules in this file to avoid duplication.
+    pub(crate) fn make_workspace(files: &[(&str, &str)]) -> TempDir {
         let dir = tempfile::tempdir().expect("create tempdir");
         for (path, content) in files {
             let full = dir.path().join(path);
@@ -654,6 +703,16 @@ mod tests {
         }
         dir
     }
+}
+
+// ── Unit Tests ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::test_helpers::make_workspace;
+    use super::*;
+    use tempfile::TempDir;
 
     fn params_for(workspace: &TempDir, query: &str) -> SearchParams {
         SearchParams {
@@ -1405,6 +1464,7 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod missing_coverage_tests {
+    use super::test_helpers::make_workspace;
     use super::*;
     use std::io::Write;
 
@@ -1429,11 +1489,10 @@ mod missing_coverage_tests {
 
     #[tokio::test]
     async fn test_search_context_lines_gap() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let full = dir.path().join("main.rs");
-        let mut f = std::fs::File::create(&full).expect("create file");
-        f.write_all(b"line1\nline2\nmatch1\nline4\nline5\nline6\nline7\nline8\nmatch2\n")
-            .expect("write content");
+        let dir = make_workspace(&[(
+            "main.rs",
+            "line1\nline2\nmatch1\nline4\nline5\nline6\nline7\nline8\nmatch2\n",
+        )]);
 
         let scout = RipgrepScout;
         let params = SearchParams {
@@ -1456,11 +1515,7 @@ mod missing_coverage_tests {
 
     #[tokio::test]
     async fn test_search_context_lines_max_buffer() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let full = dir.path().join("main.rs");
-        let mut f = std::fs::File::create(&full).expect("create file");
-        f.write_all(b"line1\nline2\nline3\nmatch\n")
-            .expect("write content");
+        let dir = make_workspace(&[("main.rs", "line1\nline2\nline3\nmatch\n")]);
 
         let scout = RipgrepScout;
         let params = SearchParams {
@@ -1487,10 +1542,11 @@ mod missing_coverage_tests {
 
     #[tokio::test]
     async fn test_search_skips_binary_files() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        std::fs::write(dir.path().join("main.rs"), "fn main() { findme(); }").unwrap();
-        std::fs::write(dir.path().join("image.png"), "PNG binary data").unwrap();
-        std::fs::write(dir.path().join("data.pdf"), "PDF binary data").unwrap();
+        let dir = make_workspace(&[
+            ("main.rs", "fn main() { findme(); }"),
+            ("image.png", "PNG binary data"),
+            ("data.pdf", "PDF binary data"),
+        ]);
 
         let scout = RipgrepScout;
         let params = SearchParams {
@@ -1538,10 +1594,161 @@ mod missing_coverage_tests {
             result.gitignored_skipped, 1,
             "ignored.rs should be counted as gitignored"
         );
-        assert_eq!(result.files_searched, 1, "only main.rs should be searched");
+        // .gitignore is a root-level file (not inside .git/) and is now
+        // correctly included in search scope, so we search main.rs + .gitignore.
         assert_eq!(
-            result.files_in_scope, 1,
-            "files_in_scope excludes gitignored (only main.rs is searchable)"
+            result.files_searched, 2,
+            "main.rs and .gitignore should be searched"
+        );
+        assert_eq!(
+            result.files_in_scope, 2,
+            "files_in_scope excludes gitignored (main.rs + .gitignore are searchable)"
+        );
+    }
+
+    /// A file that is both binary (by extension) AND gitignored must appear in
+    /// `binary_skipped`, not in `gitignored_skipped`.
+    ///
+    /// Regression guard for M2: the `binary_skipped` counter is now collected in
+    /// the first (pre-gitignore) walk. A binary+gitignored file passes all filters
+    /// except the binary check, so it increments `binary_skipped` in that walk.
+    /// The second walk skips it (gitignore + binary). The formula
+    /// `total - files.len() - binary_skipped` must therefore NOT double-count it.
+    #[tokio::test]
+    async fn test_binary_gitignored_file_counted_only_in_binary_skipped() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init should succeed");
+
+        // A text file to search.
+        std::fs::write(dir.path().join("main.rs"), "fn main() { findme(); }").unwrap();
+        // A binary file that is also gitignored.
+        std::fs::write(dir.path().join(".gitignore"), "artifact.o\n").unwrap();
+        std::fs::write(dir.path().join("artifact.o"), b"\x00\x01\x02binary").unwrap();
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        // The gitignored binary should appear in binary_skipped (counted in first walk),
+        // NOT in gitignored_skipped (which counts non-binary gitignored files).
+        assert!(
+            result.binary_skipped >= 1,
+            "artifact.o must be counted as binary_skipped, got binary_skipped={}",
+            result.binary_skipped
+        );
+        // gitignored_skipped should not count artifact.o (it's a binary, not a gitignored text file).
+        assert_eq!(
+            result.gitignored_skipped, 0,
+            "artifact.o must not be double-counted in gitignored_skipped, got {}",
+            result.gitignored_skipped
+        );
+        // Only main.rs matched.
+        assert_eq!(result.matches.len(), 1);
+    }
+
+    /// Verify that both `binary_skipped` and `gitignored_skipped` are correct when
+    /// the workspace contains both gitignored binary files and gitignored text files.
+    #[tokio::test]
+    async fn test_binary_and_text_gitignored_skipped_counts() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init should succeed");
+
+        // 1. A text file to search.
+        std::fs::write(dir.path().join("main.rs"), "fn main() { findme(); }").unwrap();
+        // 2. A gitignored text file.
+        std::fs::write(dir.path().join("ignored.rs"), "fn ignored() { findme(); }").unwrap();
+        // 3. A gitignored binary file.
+        std::fs::write(dir.path().join("artifact.o"), b"\x00\x01\x02binary").unwrap();
+        // 4. A non-gitignored binary file.
+        std::fs::write(dir.path().join("binary.o"), b"\x00\x01\x02binary").unwrap();
+
+        // Write .gitignore
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\nartifact.o\n").unwrap();
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        // binary_skipped should be 2 (artifact.o + binary.o)
+        assert_eq!(
+            result.binary_skipped, 2,
+            "both artifact.o and binary.o must be counted as binary_skipped, got {}",
+            result.binary_skipped
+        );
+        // gitignored_skipped should be 1 (ignored.rs only, not artifact.o or binary.o)
+        assert_eq!(
+            result.gitignored_skipped, 1,
+            "only ignored.rs must be counted in gitignored_skipped, got {}",
+            result.gitignored_skipped
+        );
+        // Only main.rs matches.
+        assert_eq!(result.matches.len(), 1);
+    }
+
+    /// Regression test: `.github/` must NOT be excluded by the `.git/` entry
+    /// in `ALWAYS_EXCLUDED_DIRS`. Previously the Windows-path check stripped
+    /// the trailing `/` producing `.git`, which prefix-matched `.github/`.
+    #[test]
+    fn test_filter_entry_does_not_exclude_github_dir() {
+        let glob_all = globset::GlobBuilder::new("**/*")
+            .literal_separator(false)
+            .build()
+            .unwrap();
+        let glob_matcher = globset::GlobSetBuilder::new()
+            .add(glob_all)
+            .build()
+            .unwrap();
+
+        // .git/ files MUST be excluded.
+        assert!(
+            !filter_entry(
+                ".git/config",
+                std::path::Path::new(".git/config"),
+                "**/*",
+                &glob_matcher,
+                None,
+            ),
+            ".git/config should be excluded"
+        );
+
+        // .github/ files must NOT be excluded.
+        assert!(
+            filter_entry(
+                ".github/workflows/ci.yml",
+                std::path::Path::new(".github/workflows/ci.yml"),
+                "**/*",
+                &glob_matcher,
+                None,
+            ),
+            ".github/ must not be excluded by .git/ rule"
+        );
+
+        // .gitignore at root must NOT be excluded (it's a file, not under .git/).
+        assert!(
+            filter_entry(
+                ".gitignore",
+                std::path::Path::new(".gitignore"),
+                "**/*",
+                &glob_matcher,
+                None,
+            ),
+            ".gitignore must not be excluded by .git/ rule"
         );
     }
 }
@@ -1551,21 +1758,8 @@ mod missing_coverage_tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod batch03c_tests {
+    use super::test_helpers::make_workspace;
     use super::*;
-    use std::io::Write;
-
-    fn make_workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        for (path, content) in files {
-            let full = dir.path().join(path);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).expect("create dirs");
-            }
-            let mut f = std::fs::File::create(&full).expect("create file");
-            write!(f, "{content}").expect("write content");
-        }
-        dir
-    }
 
     // ── Multi-pattern query (regex alternation) ───────────────────────────
 
