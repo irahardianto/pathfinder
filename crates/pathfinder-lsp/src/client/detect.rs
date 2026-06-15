@@ -241,6 +241,10 @@ pub(crate) fn validate_marker_file(
         .and_then(|n| n.to_str())
         .unwrap_or("");
 
+    if !marker_path.exists() {
+        return Ok(());
+    }
+
     let contents = match std::fs::read_to_string(marker_path) {
         Ok(c) => c,
         Err(e) => return Err(format!("cannot read {file_name}: {e}")),
@@ -1613,6 +1617,30 @@ mod tests {
             assert_eq!(ts.args, ["--stdio"]);
             assert!(ts.init_timeout_secs.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn test_detects_typescript_monorepo_multiple_tsconfig_no_root() {
+        let dir = tempdir().expect("temp dir");
+        let app1 = dir.path().join("apps").join("app1");
+        let app2 = dir.path().join("apps").join("app2");
+        std::fs::create_dir_all(&app1).expect("create dir");
+        std::fs::create_dir_all(&app2).expect("create dir");
+        std::fs::write(app1.join("tsconfig.json"), "{}").expect("write");
+        std::fs::write(app2.join("tsconfig.json"), "{}").expect("write");
+        std::fs::write(app1.join("index.ts"), "").expect("write");
+
+        let result = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+        
+        let ts_detected = result
+            .detected
+            .iter()
+            .find(|l| l.language_id == "typescript");
+        assert!(ts_detected.is_some(), "TypeScript should be detected in monorepo despite no root tsconfig.json");
+        let ts = ts_detected.unwrap();
+        assert_eq!(ts.root, dir.path(), "Fallback should resolve to workspace root");
     }
 
     #[tokio::test]
