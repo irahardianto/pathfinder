@@ -3,6 +3,35 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
+/// Level of detail for skeleton output.
+///
+/// Controls how much work `generate_skeleton_text` performs and what kind
+/// of output it produces. Higher detail levels are more expensive (CPU,
+/// I/O, tokens) because they involve tree-sitter AST parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkeletonDetail {
+    /// Directory tree + manifest/config files only.
+    ///
+    /// Cheapest mode. Walks the directory tree but does NOT read source
+    /// files or run tree-sitter. Includes package manager manifests
+    /// (Cargo.toml, package.json, go.mod, pyproject.toml, etc.) as
+    /// notable files in the tree.
+    Structure,
+    /// File listing without symbol extraction.
+    ///
+    /// Walks all source files, computes version hashes and detects the
+    /// tech stack, but does NOT run tree-sitter symbol extraction.
+    /// Output shows `File: path` headers only, no symbol bodies.
+    Files,
+    /// Full AST symbol hierarchy.
+    ///
+    /// Current default behavior. Reads every source file, runs tree-sitter
+    /// to extract symbols, and renders the full skeleton with function
+    /// signatures, classes, structs, etc.
+    #[default]
+    Symbols,
+}
+
 /// Configuration for skeleton generation.
 ///
 /// Bundles token budget, traversal depth, visibility filtering, and
@@ -26,6 +55,8 @@ pub struct SkeletonConfig<'a> {
     pub exclude_extensions: Vec<String>,
     /// Include test symbols regardless of visibility.
     pub include_tests: bool,
+    /// Level of detail to produce.
+    pub detail: SkeletonDetail,
 }
 
 impl<'a> SkeletonConfig<'a> {
@@ -46,6 +77,7 @@ impl<'a> SkeletonConfig<'a> {
             include_extensions: Vec::new(),
             exclude_extensions: Vec::new(),
             include_tests: true,
+            detail: SkeletonDetail::Symbols,
         }
     }
 
@@ -74,6 +106,13 @@ impl<'a> SkeletonConfig<'a> {
     #[must_use]
     pub fn with_exclude_extensions(mut self, exclude_extensions: Vec<String>) -> Self {
         self.exclude_extensions = exclude_extensions;
+        self
+    }
+
+    /// Builder-style setter for detail level.
+    #[must_use]
+    pub const fn with_detail(mut self, detail: SkeletonDetail) -> Self {
+        self.detail = detail;
         self
     }
 }
@@ -379,6 +418,31 @@ pub async fn generate_skeleton_text(
 
     let abs_target = workspace_root.join(target_path);
 
+    // ── Structure mode: directory tree + manifest files only ──────────
+    //
+    // Cheapest mode. Does NOT read source files or run tree-sitter.
+    // Walks the directory tree, collects directory names and notable
+    // manifest/config files, and renders a flat tree listing.
+    //
+    // Structure mode intentionally ignores `changed_files`,
+    // `include_extensions`, and `exclude_extensions` because it operates
+    // on directory-level structure, not individual source files. These
+    // filters are source-file concerns that don't apply to directory
+    // trees and manifests.
+    //
+    // Structure mode also skips the two-pass depth strategy (language-aware
+    // depth expansion) since it only needs the configured depth to list
+    // directories.
+    if config.detail == SkeletonDetail::Structure {
+        let mut builder = WalkBuilder::new(&abs_target);
+        builder.max_depth(Some(config.depth as usize));
+        builder.require_git(false);
+        builder.hidden(true);
+        builder.add_custom_ignore_filename(".pathfinderignore");
+        let walker = builder.build();
+        return generate_structure_skeleton(walker, workspace_root, config);
+    }
+
     // Two-pass depth strategy:
     // 1. Quick extension-only pre-scan at the requested depth to detect languages.
     //    This is O(file count) with no tree-sitter parsing — fast and cheap.
@@ -450,6 +514,26 @@ pub async fn generate_skeleton_text(
     }
 
     let files_in_scope = file_entries.len();
+
+    // ── Files mode: file listing without symbol extraction ───────────
+    //
+    // Walks all source files, computes version hashes and detects the
+    // tech stack, but does NOT run tree-sitter symbol extraction.
+    // Output shows file paths only, no symbol bodies.
+    if config.detail == SkeletonDetail::Files {
+        return generate_files_skeleton(
+            file_entries
+                .iter()
+                .map(|e| (&e.abs_path, &e.rel_path))
+                .collect(),
+            &tech_stack,
+            files_in_scope,
+            config,
+        )
+        .await;
+    }
+
+    // ── Symbols mode: full AST symbol hierarchy (default) ────────────
 
     const READ_CONCURRENCY: usize = 32;
 
@@ -647,6 +731,217 @@ pub async fn generate_skeleton_text(
         truncated_paths,
         files_in_scope,
         coverage_percent,
+        version_hashes,
+    })
+}
+
+/// Well-known manifest/config files that `Structure` mode includes in its
+/// directory tree listing. These are files that help agents understand the
+/// project layout without reading source code.
+const MANIFEST_FILES: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "requirements.txt",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "Makefile",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "tsconfig.json",
+    "jsconfig.json",
+    ".env.example",
+    "Gemfile",
+    "Pipfile",
+    "flake.nix",
+    "CMakeLists.txt",
+];
+
+/// Returns `true` if the filename is a well-known manifest or config file
+/// that should be included in `Structure` mode output.
+fn is_manifest_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| MANIFEST_FILES.contains(&name))
+}
+
+/// Generate a directory-tree-only skeleton (Structure mode).
+///
+/// Walks the directory tree collecting directory names and manifest files.
+/// Does NOT read source file contents or run tree-sitter AST extraction.
+/// This is the cheapest explore mode.
+#[allow(clippy::unnecessary_wraps)] // Must match generate_skeleton_text return type for early return
+fn generate_structure_skeleton(
+    walker: ignore::Walk,
+    workspace_root: &Path,
+    config: &SkeletonConfig<'_>,
+) -> Result<RepoMapResult, SurgeonError> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut manifests: Vec<PathBuf> = Vec::new();
+    let mut tech_stack: Vec<crate::language::SupportedLanguage> = Vec::default();
+
+    for result in walker {
+        let Ok(entry) = result else { continue };
+        let path = entry.path();
+        let rel_path = path.strip_prefix(workspace_root).unwrap_or(path);
+
+        if path.is_dir() {
+            // Skip the root entry (empty relative path)
+            if !rel_path.as_os_str().is_empty() {
+                dirs.push(rel_path.to_path_buf());
+            }
+            continue;
+        }
+
+        // Detect tech stack from file extensions (cheap — no file reads)
+        if let Some(lang) = crate::language::SupportedLanguage::detect(path) {
+            if !tech_stack.contains(&lang) {
+                tech_stack.push(lang);
+            }
+        }
+
+        // Collect manifest/config files
+        if is_manifest_file(path) {
+            manifests.push(rel_path.to_path_buf());
+        }
+    }
+
+    dirs.sort();
+    manifests.sort();
+
+    let mut skeleton_out = String::new();
+    let mut current_tokens: u32 = 0;
+
+    // Render directories
+    for dir in &dirs {
+        let line = format!("{}/\n", dir.display());
+        let tokens = estimate_tokens(&line);
+        if current_tokens + tokens > config.max_tokens {
+            break;
+        }
+        skeleton_out.push_str(&line);
+        current_tokens += tokens;
+    }
+
+    // Render manifest files under a separator
+    if !manifests.is_empty() {
+        let header = "\n── Notable files ──\n";
+        let header_tokens = estimate_tokens(header);
+        if current_tokens + header_tokens <= config.max_tokens {
+            skeleton_out.push_str(header);
+            current_tokens += header_tokens;
+
+            for manifest in &manifests {
+                let line = format!("{}\n", manifest.display());
+                let tokens = estimate_tokens(&line);
+                if current_tokens + tokens > config.max_tokens {
+                    break;
+                }
+                skeleton_out.push_str(&line);
+                current_tokens += tokens;
+            }
+        }
+    }
+
+    Ok(RepoMapResult {
+        skeleton: skeleton_out.trim().to_string(),
+        tech_stack: tech_stack.iter().map(|l| l.as_str().to_owned()).collect(),
+        files_scanned: 0,
+        files_truncated: 0,
+        truncated_paths: vec![],
+        // Count manifests only (not dirs) for consistency with Files/Symbols
+        // which count source files.
+        files_in_scope: manifests.len(),
+        coverage_percent: 100,
+        version_hashes: HashMap::default(),
+    })
+}
+
+/// Generate a files-only skeleton (Files mode).
+///
+/// Lists all source files with version hashes and tech stack detection,
+/// but does NOT run tree-sitter symbol extraction. Output shows file paths
+/// only with no symbol bodies — significantly cheaper than Symbols mode.
+#[allow(clippy::items_after_statements)]
+async fn generate_files_skeleton(
+    file_entries: Vec<(&PathBuf, &PathBuf)>, // (abs_path, rel_path)
+    tech_stack: &[crate::language::SupportedLanguage],
+    files_in_scope: usize,
+    config: &SkeletonConfig<'_>,
+) -> Result<RepoMapResult, SurgeonError> {
+    use futures::stream::{self, StreamExt};
+    use pathfinder_common::types::VersionHash;
+
+    // Sort entries for deterministic output
+    let mut entries = file_entries;
+    entries.sort_by(|a, b| a.1.cmp(b.1));
+
+    // Concurrently compute version hashes (same concurrency as Symbols mode).
+    // This avoids the sequential I/O bottleneck for large repos.
+    const HASH_CONCURRENCY: usize = 32;
+
+    // Collect owned paths for the concurrent hash tasks (closures need 'static).
+    let hash_inputs: Vec<(PathBuf, String)> = entries
+        .iter()
+        .map(|(abs_path, rel_path)| ((*abs_path).clone(), rel_path.display().to_string()))
+        .collect();
+
+    let hash_stream = stream::iter(hash_inputs).map(|(abs_path, rel_str)| async move {
+        let hash = match tokio::fs::read(&abs_path).await {
+            Ok(source) => Some(VersionHash::compute(&source).short().to_owned()),
+            Err(_) => None,
+        };
+        (rel_str, hash)
+    });
+
+    let hash_results: Vec<(String, Option<String>)> = hash_stream
+        .buffer_unordered(HASH_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut version_hashes = HashMap::default();
+    for (path, hash) in &hash_results {
+        if let Some(h) = hash {
+            version_hashes.insert(path.clone(), h.clone());
+        }
+    }
+
+    // Render file listing (sequential — deterministic order from sorted entries)
+    let mut skeleton_out = String::new();
+    let mut current_tokens: u32 = 0;
+    let mut files_rendered: usize = 0;
+    let mut files_truncated: usize = 0;
+    let mut truncated_paths: Vec<String> = Vec::new();
+
+    for (_abs_path, rel_path) in &entries {
+        let line = format!("{}\n", rel_path.display());
+        let tokens = estimate_tokens(&line);
+
+        if current_tokens + tokens > config.max_tokens {
+            files_truncated += 1;
+            truncated_paths.push(rel_path.display().to_string());
+            continue;
+        }
+
+        skeleton_out.push_str(&line);
+        current_tokens += tokens;
+        files_rendered += 1;
+    }
+
+    Ok(RepoMapResult {
+        skeleton: skeleton_out.trim().to_string(),
+        tech_stack: tech_stack.iter().map(|l| l.as_str().to_owned()).collect(),
+        files_scanned: files_rendered,
+        files_truncated,
+        truncated_paths,
+        files_in_scope,
+        coverage_percent: 100,
         version_hashes,
     })
 }
@@ -1741,6 +2036,312 @@ mod tests {
             filtered.len(),
             1,
             "it_ prefix function kept with include_tests=true"
+        );
+    }
+
+    // ── Detail level tests ─────────────────────────────────────────────
+
+    /// Symbol keywords that must NOT appear in Structure/Files mode output.
+    const SYMBOL_KEYWORDS: &[&str] = &[
+        "func ",
+        "struct ",
+        "class ",
+        "method ",
+        "impl ",
+        "const ",
+        "interface ",
+        "enum ",
+        "mod ",
+        "test ",
+        "zone ",
+        "component ",
+        "element ",
+        "selector ",
+    ];
+
+    /// Helper: create a temp dir with a Rust source file and a Cargo.toml.
+    fn setup_detail_test_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).expect("create src/");
+        std::fs::write(
+            src.join("main.rs"),
+            "pub fn hello() { println!(\"hi\"); }\npub struct Foo;\n",
+        )
+        .expect("write main.rs");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\n",
+        )
+        .expect("write Cargo.toml");
+        dir
+    }
+
+    /// Structure mode: output contains directories and manifest files,
+    /// but NO symbol keywords (func, struct, class, etc.).
+    #[tokio::test]
+    async fn test_skeleton_detail_structure_no_symbols() {
+        let dir = setup_detail_test_dir();
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        let config =
+            SkeletonConfig::new(4_000, 3, "all", 2_000).with_detail(SkeletonDetail::Structure);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("structure mode should succeed");
+
+        // Must contain the directory structure
+        assert!(
+            result.skeleton.contains("src/"),
+            "structure mode must list src/ directory: got {:?}",
+            result.skeleton
+        );
+
+        // Must contain manifest files
+        assert!(
+            result.skeleton.contains("Cargo.toml"),
+            "structure mode must list Cargo.toml manifest: got {:?}",
+            result.skeleton
+        );
+
+        // Must NOT contain any symbol keywords
+        for kw in SYMBOL_KEYWORDS {
+            assert!(
+                !result.skeleton.contains(kw),
+                "structure mode must not contain symbol keyword {kw:?}: got {:?}",
+                result.skeleton
+            );
+        }
+
+        // files_scanned should be 0 (no source files read)
+        assert_eq!(
+            result.files_scanned, 0,
+            "structure mode should not scan source files"
+        );
+    }
+
+    /// Files mode: output contains file paths but NO symbol keywords.
+    #[tokio::test]
+    async fn test_skeleton_detail_files_no_symbols() {
+        let dir = setup_detail_test_dir();
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        let config = SkeletonConfig::new(8_000, 3, "all", 2_000).with_detail(SkeletonDetail::Files);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("files mode should succeed");
+
+        // Must contain file paths
+        assert!(
+            result.skeleton.contains("src/main.rs"),
+            "files mode must list source files: got {:?}",
+            result.skeleton
+        );
+
+        // Must NOT contain any symbol keywords
+        for kw in SYMBOL_KEYWORDS {
+            assert!(
+                !result.skeleton.contains(kw),
+                "files mode must not contain symbol keyword {kw:?}: got {:?}",
+                result.skeleton
+            );
+        }
+
+        // Should have version hashes for files
+        assert!(
+            !result.version_hashes.is_empty(),
+            "files mode should compute version hashes"
+        );
+
+        // files_scanned should be > 0
+        assert!(
+            result.files_scanned > 0,
+            "files mode should count scanned files"
+        );
+    }
+
+    /// Symbols mode: output contains symbol keywords (regression test).
+    #[tokio::test]
+    async fn test_skeleton_detail_symbols_has_symbols() {
+        let dir = setup_detail_test_dir();
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        let config =
+            SkeletonConfig::new(16_000, 3, "all", 2_000).with_detail(SkeletonDetail::Symbols);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("symbols mode should succeed");
+
+        // Must contain symbol keywords
+        let has_symbols = SYMBOL_KEYWORDS
+            .iter()
+            .any(|kw| result.skeleton.contains(kw));
+        assert!(
+            has_symbols,
+            "symbols mode must contain at least one symbol keyword: got {:?}",
+            result.skeleton
+        );
+
+        // Must contain the file header format
+        assert!(
+            result.skeleton.contains("File: "),
+            "symbols mode must use 'File: ' header format: got {:?}",
+            result.skeleton
+        );
+    }
+
+    /// Structure mode populates `tech_stack` from file extensions.
+    #[tokio::test]
+    async fn test_skeleton_detail_structure_populates_tech_stack() {
+        let dir = setup_detail_test_dir();
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        let config =
+            SkeletonConfig::new(4_000, 3, "all", 2_000).with_detail(SkeletonDetail::Structure);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("structure mode should succeed");
+
+        assert!(
+            result.tech_stack.iter().any(|t| t == "rust"),
+            "structure mode must detect Rust tech stack from .rs files: got {:?}",
+            result.tech_stack
+        );
+    }
+
+    /// Files mode's `version_hashes` contain the expected file path keys.
+    #[tokio::test]
+    async fn test_skeleton_detail_files_version_hash_keys() {
+        let dir = setup_detail_test_dir();
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        let config = SkeletonConfig::new(8_000, 3, "all", 2_000).with_detail(SkeletonDetail::Files);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("files mode should succeed");
+
+        assert!(
+            result.version_hashes.contains_key("src/main.rs"),
+            "version_hashes must contain src/main.rs: got {:?}",
+            result.version_hashes.keys().collect::<Vec<_>>()
+        );
+
+        // Each hash must be 7-char hex
+        for (path, hash) in &result.version_hashes {
+            assert_eq!(
+                hash.len(),
+                7,
+                "version hash for {path} must be 7 chars, got {hash:?}"
+            );
+        }
+    }
+
+    /// `SkeletonDetail` default is Symbols.
+    #[test]
+    fn test_skeleton_detail_default_is_symbols() {
+        assert_eq!(SkeletonDetail::default(), SkeletonDetail::Symbols);
+    }
+
+    /// `is_manifest_file` detects known manifest files and rejects non-manifests.
+    #[test]
+    fn test_is_manifest_file() {
+        use std::path::Path;
+
+        // Should match
+        assert!(is_manifest_file(Path::new("Cargo.toml")));
+        assert!(is_manifest_file(Path::new("package.json")));
+        assert!(is_manifest_file(Path::new("go.mod")));
+        assert!(is_manifest_file(Path::new("pyproject.toml")));
+        assert!(is_manifest_file(Path::new("Dockerfile")));
+        assert!(is_manifest_file(Path::new("Makefile")));
+        assert!(is_manifest_file(Path::new("tsconfig.json")));
+
+        // Should NOT match
+        assert!(!is_manifest_file(Path::new("main.rs")));
+        assert!(!is_manifest_file(Path::new("index.ts")));
+        assert!(!is_manifest_file(Path::new("README.md")));
+        assert!(!is_manifest_file(Path::new(".gitignore")));
+    }
+
+    /// Structure mode with tight token budget produces truncated but valid output.
+    #[tokio::test]
+    async fn test_skeleton_detail_structure_tight_budget() {
+        let dir = setup_detail_test_dir();
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        // Very tight budget — may not fit all dirs
+        let config = SkeletonConfig::new(1, 3, "all", 2_000).with_detail(SkeletonDetail::Structure);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("structure mode with tight budget should not error");
+
+        // Should return successfully even with empty skeleton
+        assert!(
+            result.skeleton.len() <= 100,
+            "tight budget should produce minimal or empty skeleton"
+        );
+    }
+
+    /// Structure mode with empty directory (no manifests, no source files).
+    #[tokio::test]
+    async fn test_skeleton_detail_structure_empty_dir() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        let config =
+            SkeletonConfig::new(4_000, 3, "all", 2_000).with_detail(SkeletonDetail::Structure);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("structure mode on empty dir should succeed");
+
+        // Empty dir has no subdirs, no manifests
+        assert_eq!(result.files_in_scope, 0, "empty dir has 0 manifest files");
+        assert!(result.tech_stack.is_empty(), "empty dir has no tech stack");
+    }
+
+    /// Structure mode at depth=1 sees immediate subdirs and root manifests,
+    /// but NOT source files at depth >= 2.
+    #[tokio::test]
+    async fn test_skeleton_detail_structure_depth_1() {
+        let dir = setup_detail_test_dir();
+        let surgeon = crate::TreeSitterSurgeon::new(100);
+
+        let config =
+            SkeletonConfig::new(4_000, 1, "all", 2_000).with_detail(SkeletonDetail::Structure);
+
+        let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+            .await
+            .expect("structure mode at depth=1 should succeed");
+
+        // Must see immediate subdir src/
+        assert!(
+            result.skeleton.contains("src/"),
+            "depth=1 must list immediate subdirectory src/: got {:?}",
+            result.skeleton
+        );
+
+        // Must see root manifest
+        assert!(
+            result.skeleton.contains("Cargo.toml"),
+            "depth=1 must list root Cargo.toml: got {:?}",
+            result.skeleton
+        );
+
+        // Source files at depth=2 (src/main.rs) are invisible to walker,
+        // so tech_stack is empty at depth=1 when all source files are in
+        // subdirectories. This is expected — agents can request higher depth
+        // or use Files/Symbols mode for tech_stack detection.
+        assert!(
+            result.tech_stack.is_empty(),
+            "depth=1 should have empty tech_stack when source files are in subdirs: got {:?}",
+            result.tech_stack
         );
     }
 }
