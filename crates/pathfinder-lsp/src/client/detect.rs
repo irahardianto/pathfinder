@@ -528,14 +528,34 @@ fn resolve_command(name: &str, lang: &str) -> Option<String> {
         .ok()
 }
 
+/// Check if a directory has a marker file.
+async fn has_marker(dir: &Path, marker: &str) -> bool {
+    tokio::fs::metadata(dir.join(marker)).await.is_ok()
+}
+
 /// Searches for a marker file starting from `base` up to `max_depth` subdirectory levels.
 ///
 /// `max_depth` is clamped to 2 — deeper scans are not supported.
+///
+/// `sibling_filter` refines the **multi-match** branch only:
+/// When multiple directories contain `marker` and `sibling_filter` is `Some("tsconfig.json")`,
+/// only directories that ALSO have `tsconfig.json` are kept. If that narrows to 1, use it.
+/// If that narrows to 0 or still multiple, fall back to workspace root.
+///
+/// A single match is always accepted regardless of `sibling_filter`, preserving
+/// detection of pure JS projects (package.json without tsconfig.json).
+///
 /// Returns the directory containing the marker file, or `None` if not found.
-async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std::path::PathBuf> {
+async fn find_marker(
+    base: &Path,
+    marker: &str,
+    max_depth: usize,
+    sibling_filter: Option<&str>,
+) -> Option<std::path::PathBuf> {
     let max_depth = max_depth.min(2);
+
     // Check base directory first (depth 0)
-    if tokio::fs::metadata(base.join(marker)).await.is_ok() {
+    if has_marker(base, marker).await {
         return Some(base.to_path_buf());
     }
     if max_depth == 0 {
@@ -562,7 +582,7 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
         }
 
         // Check this subdirectory
-        if tokio::fs::metadata(path.join(marker)).await.is_ok() {
+        if has_marker(&path, marker).await {
             matches.push(path.clone());
         }
 
@@ -580,7 +600,7 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
                             continue;
                         }
                     }
-                    if tokio::fs::metadata(sub_path.join(marker)).await.is_ok() {
+                    if has_marker(&sub_path, marker).await {
                         matches.push(sub_path);
                     }
                 }
@@ -592,6 +612,28 @@ async fn find_marker(base: &Path, marker: &str, max_depth: usize) -> Option<std:
         0 => None,
         1 => Some(matches[0].clone()),
         _ => {
+            // Multiple matches found. If sibling_filter is set, prefer directories
+            // that also have the sibling file (e.g., tsconfig.json next to package.json).
+            // This filters out e2e/test sub-projects that have package.json but no TS config.
+            if let Some(sibling) = sibling_filter {
+                let mut refined = Vec::new();
+                for dir in &matches {
+                    if tokio::fs::metadata(dir.join(sibling)).await.is_ok() {
+                        refined.push(dir.clone());
+                    }
+                }
+                if refined.len() == 1 {
+                    tracing::info!(
+                        "Multiple {} markers found; selected {} (has {} sibling)",
+                        marker,
+                        refined[0].display(),
+                        sibling,
+                    );
+                    return Some(refined[0].clone());
+                }
+                // refined.len() == 0 or still multiple — fall through to workspace root
+            }
+
             tracing::info!(
                 "Multiple {} marker files found in monorepo. Using workspace root {} as project root.",
                 marker,
@@ -810,6 +852,7 @@ pub async fn detect_languages(
                     workspace_root,
                     marker,
                     rust_plugin.marker_search_depth() as usize,
+                    None,
                 )
                 .await
                 {
@@ -902,6 +945,7 @@ pub async fn detect_languages(
                     workspace_root,
                     marker,
                     go_plugin.marker_search_depth() as usize,
+                    None,
                 )
                 .await
                 {
@@ -990,10 +1034,19 @@ pub async fn detect_languages(
         } else {
             let mut found = None;
             for marker in ts_plugin.marker_files() {
+                // For `package.json`, require a sibling `tsconfig.json` to
+                // avoid false-positive root detection in monorepos where
+                // e2e/test sub-projects have `package.json` without TS config.
+                let sibling = if *marker == "package.json" {
+                    Some("tsconfig.json")
+                } else {
+                    None
+                };
                 if let Some(r) = find_marker(
                     workspace_root,
                     marker,
                     ts_plugin.marker_search_depth() as usize,
+                    sibling,
                 )
                 .await
                 {
@@ -1103,6 +1156,7 @@ pub async fn detect_languages(
                     workspace_root,
                     marker,
                     py_plugin.marker_search_depth() as usize,
+                    None,
                 )
                 .await
                 {
@@ -1209,6 +1263,7 @@ pub async fn detect_languages(
                     workspace_root,
                     marker,
                     java_plugin.marker_search_depth() as usize,
+                    None,
                 )
                 .await
                 {
@@ -1746,7 +1801,7 @@ mod tests {
         let deep = dir.path().join("apps").join("backend");
         std::fs::create_dir_all(&deep).expect("create dirs");
         std::fs::write(deep.join("go.mod"), "module deep").expect("write");
-        let found = find_marker(dir.path(), "go.mod", 2).await;
+        let found = find_marker(dir.path(), "go.mod", 2, None).await;
         assert_eq!(
             found.as_deref(),
             Some(deep.as_path()),
@@ -1760,7 +1815,7 @@ mod tests {
         let sub = dir.path().join("sub");
         std::fs::create_dir_all(&sub).expect("create dir");
         std::fs::write(sub.join("Cargo.toml"), "[package]").expect("write");
-        let found = find_marker(dir.path(), "Cargo.toml", 0).await;
+        let found = find_marker(dir.path(), "Cargo.toml", 0, None).await;
         assert!(
             found.is_none(),
             "max_depth=0 must not recurse into subdirectories"
@@ -1770,7 +1825,7 @@ mod tests {
     #[tokio::test]
     async fn test_find_marker_missing_returns_none() {
         let dir = tempdir().expect("temp dir");
-        let found = find_marker(dir.path(), "no_such_marker_file.toml", 2).await;
+        let found = find_marker(dir.path(), "no_such_marker_file.toml", 2, None).await;
         assert!(found.is_none(), "absent marker must return None");
     }
 
@@ -3041,7 +3096,7 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("write");
 
-        let found = find_marker(dir.path(), "Cargo.toml", 0).await;
+        let found = find_marker(dir.path(), "Cargo.toml", 0, None).await;
         assert_eq!(found.as_deref(), Some(dir.path()));
     }
 
@@ -3052,7 +3107,7 @@ mod tests {
         std::fs::create_dir_all(&sub).expect("create dir");
         std::fs::write(sub.join("go.mod"), "module backend").expect("write");
 
-        let found = find_marker(dir.path(), "go.mod", 2).await;
+        let found = find_marker(dir.path(), "go.mod", 2, None).await;
         assert_eq!(found.as_deref(), Some(sub.as_path()));
     }
 
@@ -3066,7 +3121,7 @@ mod tests {
         std::fs::write(sub1.join("go.mod"), "module backend").expect("write");
         std::fs::write(sub2.join("go.mod"), "module worker").expect("write");
 
-        let found = find_marker(dir.path(), "go.mod", 2).await;
+        let found = find_marker(dir.path(), "go.mod", 2, None).await;
         assert_eq!(found.as_deref(), Some(dir.path()));
     }
 
@@ -3210,8 +3265,8 @@ mod tests {
         std::fs::create_dir_all(&deep).expect("create dirs");
         std::fs::write(deep.join("Cargo.toml"), "[package]").expect("write");
 
-        let result_depth_2 = find_marker(dir.path(), "Cargo.toml", 2).await;
-        let result_depth_5 = find_marker(dir.path(), "Cargo.toml", 5).await;
+        let result_depth_2 = find_marker(dir.path(), "Cargo.toml", 2, None).await;
+        let result_depth_5 = find_marker(dir.path(), "Cargo.toml", 5, None).await;
         assert_eq!(
             result_depth_2, result_depth_5,
             "max_depth=5 must behave identically to max_depth=2 (clamped)"
@@ -3231,10 +3286,90 @@ mod tests {
         std::fs::create_dir_all(&deep).expect("create dirs");
         std::fs::write(deep.join("go.mod"), "module deep").expect("write");
 
-        let found = find_marker(dir.path(), "go.mod", 100).await;
+        let found = find_marker(dir.path(), "go.mod", 100, None).await;
         assert!(
             found.is_none(),
             "max_depth is clamped to 2, so depth-3 marker must not be found"
+        );
+    }
+
+    // ── Monorepo TS detection: sibling_filter ──────────────────────────
+
+    #[tokio::test]
+    async fn test_find_marker_sibling_filter_multi_match_prefers_with_sibling() {
+        // Monorepo: apps/e2e/package.json (no tsconfig) + apps/frontend/package.json + tsconfig
+        let dir = tempdir().expect("temp dir");
+        let e2e = dir.path().join("apps").join("e2e");
+        let frontend = dir.path().join("apps").join("frontend");
+        std::fs::create_dir_all(&e2e).expect("create e2e");
+        std::fs::create_dir_all(&frontend).expect("create frontend");
+
+        // e2e has package.json but NO tsconfig.json
+        std::fs::write(e2e.join("package.json"), "{}").expect("write");
+        // frontend has both
+        std::fs::write(frontend.join("package.json"), "{}").expect("write");
+        std::fs::write(frontend.join("tsconfig.json"), "{}").expect("write");
+
+        // With sibling_filter on multi-match: only frontend should be selected
+        let found = find_marker(dir.path(), "package.json", 2, Some("tsconfig.json")).await;
+
+        assert_eq!(
+            found.as_deref(),
+            Some(frontend.as_path()),
+            "multi-match: should pick the directory that has both package.json AND tsconfig.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_sibling_filter_single_match_accepts_without_sibling() {
+        // Pure JS project: single package.json, no tsconfig.json anywhere.
+        // sibling_filter only applies to multi-match, so single match is accepted.
+        let dir = tempdir().expect("temp dir");
+        let sub = dir.path().join("apps").join("myapp");
+        std::fs::create_dir_all(&sub).expect("create dir");
+        std::fs::write(sub.join("package.json"), "{}").expect("write");
+
+        let found = find_marker(dir.path(), "package.json", 2, Some("tsconfig.json")).await;
+        assert_eq!(
+            found.as_deref(),
+            Some(sub.as_path()),
+            "single match with sibling_filter: should accept (pure JS project)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_sibling_filter_multi_match_all_rejected_falls_back_to_root() {
+        // Multiple package.json, NONE have tsconfig.json — fall back to workspace root.
+        let dir = tempdir().expect("temp dir");
+        let e2e = dir.path().join("apps").join("e2e");
+        let scripts = dir.path().join("apps").join("scripts");
+        std::fs::create_dir_all(&e2e).expect("create e2e");
+        std::fs::create_dir_all(&scripts).expect("create scripts");
+
+        std::fs::write(e2e.join("package.json"), "{}").expect("write");
+        std::fs::write(scripts.join("package.json"), "{}").expect("write");
+        // No tsconfig.json in either
+
+        let found = find_marker(dir.path(), "package.json", 2, Some("tsconfig.json")).await;
+        assert_eq!(
+            found.as_deref(),
+            Some(dir.path()),
+            "multi-match, none have sibling: should fall back to workspace root"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_marker_sibling_filter_none_keeps_original_behavior() {
+        let dir = tempdir().expect("temp dir");
+        let sub = dir.path().join("apps").join("e2e");
+        std::fs::create_dir_all(&sub).expect("create dir");
+        std::fs::write(sub.join("package.json"), "{}").expect("write");
+
+        // Without sibling_filter: old behavior — finds the marker
+        let found = find_marker(dir.path(), "package.json", 2, None).await;
+        assert!(
+            found.is_some(),
+            "without sibling_filter, find_marker should still find the marker"
         );
     }
 }

@@ -538,7 +538,7 @@ impl PathfinderServer {
             Some("ready") => Some(false),
             _ => None,
         };
-        let resolution_strategy = if engines.contains(&"lsp") {
+        let resolution_strategy = if !degraded && engines.contains(&"lsp") {
             Some("lsp_call_hierarchy".to_owned())
         } else if degraded {
             // Distinguish: LSP was never available vs LSP failed vs grep fallback.
@@ -575,6 +575,7 @@ impl PathfinderServer {
             resolution_strategy,
             duration_ms: Some(millis_to_u64(duration_ms)),
             imports,
+            content: Some(scope.content.clone()),
         };
 
         // Build the dependency block: list each callee signature, file, and line.
