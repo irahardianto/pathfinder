@@ -1701,6 +1701,27 @@ mod missing_coverage_tests {
         assert_eq!(result.matches.len(), 1);
     }
 
+    #[tokio::test]
+    async fn test_search_skips_always_excluded_dirs_like_qlty() {
+        let dir = make_workspace(&[
+            ("main.rs", "fn main() { findme(); }"),
+            (".qlty/cache/binary", "findme"),
+            ("node_modules/dep/index.js", "findme"),
+        ]);
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].file, "main.rs");
+        assert_eq!(result.files_searched, 1, "only main.rs should be searched");
+    }
+
     /// Regression test: `.github/` must NOT be excluded by the `.git/` entry
     /// in `ALWAYS_EXCLUDED_DIRS`. Previously the Windows-path check stripped
     /// the trailing `/` producing `.git`, which prefix-matched `.github/`.
@@ -1725,6 +1746,18 @@ mod missing_coverage_tests {
                 None,
             ),
             ".git/config should be excluded"
+        );
+
+        // .qlty/ files MUST be excluded.
+        assert!(
+            !filter_entry(
+                ".qlty/cache/index",
+                std::path::Path::new(".qlty/cache/index"),
+                "**/*",
+                &glob_matcher,
+                None,
+            ),
+            ".qlty/cache/index should be excluded"
         );
 
         // .github/ files must NOT be excluded.

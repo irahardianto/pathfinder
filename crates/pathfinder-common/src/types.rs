@@ -20,6 +20,7 @@ pub const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
     ".idea/",
     ".vscode/",
     "__pycache__/",
+    ".qlty/",
 ];
 
 /// A parsed semantic path in the format `file_path[::symbol_chain]`.
