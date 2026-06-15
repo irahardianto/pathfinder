@@ -163,6 +163,24 @@ impl<'a> SymbolExtractionContext<'a> {
             self.extract_nested_symbols(child, &path, &mut symbol.children);
         }
 
+        // Extract nested function definitions inside function bodies.
+        // This captures inner functions in Python (`def outer(): def inner():`)
+        // and JavaScript/TypeScript closures. Rust/Go/Java don't have common
+        // inner-function patterns at the symbol level, so we skip them to
+        // avoid recursing into every function body unnecessarily.
+        if matches!(sk, SymbolKind::Function | SymbolKind::Method)
+            && matches!(
+                self.lang,
+                SupportedLanguage::Python
+                    | SupportedLanguage::JavaScript
+                    | SupportedLanguage::TypeScript
+                    | SupportedLanguage::Tsx
+                    | SupportedLanguage::Vue
+            )
+        {
+            self.extract_nested_symbols(child, &path, &mut symbol.children);
+        }
+
         if matches!(sk, SymbolKind::Function)
             && matches!(
                 self.lang,
@@ -3705,5 +3723,50 @@ where\n\
             .iter()
             .all(|s| !s.name.contains('<') && !s.name.contains('>'));
         assert!(no_bad_names, "No symbol should have '<' or '>' in name");
+    }
+
+    /// Nested Python function: `def outer(): def inner()` → `outer` has child `inner`
+    /// with `semantic_path` `outer.inner`.
+    #[test]
+    fn test_python_nested_function_captured_as_child() {
+        let source = "def outer():\n    def inner():\n        pass\n    return inner\n";
+        let symbols = parse_and_extract(source, SupportedLanguage::Python);
+
+        let outer = symbols
+            .iter()
+            .find(|s| s.name == "outer")
+            .expect("outer function must be extracted");
+        assert_eq!(outer.kind, SymbolKind::Function);
+
+        let inner = outer
+            .children
+            .iter()
+            .find(|c| c.name == "inner")
+            .expect("inner function must be a child of outer");
+        assert_eq!(inner.kind, SymbolKind::Function);
+        assert_eq!(
+            inner.semantic_path, "outer.inner",
+            "inner function path must be outer.inner"
+        );
+    }
+
+    /// Nested JS function: arrow function inside outer function is captured.
+    #[test]
+    fn test_js_nested_function_captured_as_child() {
+        let source = "function outer() {\n  function inner() { return 1; }\n  return inner;\n}\n";
+        let symbols = parse_and_extract(source, SupportedLanguage::JavaScript);
+
+        let outer = symbols
+            .iter()
+            .find(|s| s.name == "outer")
+            .expect("outer function must be extracted");
+
+        let inner = outer
+            .children
+            .iter()
+            .find(|c| c.name == "inner")
+            .expect("inner function must be a child of outer");
+        assert_eq!(inner.kind, SymbolKind::Function);
+        assert_eq!(inner.semantic_path, "outer.inner");
     }
 }
