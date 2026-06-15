@@ -1633,14 +1633,21 @@ mod tests {
         let result = detect_languages(dir.path(), &make_ts_config())
             .await
             .expect("detect");
-        
+
         let ts_detected = result
             .detected
             .iter()
             .find(|l| l.language_id == "typescript");
-        assert!(ts_detected.is_some(), "TypeScript should be detected in monorepo despite no root tsconfig.json");
-        let ts = ts_detected.unwrap();
-        assert_eq!(ts.root, dir.path(), "Fallback should resolve to workspace root");
+        assert!(
+            ts_detected.is_some(),
+            "TypeScript should be detected in monorepo despite no root tsconfig.json"
+        );
+        let ts = ts_detected.expect("TypeScript should be detected");
+        assert_eq!(
+            ts.root,
+            dir.path(),
+            "Fallback should resolve to workspace root"
+        );
     }
 
     #[tokio::test]

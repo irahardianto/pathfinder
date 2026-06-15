@@ -6,9 +6,29 @@ use serde::{Deserialize, Serialize};
 /// How indexing completion was determined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum IndexingCompletionSource {
-    /// LSP sent `WorkDoneProgressEnd` notification.
+    /// LSP sent `WorkDoneProgressEnd` notification — indexing completion confirmed.
     Progress,
-    /// Timeout elapsed without `WorkDoneProgressEnd`, assumed complete.
+    /// Timeout elapsed without `WorkDoneProgressEnd` notification; indexing assumed complete.
+    ///
+    /// **What this means:**
+    /// The LSP did not send a progress-end notification within the expected window, so
+    /// Pathfinder assumed indexing was done and allowed tool requests to proceed.
+    ///
+    /// **When this is normal:**
+    /// Some LSP servers (e.g., older versions of gopls, pyright) never send
+    /// `WorkDoneProgressEnd` — they only send diagnostics. In this case,
+    /// `timeout_fallback` is expected and LSP-backed tools work correctly.
+    ///
+    /// **When this indicates a problem:**
+    /// If `navigation_ready=false` AND `indexing_source="timeout_fallback"`, the LSP
+    /// may have crashed or stalled before completing indexing. In this case:
+    ///   1. Check `health` again in 10-30 seconds.
+    ///   2. Use `health { action: "restart" }` to force-restart the LSP.
+    ///   3. If it persists, check LSP server logs.
+    ///
+    /// **Impact on tool results:**
+    /// `timeout_fallback` alone does not degrade tool results — only `navigation_ready`
+    /// determines whether LSP-backed features (`locate`, `trace`) are available.
     TimeoutFallback,
 }
 
@@ -52,6 +72,12 @@ pub struct LspLanguageStatus {
     /// `None` when the server omits `serverInfo` or the process is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
+    /// How indexing completion was determined: `"progress"` or `"timeout_fallback"`.
+    ///
+    /// - `"progress"`: LSP confirmed via `WorkDoneProgressEnd` — reliable.
+    /// - `"timeout_fallback"`: LSP never sent completion signal; assumed complete after timeout.
+    ///   This is normal for some servers (gopls, pyright). Only a concern when
+    ///   combined with `navigation_ready=false`. See [`IndexingCompletionSource::TimeoutFallback`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
