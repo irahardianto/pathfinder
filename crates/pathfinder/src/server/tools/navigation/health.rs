@@ -410,10 +410,19 @@ impl PathfinderServer {
             }
         }
 
+        // P2-6: Derive top-level indexing_complete from per-language status.
+        // True when all languages have indexing_status != "in_progress".
+        // Languages with no indexing info (None) are treated as complete
+        // (they may be unavailable, so there's nothing to index).
+        let indexing_complete = languages
+            .iter()
+            .all(|l| l.indexing_status.as_deref() != Some("in_progress"));
+
         let response = crate::server::types::LspHealthResponse {
             status: overall_status.to_owned(),
             languages,
             warm_start_complete: self.lawyer.is_warm_start_complete(),
+            indexing_complete,
             known_limitations,
         };
 
@@ -3043,6 +3052,130 @@ mod tests {
         assert!(
             !text.contains("server:"),
             "no server name should mean no 'server:' in text, got: {text}"
+        );
+    }
+
+    // ── P2-6: Top-level indexing_complete boolean ──────────────────────
+
+    #[tokio::test]
+    async fn test_health_indexing_complete_true_when_all_done() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Two languages, both fully indexed
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([
+            (
+                "rust".to_string(),
+                pathfinder_lsp::types::LspLanguageStatus {
+                    validation: true,
+                    reason: "LSP connected".to_string(),
+                    navigation_ready: Some(true),
+                    indexing_complete: Some(true),
+                    uptime_seconds: Some(30),
+                    diagnostics_strategy: Some("pull".to_string()),
+                    supports_definition: Some(true),
+                    supports_call_hierarchy: Some(true),
+                    supports_diagnostics: Some(true),
+                    supports_formatting: Some(true),
+                    server_name: None,
+                    indexing_source: None,
+                    indexing_duration_secs: None,
+                    indexing_progress_percent: None,
+                    registrations_received: None,
+                },
+            ),
+            (
+                "go".to_string(),
+                pathfinder_lsp::types::LspLanguageStatus {
+                    validation: true,
+                    reason: "LSP connected".to_string(),
+                    navigation_ready: Some(true),
+                    indexing_complete: Some(true),
+                    uptime_seconds: Some(20),
+                    diagnostics_strategy: Some("push".to_string()),
+                    supports_definition: Some(true),
+                    supports_call_hierarchy: Some(true),
+                    supports_diagnostics: Some(true),
+                    supports_formatting: Some(false),
+                    server_name: None,
+                    indexing_source: None,
+                    indexing_duration_secs: None,
+                    indexing_progress_percent: None,
+                    registrations_received: None,
+                },
+            ),
+        ]));
+
+        let params = crate::server::types::HealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let val = unpack_health(result.expect("should succeed"));
+
+        assert!(
+            val.indexing_complete,
+            "indexing_complete should be true when all languages are done indexing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_indexing_complete_false_when_one_indexing() {
+        let surgeon = Arc::new(MockSurgeon::default());
+        let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+        let lawyer_clone = lawyer.clone();
+        let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        // Rust: done indexing. Go: still indexing.
+        lawyer_clone.set_capability_status(std::collections::HashMap::from([
+            (
+                "rust".to_string(),
+                pathfinder_lsp::types::LspLanguageStatus {
+                    validation: true,
+                    reason: "LSP connected".to_string(),
+                    navigation_ready: Some(true),
+                    indexing_complete: Some(true),
+                    uptime_seconds: Some(30),
+                    diagnostics_strategy: Some("pull".to_string()),
+                    supports_definition: Some(true),
+                    supports_call_hierarchy: Some(true),
+                    supports_diagnostics: Some(true),
+                    supports_formatting: Some(true),
+                    server_name: None,
+                    indexing_source: None,
+                    indexing_duration_secs: None,
+                    indexing_progress_percent: None,
+                    registrations_received: None,
+                },
+            ),
+            (
+                "go".to_string(),
+                pathfinder_lsp::types::LspLanguageStatus {
+                    validation: true,
+                    reason: "LSP connected".to_string(),
+                    navigation_ready: Some(true),
+                    indexing_complete: Some(false), // still indexing
+                    uptime_seconds: Some(5),
+                    diagnostics_strategy: Some("push".to_string()),
+                    supports_definition: Some(true),
+                    supports_call_hierarchy: Some(true),
+                    supports_diagnostics: Some(true),
+                    supports_formatting: Some(false),
+                    server_name: None,
+                    indexing_source: None,
+                    indexing_duration_secs: None,
+                    indexing_progress_percent: Some(45),
+                    registrations_received: None,
+                },
+            ),
+        ]));
+
+        let params = crate::server::types::HealthParams::default();
+        let result = server.lsp_health_impl(params).await;
+        let val = unpack_health(result.expect("should succeed"));
+
+        assert!(
+            !val.indexing_complete,
+            "indexing_complete should be false when any language is still indexing"
         );
     }
 }
