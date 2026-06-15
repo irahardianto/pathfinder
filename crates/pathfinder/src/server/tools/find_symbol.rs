@@ -606,8 +606,8 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
             || kind.eq_ignore_ascii_case("interface")
     } else if filter.eq_ignore_ascii_case("struct") {
         kind.eq_ignore_ascii_case("struct")
-    } else if filter.eq_ignore_ascii_case("interface") {
-        kind.eq_ignore_ascii_case("interface")
+    } else if filter.eq_ignore_ascii_case("interface") || filter.eq_ignore_ascii_case("trait") {
+        kind.eq_ignore_ascii_case("interface") || kind.eq_ignore_ascii_case("trait")
     } else if filter.eq_ignore_ascii_case("enum") {
         kind.eq_ignore_ascii_case("enum")
     } else if filter.eq_ignore_ascii_case("constant") {
@@ -870,6 +870,9 @@ mod tests {
         assert!(kind_matches_filter("fn", "function"));
         assert!(kind_matches_filter("method", "function"));
         assert!(kind_matches_filter("interface", "class"));
+        assert!(kind_matches_filter("interface", "trait"));
+        assert!(kind_matches_filter("trait", "interface"));
+        assert!(kind_matches_filter("trait", "trait"));
         assert!(kind_matches_filter("const", "constant"));
         assert!(kind_matches_filter("mod", "module"));
 
