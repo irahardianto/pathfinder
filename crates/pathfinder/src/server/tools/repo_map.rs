@@ -212,7 +212,7 @@ impl PathfinderServer {
 
         // Apply detail overrides to depth and max_tokens
         let (depth, max_tokens) = match params.detail {
-            Detail::Structure => (params.depth.min(1), params.max_tokens.min(4_000)),
+            Detail::Structure => (params.depth, params.max_tokens.min(4_000)),
             Detail::Files => (params.depth.min(3), params.max_tokens.min(8_000)),
             Detail::Symbols => (params.depth, params.max_tokens),
         };
@@ -249,12 +249,18 @@ impl PathfinderServer {
 
         // Clamp to reasonable bounds: minimum 500 (usable output), max 100k (memory safety)
         let max_tokens = effective_max_tokens.clamp(500, 100_000);
+        let skeleton_detail = match params.detail {
+            Detail::Structure => pathfinder_treesitter::repo_map::SkeletonDetail::Structure,
+            Detail::Files => pathfinder_treesitter::repo_map::SkeletonDetail::Files,
+            Detail::Symbols => pathfinder_treesitter::repo_map::SkeletonDetail::Symbols,
+        };
         let config = pathfinder_treesitter::repo_map::SkeletonConfig::new(
             max_tokens,
             depth,
             visibility_str,
             params.max_tokens_per_file,
         )
+        .with_detail(skeleton_detail)
         .with_changed_files(changed_files)
         .with_include_extensions(params.include_extensions)
         .with_exclude_extensions(params.exclude_extensions)

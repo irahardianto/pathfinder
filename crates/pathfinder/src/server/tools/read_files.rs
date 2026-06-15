@@ -253,10 +253,11 @@ impl PathfinderServer {
                     });
 
                     let (content, total_lines, version_hash) = if let Some(content) = content {
+                        // short() = 7-char hex; consistent with the explore tool's version_hashes format.
                         let version_hash =
                             pathfinder_common::types::VersionHash::compute(content.as_bytes())
-                                .as_str()
-                                .to_string();
+                                .short()
+                                .to_owned();
                         let truncated = truncate_content(&content, params.max_lines_per_file);
                         let total = u32::try_from(truncated.lines().count()).unwrap_or(u32::MAX);
                         (Some(truncated), Some(total), Some(version_hash))
@@ -327,9 +328,10 @@ impl PathfinderServer {
                 }
             };
 
+            // short() = 7-char hex; consistent with the explore tool's version_hashes format.
             let version_hash = pathfinder_common::types::VersionHash::compute(content.as_bytes())
-                .as_str()
-                .to_string();
+                .short()
+                .to_owned();
             let content = truncate_content(&content, params.max_lines_per_file);
             let total_lines = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
             let language = language_from_path(Path::new(file_path));
@@ -683,24 +685,23 @@ mod tests {
             serde_json::from_value(result1.structured_content.unwrap()).unwrap();
         let hash1 = response1.files[0].version_hash.as_ref().unwrap().clone();
 
+        // read tool now emits short() — 7-char hex, consistent with explore's version_hashes.
+        assert_eq!(hash1.len(), 7, "hash should be 7 hex chars (short format)");
         assert!(
-            hash1.starts_with("sha256:"),
-            "hash should start with 'sha256:'"
-        );
-        let hex_part = &hash1[7..];
-        assert_eq!(
-            hex_part.len(),
-            64,
-            "hash should have 64 hex chars after prefix"
+            hash1.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash should be lowercase hex only, got: {hash1}"
         );
         assert!(
-            hex_part.chars().all(|c| c.is_ascii_hexdigit()),
-            "hash should be hex only"
+            !hash1.starts_with("sha256:"),
+            "read tool must not emit sha256: prefix; that would diverge from explore"
         );
 
         let binding = pathfinder_common::types::VersionHash::compute(content.as_bytes());
-        let expected_hash = binding.as_str();
-        assert_eq!(hash1, expected_hash, "hash should match computed SHA-256");
+        let expected_hash = binding.short();
+        assert_eq!(
+            hash1, expected_hash,
+            "hash should match VersionHash::short()"
+        );
     }
 
     #[tokio::test]
@@ -1056,9 +1057,11 @@ mod tests {
         let file_result = &response.files[0];
         assert!(file_result.version_hash.is_some());
         let hash = file_result.version_hash.as_ref().unwrap();
-        assert!(hash.starts_with("sha256:"));
+        // short format: 7-char hex, no sha256: prefix
+        assert_eq!(hash.len(), 7, "hash must be 7-char short format");
+        assert!(!hash.starts_with("sha256:"), "must not have sha256: prefix");
         let expected = pathfinder_common::types::VersionHash::compute(content.as_bytes());
-        assert_eq!(hash, expected.as_str());
+        assert_eq!(hash, expected.short());
     }
 
     #[tokio::test]
