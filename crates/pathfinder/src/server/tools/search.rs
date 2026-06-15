@@ -74,8 +74,8 @@ impl PathfinderServer {
     ) -> Result<Json<SearchCodebaseResponse>, ErrorData> {
         let start = std::time::Instant::now();
         let is_regex = matches!(params.mode, SearchMode::Regex);
-        let group_by_file = true;
-        let filter_mode = FilterMode::CodeOnly;
+        let group_by_file = params.group_by_file;
+        let filter_mode = params.filter_mode;
 
         tracing::info!(
             tool = "search_codebase",
@@ -1201,5 +1201,139 @@ mod tests {
             hint.contains("No matches found"),
             "hint should mention no matches, got: {hint}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_search_group_by_file_parameter() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(ws_dir.path().join("src/lib.rs"), "fn find_me() {}\n").unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        // For 1 match:
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("code".to_string()));
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon.clone(), lawyer);
+
+        // Scenario 1: group_by_file = true
+        let params_grouped = SearchParams {
+            query: "find_me".to_owned(),
+            mode: SearchMode::Text,
+            path_glob: "**/*.rs".to_owned(),
+            max_results: 10,
+            group_by_file: true,
+            ..Default::default()
+        };
+        let response_grouped = server.search_codebase_impl(params_grouped).await.expect("grouped search should succeed").0;
+        assert!(response_grouped.file_groups.is_some(), "file_groups should be present");
+        assert_eq!(response_grouped.total_matches, 1);
+
+        // Scenario 2: group_by_file = false
+        // For the next call, re-push mock results for the match
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("code".to_string()));
+
+        let params_flat = SearchParams {
+            query: "find_me".to_owned(),
+            mode: SearchMode::Text,
+            path_glob: "**/*.rs".to_owned(),
+            max_results: 10,
+            group_by_file: false,
+            ..Default::default()
+        };
+        let response_flat = server.search_codebase_impl(params_flat).await.expect("flat search should succeed").0;
+        assert!(response_flat.file_groups.is_none(), "file_groups should not be present");
+        assert_eq!(response_flat.total_matches, 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_filter_mode_parameter() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+        let config = PathfinderConfig::default();
+        let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+        std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+        std::fs::write(
+            ws_dir.path().join("src/lib.rs"),
+            "fn find_me() {}\n// find_me in comment\n",
+        )
+        .unwrap();
+
+        let scout = Arc::new(RipgrepScout);
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+        let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon.clone(), lawyer);
+
+        // Scenario 1: filter_mode = FilterMode::CommentsOnly
+        // Ripgrep will find 2 matches.
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("code".to_string()));
+
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("comment".to_string()));
+
+        let params_comments = SearchParams {
+            query: "find_me".to_owned(),
+            mode: SearchMode::Text,
+            path_glob: "**/*.rs".to_owned(),
+            max_results: 10,
+            filter_mode: FilterMode::CommentsOnly,
+            ..Default::default()
+        };
+        let response_comments = server.search_codebase_impl(params_comments).await.expect("comments search should succeed").0;
+        assert_eq!(response_comments.total_matches, 1);
+        assert_eq!(response_comments.matches[0].content, "// find_me in comment");
+
+        // Scenario 2: filter_mode = FilterMode::CodeOnly
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("code".to_string()));
+
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("comment".to_string()));
+
+        let params_code = SearchParams {
+            query: "find_me".to_owned(),
+            mode: SearchMode::Text,
+            path_glob: "**/*.rs".to_owned(),
+            max_results: 10,
+            filter_mode: FilterMode::CodeOnly,
+            ..Default::default()
+        };
+        let response_code = server.search_codebase_impl(params_code).await.expect("code search should succeed").0;
+        assert_eq!(response_code.total_matches, 1);
+        assert_eq!(response_code.matches[0].content, "fn find_me() {}");
+
+        // Scenario 3: filter_mode = FilterMode::All
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("code".to_string()));
+
+        surgeon.enclosing_symbol_results.lock().unwrap().push(Ok(None));
+        surgeon.enclosing_symbol_detail_results.lock().unwrap().push(Ok(None));
+        surgeon.node_type_at_position_results.lock().unwrap().push(Ok("comment".to_string()));
+
+        let params_all = SearchParams {
+            query: "find_me".to_owned(),
+            mode: SearchMode::Text,
+            path_glob: "**/*.rs".to_owned(),
+            max_results: 10,
+            filter_mode: FilterMode::All,
+            ..Default::default()
+        };
+        let response_all = server.search_codebase_impl(params_all).await.expect("all search should succeed").0;
+        assert_eq!(response_all.total_matches, 2);
     }
 }

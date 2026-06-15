@@ -7,7 +7,7 @@
 //! can remove its struct's allow without touching unrelated items.
 #![allow(dead_code)] // Fields are read by serde deserialization, not by name
 
-use pathfinder_common::types::{ActionableGuidance, DegradedReason};
+use pathfinder_common::types::{ActionableGuidance, DegradedReason, FilterMode};
 use rmcp::schemars;
 use rmcp::serde::{self, Deserialize, Serialize};
 
@@ -956,7 +956,7 @@ pub enum SearchMode {
 }
 
 /// Parameters for the `search` tool (merges `search_codebase` + `find_symbol`).
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
     /// Search pattern (literal text, regex, or symbol name depending on `mode`).
     pub query: String,
@@ -992,6 +992,30 @@ pub struct SearchParams {
     /// Only used when `mode` is `symbol`.
     #[serde(default)]
     pub kind: Option<String>,
+    /// Group matches by file path. Default: true.
+    #[serde(default = "default_group_by_file")]
+    pub group_by_file: bool,
+    /// Filter results: `all`, `code_only`, or `comments_only`. Default: `code_only`.
+    #[serde(default = "default_filter_mode")]
+    pub filter_mode: FilterMode,
+}
+
+impl Default for SearchParams {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            mode: SearchMode::Text,
+            path_glob: default_path_glob(),
+            max_results: default_max_results(),
+            context_lines: default_context_lines(),
+            known_files: Vec::new(),
+            exclude_glob: String::new(),
+            offset: 0,
+            kind: None,
+            group_by_file: default_group_by_file(),
+            filter_mode: default_filter_mode(),
+        }
+    }
 }
 
 /// Parameters for the `read` tool (merges `read_file` + `read_source_file` + `read_files`).
@@ -1198,6 +1222,14 @@ pub fn default_detail_level() -> String {
 pub const fn default_explore_depth() -> u32 {
     3
 }
+#[must_use]
+pub const fn default_group_by_file() -> bool {
+    true
+}
+#[must_use]
+pub const fn default_filter_mode() -> FilterMode {
+    FilterMode::CodeOnly
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1218,6 +1250,8 @@ mod tests {
         assert_eq!(default_start_line(), 1);
         assert_eq!(default_max_lines(), 500);
         assert_eq!(default_detail_level(), "compact");
+        assert_eq!(default_group_by_file(), true);
+        assert_eq!(default_filter_mode(), FilterMode::CodeOnly);
     }
 
     #[test]

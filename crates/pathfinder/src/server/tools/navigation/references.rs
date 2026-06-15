@@ -95,6 +95,7 @@ impl PathfinderServer {
             exclude_glob: String::new(),
             offset: params.offset,
             kind: None,
+            ..Default::default()
         };
 
         let result = match self.search_codebase_impl(search_params).await {
