@@ -3,6 +3,77 @@ version = 1
 name = "pathfinder"
 
 # ──────────────────────────────────────────────
+# Test patterns — tell DeepSource which files are test code
+# ──────────────────────────────────────────────
+
+# Must match the project's naming convention:
+#   *_test.rs  — unit tests co-located with source (e.g., scope_resolver_test.rs)
+#   tests.rs   — inline test modules (e.g., exploration/tests.rs)
+#   tests/**   — integration test directories (e.g., crates/pathfinder/tests/)
+test_patterns = [
+  "**/tests/**",
+  "**/*_test.rs",
+  "**/tests.rs",
+]
+
+# ──────────────────────────────────────────────
+# Exclude patterns — paths to skip during analysis and coverage
+# ──────────────────────────────────────────────
+
+# target/ is auto-excluded by DeepSource for Rust projects, but be explicit
+# about other non-source directories.
+#
+# IMPORTANT: This key MUST appear before [[analyzers]] and [[transformers]]
+# to remain a top-level key. TOML array-of-tables ([[...]]) creates a scope
+# that captures any keys defined after them.
+exclude_patterns = [
+  # ── Non-source directories ──
+  ".agents/**",
+  "docs/**",
+  "banner.jpeg",
+
+  # ── Test infrastructure (subprocess fixtures) ──
+  # test-mock-lsp is a standalone binary used as a test fixture (subprocess).
+  # Coverage tools cannot trace across process boundaries, so its source lines
+  # are always reported as uncovered even though they execute during integration
+  # tests. Excluding it keeps the coverage metric meaningful.
+  "crates/test-mock-lsp/**",
+
+  # ── Integration test directories ──
+  # Test code in crates/*/tests/ (integration tests, common helpers, fixtures).
+  # These are classified as test code by test_patterns above, but excluding them
+  # from analysis prevents DeepSource from raising style/complexity issues on
+  # test infrastructure that has intentionally different quality standards.
+  "crates/*/tests/**",
+
+  # ── Benchmark harnesses ──
+  # Benchmark harnesses use intentional patterns (black_box, criterion setup)
+  # that look like dead code or anti-patterns to static analyzers.
+  # They are not production code and should not affect coverage or analysis.
+  "crates/*/benches/**",
+
+  # ── Binary entry points ──
+  # main.rs is the binary entry point: Tokio runtime construction + CLI parsing.
+  # fn main() and the runtime block_on() cannot be unit-tested without spawning
+  # the actual process. Coverage is structurally low by necessity —
+  # the logic it wires up is fully covered by integration tests.
+  "crates/pathfinder/src/main.rs",
+
+  # ── Mock / fake / no-op implementations ──
+  # Test doubles that exist in src/ to satisfy trait bounds in tests.
+  # They inflate or deflate coverage depending on test exercise patterns,
+  # distorting the metric for actual production logic.
+  "crates/*/src/mock.rs",
+  "crates/*/src/**/fake_*.rs",
+  "crates/pathfinder-lsp/src/no_op.rs",
+
+  # ── Test helpers inside src/ tree ──
+  # Helper functions that exist in src/ solely to support tests.
+  # Not production logic; should not count toward coverage.
+  "**/test_helpers.rs",
+]
+
+# ──────────────────────────────────────────────
 # Analyzers
 # ──────────────────────────────────────────────
 
@@ -49,20 +120,3 @@ enabled = true
 [[transformers]]
 name = "rustfmt"
 enabled = false
-
-# ──────────────────────────────────────────────
-# Exclude patterns — paths to skip during analysis
-# ──────────────────────────────────────────────
-
-# target/ is auto-excluded by DeepSource for Rust projects, but be explicit
-# about other non-source directories.
-exclude_patterns = [
-  ".pi/**",
-  "docs/**",
-  "banner.jpeg",
-  # test-mock-lsp is a standalone binary used as a test fixture (subprocess).
-  # Coverage tools cannot trace across process boundaries, so its source lines
-  # are always reported as uncovered even though they execute during integration
-  # tests. Excluding it keeps the coverage metric meaningful.
-  "crates/test-mock-lsp/**",
-]

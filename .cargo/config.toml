@@ -3,11 +3,14 @@
 # Aliases for common commands with sensible defaults.
 
 [alias]
-# Run test coverage with test-mock-lsp excluded (it's a test-only utility).
+# Run test coverage with test-mock-lsp excluded (it's a test-only utility binary)
+# and main.rs excluded (binary entry point — Tokio runtime setup + CLI parsing
+# cannot be unit-tested without spawning the full process; logic is covered by
+# integration tests).
 # Usage:
 #   cargo coverage          # Run all tests + show coverage summary
 #   cargo coverage --json   # Run tests + output JSON report
-coverage = "llvm-cov --workspace --exclude test-mock-lsp"
+coverage = "llvm-cov --workspace --exclude test-mock-lsp --ignore-filename-regex 'main\\.rs$'"
 
 # Show existing coverage report (after running tests).
 # Equivalent to: cargo llvm-cov report
@@ -16,4 +19,4 @@ coverage-report = "llvm-cov report"
 
 # Same as coverage but using cargo-nextest as the test runner (faster).
 # Requires cargo-nextest to be installed.
-coverage-nextest = "llvm-cov --workspace --exclude test-mock-lsp --nextest"
+coverage-nextest = "llvm-cov --workspace --exclude test-mock-lsp --ignore-filename-regex 'main\\.rs$' --nextest"
