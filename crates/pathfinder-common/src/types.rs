@@ -518,6 +518,58 @@ impl fmt::Display for DegradedReason {
     }
 }
 
+/// Fallback tool to use for authoritative results when degraded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackTool {
+    Search,
+    Read,
+}
+
+impl FallbackTool {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FallbackTool::Search => "search",
+            FallbackTool::Read => "read",
+        }
+    }
+}
+
+impl fmt::Display for FallbackTool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Trust level of the degraded results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevel {
+    Unreliable,
+    Heuristic,
+    Partial,
+    None,
+}
+
+impl TrustLevel {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TrustLevel::Unreliable => "unreliable",
+            TrustLevel::Heuristic => "heuristic",
+            TrustLevel::Partial => "partial",
+            TrustLevel::None => "none",
+        }
+    }
+}
+
+impl fmt::Display for TrustLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Actionable guidance for handling degraded tool responses.
 ///
 /// Gives agents machine-readable next steps: whether to retry, which fallback
@@ -528,16 +580,18 @@ pub struct ActionableGuidance {
     /// Whether retrying after a delay is recommended.
     pub retry_recommended: bool,
     /// How many seconds to wait before retrying (if `retry_recommended` is true).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_seconds: Option<u32>,
     /// Fallback tool to use for authoritative results (if available).
-    pub fallback_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_tool: Option<FallbackTool>,
     /// Trust level of the degraded results.
     ///
-    /// - `"unreliable"`: Results should not be trusted, especially empty counts.
-    /// - `"heuristic"`: Best-effort grep-based results. Verify manually.
-    /// - `"partial"`: Some features unavailable, but available results are correct.
-    /// - `"none"`: Results are unavailable for this language.
-    pub trust_level: String,
+    /// - `Unreliable`: Results should not be trusted, especially empty counts.
+    /// - `Heuristic`: Best-effort grep-based results. Verify manually.
+    /// - `Partial`: Some features unavailable, but available results are correct.
+    /// - `None`: Results are unavailable for this language.
+    pub trust_level: TrustLevel,
     /// Whether this degradation is permanent (won't improve on retry).
     pub permanent: bool,
 }
@@ -555,23 +609,23 @@ impl DegradedReason {
             DegradedReason::NoLsp => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("search".to_owned()),
-                trust_level: "partial".to_owned(),
+                fallback_tool: Some(FallbackTool::Search),
+                trust_level: TrustLevel::Partial,
                 permanent: true,
             },
             DegradedReason::LspWarmupEmptyUnverified => ActionableGuidance {
                 retry_recommended: true,
                 retry_after_seconds: Some(15),
                 fallback_tool: None,
-                trust_level: "unreliable".to_owned(),
+                trust_level: TrustLevel::Unreliable,
                 permanent: false,
             },
             DegradedReason::LspWarmupGrepFallback | DegradedReason::LspTimeoutGrepFallback => {
                 ActionableGuidance {
                     retry_recommended: true,
                     retry_after_seconds: Some(30),
-                    fallback_tool: Some("search".to_owned()),
-                    trust_level: "heuristic".to_owned(),
+                    fallback_tool: Some(FallbackTool::Search),
+                    trust_level: TrustLevel::Heuristic,
                     permanent: false,
                 }
             }
@@ -583,29 +637,29 @@ impl DegradedReason {
             | DegradedReason::GrepFallbackDependencies => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("search".to_owned()),
-                trust_level: "heuristic".to_owned(),
+                fallback_tool: Some(FallbackTool::Search),
+                trust_level: TrustLevel::Heuristic,
                 permanent: true,
             },
             DegradedReason::UnsupportedLanguageFilterBypassed => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("read".to_owned()),
-                trust_level: "partial".to_owned(),
+                fallback_tool: Some(FallbackTool::Read),
+                trust_level: TrustLevel::Partial,
                 permanent: true,
             },
             DegradedReason::UnsupportedLanguage => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some("read".to_owned()),
-                trust_level: "none".to_owned(),
+                fallback_tool: Some(FallbackTool::Read),
+                trust_level: TrustLevel::None,
                 permanent: true,
             },
             DegradedReason::GitError => ActionableGuidance {
                 retry_recommended: true,
                 retry_after_seconds: Some(5),
                 fallback_tool: None,
-                trust_level: "partial".to_owned(),
+                trust_level: TrustLevel::Partial,
                 permanent: false,
             },
         }
@@ -922,8 +976,8 @@ mod tests {
         let g = DegradedReason::NoLsp.guidance();
         assert!(!g.retry_recommended);
         assert!(g.permanent);
-        assert_eq!(g.fallback_tool.as_deref(), Some("search"));
-        assert_eq!(g.trust_level, "partial");
+        assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+        assert_eq!(g.trust_level, TrustLevel::Partial);
     }
 
     #[test]
@@ -941,8 +995,8 @@ mod tests {
         let g = DegradedReason::LspErrorGrepFallback.guidance();
         assert!(!g.retry_recommended);
         assert!(g.permanent);
-        assert_eq!(g.fallback_tool.as_deref(), Some("search"));
-        assert_eq!(g.trust_level, "heuristic");
+        assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+        assert_eq!(g.trust_level, TrustLevel::Heuristic);
     }
 
     #[test]
@@ -1039,5 +1093,136 @@ mod tests {
                 "retry_recommended must match the presence of retry_after_seconds for variant {variant:?}"
             );
         }
+    }
+
+    // ── FallbackTool serde roundtrip ───────────────────────────────────────
+
+    #[test]
+    fn test_fallback_tool_serde_roundtrip() {
+        let variants = [
+            (FallbackTool::Search, "\"search\""),
+            (FallbackTool::Read, "\"read\""),
+        ];
+        for (variant, expected_json) in variants {
+            let serialized =
+                serde_json::to_string(&variant).expect("FallbackTool should serialize");
+            assert_eq!(serialized, expected_json);
+            let deserialized: FallbackTool =
+                serde_json::from_str(&serialized).expect("FallbackTool should deserialize");
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    // ── TrustLevel serde roundtrip ────────────────────────────────────────
+
+    #[test]
+    fn test_trust_level_serde_roundtrip() {
+        let variants = [
+            (TrustLevel::Unreliable, "\"unreliable\""),
+            (TrustLevel::Heuristic, "\"heuristic\""),
+            (TrustLevel::Partial, "\"partial\""),
+            (TrustLevel::None, "\"none\""),
+        ];
+        for (variant, expected_json) in variants {
+            let serialized = serde_json::to_string(&variant).expect("TrustLevel should serialize");
+            assert_eq!(serialized, expected_json);
+            let deserialized: TrustLevel =
+                serde_json::from_str(&serialized).expect("TrustLevel should deserialize");
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    // ── ActionableGuidance serde roundtrip ─────────────────────────────────
+
+    #[test]
+    fn test_actionable_guidance_serde_roundtrip() {
+        // Case 1: all Option fields populated
+        let guidance = ActionableGuidance {
+            retry_recommended: true,
+            retry_after_seconds: Some(30),
+            fallback_tool: Some(FallbackTool::Search),
+            trust_level: TrustLevel::Heuristic,
+            permanent: false,
+        };
+        let serialized =
+            serde_json::to_string(&guidance).expect("ActionableGuidance should serialize");
+        let deserialized: ActionableGuidance =
+            serde_json::from_str(&serialized).expect("ActionableGuidance should deserialize");
+        assert_eq!(deserialized, guidance);
+
+        // Case 2: fallback_tool=None — must NOT appear as "null" in JSON
+        // (validates skip_serializing_if = "Option::is_none" is present)
+        let no_fallback = DegradedReason::GitError.guidance(); // fallback_tool: None, retry_after_seconds: Some(5)
+        let serialized_no_fallback =
+            serde_json::to_string(&no_fallback).expect("ActionableGuidance should serialize");
+        assert!(
+            !serialized_no_fallback.contains("\"fallback_tool\":null"),
+            "fallback_tool=None should be omitted, not serialized as null. Got: {serialized_no_fallback}"
+        );
+        let deserialized_no_fallback: ActionableGuidance =
+            serde_json::from_str(&serialized_no_fallback)
+                .expect("ActionableGuidance should deserialize");
+        assert_eq!(deserialized_no_fallback, no_fallback);
+
+        // Case 3: retry_after_seconds=None — must NOT appear as "null" in JSON
+        let no_retry = DegradedReason::NoLsp.guidance(); // retry_after_seconds: None, fallback_tool: None
+        let serialized_no_retry =
+            serde_json::to_string(&no_retry).expect("ActionableGuidance should serialize");
+        assert!(
+            !serialized_no_retry.contains("\"retry_after_seconds\":null"),
+            "retry_after_seconds=None should be omitted, not serialized as null. Got: {serialized_no_retry}"
+        );
+        assert!(
+            !serialized_no_retry.contains("\"fallback_tool\":null"),
+            "fallback_tool=None should be omitted, not serialized as null. Got: {serialized_no_retry}"
+        );
+        let deserialized_no_retry: ActionableGuidance = serde_json::from_str(&serialized_no_retry)
+            .expect("ActionableGuidance should deserialize");
+        assert_eq!(deserialized_no_retry, no_retry);
+    }
+
+    // ── guidance() field-level tests for uncovered arms ────────────────────
+
+    #[test]
+    fn test_guidance_lsp_warmup_grep_fallback() {
+        let g = DegradedReason::LspWarmupGrepFallback.guidance();
+        assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+        assert_eq!(g.trust_level, TrustLevel::Heuristic);
+        assert!(!g.permanent);
+        assert!(g.retry_recommended);
+    }
+
+    #[test]
+    fn test_guidance_lsp_timeout_grep_fallback() {
+        let g = DegradedReason::LspTimeoutGrepFallback.guidance();
+        assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+        assert_eq!(g.trust_level, TrustLevel::Heuristic);
+        assert!(!g.permanent);
+        assert!(g.retry_recommended);
+    }
+
+    #[test]
+    fn test_guidance_unsupported_language_filter_bypassed() {
+        let g = DegradedReason::UnsupportedLanguageFilterBypassed.guidance();
+        assert_eq!(g.fallback_tool, Some(FallbackTool::Read));
+        assert_eq!(g.trust_level, TrustLevel::Partial);
+        assert!(g.permanent);
+    }
+
+    #[test]
+    fn test_guidance_unsupported_language() {
+        let g = DegradedReason::UnsupportedLanguage.guidance();
+        assert_eq!(g.fallback_tool, Some(FallbackTool::Read));
+        assert_eq!(g.trust_level, TrustLevel::None);
+        assert!(g.permanent);
+    }
+
+    #[test]
+    fn test_guidance_git_error() {
+        let g = DegradedReason::GitError.guidance();
+        assert!(g.retry_recommended);
+        assert_eq!(g.retry_after_seconds, Some(5));
+        assert_eq!(g.fallback_tool, None);
+        assert!(!g.permanent);
     }
 }

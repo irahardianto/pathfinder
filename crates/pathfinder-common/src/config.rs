@@ -53,13 +53,22 @@ impl PathfinderConfig {
     /// If it doesn't exist, defaults are returned.
     ///
     /// # Errors
-    /// Returns an error if the file exists but contains invalid JSON.
+    /// Returns an error if the file exists but contains invalid JSON or fails validation.
     pub async fn load(workspace_root: &Path) -> Result<Self, ConfigError> {
         let config_path = workspace_root.join("pathfinder.config.json");
 
-        if !config_path.exists() {
-            tracing::debug!("No pathfinder.config.json found, using defaults");
-            return Ok(Self::default());
+        match tokio::fs::metadata(&config_path).await {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("No pathfinder.config.json found, using defaults");
+                return Ok(Self::default());
+            }
+            Err(e) => {
+                return Err(ConfigError::ReadFailed {
+                    path: config_path,
+                    source: e,
+                });
+            }
+            Ok(_) => {}
         }
 
         let content =
@@ -76,8 +85,33 @@ impl PathfinderConfig {
                 source: e,
             })?;
 
+        config.validate()?;
+
         tracing::info!("Loaded configuration from pathfinder.config.json");
         Ok(config)
+    }
+
+    /// Validate configuration values.
+    ///
+    /// # Errors
+    /// Returns a `ConfigValidationError` if any configuration value is invalid.
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let log_level = self.log_level.to_lowercase();
+        if !matches!(
+            log_level.as_str(),
+            "trace" | "debug" | "info" | "warn" | "error"
+        ) {
+            return Err(ConfigValidationError::InvalidLogLevel(
+                self.log_level.clone(),
+            ));
+        }
+        if self.search.max_results == 0 {
+            return Err(ConfigValidationError::InvalidMaxResults);
+        }
+        if self.repo_map.max_tokens == 0 {
+            return Err(ConfigValidationError::InvalidMaxTokens);
+        }
+        Ok(())
     }
 }
 
@@ -171,6 +205,22 @@ impl Default for RepoMapConfig {
     }
 }
 
+/// Errors that can occur during configuration validation.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigValidationError {
+    /// Invalid log level.
+    #[error("invalid log level: '{0}' (expected 'trace', 'debug', 'info', 'warn', or 'error')")]
+    InvalidLogLevel(String),
+
+    /// Search results count is zero or negative.
+    #[error("search.max_results must be greater than zero")]
+    InvalidMaxResults,
+
+    /// Repo map max tokens is zero or negative.
+    #[error("repo_map.max_tokens must be greater than zero")]
+    InvalidMaxTokens,
+}
+
 /// Configuration loading errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -191,6 +241,10 @@ pub enum ConfigError {
         /// Underlying JSON parsing error.
         source: serde_json::Error,
     },
+
+    /// Error when configuration validation fails.
+    #[error("invalid configuration: {0}")]
+    ValidationError(#[from] ConfigValidationError),
 }
 
 fn default_log_level() -> String {
@@ -218,7 +272,7 @@ fn default_token_method() -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -298,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_valid_config_from_file() {
         let temp = tempdir().expect("create tempdir");
-        let config_json = r#"{ "log_level": "trace", "idle_timeout": 30 }"#;
+        let config_json = r#"{ "log_level": "trace" }"#;
         std::fs::write(temp.path().join("pathfinder.config.json"), config_json)
             .expect("should write config");
 
@@ -338,6 +392,33 @@ mod tests {
         assert_eq!(ts_config.typescript_plugins.len(), 2);
         assert_eq!(ts_config.typescript_plugins[0], "@vue/typescript-plugin");
         assert_eq!(ts_config.typescript_plugins[1], "@angular/language-service");
+    }
+
+    #[test]
+    fn test_validation_invalid_log_level() {
+        let json = r#"{ "log_level": "banana" }"#;
+        let config: PathfinderConfig = serde_json::from_str(json).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_zero_max_results() {
+        let json = r#"{ "search": { "max_results": 0 } }"#;
+        let config: PathfinderConfig = serde_json::from_str(json).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_zero_max_tokens() {
+        let json = r#"{ "repo_map": { "max_tokens": 0 } }"#;
+        let config: PathfinderConfig = serde_json::from_str(json).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_valid_cases() {
+        let config = PathfinderConfig::default();
+        assert!(config.validate().is_ok());
     }
 
     // ── Phase 2 §5: [lsp.java] config section ────────────────────────────────
@@ -464,5 +545,60 @@ mod tests {
             "typescript-language-server"
         );
         assert_eq!(config.lsp["typescript"].args, vec!["--stdio"]);
+    }
+
+    #[tokio::test]
+    async fn test_load_rejects_invalid_config_from_file() {
+        let temp = tempdir().expect("create tempdir");
+        let config_json = r#"{ "log_level": "banana" }"#;
+        std::fs::write(temp.path().join("pathfinder.config.json"), config_json)
+            .expect("should write config");
+
+        let result = PathfinderConfig::load(temp.path()).await;
+        assert!(result.is_err());
+        assert!(matches!(result, Err(ConfigError::ValidationError(_))));
+    }
+
+    #[test]
+    fn test_validation_mixed_case_log_level() {
+        for level in ["INFO", "Debug", "TRACE", "Warn", "ERROR"] {
+            let json = format!(r#"{{ "log_level": "{level}" }}"#);
+            let config: PathfinderConfig = serde_json::from_str(&json).unwrap();
+            assert!(
+                config.validate().is_ok(),
+                "log_level '{level}' should be accepted (case-insensitive)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validation_min_valid_values() {
+        let json = r#"{ "search": { "max_results": 1 }, "repo_map": { "max_tokens": 1 } }"#;
+        let config: PathfinderConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "max_results=1 and max_tokens=1 should be valid"
+        );
+    }
+
+    /// Verifies that a non-NotFound I/O error (e.g. path is a directory)
+    /// propagates as `ReadFailed` instead of being silently swallowed as defaults.
+    #[tokio::test]
+    async fn test_load_propagates_non_notfound_io_error() {
+        let temp = tempdir().expect("create tempdir");
+        // Create a directory named pathfinder.config.json — metadata() succeeds
+        // but read_to_string() will fail with IsADirectory (not NotFound).
+        let config_path = temp.path().join("pathfinder.config.json");
+        std::fs::create_dir(&config_path).expect("should create dir");
+
+        let result = PathfinderConfig::load(temp.path()).await;
+        assert!(
+            result.is_err(),
+            "should fail when config path is a directory"
+        );
+        assert!(
+            matches!(result, Err(ConfigError::ReadFailed { .. })),
+            "expected ReadFailed, got: {result:?}"
+        );
     }
 }
