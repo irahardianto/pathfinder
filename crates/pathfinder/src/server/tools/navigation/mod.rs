@@ -63,53 +63,6 @@ fn is_source_file(file: &str) -> bool {
     SOURCE_FILE_EXTENSIONS.contains(&ext)
 }
 
-/// Returns `true` if the file path looks like a test file.
-///
-/// Uses language-specific heuristics:
-/// - Rust: files ending in `_test.rs` or containing `mod tests`
-/// - Go: files ending in `_test.go`
-/// - Python: files starting with `test_` or containing test functions
-/// - TypeScript/JavaScript: files ending in `.test.ts`, `.spec.ts`, `.test.js`, `.spec.js`
-fn is_test_file(file: &str) -> bool {
-    let path = std::path::Path::new(file);
-    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let file_str = file.replace('\\', "/");
-
-    // Directory-based detection: files inside test/spec/__tests__ directories
-    if file_str.contains("/tests/")
-        || file_str.contains("/test/")
-        || file_str.contains("/spec/")
-        || file_str.contains("/specs/")
-        || file_str.contains("/__tests__/")
-        || file_str.contains("/__test__/")
-    {
-        return true;
-    }
-
-    match ext {
-        "rs" => filename.ends_with("_test.rs") || filename == "test.rs",
-        "go" => filename.ends_with("_test.go"),
-        "py" => filename.starts_with("test_") || filename == "conftest.py",
-        "java" => filename.ends_with("Test.java") || filename.ends_with("Tests.java"),
-        "kt" | "kts" => filename.ends_with("Test.kt") || filename.ends_with("Spec.kt"),
-        "cs" => filename.ends_with("Test.cs") || filename.ends_with("Tests.cs"),
-        "rb" => filename.ends_with("_test.rb") || filename.ends_with("_spec.rb"),
-        "dart" => filename.ends_with("_test.dart"),
-        "ts" | "tsx" | "js" | "jsx" => {
-            filename.ends_with(".test.ts")
-                || filename.ends_with(".spec.ts")
-                || filename.ends_with(".test.tsx")
-                || filename.ends_with(".spec.tsx")
-                || filename.ends_with(".test.js")
-                || filename.ends_with(".spec.js")
-                || filename.ends_with(".test.jsx")
-                || filename.ends_with(".spec.jsx")
-        }
-        _ => false,
-    }
-}
-
 /// Returns `true` if the file looks like it's from the user's workspace (not external/dependencies).
 ///
 /// Uses heuristic string matching — does not perform filesystem I/O — to avoid per-reference
@@ -1695,36 +1648,6 @@ def process():
             super::PathfinderServer::try_separator_correction("file.rs"),
             None
         );
-    }
-
-    #[test]
-    fn test_is_test_file_various_languages() {
-        // Kotlin test files
-        assert!(super::is_test_file("src/Test.kt"));
-        assert!(super::is_test_file("src/MySpec.kt"));
-        assert!(!super::is_test_file("src/Main.kt"));
-
-        // C# test files
-        assert!(super::is_test_file("src/Test.cs"));
-        assert!(super::is_test_file("src/MyTests.cs"));
-        assert!(!super::is_test_file("src/Program.cs"));
-
-        // Ruby test files
-        assert!(super::is_test_file("src/some_test.rb"));
-        assert!(super::is_test_file("src/some_spec.rb"));
-        assert!(!super::is_test_file("src/app.rb"));
-
-        // Dart test files
-        assert!(super::is_test_file("src/some_test.dart"));
-        assert!(!super::is_test_file("src/main.dart"));
-
-        // Directory-based detection
-        assert!(super::is_test_file("src/tests/helper.rs"));
-        assert!(super::is_test_file("src/test/helper.go"));
-        assert!(super::is_test_file("src/spec/helper.js"));
-        assert!(super::is_test_file("src/specs/helper.ts"));
-        assert!(super::is_test_file("src/__tests__/helper.tsx"));
-        assert!(super::is_test_file("src/__test__/helper.py"));
     }
 
     #[test]

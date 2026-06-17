@@ -4,7 +4,7 @@
 //! used by `read` (config file mode).
 
 use pathfinder_common::error::PathfinderError;
-use pathfinder_common::types::SemanticPath;
+use pathfinder_common::types::{SemanticPath, TrustLevel};
 use rmcp::model::{ErrorCode, ErrorData};
 use std::fmt::Write;
 use std::path::Path;
@@ -122,14 +122,17 @@ pub(crate) fn format_degraded_notice(reason: &pathfinder_common::types::Degraded
     let guidance = reason.guidance();
     let mut parts = vec![format!("DEGRADED ({reason})")];
 
-    match guidance.trust_level.as_str() {
-        "unreliable" => parts.push("results are UNRELIABLE, do not trust empty counts".into()),
-        "heuristic" => {
+    // Match on the enum directly (not .as_str()) so the compiler enforces exhaustiveness:
+    // adding a new TrustLevel variant will cause a compile error here, forcing an update.
+    match guidance.trust_level {
+        TrustLevel::Unreliable => {
+            parts.push("results are UNRELIABLE, do not trust empty counts".into());
+        }
+        TrustLevel::Heuristic => {
             parts.push("results are heuristic (grep-based), verify manually".into());
         }
-        "partial" => parts.push("results are PARTIAL, some features unavailable".into()),
-        "none" => parts.push("results are UNAVAILABLE for this language".into()),
-        _ => {}
+        TrustLevel::Partial => parts.push("results are PARTIAL, some features unavailable".into()),
+        TrustLevel::None => parts.push("results are UNAVAILABLE for this language".into()),
     }
 
     if let Some(fallback) = &guidance.fallback_tool {
@@ -351,23 +354,19 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_metadata_failure_logs_warning() {
-        // Create a type that cannot be serialized
-        // Using a struct with a non-serializable field
-        #[derive(serde::Serialize)]
-        struct Unserializable {
-            #[serde(skip)]
-            #[allow(dead_code)] // Field is intentionally unused for this test
-            non_serializable: std::rc::Rc<i32>,
+    fn test_serialize_metadata_failure_returns_none() {
+        // Custom type whose Serialize impl always fails.
+        struct AlwaysFail;
+        impl serde::Serialize for AlwaysFail {
+            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
         }
-        let data = Unserializable {
-            non_serializable: std::rc::Rc::new(42),
-        };
-        // This should not panic, just return None and log a warning
-        let result = super::serialize_metadata(&data);
-        // The result might be Some if Rc is skipped, or None if serialization fails
-        // Either way, it shouldn't panic
-        let _ = result;
+        let result = super::serialize_metadata(&AlwaysFail);
+        assert!(
+            result.is_none(),
+            "serialize_metadata should return None on serialization failure"
+        );
     }
 
     #[test]

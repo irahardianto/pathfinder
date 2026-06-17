@@ -241,6 +241,39 @@ impl PathfinderServer {
         }
     }
 
+    /// Runs sequential grep reference fallback and grep outgoing fallback.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_grep_fallbacks(
+        &self,
+        symbol_name: &str,
+        definition_path: &std::path::Path,
+        scope_content: &str,
+        scope_language: &str,
+        remaining_outgoing: u32,
+        project_only: bool,
+        files_referenced: &mut std::collections::HashSet<String>,
+    ) -> (
+        Option<Vec<crate::server::types::ImpactReference>>,
+        Option<Vec<crate::server::types::ImpactReference>>,
+    ) {
+        let incoming = self
+            .grep_reference_fallback(symbol_name, definition_path, files_referenced)
+            .await;
+
+        let outgoing = self
+            .grep_outgoing_fallback(
+                scope_content,
+                scope_language,
+                definition_path,
+                remaining_outgoing,
+                project_only,
+                files_referenced,
+            )
+            .await;
+
+        (incoming, outgoing)
+    }
+
     /// Performs BFS traversal of the call hierarchy in the specified direction.
     ///
     /// Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
@@ -573,45 +606,25 @@ impl PathfinderServer {
                     && outgoing.as_ref().is_none_or(Vec::is_empty)
                 {
                     let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-                    let mut grep_incoming = None;
-                    let mut grep_outgoing = None;
-
-                    if let Some(refs) = self
-                        .grep_reference_fallback(
+                    let (grep_in, grep_out) = self
+                        .run_grep_fallbacks(
                             &symbol_name,
                             &semantic_path.file_path,
-                            &mut files_referenced,
-                        )
-                        .await
-                    {
-                        if !refs.is_empty() {
-                            grep_incoming = Some(refs);
-                        }
-                    }
-
-                    if let Some(refs) = self
-                        .grep_outgoing_fallback(
                             &scope.content,
                             &scope.language,
-                            &semantic_path.file_path,
                             remaining_outgoing,
                             project_only,
                             &mut files_referenced,
                         )
-                        .await
-                    {
-                        if !refs.is_empty() {
-                            grep_outgoing = Some(refs);
-                        }
-                    }
+                        .await;
 
                     degraded = true;
                     degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-                    if grep_incoming.is_some() {
-                        incoming = grep_incoming;
+                    if grep_in.is_some() {
+                        incoming = grep_in;
                     }
-                    if grep_outgoing.is_some() {
-                        outgoing = grep_outgoing;
+                    if grep_out.is_some() {
+                        outgoing = grep_out;
                     }
                 }
             }
@@ -638,43 +651,23 @@ impl PathfinderServer {
                     // LSP is warm — definition resolved. But let's check for false negatives (indexing incomplete, etc.)
                     // by running grep fallback.
                     let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-                    let mut grep_incoming = None;
-                    let mut grep_outgoing = None;
-
-                    if let Some(refs) = self
-                        .grep_reference_fallback(
+                    let (grep_in, grep_out) = self
+                        .run_grep_fallbacks(
                             &symbol_name,
                             &semantic_path.file_path,
-                            &mut files_referenced,
-                        )
-                        .await
-                    {
-                        if !refs.is_empty() {
-                            grep_incoming = Some(refs);
-                        }
-                    }
-
-                    if let Some(refs) = self
-                        .grep_outgoing_fallback(
                             &scope.content,
                             &scope.language,
-                            &semantic_path.file_path,
                             remaining_outgoing,
                             project_only,
                             &mut files_referenced,
                         )
-                        .await
-                    {
-                        if !refs.is_empty() {
-                            grep_outgoing = Some(refs);
-                        }
-                    }
+                        .await;
 
                     engines.push("lsp");
                     degraded = true;
                     degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-                    incoming = grep_incoming.or(Some(Vec::new()));
-                    outgoing = grep_outgoing.or(Some(Vec::new()));
+                    incoming = grep_in.or(Some(Vec::new()));
+                    outgoing = grep_out.or(Some(Vec::new()));
                 } else {
                     // LSP likely still warming up — empty call hierarchy is not reliable.
                     // Degrade so agents know to verify before acting on "zero references".
@@ -689,17 +682,20 @@ impl PathfinderServer {
                     degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
 
                     let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-
-                    let mut grep_fallback_found = false;
-
-                    if let Some(refs) = self
-                        .grep_reference_fallback(
+                    let (grep_in, grep_out) = self
+                        .run_grep_fallbacks(
                             &symbol_name,
                             &semantic_path.file_path,
+                            &scope.content,
+                            &scope.language,
+                            remaining_outgoing,
+                            project_only,
                             &mut files_referenced,
                         )
-                        .await
-                    {
+                        .await;
+
+                    let mut grep_fallback_found = false;
+                    if let Some(refs) = grep_in {
                         incoming = Some(refs);
                         grep_fallback_found = true;
                         tracing::info!(
@@ -708,18 +704,7 @@ impl PathfinderServer {
                             "find_callers_callees: grep-based fallback references found during LSP warmup"
                         );
                     }
-
-                    if let Some(refs) = self
-                        .grep_outgoing_fallback(
-                            &scope.content,
-                            &scope.language,
-                            &semantic_path.file_path,
-                            remaining_outgoing,
-                            project_only,
-                            &mut files_referenced,
-                        )
-                        .await
-                    {
+                    if let Some(refs) = grep_out {
                         outgoing = Some(refs);
                         grep_fallback_found = true;
                         tracing::info!(
@@ -728,7 +713,6 @@ impl PathfinderServer {
                             "find_callers_callees: grep-based outgoing deps found during LSP warmup"
                         );
                     }
-
                     if grep_fallback_found {
                         degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
                     }
@@ -745,16 +729,20 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-                let mut grep_fallback_found = false;
-
-                if let Some(refs) = self
-                    .grep_reference_fallback(
+                let (grep_in, grep_out) = self
+                    .run_grep_fallbacks(
                         &symbol_name,
                         &semantic_path.file_path,
+                        &scope.content,
+                        &scope.language,
+                        remaining_outgoing,
+                        project_only,
                         &mut files_referenced,
                     )
-                    .await
-                {
+                    .await;
+
+                let mut grep_fallback_found = false;
+                if let Some(refs) = grep_in {
                     incoming = Some(refs);
                     grep_fallback_found = true;
                     tracing::info!(
@@ -763,18 +751,7 @@ impl PathfinderServer {
                         "find_callers_callees: grep-based fallback references found"
                     );
                 }
-
-                if let Some(refs) = self
-                    .grep_outgoing_fallback(
-                        &scope.content,
-                        &scope.language,
-                        &semantic_path.file_path,
-                        remaining_outgoing,
-                        project_only,
-                        &mut files_referenced,
-                    )
-                    .await
-                {
+                if let Some(refs) = grep_out {
                     outgoing = Some(refs);
                     grep_fallback_found = true;
                     tracing::info!(
@@ -783,7 +760,6 @@ impl PathfinderServer {
                         "find_callers_callees: grep-based outgoing deps found"
                     );
                 }
-
                 if grep_fallback_found {
                     degraded_reason = Some(DegradedReason::NoLspGrepFallback);
                 }
@@ -802,15 +778,19 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-
-                if let Some(refs) = self
-                    .grep_reference_fallback(
+                let (grep_in, grep_out) = self
+                    .run_grep_fallbacks(
                         &symbol_name,
                         &semantic_path.file_path,
+                        &scope.content,
+                        &scope.language,
+                        remaining_outgoing,
+                        project_only,
                         &mut files_referenced,
                     )
-                    .await
-                {
+                    .await;
+
+                if let Some(refs) = grep_in {
                     incoming = Some(refs);
                     tracing::info!(
                         tool = "find_callers_callees",
@@ -818,18 +798,7 @@ impl PathfinderServer {
                         "find_callers_callees: grep-based fallback references found after timeout"
                     );
                 }
-
-                if let Some(refs) = self
-                    .grep_outgoing_fallback(
-                        &scope.content,
-                        &scope.language,
-                        &semantic_path.file_path,
-                        remaining_outgoing,
-                        project_only,
-                        &mut files_referenced,
-                    )
-                    .await
-                {
+                if let Some(refs) = grep_out {
                     outgoing = Some(refs);
                     tracing::info!(
                         tool = "find_callers_callees",
@@ -853,15 +822,19 @@ impl PathfinderServer {
                 );
 
                 let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-
-                if let Some(refs) = self
-                    .grep_reference_fallback(
+                let (grep_in, grep_out) = self
+                    .run_grep_fallbacks(
                         &symbol_name,
                         &semantic_path.file_path,
+                        &scope.content,
+                        &scope.language,
+                        remaining_outgoing,
+                        project_only,
                         &mut files_referenced,
                     )
-                    .await
-                {
+                    .await;
+
+                if let Some(refs) = grep_in {
                     incoming = Some(refs);
                     tracing::info!(
                         tool = "find_callers_callees",
@@ -869,18 +842,7 @@ impl PathfinderServer {
                         "find_callers_callees: grep-based fallback references found after LSP error"
                     );
                 }
-
-                if let Some(refs) = self
-                    .grep_outgoing_fallback(
-                        &scope.content,
-                        &scope.language,
-                        &semantic_path.file_path,
-                        remaining_outgoing,
-                        project_only,
-                        &mut files_referenced,
-                    )
-                    .await
-                {
+                if let Some(refs) = grep_out {
                     outgoing = Some(refs);
                     tracing::info!(
                         tool = "find_callers_callees",
@@ -952,99 +914,8 @@ impl PathfinderServer {
             Some("treesitter_direct".to_owned())
         };
 
-        // Spec 4.2: Test coverage search
-        let (test_callers, test_coverage_status) = if false {
-            let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
-
-            if symbol_name.is_empty() {
-                (None, Some("not_found".to_owned()))
-            } else {
-                let mut test_refs = Vec::new();
-                let mut seen_test_positions = std::collections::HashSet::new();
-
-                // 1. Extract from incoming callers
-                if let Some(incoming_refs) = &incoming {
-                    for r in incoming_refs {
-                        if super::is_test_file(&r.file)
-                            && seen_test_positions.insert((r.file.clone(), r.line))
-                        {
-                            test_refs.push(crate::server::types::ImpactReference {
-                                semantic_path: r.semantic_path.clone(),
-                                file: r.file.clone(),
-                                line: r.line,
-                                snippet: r.snippet.clone(),
-                                direction: "test_coverage".to_owned(),
-                                depth: 0,
-                                // Inherit confidence from the source caller reference
-                                confidence: r.confidence.clone(),
-                            });
-                        }
-                    }
-                }
-
-                // 2. Search for the symbol name in test files.
-                // Broad glob covers test, spec, __tests__ directories and
-                // files like foo_test.rs, foo.test.ts, foo_spec.rb, test_foo.py.
-                let search_params = pathfinder_search::SearchParams {
-                    workspace_root: self.workspace_root.path().to_path_buf(),
-                    query: symbol_name.clone(),
-                    is_regex: false,
-                    path_glob: "**/*{test,spec,Test,Spec,__tests__}*".to_owned(),
-                    exclude_glob: String::new(),
-                    max_results: 100,
-                    offset: 0,
-                    context_lines: 2,
-                };
-
-                match self.scout.search(&search_params).await {
-                    Ok(results) => {
-                        for m in results.matches {
-                            if super::is_test_file(&m.file) {
-                                let line = usize::try_from(m.line).unwrap_or(0);
-                                if seen_test_positions.insert((m.file.clone(), line)) {
-                                    let fallback_path = format!("{}:{}", m.file, m.line);
-                                    test_refs.push(crate::server::types::ImpactReference {
-                                        semantic_path: m
-                                            .enclosing_semantic_path
-                                            .unwrap_or(fallback_path),
-                                        file: m.file,
-                                        line,
-                                        snippet: m.content,
-                                        direction: "test_coverage".to_owned(),
-                                        depth: 0,
-                                        confidence: Some("heuristic".to_owned()),
-                                    });
-                                }
-                            }
-                        }
-
-                        // Cap test references at 20 (just like original logic)
-                        test_refs.truncate(20);
-
-                        if test_refs.is_empty() {
-                            (None, Some("not_found".to_owned()))
-                        } else {
-                            (Some(test_refs), Some("found".to_owned()))
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            tool = "find_callers_callees",
-                            error = %e,
-                            "test coverage search failed"
-                        );
-                        if test_refs.is_empty() {
-                            (None, Some("unknown_degraded".to_owned()))
-                        } else {
-                            test_refs.truncate(20);
-                            (Some(test_refs), Some("found".to_owned()))
-                        }
-                    }
-                }
-            }
-        } else {
-            (None, None)
-        };
+        // Spec 4.2: Test coverage search (deactivated, keeping fields None for backwards compatibility)
+        let (test_callers, test_coverage_status) = (None, None);
 
         // P2-7: Generate a hint when zero incoming callers and not degraded.
         // Non-degraded + empty incoming = LSP confirmed zero callers, which could be
