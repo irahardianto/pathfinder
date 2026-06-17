@@ -364,12 +364,13 @@ pub struct RipgrepScout;
 /// pre-gitignore counting walk and the post-gitignore collection walk, preventing
 /// the filtering logic from drifting between the two.
 #[inline]
-fn filter_entry(
+fn filter_entry_impl(
     relative: &str,
     path: &std::path::Path,
     glob: &str,
     glob_matcher: &globset::GlobSet,
     exclude_matcher: Option<&globset::GlobSet>,
+    skip_binary: bool,
 ) -> bool {
     // 1. Always-excluded dirs (git internals, dependency directories, IDE configs).
     //    Use both Unix (/) and Windows (\) path separators for cross-platform support.
@@ -399,16 +400,32 @@ fn filter_entry(
     }
 
     // 4. Binary-extension filter.
-    if is_binary_extension(path) {
+    if skip_binary && is_binary_extension(path) {
         return false;
     }
 
     true
 }
 
+/// Convenience wrapper around [`filter_entry_impl`] that always skips binary files.
+///
+/// Used by the post-gitignore walk in [`walk_files`] where binary files should
+/// be excluded from the collected results.
+#[inline]
+fn filter_entry(
+    relative: &str,
+    path: &std::path::Path,
+    glob: &str,
+    glob_matcher: &globset::GlobSet,
+    exclude_matcher: Option<&globset::GlobSet>,
+) -> bool {
+    filter_entry_impl(relative, path, glob, glob_matcher, exclude_matcher, true)
+}
+
 impl RipgrepScout {
     /// Build a `RegexMatcher` from `params`, respecting `is_regex`.
     /// Uses thread-local cache to avoid re-compiling the same pattern.
+    #[tracing::instrument(skip(params))]
     fn build_matcher(params: &SearchParams) -> Result<RegexMatcher, SearchError> {
         let pattern = if params.is_regex {
             params.query.clone()
@@ -439,6 +456,7 @@ impl RipgrepScout {
     /// plus the count of files skipped because they matched known binary extensions, and the count of
     /// gitignored files that matched the glob but were excluded by gitignore.
     #[allow(clippy::type_complexity)]
+    #[tracing::instrument(skip(params))]
     fn walk_files(
         params: &SearchParams,
     ) -> Result<(Vec<(PathBuf, String)>, usize, usize), SearchError> {
@@ -499,39 +517,20 @@ impl RipgrepScout {
                 Err(_) => continue,
             };
 
-            // Check always-excluded dirs, glob, exclude-glob — but NOT binary yet,
-            // so we can count binaries separately.
-            if ALWAYS_EXCLUDED_DIRS.iter().any(|dir| {
-                let unix_dir = *dir;
-                let mut win_buf = String::with_capacity(unix_dir.len());
-                win_buf.push_str(&unix_dir[..unix_dir.len() - 1]);
-                win_buf.push('\\');
-                relative.starts_with(unix_dir) || relative.starts_with(&win_buf)
-            }) {
-                continue;
-            }
-
-            if !glob_matcher.is_match(&relative) && glob != "**/*" {
-                continue;
-            }
-
-            if let Some(ref excl_set) = exclude_matcher {
-                if excl_set.is_match(&relative) {
-                    continue;
+            if filter_entry_impl(
+                &relative,
+                &path,
+                glob,
+                &glob_matcher,
+                exclude_matcher.as_ref(),
+                false,
+            ) {
+                if is_binary_extension(&path) {
+                    binary_skipped += 1;
+                } else {
+                    total_files_without_gitignore += 1;
                 }
             }
-
-            // Count binary files separately from the total so gitignored_skipped is accurate.
-            // Previously binaries were silently skipped here without incrementing any counter,
-            // making the gitignored_skipped calculation subtract binary_skipped (from the second
-            // walk) from total_files_without_gitignore (which excluded binaries from the first
-            // walk) — a population mismatch. Now both populations exclude the same binaries.
-            if is_binary_extension(&path) {
-                binary_skipped += 1;
-                continue;
-            }
-
-            total_files_without_gitignore += 1;
         }
 
         // Second walk: gitignore enabled — collect files that actually pass all filters.
@@ -572,6 +571,7 @@ impl RipgrepScout {
 
 #[async_trait::async_trait]
 impl Scout for RipgrepScout {
+    #[tracing::instrument(skip(self, params))]
     async fn search(&self, params: &SearchParams) -> Result<SearchResult, SearchError> {
         let params_clone = params.clone();
         tokio::task::spawn_blocking(move || {
