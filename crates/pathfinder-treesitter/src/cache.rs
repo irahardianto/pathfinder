@@ -40,6 +40,12 @@ type InFlightParseMap = HashMap<PathBuf, InFlightParse>;
 /// Type alias for the in-flight Vue parse map.
 type InFlightVueParseMap = HashMap<PathBuf, InFlightVueParse>;
 
+#[derive(Clone)]
+enum ContentSource {
+    Disk,
+    Preloaded(Arc<[u8]>),
+}
+
 /// Contains the cached parsing result for a file.
 #[derive(Debug)]
 pub struct CacheEntry {
@@ -124,12 +130,85 @@ impl AstCache {
         path: &Path,
         lang: SupportedLanguage,
     ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
-        // --- Fast-path guard: single stat syscall ---
         let meta = tokio::fs::metadata(path)
             .await
             .map_err(|e| io_err(e, path))?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
+        self.get_or_parse_single_zone_impl(path, lang, current_mtime, ContentSource::Disk)
+            .await
+    }
+
+    /// Retrieve the tree and source code using pre-loaded content and mtime.
+    ///
+    /// Identical to [`get_or_parse`] but accepts pre-read file bytes and mtime
+    /// instead of reading from disk. Eliminates the double-read when the caller
+    /// already has the file content (e.g., `generate_skeleton_text`).
+    ///
+    /// # Errors
+    /// Returns `SurgeonError` if parsing fails.
+    #[instrument(skip(self, content), fields(cache_hit = false))]
+    pub async fn get_or_parse_preloaded(
+        &self,
+        path: &Path,
+        lang: SupportedLanguage,
+        content: Arc<[u8]>,
+        mtime: SystemTime,
+    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
+        self.get_or_parse_single_zone_impl(path, lang, mtime, ContentSource::Preloaded(content))
+            .await
+    }
+
+    /// Retrieve the multi-zone parse result for a Vue SFC.
+    ///
+    /// Uses file mtime as a fast-path guard identical to [`get_or_parse`].
+    /// On a cache miss, reads the SFC from disk and calls `parse_vue_multizone`.
+    ///
+    /// # Errors
+    /// Returns `SurgeonError` if I/O fails or the script zone fails to parse.
+    /// Template/style parse failures set `MultiZoneTree::degraded = true` but
+    /// are non-fatal.
+    #[instrument(skip(self), fields(cache_hit = false))]
+    pub async fn get_or_parse_vue(
+        &self,
+        path: &Path,
+    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
+        let meta = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| io_err(e, path))?;
+        let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        self.get_or_parse_vue_impl(path, current_mtime, ContentSource::Disk)
+            .await
+    }
+
+    /// Retrieve the multi-zone parse result for a Vue SFC using pre-loaded content.
+    ///
+    /// Identical to [`get_or_parse_vue`] but accepts pre-read file bytes and mtime
+    /// instead of reading from disk. Eliminates the double-read when the caller
+    /// already has the file content (e.g., `generate_skeleton_text`).
+    ///
+    /// # Errors
+    /// Returns `SurgeonError` if the script zone fails to parse.
+    #[instrument(skip(self, content), fields(cache_hit = false))]
+    pub async fn get_or_parse_vue_preloaded(
+        &self,
+        path: &Path,
+        content: &[u8],
+        mtime: SystemTime,
+    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
+        let content_arc = Arc::from(content);
+        self.get_or_parse_vue_impl(path, mtime, ContentSource::Preloaded(content_arc))
+            .await
+    }
+
+    async fn get_or_parse_single_zone_impl(
+        &self,
+        path: &Path,
+        lang: SupportedLanguage,
+        current_mtime: SystemTime,
+        content_source: ContentSource,
+    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
         let needs_hash_check = {
             let mut lock = self.entries.lock();
             if let Some(entry) = lock.get(path) {
@@ -144,9 +223,12 @@ impl AstCache {
         };
 
         if needs_hash_check {
-            let content = match tokio::fs::read(path).await {
-                Ok(c) => c,
-                Err(e) => return Err(io_err(e, path)),
+            let content = match &content_source {
+                ContentSource::Disk => match tokio::fs::read(path).await {
+                    Ok(c) => c,
+                    Err(e) => return Err(io_err(e, path)),
+                },
+                ContentSource::Preloaded(c) => c.to_vec(),
             };
             let current_hash = tokio::task::spawn_blocking(move || VersionHash::compute(&content))
                 .await
@@ -178,25 +260,34 @@ impl AstCache {
         let result = cell
             .get_or_init(|| {
                 let path_owned = path.to_path_buf();
+                let source = match &content_source {
+                    ContentSource::Disk => None,
+                    ContentSource::Preloaded(c) => Some(Arc::clone(c)),
+                };
                 async move {
                     // --- Slow path: full read + hash + parse ---
-                    let content = tokio::fs::read(&path_owned)
-                        .await
-                        .map_err(|e| io_err(e, &path_owned))?;
+                    let content_arc = if let Some(c) = source {
+                        c
+                    } else {
+                        let content = tokio::fs::read(&path_owned)
+                            .await
+                            .map_err(|e| io_err(e, &path_owned))?;
+                        Arc::from(content)
+                    };
 
                     // CLONE: content must be moved into spawn_blocking.
                     // The hash/parse CPU work goes to the blocking pool.
                     let (tree, current_hash, content_arc) = tokio::task::spawn_blocking({
                         let path = path_owned.clone();
+                        let content = Arc::clone(&content_arc);
                         move || {
                             let current_hash = VersionHash::compute(&content);
-                            let content_arc: Arc<[u8]> = Arc::from(content);
                             // For Vue SFCs, preprocess extracts the <script> block before parsing.
                             // The original `content` is kept for version hashing and change detection —
                             // only the input to the AST parser uses the processed bytes.
-                            let parse_input = lang.preprocess_source(&content_arc);
+                            let parse_input = lang.preprocess_source(&content);
                             let tree = AstParser::parse_source(&path, lang, &parse_input)?;
-                            Ok::<_, SurgeonError>((tree, current_hash, content_arc))
+                            Ok::<_, SurgeonError>((tree, current_hash, content))
                         }
                     })
                     .await
@@ -230,130 +321,12 @@ impl AstCache {
         result.as_ref().cloned().map_err(Clone::clone)
     }
 
-    /// Retrieve the tree and source code using pre-loaded content and mtime.
-    ///
-    /// Identical to [`get_or_parse`] but accepts pre-read file bytes and mtime
-    /// instead of reading from disk. Eliminates the double-read when the caller
-    /// already has the file content (e.g., `generate_skeleton_text`).
-    ///
-    /// # Errors
-    /// Returns `SurgeonError` if parsing fails.
-    #[instrument(skip(self, content), fields(cache_hit = false))]
-    pub async fn get_or_parse_preloaded(
+    async fn get_or_parse_vue_impl(
         &self,
         path: &Path,
-        lang: SupportedLanguage,
-        content: Arc<[u8]>,
-        mtime: SystemTime,
-    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
-        let needs_hash_check = {
-            let mut lock = self.entries.lock();
-            if let Some(entry) = lock.get(path) {
-                if entry.mtime == mtime && entry.lang == lang {
-                    tracing::Span::current().record("cache_hit", true);
-                    return Ok((entry.tree.clone(), entry.source.clone()));
-                }
-                entry.lang == lang
-            } else {
-                false
-            }
-        };
-
-        if needs_hash_check {
-            let content_clone = content.clone();
-            let current_hash =
-                tokio::task::spawn_blocking(move || VersionHash::compute(&content_clone))
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("spawn_blocking hash panicked: {e}");
-                        VersionHash::compute(&[])
-                    });
-
-            let mut lock = self.entries.lock();
-            if let Some(entry) = lock.get_mut(path) {
-                if entry.content_hash == current_hash && entry.lang == lang {
-                    entry.mtime = mtime;
-                    tracing::Span::current().record("cache_hit", true);
-                    return Ok((entry.tree.clone(), entry.source.clone()));
-                }
-            }
-        }
-
-        let cell = {
-            let mut in_flight = self.in_flight.lock();
-            in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
-        };
-
-        let result = cell
-            .get_or_init(|| {
-                let path_owned = path.to_path_buf();
-                // CLONE: content_arc must be moved into spawn_blocking.
-                // It's Arc, so clone is refcount increment only.
-                let content_arc = content.clone();
-                async move {
-                    let (tree, current_hash, content_arc) = tokio::task::spawn_blocking({
-                        let path = path_owned.clone();
-                        let content = content_arc.clone();
-                        move || {
-                            let current_hash = VersionHash::compute(&content);
-                            let parse_input = lang.preprocess_source(&content);
-                            let tree = AstParser::parse_source(&path, lang, &parse_input)?;
-                            Ok::<_, SurgeonError>((tree, current_hash, content))
-                        }
-                    })
-                    .await
-                    .map_err(|join_err| SurgeonError::ParseError {
-                        path: path_owned.clone(),
-                        reason: format!("spawn_blocking panicked: {join_err}"),
-                    })??;
-
-                    // Fast cache insertion back on async worker (nanoseconds)
-                    self.entries.lock().put(
-                        path_owned.clone(),
-                        CacheEntry {
-                            tree: tree.clone(),
-                            source: content_arc.clone(),
-                            content_hash: current_hash,
-                            lang,
-                            mtime,
-                        },
-                    );
-
-                    Ok::<_, SurgeonError>((tree, content_arc))
-                }
-            })
-            .await;
-
-        {
-            let mut in_flight = self.in_flight.lock();
-            in_flight.remove(path);
-        }
-
-        result.as_ref().cloned().map_err(Clone::clone)
-    }
-
-    /// Retrieve the multi-zone parse result for a Vue SFC.
-    ///
-    /// Uses file mtime as a fast-path guard identical to [`get_or_parse`].
-    /// On a cache miss, reads the SFC from disk and calls `parse_vue_multizone`.
-    ///
-    /// # Errors
-    /// Returns `SurgeonError` if I/O fails or the script zone fails to parse.
-    /// Template/style parse failures set `MultiZoneTree::degraded = true` but
-    /// are non-fatal.
-    #[instrument(skip(self), fields(cache_hit = false))]
-    pub async fn get_or_parse_vue(
-        &self,
-        path: &Path,
+        current_mtime: SystemTime,
+        content_source: ContentSource,
     ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
-        let meta = tokio::fs::metadata(path)
-            .await
-            .map_err(|e| io_err(e, path))?;
-        let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-
         let needs_hash_check = {
             let mut lock = self.vue_entries.lock();
             if let Some(entry) = lock.get(path) {
@@ -369,8 +342,13 @@ impl AstCache {
         };
 
         if needs_hash_check {
-            let content = tokio::fs::read(path).await.map_err(|e| io_err(e, path))?;
-
+            let content = match &content_source {
+                ContentSource::Disk => match tokio::fs::read(path).await {
+                    Ok(c) => c,
+                    Err(e) => return Err(io_err(e, path)),
+                },
+                ContentSource::Preloaded(c) => c.to_vec(),
+            };
             let current_hash = tokio::task::spawn_blocking(move || VersionHash::compute(&content))
                 .await
                 .unwrap_or_else(|e| {
@@ -402,16 +380,26 @@ impl AstCache {
         let result = cell
             .get_or_init(|| {
                 let path_owned = path.to_path_buf();
+                let source = match &content_source {
+                    ContentSource::Disk => None,
+                    ContentSource::Preloaded(c) => Some(Arc::clone(c)),
+                };
                 async move {
                     // --- Slow path ---
-                    let content = tokio::fs::read(&path_owned)
-                        .await
-                        .map_err(|e| io_err(e, &path_owned))?;
+                    let content_arc = if let Some(c) = source {
+                        c
+                    } else {
+                        let content = tokio::fs::read(&path_owned)
+                            .await
+                            .map_err(|e| io_err(e, &path_owned))?;
+                        Arc::from(content)
+                    };
 
                     // CLONE: content must be moved into spawn_blocking.
                     // The hash + parse_vue_multizone CPU work goes to blocking pool.
                     let (multi, content_hash) = tokio::task::spawn_blocking({
                         let path = path_owned.clone();
+                        let content = Arc::clone(&content_arc);
                         move || {
                             let content_hash = VersionHash::compute(&content);
                             let multi = parse_vue_multizone(&content).map_err(|e| {
@@ -438,115 +426,6 @@ impl AstCache {
                             multi: cached_multi,
                             content_hash: content_hash.clone(),
                             mtime: current_mtime,
-                        },
-                    );
-
-                    Ok::<_, SurgeonError>((multi, content_hash))
-                }
-            })
-            .await;
-
-        {
-            let mut vue_in_flight = self.vue_in_flight.lock();
-            vue_in_flight.remove(path);
-        }
-
-        result.as_ref().cloned().map_err(Clone::clone)
-    }
-
-    /// Retrieve the multi-zone parse result for a Vue SFC using pre-loaded content.
-    ///
-    /// Identical to [`get_or_parse_vue`] but accepts pre-read file bytes and mtime
-    /// instead of reading from disk. Eliminates the double-read when the caller
-    /// already has the file content (e.g., `generate_skeleton_text`).
-    ///
-    /// # Errors
-    /// Returns `SurgeonError` if the script zone fails to parse.
-    #[instrument(skip(self, content), fields(cache_hit = false))]
-    pub async fn get_or_parse_vue_preloaded(
-        &self,
-        path: &Path,
-        content: &[u8],
-        mtime: SystemTime,
-    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
-        let needs_hash_check = {
-            let mut lock = self.vue_entries.lock();
-            if let Some(entry) = lock.get(path) {
-                if entry.mtime == mtime {
-                    tracing::Span::current().record("cache_hit", true);
-                    let multi = (*entry.multi).clone();
-                    return Ok((multi, entry.content_hash.clone()));
-                }
-                true
-            } else {
-                false
-            }
-        };
-
-        if needs_hash_check {
-            let owned_content = content.to_vec();
-            let current_hash =
-                tokio::task::spawn_blocking(move || VersionHash::compute(&owned_content))
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("spawn_blocking hash panicked: {e}");
-                        VersionHash::compute(&[])
-                    });
-
-            let mut lock = self.vue_entries.lock();
-            if let Some(entry) = lock.get_mut(path) {
-                if entry.content_hash == current_hash {
-                    entry.mtime = mtime;
-                    tracing::Span::current().record("cache_hit", true);
-                    let multi = (*entry.multi).clone();
-                    return Ok((multi, entry.content_hash.clone()));
-                }
-            }
-        }
-
-        let cell = {
-            let mut vue_in_flight = self.vue_in_flight.lock();
-            vue_in_flight
-                .entry(path.to_path_buf())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
-        };
-
-        let result = cell
-            .get_or_init(|| {
-                let path_owned = path.to_path_buf();
-                // CLONE: content is &[u8], must own it for spawn_blocking.
-                let owned_content = content.to_vec();
-                async move {
-                    // The hash + parse_vue_multizone CPU work goes to blocking pool.
-                    let (multi, content_hash) = tokio::task::spawn_blocking({
-                        let path = path_owned.clone();
-                        move || {
-                            let content_hash = VersionHash::compute(&owned_content);
-                            let multi = parse_vue_multizone(&owned_content).map_err(|e| {
-                                SurgeonError::ParseError {
-                                    path,
-                                    reason: format!("Vue multi-zone parse failed: {e}"),
-                                }
-                            })?;
-                            Ok::<_, SurgeonError>((multi, content_hash))
-                        }
-                    })
-                    .await
-                    .map_err(|join_err| SurgeonError::ParseError {
-                        path: path_owned.clone(),
-                        reason: format!("spawn_blocking panicked: {join_err}"),
-                    })??;
-
-                    let cached_multi = Arc::new(multi.clone());
-
-                    // Fast cache insertion back on async worker (nanoseconds)
-                    self.vue_entries.lock().put(
-                        path_owned.clone(),
-                        MultiZoneEntry {
-                            multi: cached_multi,
-                            content_hash: content_hash.clone(),
-                            mtime,
                         },
                     );
 

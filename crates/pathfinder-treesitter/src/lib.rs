@@ -8,7 +8,6 @@
 /// Module for cache functionality.
 pub mod cache;
 /// Module containing error types and utilities.
-/// Module for error types and utilities.
 pub mod error;
 /// Language detection and support for various programming languages.
 pub mod language;
@@ -22,7 +21,6 @@ pub mod repo_map;
 pub mod surgeon;
 /// Public module for symbol definitions.
 pub mod symbols;
-/// Provides utilities for surgically manipulating Tree-sitter parse trees.
 /// Public module providing Tree-sitter-based surgery utilities.
 pub mod treesitter_surgeon;
 /// Vue multi-zone parsing utilities.
