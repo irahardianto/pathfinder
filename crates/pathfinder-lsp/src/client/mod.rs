@@ -93,6 +93,24 @@ pub(crate) enum ProcessEntry {
     Unavailable(UnavailableState),
 }
 
+#[allow(clippy::struct_excessive_bools)]
+struct ValidationStatusInput<'a> {
+    command: &'a str,
+    language_id: &'a str,
+    running: bool,
+    diagnostics_strategy: DiagnosticsStrategy,
+    supports_definition: bool,
+    supports_call_hierarchy: bool,
+    supports_formatting: bool,
+    indexing_complete: bool,
+    uptime_seconds: u64,
+    server_name: Option<&'a str>,
+    indexing_source: Option<String>,
+    indexing_duration_secs: Option<u64>,
+    indexing_progress_pct: Option<u8>,
+    registrations_received: u32,
+}
+
 impl ProcessEntry {
     fn to_validation_status(
         &self,
@@ -121,41 +139,41 @@ impl ProcessEntry {
                 } else {
                     caps.diagnostics_strategy
                 };
-                validation_status_from_parts(
+                validation_status_from_parts(ValidationStatusInput {
                     command,
                     language_id,
-                    true,
-                    effective_diag_strategy,
-                    caps.definition_provider,
-                    caps.call_hierarchy_provider,
-                    caps.formatting_provider,
-                    state
+                    running: true,
+                    diagnostics_strategy: effective_diag_strategy,
+                    supports_definition: caps.definition_provider,
+                    supports_call_hierarchy: caps.call_hierarchy_provider,
+                    supports_formatting: caps.formatting_provider,
+                    indexing_complete: state
                         .indexing_complete
                         .load(std::sync::atomic::Ordering::Relaxed),
-                    state.spawned_at.elapsed().as_secs(),
-                    caps.server_name.as_deref(),
+                    uptime_seconds: state.spawned_at.elapsed().as_secs(),
+                    server_name: caps.server_name.as_deref(),
                     indexing_source,
                     indexing_duration_secs,
                     indexing_progress_pct,
-                    caps.registrations_received,
-                )
+                    registrations_received: caps.registrations_received,
+                })
             }
-            Self::Unavailable(_) => validation_status_from_parts(
+            Self::Unavailable(_) => validation_status_from_parts(ValidationStatusInput {
                 command,
                 language_id,
-                false,
-                DiagnosticsStrategy::None,
-                false,
-                false,
-                false,
-                false,
-                0,
-                None,
-                None,
-                None,
-                None,
-                0,
-            ),
+                running: false,
+                diagnostics_strategy: DiagnosticsStrategy::None,
+                supports_definition: false,
+                supports_call_hierarchy: false,
+                supports_formatting: false,
+                indexing_complete: false,
+                uptime_seconds: 0,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_pct: None,
+                registrations_received: 0,
+            }),
         }
     }
 }
@@ -183,28 +201,13 @@ pub(crate) fn grace_period_for_language(language_id: &str) -> u64 {
 ///
 /// MT-2: `server_name` added so the status carries the server identity for
 /// per-server push diagnostics config selection in validation tools.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::fn_params_excessive_bools)]
 fn validation_status_from_parts(
-    command: &str,
-    language_id: &str,
-    running: bool,
-    diagnostics_strategy: DiagnosticsStrategy,
-    supports_definition: bool,
-    supports_call_hierarchy: bool,
-    supports_formatting: bool,
-    indexing_complete: bool,
-    uptime_seconds: u64,
-    server_name: Option<&str>,
-    indexing_source: Option<String>,
-    indexing_duration_secs: Option<u64>,
-    indexing_progress_pct: Option<u8>,
-    registrations_received: u32,
+    input: ValidationStatusInput<'_>,
 ) -> crate::types::LspLanguageStatus {
-    if !running {
+    if !input.running {
         return crate::types::LspLanguageStatus {
             validation: false,
-            reason: format!("{command} failed to start or crashed repeatedly"),
+            reason: format!("{} failed to start or crashed repeatedly", input.command),
             navigation_ready: None,
             indexing_complete: None,
             uptime_seconds: None,
@@ -226,70 +229,62 @@ fn validation_status_from_parts(
     // advertise definitionProvider in the handshake). Language-aware grace
     // periods prevent premature `Some(false)` for slow-registering servers
     // while keeping static servers (rust-analyzer, gopls) immediately conclusive.
-    let grace = grace_period_for_language(language_id);
-    let navigation_ready = if !supports_definition && uptime_seconds < grace {
+    let grace = grace_period_for_language(input.language_id);
+    let navigation_ready = if !input.supports_definition && input.uptime_seconds < grace {
         None // Indeterminate — too early to tell, registrations may be in flight
     } else {
-        Some(supports_definition)
+        Some(input.supports_definition)
     };
 
-    match diagnostics_strategy {
+    match input.diagnostics_strategy {
         DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
             validation: true,
             reason: format!(
                 "LSP connected and supports validation ({})",
-                match diagnostics_strategy {
-                    DiagnosticsStrategy::Pull => "pull diagnostics",
-                    DiagnosticsStrategy::Push => "push diagnostics",
-                    DiagnosticsStrategy::None => unreachable!(),
+                if matches!(input.diagnostics_strategy, DiagnosticsStrategy::Pull) {
+                    "pull diagnostics"
+                } else {
+                    "push diagnostics"
                 }
             ),
             navigation_ready,
-            indexing_complete: Some(indexing_complete),
-            uptime_seconds: Some(uptime_seconds),
-            diagnostics_strategy: Some(diagnostics_strategy.as_str().to_owned()),
-            supports_definition: Some(supports_definition),
-            supports_call_hierarchy: Some(supports_call_hierarchy),
+            indexing_complete: Some(input.indexing_complete),
+            uptime_seconds: Some(input.uptime_seconds),
+            diagnostics_strategy: Some(input.diagnostics_strategy.as_str().to_owned()),
+            supports_definition: Some(input.supports_definition),
+            supports_call_hierarchy: Some(input.supports_call_hierarchy),
             supports_diagnostics: Some(true),
-            supports_formatting: Some(supports_formatting),
-            server_name: server_name.map(ToOwned::to_owned),
-            indexing_source,
-            indexing_duration_secs,
-            indexing_progress_percent: if indexing_complete {
+            supports_formatting: Some(input.supports_formatting),
+            server_name: input.server_name.map(ToOwned::to_owned),
+            indexing_source: input.indexing_source,
+            indexing_duration_secs: input.indexing_duration_secs,
+            indexing_progress_percent: if input.indexing_complete {
                 None
             } else {
-                indexing_progress_pct
+                input.indexing_progress_pct
             },
-            registrations_received: if running {
-                Some(registrations_received)
-            } else {
-                None
-            },
+            registrations_received: Some(input.registrations_received),
         },
         DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
             validation: false,
             reason: "LSP connected but does not support diagnostics".to_owned(),
             navigation_ready,
-            indexing_complete: Some(indexing_complete),
-            uptime_seconds: Some(uptime_seconds),
+            indexing_complete: Some(input.indexing_complete),
+            uptime_seconds: Some(input.uptime_seconds),
             diagnostics_strategy: Some("none".to_owned()),
-            supports_definition: Some(supports_definition),
-            supports_call_hierarchy: Some(supports_call_hierarchy),
+            supports_definition: Some(input.supports_definition),
+            supports_call_hierarchy: Some(input.supports_call_hierarchy),
             supports_diagnostics: Some(false),
-            supports_formatting: Some(supports_formatting),
-            server_name: server_name.map(ToOwned::to_owned),
-            indexing_source,
-            indexing_duration_secs,
-            indexing_progress_percent: if indexing_complete {
+            supports_formatting: Some(input.supports_formatting),
+            server_name: input.server_name.map(ToOwned::to_owned),
+            indexing_source: input.indexing_source,
+            indexing_duration_secs: input.indexing_duration_secs,
+            indexing_progress_percent: if input.indexing_complete {
                 None
             } else {
-                indexing_progress_pct
+                input.indexing_progress_pct
             },
-            registrations_received: if running {
-                Some(registrations_received)
-            } else {
-                None
-            },
+            registrations_received: Some(input.registrations_received),
         },
     }
 }
@@ -354,6 +349,41 @@ mod tests {
     use crate::types::IndexingCompletionSource;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn validation_status_from_parts(
+        command: &str,
+        language_id: &str,
+        running: bool,
+        diagnostics_strategy: DiagnosticsStrategy,
+        supports_definition: bool,
+        supports_call_hierarchy: bool,
+        supports_formatting: bool,
+        indexing_complete: bool,
+        uptime_seconds: u64,
+        server_name: Option<&str>,
+        indexing_source: Option<String>,
+        indexing_duration_secs: Option<u64>,
+        indexing_progress_pct: Option<u8>,
+        registrations_received: u32,
+    ) -> crate::types::LspLanguageStatus {
+        super::validation_status_from_parts(super::ValidationStatusInput {
+            command,
+            language_id,
+            running,
+            diagnostics_strategy,
+            supports_definition,
+            supports_call_hierarchy,
+            supports_formatting,
+            indexing_complete,
+            uptime_seconds,
+            server_name,
+            indexing_source,
+            indexing_duration_secs,
+            indexing_progress_pct,
+            registrations_received,
+        })
+    }
 
     // ── ProcessEntry::to_validation_status tests ──────────────────
 

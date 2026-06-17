@@ -776,7 +776,7 @@ async fn build_initialize_request(
         "initialize",
         &json!({
             "processId": std::process::id(),
-            "clientInfo": { "name": "pathfinder", "version": "0.1.0" },
+            "clientInfo": { "name": "pathfinder", "version": env!("CARGO_PKG_VERSION") },
             "rootUri": workspace_uri,
             "workspaceFolders": [{ "uri": workspace_uri, "name": workspace_name }],
             "initializationOptions": initialization_options,
@@ -1155,6 +1155,11 @@ mod process_tests {
             .expect("rootUri should be a string")
             .starts_with("file://"));
         assert_eq!(params["clientInfo"]["name"], "pathfinder");
+        assert_eq!(
+            params["clientInfo"]["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "clientInfo.version should match Cargo.toml version"
+        );
         assert!(
             params["processId"]
                 .as_u64()
@@ -1277,11 +1282,23 @@ mod process_tests {
 
     #[tokio::test]
     async fn test_path_to_file_uri_nonexistent() {
-        // Non-existent paths should still work (they just check metadata)
+        // Non-existent absolute paths should still produce a valid file URI.
+        // `path_to_file_uri` only checks metadata for is_dir; a missing file
+        // falls through to `from_file_path`, which succeeds for absolute paths.
         let uri = path_to_file_uri(Path::new("/definitely/does/not/exist.txt")).await;
-        // Path doesn't exist as file, so is_dir=false, from_file_path might fail
-        // depending on the URL library
-        assert!(uri.is_ok() || uri.is_err());
+        assert!(
+            uri.is_ok(),
+            "absolute nonexistent path should produce a valid file URI"
+        );
+        let uri_str = uri.expect("should be Ok");
+        assert!(
+            uri_str.starts_with("file:///"),
+            "URI should start with file:///: {uri_str}"
+        );
+        assert!(
+            uri_str.ends_with("exist.txt"),
+            "URI should contain the filename: {uri_str}"
+        );
     }
 
     #[tokio::test]
