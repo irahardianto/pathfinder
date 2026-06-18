@@ -307,3 +307,19 @@ fn test_find_all_references_metadata_default_roundtrip() {
     assert!(!obj.contains_key("resolution_strategy"));
     assert!(!obj.contains_key("hint"));
 }
+
+#[test]
+fn test_source_symbol_serde_missing_children() {
+    let json_str = r#"{"name":"foo","semantic_path":"foo::bar","kind":"function","start_line":10,"end_line":20}"#;
+    let symbol: SourceSymbol = serde_json::from_str(json_str).expect("deserialize SourceSymbol");
+    assert_eq!(symbol.name, "foo");
+    assert_eq!(symbol.semantic_path, "foo::bar");
+    assert_eq!(symbol.kind, "function");
+    assert_eq!(symbol.start_line, 10);
+    assert_eq!(symbol.end_line, 20);
+    assert!(symbol.children.is_empty());
+
+    // Serialize it back and make sure children is not serialized when empty
+    let serialized = serde_json::to_string(&symbol).expect("serialize SourceSymbol");
+    assert!(!serialized.contains("children"));
+}
