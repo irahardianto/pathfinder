@@ -860,10 +860,13 @@ async fn test_read_source_file_compact_detail_level() {
     let meta: crate::server::types::ReadSourceFileMetadata =
         serde_json::from_value(call.structured_content.unwrap()).unwrap();
     // compact mode should flatten children
-    assert_eq!(meta.symbols.len(), 1, "compact returns top-level symbols only");
+    assert_eq!(
+        meta.symbols.len(),
+        1,
+        "compact returns top-level symbols only"
+    );
     assert!(
         meta.symbols[0].children.is_empty(),
         "compact mode should drop children"
     );
 }
-

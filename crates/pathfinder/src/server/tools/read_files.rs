@@ -144,7 +144,6 @@ impl PathfinderServer {
             }
         }
 
-
         indexed_results.sort_by_key(|(idx, _)| *idx);
         let file_results: Vec<FileResult> = indexed_results.into_iter().map(|(_, r)| r).collect();
 

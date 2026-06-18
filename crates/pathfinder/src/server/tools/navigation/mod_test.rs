@@ -1693,8 +1693,8 @@ fn test_last_symbol_name_single_segment() {
 
 #[test]
 fn test_last_symbol_name_no_symbol_chain() {
-    let sp = pathfinder_common::types::SemanticPath::parse("src/lib.rs")
-        .expect("valid semantic path");
+    let sp =
+        pathfinder_common::types::SemanticPath::parse("src/lib.rs").expect("valid semantic path");
     let name = super::last_symbol_name(&sp);
     assert_eq!(name, None);
 }

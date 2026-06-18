@@ -976,7 +976,10 @@ async fn test_symbol_overview_file_read_failure_continues() {
 
     // Should succeed even though file read fails — overview continues with empty content
     let result = server.symbol_overview_impl(params).await;
-    assert!(result.is_ok(), "overview should succeed despite file read failure");
+    assert!(
+        result.is_ok(),
+        "overview should succeed despite file read failure"
+    );
 }
 
 // ── coverage: overview.rs lines 82-90 (open_document failure) ──────────
@@ -1020,7 +1023,10 @@ async fn test_symbol_overview_open_document_failure_continues() {
 
     // Should succeed despite open_document failure
     let result = server.symbol_overview_impl(params).await;
-    assert!(result.is_ok(), "overview should succeed despite open_document failure");
+    assert!(
+        result.is_ok(),
+        "overview should succeed despite open_document failure"
+    );
     let val: crate::server::types::SymbolOverviewResponse =
         serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
     assert!(val.source.is_some());
@@ -1060,13 +1066,19 @@ async fn test_symbol_overview_callers_callees_err_sets_impact_unavailable() {
     };
 
     let result = server.symbol_overview_impl(params).await;
-    assert!(result.is_ok(), "overview should succeed with degraded impact");
+    assert!(
+        result.is_ok(),
+        "overview should succeed with degraded impact"
+    );
 
     let val: crate::server::types::SymbolOverviewResponse =
         serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
 
     // Impact should be None (unavailable)
-    assert!(val.impact.is_none(), "impact should be None when callers/callees fails");
+    assert!(
+        val.impact.is_none(),
+        "impact should be None when callers/callees fails"
+    );
     assert!(val.impact_degraded, "impact_degraded should be true");
     assert!(val.degraded, "overall degraded should be true");
     // References should still be available
@@ -1118,14 +1130,23 @@ async fn test_symbol_overview_references_err_sets_refs_unavailable() {
     };
 
     let result = server.symbol_overview_impl(params).await;
-    assert!(result.is_ok(), "overview should succeed with degraded references");
+    assert!(
+        result.is_ok(),
+        "overview should succeed with degraded references"
+    );
 
     let val: crate::server::types::SymbolOverviewResponse =
         serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
 
     // References should be None (unavailable)
-    assert!(val.references.is_none(), "references should be None when refs fails");
-    assert!(val.references_degraded, "references_degraded should be true");
+    assert!(
+        val.references.is_none(),
+        "references should be None when refs fails"
+    );
+    assert!(
+        val.references_degraded,
+        "references_degraded should be true"
+    );
     assert!(val.degraded, "overall degraded should be true");
     assert_eq!(val.files_referenced, 0);
     // Impact should still be available
@@ -1166,7 +1187,10 @@ async fn test_symbol_overview_both_sub_tools_err() {
     };
 
     let result = server.symbol_overview_impl(params).await;
-    assert!(result.is_ok(), "overview should succeed even with both sub-tools failing");
+    assert!(
+        result.is_ok(),
+        "overview should succeed even with both sub-tools failing"
+    );
 
     let val: crate::server::types::SymbolOverviewResponse =
         serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
@@ -1174,9 +1198,14 @@ async fn test_symbol_overview_both_sub_tools_err() {
     assert!(val.impact.is_none(), "impact should be None");
     assert!(val.references.is_none(), "references should be None");
     assert!(val.impact_degraded, "impact_degraded should be true");
-    assert!(val.references_degraded, "references_degraded should be true");
+    assert!(
+        val.references_degraded,
+        "references_degraded should be true"
+    );
     assert!(val.degraded, "overall degraded should be true");
     // Source should still be available from initial scope read
-    assert!(val.source.is_some(), "source should still be available from initial scope read");
+    assert!(
+        val.source.is_some(),
+        "source should still be available from initial scope read"
+    );
 }
-

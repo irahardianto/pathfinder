@@ -455,7 +455,10 @@ async fn test_get_repo_map_detail_structure_clamps_tokens() {
     params.max_tokens = 10_000; // Should be clamped to min(10_000, 4_000) = 4_000
 
     let result = server.get_repo_map_impl(params).await;
-    assert!(result.is_ok(), "Detail::Structure should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "Detail::Structure should succeed: {result:?}"
+    );
     let tool_result = result.unwrap();
     let meta = tool_result.structured_content.as_ref().unwrap();
     let max_tokens_used = meta
@@ -545,4 +548,3 @@ async fn test_get_repo_map_degraded_text_contains_notice() {
         "degraded text should still contain skeleton content"
     );
 }
-

@@ -2082,7 +2082,10 @@ fn test_find_enclosing_symbol_ref_returns_reference() {
 
     // Row 3 (0-indexed) is inside Handler
     let sym_ref = find_enclosing_symbol_ref(&syms, 3);
-    assert!(sym_ref.is_some(), "should find enclosing symbol ref at row 3");
+    assert!(
+        sym_ref.is_some(),
+        "should find enclosing symbol ref at row 3"
+    );
     let sym = sym_ref.unwrap();
     assert_eq!(sym.name, "Handler");
     assert_eq!(sym.kind, SymbolKind::Function);
@@ -2296,7 +2299,8 @@ fn plain_function() {}
 /// Go: `TestHandler` is a Test; `BenchmarkFoo` and `helperFn` are Functions.
 #[test]
 fn test_go_test_function_detection() {
-    let source = b"package main\nfunc TestHandler() {}\nfunc BenchmarkFoo() {}\nfunc helperFn() {}\n";
+    let source =
+        b"package main\nfunc TestHandler() {}\nfunc BenchmarkFoo() {}\nfunc helperFn() {}\n";
     let tree = AstParser::parse_source(
         std::path::Path::new("main.go"),
         SupportedLanguage::Go,
@@ -2361,10 +2365,7 @@ function normalFunction() {}
         );
     }
 
-    let normal = symbols
-        .iter()
-        .find(|s| s.name == "normalFunction")
-        .unwrap();
+    let normal = symbols.iter().find(|s| s.name == "normalFunction").unwrap();
     assert_eq!(
         normal.kind,
         SymbolKind::Function,
@@ -2502,14 +2503,8 @@ fn test_vue_self_closing_template_element() {
         .expect("template zone should exist");
 
     // MyInput is a component (starts with uppercase) — promoted to top-level of template
-    let my_input = template_sym
-        .children
-        .iter()
-        .find(|c| c.name == "MyInput");
-    assert!(
-        my_input.is_some(),
-        "MyInput component should be extracted"
-    );
+    let my_input = template_sym.children.iter().find(|c| c.name == "MyInput");
+    assert!(my_input.is_some(), "MyInput component should be extracted");
     assert_eq!(
         my_input.unwrap().kind,
         crate::surgeon::SymbolKind::Component,
@@ -2535,10 +2530,7 @@ fn test_vue_self_closing_template_element() {
 
     // span at depth 1 should be emitted (depth < 3)
     let span = template_sym.children.iter().find(|c| c.name == "span");
-    assert!(
-        span.is_some(),
-        "span at depth 1 should be extracted"
-    );
+    assert!(span.is_some(), "span at depth 1 should be extracted");
     assert_eq!(
         span.unwrap().kind,
         crate::surgeon::SymbolKind::HtmlElement,

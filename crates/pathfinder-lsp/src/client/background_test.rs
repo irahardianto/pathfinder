@@ -784,9 +784,7 @@ fn test_collect_idle_languages_skips_unavailable_entries() {
     processes.insert(
         "python".to_owned(),
         ProcessEntry::Unavailable(crate::client::UnavailableState {
-            unavailable_since: Instant::now()
-                .checked_sub(Duration::from_mins(30))
-                .unwrap(),
+            unavailable_since: Instant::now().checked_sub(Duration::from_mins(30)).unwrap(),
             backoff_attempt: 1,
         }),
     );
@@ -844,4 +842,3 @@ async fn test_collect_idle_languages_skips_in_flight() {
         "should not collect languages with in-flight requests, got: {idle:?}"
     );
 }
-

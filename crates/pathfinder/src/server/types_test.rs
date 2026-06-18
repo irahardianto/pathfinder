@@ -36,25 +36,62 @@ fn test_degraded_reason_serde_roundtrip() {
 
     let variants = vec![
         (DegradedReason::NoLsp, "\"no_lsp\""),
-        (DegradedReason::LspWarmupEmptyUnverified, "\"lsp_warmup_empty_unverified\""),
-        (DegradedReason::LspWarmupGrepFallback, "\"lsp_warmup_grep_fallback\""),
-        (DegradedReason::LspTimeoutGrepFallback, "\"lsp_timeout_grep_fallback\""),
-        (DegradedReason::LspErrorGrepFallback, "\"lsp_error_grep_fallback\""),
-        (DegradedReason::NoLspGrepFallback, "\"no_lsp_grep_fallback\""),
-        (DegradedReason::GrepFallbackFileScoped, "\"grep_fallback_file_scoped\""),
-        (DegradedReason::GrepFallbackImplScoped, "\"grep_fallback_impl_scoped\""),
-        (DegradedReason::GrepFallbackGlobal, "\"grep_fallback_global\""),
-        (DegradedReason::GrepFallbackDependencies, "\"grep_fallback_dependencies\""),
-        (DegradedReason::UnsupportedLanguageFilterBypassed, "\"unsupported_language_filter_bypassed\""),
-        (DegradedReason::UnsupportedLanguage, "\"unsupported_language\""),
+        (
+            DegradedReason::LspWarmupEmptyUnverified,
+            "\"lsp_warmup_empty_unverified\"",
+        ),
+        (
+            DegradedReason::LspWarmupGrepFallback,
+            "\"lsp_warmup_grep_fallback\"",
+        ),
+        (
+            DegradedReason::LspTimeoutGrepFallback,
+            "\"lsp_timeout_grep_fallback\"",
+        ),
+        (
+            DegradedReason::LspErrorGrepFallback,
+            "\"lsp_error_grep_fallback\"",
+        ),
+        (
+            DegradedReason::NoLspGrepFallback,
+            "\"no_lsp_grep_fallback\"",
+        ),
+        (
+            DegradedReason::GrepFallbackFileScoped,
+            "\"grep_fallback_file_scoped\"",
+        ),
+        (
+            DegradedReason::GrepFallbackImplScoped,
+            "\"grep_fallback_impl_scoped\"",
+        ),
+        (
+            DegradedReason::GrepFallbackGlobal,
+            "\"grep_fallback_global\"",
+        ),
+        (
+            DegradedReason::GrepFallbackDependencies,
+            "\"grep_fallback_dependencies\"",
+        ),
+        (
+            DegradedReason::UnsupportedLanguageFilterBypassed,
+            "\"unsupported_language_filter_bypassed\"",
+        ),
+        (
+            DegradedReason::UnsupportedLanguage,
+            "\"unsupported_language\"",
+        ),
         (DegradedReason::GitError, "\"git_error\""),
     ];
 
     for (variant, expected_json) in variants {
         let serialized = serde_json::to_string(&variant).expect("serialize DegradedReason");
-        assert_eq!(serialized, expected_json, "serialize mismatch for {variant:?}");
+        assert_eq!(
+            serialized, expected_json,
+            "serialize mismatch for {variant:?}"
+        );
 
-        let deserialized: DegradedReason = serde_json::from_str(&serialized).expect("deserialize DegradedReason");
+        let deserialized: DegradedReason =
+            serde_json::from_str(&serialized).expect("deserialize DegradedReason");
         assert_eq!(deserialized, variant, "roundtrip mismatch for {variant:?}");
     }
 }
@@ -197,17 +234,44 @@ fn test_symbol_overview_response_skip_empty_fields() {
     let obj = json.as_object().expect("should be JSON object");
 
     // Fields with skip_serializing_if = Option::is_none should be absent
-    assert!(!obj.contains_key("source"), "source should be absent when None");
-    assert!(!obj.contains_key("impact"), "impact should be absent when None");
-    assert!(!obj.contains_key("references"), "references should be absent when None");
-    assert!(!obj.contains_key("degraded_reason"), "degraded_reason should be absent when None");
-    assert!(!obj.contains_key("actionable_guidance"), "actionable_guidance should be absent when None");
-    assert!(!obj.contains_key("lsp_readiness"), "lsp_readiness should be absent when None");
-    assert!(!obj.contains_key("warm_start_in_progress"), "warm_start_in_progress should be absent when None");
+    assert!(
+        !obj.contains_key("source"),
+        "source should be absent when None"
+    );
+    assert!(
+        !obj.contains_key("impact"),
+        "impact should be absent when None"
+    );
+    assert!(
+        !obj.contains_key("references"),
+        "references should be absent when None"
+    );
+    assert!(
+        !obj.contains_key("degraded_reason"),
+        "degraded_reason should be absent when None"
+    );
+    assert!(
+        !obj.contains_key("actionable_guidance"),
+        "actionable_guidance should be absent when None"
+    );
+    assert!(
+        !obj.contains_key("lsp_readiness"),
+        "lsp_readiness should be absent when None"
+    );
+    assert!(
+        !obj.contains_key("warm_start_in_progress"),
+        "warm_start_in_progress should be absent when None"
+    );
 
     // Fields with skip_serializing_if = Not::not should be absent when false
-    assert!(!obj.contains_key("impact_degraded"), "impact_degraded should be absent when false");
-    assert!(!obj.contains_key("references_degraded"), "references_degraded should be absent when false");
+    assert!(
+        !obj.contains_key("impact_degraded"),
+        "impact_degraded should be absent when false"
+    );
+    assert!(
+        !obj.contains_key("references_degraded"),
+        "references_degraded should be absent when false"
+    );
 
     // Always-present fields should exist
     assert!(obj.contains_key("files_referenced"));
@@ -221,13 +285,22 @@ fn test_find_all_references_metadata_default_roundtrip() {
     let obj = json.as_object().expect("should be JSON object");
 
     // Always-present fields
-    assert!(obj.contains_key("references"), "references should be present (defaults to None/null)");
+    assert!(
+        obj.contains_key("references"),
+        "references should be present (defaults to None/null)"
+    );
     assert!(obj.contains_key("files_referenced"));
     assert!(obj.contains_key("degraded"));
 
     // Optional fields with skip_serializing_if should be absent when default
-    assert!(!obj.contains_key("truncated"), "truncated should be absent when false (default)");
-    assert!(!obj.contains_key("degraded_reason"), "degraded_reason should be absent when None");
+    assert!(
+        !obj.contains_key("truncated"),
+        "truncated should be absent when false (default)"
+    );
+    assert!(
+        !obj.contains_key("degraded_reason"),
+        "degraded_reason should be absent when None"
+    );
     assert!(!obj.contains_key("actionable_guidance"));
     assert!(!obj.contains_key("lsp_readiness"));
     assert!(!obj.contains_key("duration_ms"));

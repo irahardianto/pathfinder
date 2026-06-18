@@ -230,10 +230,12 @@ async fn test_read_symbol_scope_surgeon_error() {
         .read_symbol_scope_results
         .lock()
         .unwrap()
-        .push(Err(pathfinder_treesitter::error::SurgeonError::SymbolNotFound {
-            path: "test".to_owned(),
-            did_you_mean: vec![],
-        }));
+        .push(Err(
+            pathfinder_treesitter::error::SurgeonError::SymbolNotFound {
+                path: "test".to_owned(),
+                did_you_mean: vec![],
+            },
+        ));
 
     let server = crate::server::PathfinderServer::with_all_engines(
         ws,
@@ -253,4 +255,3 @@ async fn test_read_symbol_scope_surgeon_error() {
     let err = result.unwrap_err();
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS); // SymbolNotFound maps to invalid params
 }
-

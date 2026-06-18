@@ -961,7 +961,10 @@ async fn test_read_files_source_file_read_error() {
         serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
     assert_eq!(response.files.len(), 1);
-    assert_eq!(response.failed, 1, "the broken source file should be a failure");
+    assert_eq!(
+        response.failed, 1,
+        "the broken source file should be a failure"
+    );
     assert!(
         response.files[0].error.is_some(),
         "error should be populated for broken source file"
@@ -1101,4 +1104,3 @@ async fn test_read_files_text_language_mapped_to_empty() {
         "language 'text' should be mapped to empty string, got: {lang}"
     );
 }
-

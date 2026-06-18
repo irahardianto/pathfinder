@@ -1562,7 +1562,10 @@ fn test_is_test_symbol_test_kind_arbitrary_name() {
         access_level: crate::surgeon::AccessLevel::Public,
         children: vec![],
     };
-    assert!(is_test_symbol(&sym), "SymbolKind::Test must always be a test symbol");
+    assert!(
+        is_test_symbol(&sym),
+        "SymbolKind::Test must always be a test symbol"
+    );
 }
 
 /// R4: `depth_for_detected_languages` returns correct depth per language set.

@@ -773,15 +773,17 @@ async fn test_get_or_parse_preloaded_cache_hit() {
     let content = b"fn main() {}";
     std::fs::write(&file_path, content).unwrap();
 
-    let mtime = std::fs::metadata(&file_path)
-        .unwrap()
-        .modified()
-        .unwrap();
+    let mtime = std::fs::metadata(&file_path).unwrap().modified().unwrap();
     let content_arc = Arc::from(content.as_slice());
 
     // First call — cache miss, full parse
     let (tree1, src1) = cache
-        .get_or_parse_preloaded(&file_path, SupportedLanguage::Rust, Arc::clone(&content_arc), mtime)
+        .get_or_parse_preloaded(
+            &file_path,
+            SupportedLanguage::Rust,
+            Arc::clone(&content_arc),
+            mtime,
+        )
         .await
         .unwrap();
     assert_eq!(src1.len(), content.len());
@@ -810,10 +812,7 @@ async fn test_get_or_parse_vue_preloaded_cache_hit() {
     let sfc = b"<script setup lang=\"ts\">\nconst x = 1\n</script>\n";
     std::fs::write(&file_path, sfc).unwrap();
 
-    let mtime = std::fs::metadata(&file_path)
-        .unwrap()
-        .modified()
-        .unwrap();
+    let mtime = std::fs::metadata(&file_path).unwrap().modified().unwrap();
 
     // First call — cache miss
     let (multi1, hash1) = cache

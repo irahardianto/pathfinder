@@ -2534,10 +2534,7 @@ async fn test_request_and_notify_do_not_cleanup_stale_reader() {
 
 #[test]
 fn test_indexing_timeout_go_is_30s() {
-    assert_eq!(
-        indexing_timeout_for_language("go"),
-        Duration::from_secs(30)
-    );
+    assert_eq!(indexing_timeout_for_language("go"), Duration::from_secs(30));
 }
 
 #[test]
@@ -2603,7 +2600,10 @@ async fn test_call_hierarchy_request_success() {
         )
         .await;
 
-    assert!(result.is_ok(), "should succeed with valid response: {result:?}");
+    assert!(
+        result.is_ok(),
+        "should succeed with valid response: {result:?}"
+    );
     let calls = result.expect("checked");
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].item.name, "caller_fn");
@@ -2625,9 +2625,11 @@ async fn test_call_hierarchy_request_transport_error() {
         file: "src/main.rs".to_owned(),
         line: 1,
         column: 1,
-        data: Some(json!({"name": "fn", "kind": 12, "uri": "file:///workspace/src/main.rs",
+        data: Some(
+            json!({"name": "fn", "kind": 12, "uri": "file:///workspace/src/main.rs",
             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
-            "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}})),
+            "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}}),
+        ),
     };
 
     let result = client
@@ -2714,8 +2716,6 @@ async fn test_wait_for_capability_unavailable_during_loop() {
     );
 }
 
-
-
 // ── Coverage: capabilities_for with Running ──────────────────────
 
 #[tokio::test]
@@ -2777,9 +2777,7 @@ async fn test_shutdown_idempotent() {
     // Second call should not panic and should be a no-op
     client.shutdown();
     assert!(
-        client
-            .shutdown_requested
-            .load(Ordering::Acquire),
+        client.shutdown_requested.load(Ordering::Acquire),
         "shutdown_requested should be true after shutdown"
     );
 }
@@ -2812,8 +2810,6 @@ async fn test_warm_start_for_languages_and_track_already_running() {
         "warm_start_complete should be set when all requested already running"
     );
 }
-
-
 
 // ── Coverage: force_respawn with Unavailable entry ───────────────
 
@@ -2869,8 +2865,6 @@ async fn test_ensure_process_post_lock_unavailable_not_elapsed() {
     );
 }
 
-
-
 // ── Coverage: notify success path ────────────────────────────────
 
 #[tokio::test]
@@ -2878,8 +2872,15 @@ async fn test_notify_running_process_succeeds() {
     let (client, _fake) = make_running_client("rust");
 
     let result = client
-        .notify("rust", "textDocument/didSave", json!({"textDocument": {"uri": "file:///test.rs"}}))
+        .notify(
+            "rust",
+            "textDocument/didSave",
+            json!({"textDocument": {"uri": "file:///test.rs"}}),
+        )
         .await;
 
-    assert!(result.is_ok(), "notify on running process should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "notify on running process should succeed: {result:?}"
+    );
 }

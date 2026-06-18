@@ -173,9 +173,7 @@ async fn test_system_git_rejects_dash_prefix_target() {
     // argument injection (e.g., "--exec=malicious" passed as a git ref).
     let workspace = tempfile::tempdir().expect("create tempdir");
     let runner = SystemGit;
-    let result = runner
-        .diff_name_only(workspace.path(), "--exec=evil")
-        .await;
+    let result = runner.diff_name_only(workspace.path(), "--exec=evil").await;
     assert!(result.is_err(), "target starting with '-' must be rejected");
     let err = result.expect_err("should be an error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);

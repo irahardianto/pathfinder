@@ -490,10 +490,7 @@ fn test_truncate_preview_unicode_at_char_boundary() {
 #[test]
 fn test_extract_name_from_line_var_let_const() {
     assert_eq!(extract_name_from_line("const MAX_SIZE = 100"), "MAX_SIZE");
-    assert_eq!(
-        extract_name_from_line("let myVariable = 42"),
-        "myVariable"
-    );
+    assert_eq!(extract_name_from_line("let myVariable = 42"), "myVariable");
     assert_eq!(extract_name_from_line("var count = 0"), "count");
     assert_eq!(extract_name_from_line("static INSTANCE = null"), "INSTANCE");
 }
@@ -603,4 +600,3 @@ fn test_extract_symbol_name_from_path_no_separator() {
 fn test_extract_symbol_name_from_path_empty() {
     assert_eq!(extract_symbol_name_from_path(""), "");
 }
-

@@ -2322,9 +2322,7 @@ fn test_detect_java_init_options_with_java_home() {
     }
 
     assert!(!opts.is_null());
-    assert!(opts["java"]["jdt"]["ls"]["java"]["home"]
-        .as_str()
-        .is_some());
+    assert!(opts["java"]["jdt"]["ls"]["java"]["home"].as_str().is_some());
     assert_eq!(
         opts["java"]["jdt"]["ls"]["java"]["home"].as_str().unwrap(),
         "/fake/jdk"

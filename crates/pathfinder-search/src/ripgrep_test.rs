@@ -810,7 +810,10 @@ fn test_decode_line_invalid_utf8() {
     let input: Vec<u8> = vec![b'h', b'e', 0xFF, b'l', b'o', b'\n'];
     let result = decode_line(&input);
     // Lossy conversion replaces invalid bytes with U+FFFD
-    assert!(result.contains('\u{FFFD}'), "should contain replacement char");
+    assert!(
+        result.contains('\u{FFFD}'),
+        "should contain replacement char"
+    );
     // Short enough that no truncation suffix is expected from length, but
     // decode_line adds "... [TRUNCATED]" on lossy conversion regardless.
     assert!(
@@ -908,4 +911,3 @@ async fn test_search_empty_query() {
         }
     }
 }
-

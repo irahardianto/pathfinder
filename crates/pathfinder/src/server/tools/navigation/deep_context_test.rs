@@ -970,8 +970,7 @@ async fn test_extract_file_imports_rust() {
 
 #[tokio::test]
 async fn test_extract_file_imports_go_single_line() {
-    let imports =
-        extract_imports_for_content("foo.go", "import \"fmt\"\nfunc main() {}").await;
+    let imports = extract_imports_for_content("foo.go", "import \"fmt\"\nfunc main() {}").await;
     assert_eq!(imports.len(), 1);
     assert!(imports[0].contains("import \"fmt\""));
 }
@@ -988,11 +987,9 @@ async fn test_extract_file_imports_go_multiline_block() {
 
 #[tokio::test]
 async fn test_extract_file_imports_swift() {
-    let imports = extract_imports_for_content(
-        "Foo.swift",
-        "import Foundation\nimport UIKit\nclass Foo {}",
-    )
-    .await;
+    let imports =
+        extract_imports_for_content("Foo.swift", "import Foundation\nimport UIKit\nclass Foo {}")
+            .await;
     assert_eq!(imports.len(), 2);
     assert!(imports[0].contains("import Foundation"));
 }
@@ -1012,20 +1009,16 @@ async fn test_extract_file_imports_ruby() {
 #[tokio::test]
 async fn test_extract_file_imports_unknown_ext() {
     // Unknown extension falls through to generic `import ` check
-    let imports = extract_imports_for_content(
-        "foo.xyz",
-        "import something\nrandom line\nimport another",
-    )
-    .await;
+    let imports =
+        extract_imports_for_content("foo.xyz", "import something\nrandom line\nimport another")
+            .await;
     assert_eq!(imports.len(), 2);
 }
 
 #[tokio::test]
 async fn test_extract_file_imports_max_cap() {
     // MAX_IMPORTS = 200; generate 210 import lines, expect only 200
-    let lines: Vec<String> = (0..210)
-        .map(|i| format!("import pkg_{i};"))
-        .collect();
+    let lines: Vec<String> = (0..210).map(|i| format!("import pkg_{i};")).collect();
     let content = lines.join("\n");
     let imports = extract_imports_for_content("Foo.java", &content).await;
     assert_eq!(imports.len(), 200);
@@ -1261,10 +1254,7 @@ async fn test_read_with_deep_context_no_lsp_resolution_treesitter_direct() {
         val.degraded_reason,
         Some(DegradedReason::GrepFallbackDependencies)
     );
-    assert_eq!(
-        val.resolution_strategy,
-        Some("grep_fallback".to_owned())
-    );
+    assert_eq!(val.resolution_strategy, Some("grep_fallback".to_owned()));
 }
 
 // ── grep fallback: max_dependencies truncation ──────────────────────
@@ -1368,9 +1358,9 @@ async fn test_read_with_deep_context_lsp_protocol_error_triggers_grep_fallback()
     ]);
 
     let lawyer = Arc::new(MockLawyer::default());
-    lawyer.push_prepare_call_hierarchy_result(Err(
-        pathfinder_lsp::LspError::Protocol("server crashed".to_string()),
-    ));
+    lawyer.push_prepare_call_hierarchy_result(Err(pathfinder_lsp::LspError::Protocol(
+        "server crashed".to_string(),
+    )));
 
     let ws_dir = make_temp_workspace();
     let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");

@@ -1064,9 +1064,6 @@ async fn test_search_low_coverage_hint_emitted() {
     // it just confirms the hint correctly stays silent at high coverage.
 }
 
-
-
-
 // ── General search engine error ─────────────────────────────────────────
 
 #[tokio::test]

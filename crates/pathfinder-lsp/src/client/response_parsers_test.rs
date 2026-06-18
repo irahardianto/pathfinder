@@ -630,9 +630,8 @@ fn test_parse_call_hierarchy_calls_no_ranges() {
         }
         // No "fromRanges" key
     }]);
-    let result =
-        parse_call_hierarchy_calls_response(&response, temp.path(), "from", "fromRanges")
-            .expect("ok");
+    let result = parse_call_hierarchy_calls_response(&response, temp.path(), "from", "fromRanges")
+        .expect("ok");
     assert_eq!(result.len(), 1);
     assert!(
         result[0].call_sites.is_empty(),
@@ -658,9 +657,8 @@ fn test_parse_call_hierarchy_calls_empty_ranges() {
         },
         "fromRanges": []
     }]);
-    let result =
-        parse_call_hierarchy_calls_response(&response, temp.path(), "from", "fromRanges")
-            .expect("ok");
+    let result = parse_call_hierarchy_calls_response(&response, temp.path(), "from", "fromRanges")
+        .expect("ok");
     assert_eq!(result.len(), 1);
     assert!(result[0].call_sites.is_empty());
 }
@@ -725,10 +723,7 @@ fn test_parse_uri_and_range_missing_uri() {
         }
     });
     let result = parse_uri_and_range(&loc);
-    assert!(
-        result.is_none(),
-        "location without URI should return None"
-    );
+    assert!(result.is_none(), "location without URI should return None");
 }
 
 #[test]
@@ -772,8 +767,5 @@ fn test_parse_call_hierarchy_prepare_no_detail() {
     }]);
     let result = parse_call_hierarchy_prepare_response(&response, temp.path()).expect("ok");
     assert_eq!(result.len(), 1);
-    assert!(
-        result[0].detail.is_none(),
-        "missing detail should be None"
-    );
+    assert!(result[0].detail.is_none(), "missing detail should be None");
 }

@@ -101,4 +101,3 @@ fn test_search_result_serde_roundtrip() {
     assert_eq!(deserialized.matches.len(), 1);
     assert_eq!(deserialized.matches[0], original.matches[0]);
 }
-
