@@ -916,3 +916,267 @@ fn test_render_overview_text_format() {
     assert!(text.contains("REFERENCES: unavailable"));
     assert!(text.contains("[completed in 123ms]"));
 }
+
+// ── coverage: overview.rs lines 62-69 (file read failure) ──────────────
+
+/// When the file exists (passes `abs_file.exists()`) but `read_to_string` fails
+/// (e.g., path is a directory), overview continues with empty file_content.
+/// Covers overview.rs lines 62-69.
+#[tokio::test]
+async fn test_symbol_overview_file_read_failure_continues() {
+    let ws_dir = tempfile::tempdir().expect("temp dir");
+    let src_dir = ws_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("create src dir");
+    // Create "auth.rs" as a DIRECTORY — exists() returns true, read_to_string fails.
+    std::fs::create_dir_all(src_dir.join("auth.rs")).expect("create auth.rs as dir");
+    // Other files needed by find_callers_callees / find_all_references
+    std::fs::write(src_dir.join("main.rs"), "fn main() {}").expect("create main.rs");
+
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    // 3 scopes: overview, find_callers_callees, find_all_references
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        Ok(make_scope()),
+        Ok(make_scope()),
+        Ok(make_scope()),
+    ]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 10,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_incoming_call_result(Ok(vec![]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+    lawyer.set_references_result(Ok(vec![]));
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        surgeon,
+        lawyer,
+    );
+
+    let params = crate::server::types::TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_references: 50,
+        ..Default::default()
+    };
+
+    // Should succeed even though file read fails — overview continues with empty content
+    let result = server.symbol_overview_impl(params).await;
+    assert!(result.is_ok(), "overview should succeed despite file read failure");
+}
+
+// ── coverage: overview.rs lines 82-90 (open_document failure) ──────────
+
+/// When `open_document` fails, the overview logs a warning and continues
+/// with `_doc_guard = None`. Covers overview.rs lines 82-90.
+#[tokio::test]
+async fn test_symbol_overview_open_document_failure_continues() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        Ok(make_scope()),
+        Ok(make_scope()),
+        Ok(make_scope()),
+    ]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    // Make open_document fail on the first call (overview's call)
+    lawyer.set_did_open_error(LspError::NoLspAvailable);
+
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 10,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_incoming_call_result(Ok(vec![]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+    lawyer.set_references_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = crate::server::types::TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_references: 50,
+        ..Default::default()
+    };
+
+    // Should succeed despite open_document failure
+    let result = server.symbol_overview_impl(params).await;
+    assert!(result.is_ok(), "overview should succeed despite open_document failure");
+    let val: crate::server::types::SymbolOverviewResponse =
+        serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
+    assert!(val.source.is_some());
+}
+
+// ── coverage: overview.rs lines 153-160 (find_callers_callees_impl Err) ─
+
+/// When `find_callers_callees_impl` returns Err (e.g., tree-sitter scope read
+/// fails on 2nd call), the overview sets impact to None and degraded to true.
+/// Covers overview.rs lines 153-160.
+#[tokio::test]
+async fn test_symbol_overview_callers_callees_err_sets_impact_unavailable() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        // Scope 1: overview's own read_symbol_scope_enriched (line 48) — OK
+        Ok(make_scope()),
+        // Scope 2: find_callers_callees_impl's read_symbol_scope_enriched (line 530) — Err
+        Err(pathfinder_treesitter::SurgeonError::ParseError {
+            path: std::path::PathBuf::from("src/auth.rs"),
+            reason: "simulated parse failure".into(),
+        }),
+        // Scope 3: find_all_references_impl's read_symbol_scope_enriched (line 249) — OK
+        Ok(make_scope()),
+    ]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    // No callers/callees setup needed — the scope read fails before LSP calls
+    // References still need setup
+    lawyer.set_references_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = crate::server::types::TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_references: 50,
+        ..Default::default()
+    };
+
+    let result = server.symbol_overview_impl(params).await;
+    assert!(result.is_ok(), "overview should succeed with degraded impact");
+
+    let val: crate::server::types::SymbolOverviewResponse =
+        serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
+
+    // Impact should be None (unavailable)
+    assert!(val.impact.is_none(), "impact should be None when callers/callees fails");
+    assert!(val.impact_degraded, "impact_degraded should be true");
+    assert!(val.degraded, "overall degraded should be true");
+    // References should still be available
+    assert!(val.source.is_some());
+}
+
+// ── coverage: overview.rs lines 210-223 (find_all_references_impl Err) ──
+
+/// When `find_all_references_impl` returns Err (e.g., tree-sitter scope read
+/// fails on 3rd call), the overview sets references to None and degraded to true.
+/// Covers overview.rs lines 210-223.
+#[tokio::test]
+async fn test_symbol_overview_references_err_sets_refs_unavailable() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        // Scope 1: overview's own read (line 48) — OK
+        Ok(make_scope()),
+        // Scope 2: find_callers_callees_impl (line 530) — OK
+        Ok(make_scope()),
+        // Scope 3: find_all_references_impl (line 249) — Err
+        Err(pathfinder_treesitter::SurgeonError::ParseError {
+            path: std::path::PathBuf::from("src/auth.rs"),
+            reason: "simulated parse failure for refs".into(),
+        }),
+    ]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    // Callers/callees setup
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 10,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_incoming_call_result(Ok(vec![]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+    // No references setup needed — scope read fails before LSP call
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = crate::server::types::TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_references: 50,
+        ..Default::default()
+    };
+
+    let result = server.symbol_overview_impl(params).await;
+    assert!(result.is_ok(), "overview should succeed with degraded references");
+
+    let val: crate::server::types::SymbolOverviewResponse =
+        serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
+
+    // References should be None (unavailable)
+    assert!(val.references.is_none(), "references should be None when refs fails");
+    assert!(val.references_degraded, "references_degraded should be true");
+    assert!(val.degraded, "overall degraded should be true");
+    assert_eq!(val.files_referenced, 0);
+    // Impact should still be available
+    assert!(val.impact.is_some());
+}
+
+// ── coverage: overview.rs lines 153-160 AND 210-223 (both Err) ──────────
+
+/// When both `find_callers_callees_impl` and `find_all_references_impl` return Err,
+/// impact and references are both unavailable. Covers both Err branches together.
+#[tokio::test]
+async fn test_symbol_overview_both_sub_tools_err() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        // Scope 1: overview's own read (line 48) — OK
+        Ok(make_scope()),
+        // Scope 2: find_callers_callees_impl (line 530) — Err
+        Err(pathfinder_treesitter::SurgeonError::ParseError {
+            path: std::path::PathBuf::from("src/auth.rs"),
+            reason: "callers parse failure".into(),
+        }),
+        // Scope 3: find_all_references_impl (line 249) — Err
+        Err(pathfinder_treesitter::SurgeonError::ParseError {
+            path: std::path::PathBuf::from("src/auth.rs"),
+            reason: "refs parse failure".into(),
+        }),
+    ]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    // No LSP setup needed — both scope reads fail before LSP calls
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = crate::server::types::TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_references: 50,
+        ..Default::default()
+    };
+
+    let result = server.symbol_overview_impl(params).await;
+    assert!(result.is_ok(), "overview should succeed even with both sub-tools failing");
+
+    let val: crate::server::types::SymbolOverviewResponse =
+        serde_json::from_value(result.unwrap().structured_content.unwrap()).unwrap();
+
+    assert!(val.impact.is_none(), "impact should be None");
+    assert!(val.references.is_none(), "references should be None");
+    assert!(val.impact_degraded, "impact_degraded should be true");
+    assert!(val.references_degraded, "references_degraded should be true");
+    assert!(val.degraded, "overall degraded should be true");
+    // Source should still be available from initial scope read
+    assert!(val.source.is_some(), "source should still be available from initial scope read");
+}
+

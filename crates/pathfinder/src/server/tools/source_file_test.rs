@@ -668,3 +668,202 @@ async fn test_read_source_file_unsupported_language_empty_file() {
         }
     }
 }
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_read_source_file_symbols_detail_level() {
+    use pathfinder_common::config::PathfinderConfig;
+    use pathfinder_common::sandbox::Sandbox;
+    use pathfinder_common::types::WorkspaceRoot;
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use pathfinder_treesitter::surgeon::AccessLevel;
+
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    let ws_dir = tempdir().unwrap();
+    let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let content = "fn main() {}\nfn helper() {}";
+    let test_path = ws.path().join("test.rs");
+    std::fs::write(&test_path, content).unwrap();
+
+    let mock_surgeon = MockSurgeon::new();
+    let symbols = vec![
+        make_symbol("main", 0, 0, vec![]),
+        ExtractedSymbol {
+            name: "Config".to_string(),
+            semantic_path: "Config".to_string(),
+            kind: SymbolKind::Struct,
+            byte_range: 0..0,
+            start_line: 1,
+            end_line: 1,
+            name_column: 0,
+            access_level: AccessLevel::Public,
+            children: vec![make_symbol("name", 1, 1, vec![])],
+        },
+    ];
+    mock_surgeon
+        .read_source_file_results
+        .lock()
+        .unwrap()
+        .push(Ok((content.to_owned(), "rust".to_owned(), symbols)));
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(mock_surgeon),
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = ReadParams {
+        filepath: Some("test.rs".to_owned()),
+        start_line: 1,
+        end_line: None,
+        detail_level: "symbols".to_owned(),
+        ..Default::default()
+    };
+
+    let result = server.read_source_file_impl(params).await;
+    assert!(result.is_ok(), "symbols detail_level should succeed");
+    let call = result.unwrap();
+
+    let meta: crate::server::types::ReadSourceFileMetadata =
+        serde_json::from_value(call.structured_content.unwrap()).unwrap();
+    // symbols mode returns the tree text as content
+    assert!(meta.content.is_some());
+    let content_text = meta.content.unwrap();
+    assert!(
+        content_text.contains("symbols)"),
+        "should contain symbol count in tree text"
+    );
+    // symbols should be populated
+    assert!(!meta.symbols.is_empty(), "symbols should be returned");
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_read_source_file_non_unsupported_error() {
+    use pathfinder_common::config::PathfinderConfig;
+    use pathfinder_common::sandbox::Sandbox;
+    use pathfinder_common::types::WorkspaceRoot;
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::error::SurgeonError;
+    use pathfinder_treesitter::mock::MockSurgeon;
+
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    let ws_dir = tempdir().unwrap();
+    let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // File must exist for sandbox check to pass
+    let test_path = ws.path().join("test.rs");
+    std::fs::write(&test_path, "fn main() {}").unwrap();
+
+    let mock_surgeon = MockSurgeon::new();
+    mock_surgeon
+        .read_source_file_results
+        .lock()
+        .unwrap()
+        .push(Err(SurgeonError::Io(std::sync::Arc::new(
+            std::io::Error::other("disk error"),
+        ))));
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(mock_surgeon),
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = ReadParams {
+        filepath: Some("test.rs".to_owned()),
+        start_line: 1,
+        end_line: None,
+        detail_level: "full".to_owned(),
+        ..Default::default()
+    };
+
+    let result = server.read_source_file_impl(params).await;
+    assert!(
+        result.is_err(),
+        "non-UnsupportedLanguage error should return Err"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_read_source_file_compact_detail_level() {
+    use pathfinder_common::config::PathfinderConfig;
+    use pathfinder_common::sandbox::Sandbox;
+    use pathfinder_common::types::WorkspaceRoot;
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    let ws_dir = tempdir().unwrap();
+    let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let content = "fn parent() { fn child() {} }";
+    let test_path = ws.path().join("test.rs");
+    std::fs::write(&test_path, content).unwrap();
+
+    let mock_surgeon = MockSurgeon::new();
+    let symbols = vec![make_symbol(
+        "parent",
+        0,
+        0,
+        vec![make_symbol("child", 0, 0, vec![])],
+    )];
+    mock_surgeon
+        .read_source_file_results
+        .lock()
+        .unwrap()
+        .push(Ok((content.to_owned(), "rust".to_owned(), symbols)));
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(mock_surgeon),
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    // Use an unknown detail_level to trigger the default/compact branch
+    let params = ReadParams {
+        filepath: Some("test.rs".to_owned()),
+        start_line: 1,
+        end_line: None,
+        detail_level: "compact".to_owned(),
+        ..Default::default()
+    };
+
+    let result = server.read_source_file_impl(params).await;
+    assert!(result.is_ok(), "compact detail_level should succeed");
+    let call = result.unwrap();
+
+    let meta: crate::server::types::ReadSourceFileMetadata =
+        serde_json::from_value(call.structured_content.unwrap()).unwrap();
+    // compact mode should flatten children
+    assert_eq!(meta.symbols.len(), 1, "compact returns top-level symbols only");
+    assert!(
+        meta.symbols[0].children.is_empty(),
+        "compact mode should drop children"
+    );
+}
+

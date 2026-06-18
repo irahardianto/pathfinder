@@ -344,7 +344,7 @@ pub struct SourceSymbol {
     /// Ending line number of the symbol in the source.
     pub end_line: usize,
     /// Child symbols nested within this symbol.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Self>,
 }
 

@@ -1493,3 +1493,125 @@ async fn test_skeleton_detail_structure_depth_1() {
         result.tech_stack
     );
 }
+
+// ---------------------------------------------------------------
+// Branch-coverage tests R1–R6
+// ---------------------------------------------------------------
+
+/// R1: Zone/Component/HtmlElement kinds in truncated skeleton only show the
+/// name line — no child-count / omitted line (they are NOT in the container
+/// kinds match for Class/Struct/Enum/Interface/Impl/Module).
+#[test]
+fn test_render_truncated_skeleton_zone_no_child_count() {
+    let sym = ExtractedSymbol {
+        name: "template".to_string(),
+        semantic_path: "template".to_string(),
+        kind: SymbolKind::Zone,
+        byte_range: 0..100,
+        start_line: 0,
+        end_line: 50,
+        name_column: 0,
+        access_level: crate::surgeon::AccessLevel::Public,
+        children: vec![
+            make_sym("setup", SymbolKind::Method),
+            make_sym("render", SymbolKind::Method),
+        ],
+    };
+    let result = render_truncated_file_skeleton(&[sym]);
+    assert!(
+        result.contains("zone template"),
+        "should show zone prefix + name"
+    );
+    assert!(
+        !result.contains("omitted"),
+        "zone kind must NOT emit child omission count"
+    );
+}
+
+/// R2: `filter_by_visibility` with `"public"` + `include_tests=true`
+/// preserves a Method with `it_something` name and Private access.
+#[test]
+fn test_filter_by_visibility_preserves_test_method() {
+    let syms = vec![ExtractedSymbol {
+        name: "it_something".into(),
+        semantic_path: "it_something".into(),
+        kind: SymbolKind::Method,
+        byte_range: 0..10,
+        start_line: 0,
+        end_line: 5,
+        name_column: 0,
+        access_level: crate::surgeon::AccessLevel::Private,
+        children: vec![],
+    }];
+    let filtered = filter_by_visibility(syms, "public", true);
+    assert_eq!(filtered.len(), 1, "it_ prefixed Method must be kept");
+}
+
+/// R3: A symbol with `SymbolKind::Test` is always a test symbol regardless
+/// of its name — exercises the `kind == Test` early-return in `is_test_symbol`.
+#[test]
+fn test_is_test_symbol_test_kind_arbitrary_name() {
+    let sym = ExtractedSymbol {
+        name: "random_name".into(),
+        semantic_path: "random_name".into(),
+        kind: SymbolKind::Test,
+        byte_range: 0..1,
+        start_line: 0,
+        end_line: 1,
+        name_column: 0,
+        access_level: crate::surgeon::AccessLevel::Public,
+        children: vec![],
+    };
+    assert!(is_test_symbol(&sym), "SymbolKind::Test must always be a test symbol");
+}
+
+/// R4: `depth_for_detected_languages` returns correct depth per language set.
+#[test]
+fn test_depth_for_detected_languages_java_returns_10() {
+    use crate::language::SupportedLanguage;
+
+    assert_eq!(
+        depth_for_detected_languages(&[SupportedLanguage::Java]),
+        10,
+        "Java needs deep traversal"
+    );
+    assert_eq!(
+        depth_for_detected_languages(&[SupportedLanguage::Go, SupportedLanguage::Rust]),
+        5,
+        "Go+Rust should use shallow depth"
+    );
+    assert_eq!(
+        depth_for_detected_languages(&[]),
+        5,
+        "empty language set should use default shallow depth"
+    );
+}
+
+/// R5: `symbol_prefix` returns correct prefix for every `SymbolKind` variant.
+#[test]
+fn test_symbol_prefix_all_kinds() {
+    assert_eq!(symbol_prefix(SymbolKind::Test), "test ");
+    assert_eq!(symbol_prefix(SymbolKind::Function), "func ");
+    assert_eq!(symbol_prefix(SymbolKind::Class), "class ");
+    assert_eq!(symbol_prefix(SymbolKind::Struct), "struct ");
+    assert_eq!(symbol_prefix(SymbolKind::Method), "method ");
+    assert_eq!(symbol_prefix(SymbolKind::Impl), "impl ");
+    assert_eq!(symbol_prefix(SymbolKind::Constant), "const ");
+    assert_eq!(symbol_prefix(SymbolKind::Interface), "interface ");
+    assert_eq!(symbol_prefix(SymbolKind::Enum), "enum ");
+    assert_eq!(symbol_prefix(SymbolKind::Module), "mod ");
+    assert_eq!(symbol_prefix(SymbolKind::Zone), "zone ");
+    assert_eq!(symbol_prefix(SymbolKind::Component), "component ");
+    assert_eq!(symbol_prefix(SymbolKind::HtmlElement), "element ");
+    assert_eq!(symbol_prefix(SymbolKind::CssSelector), "selector ");
+    assert_eq!(symbol_prefix(SymbolKind::CssAtRule), "at-rule ");
+}
+
+/// R6: `estimate_tokens` edge cases: empty string and boundary values.
+#[test]
+fn test_estimate_tokens_empty_and_single() {
+    assert_eq!(estimate_tokens(""), 0);
+    assert_eq!(estimate_tokens("a"), 1);
+    assert_eq!(estimate_tokens("abcd"), 1);
+    assert_eq!(estimate_tokens("abcde"), 2);
+}

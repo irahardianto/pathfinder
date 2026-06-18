@@ -2114,3 +2114,457 @@ fn test_symbol_chain_first_segment() {
     assert_eq!(chain2.segments[1].name, "bar");
     assert_eq!(chain2.segments[1].overload_index, Some(2));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Branch-coverage tests — appended to cover uncovered paths in symbols.rs
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Python class with dunder, private, protected, and public methods.
+/// Exercises all four branches of `detect_python_access_level` inside a class body.
+#[test]
+fn test_python_class_method_access_levels() {
+    let source = "\
+class MyClass:
+    def __init__(self):
+        pass
+    def __secret(self):
+        pass
+    def _protected(self):
+        pass
+    def public_method(self):
+        pass
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Python);
+    let cls = symbols
+        .iter()
+        .find(|s| s.name == "MyClass")
+        .expect("MyClass should be extracted");
+
+    let init = cls
+        .children
+        .iter()
+        .find(|c| c.name == "__init__")
+        .expect("__init__ should be a child");
+    assert_eq!(
+        init.access_level,
+        crate::surgeon::AccessLevel::Public,
+        "__init__ (dunder) should be Public"
+    );
+
+    let secret = cls
+        .children
+        .iter()
+        .find(|c| c.name == "__secret")
+        .expect("__secret should be a child");
+    assert_eq!(
+        secret.access_level,
+        crate::surgeon::AccessLevel::Private,
+        "__secret (non-dunder double underscore) should be Private"
+    );
+
+    let protected = cls
+        .children
+        .iter()
+        .find(|c| c.name == "_protected")
+        .expect("_protected should be a child");
+    assert_eq!(
+        protected.access_level,
+        crate::surgeon::AccessLevel::Protected,
+        "_protected (single underscore) should be Protected"
+    );
+
+    let public = cls
+        .children
+        .iter()
+        .find(|c| c.name == "public_method")
+        .expect("public_method should be a child");
+    assert_eq!(
+        public.access_level,
+        crate::surgeon::AccessLevel::Public,
+        "public_method (no prefix) should be Public"
+    );
+}
+
+/// Java test-name conventions exercise `is_java_test` branches:
+/// - exact name "test", "test_*" prefix, "testX" (uppercase 5th char),
+///   "testing" (lowercase 5th char, not a test), and a normal method.
+#[test]
+fn test_java_test_name_conventions() {
+    let source = b"\
+class A {\n\
+    void testFoo() {}\n\
+    void test() {}\n\
+    void test_underscore() {}\n\
+    void testing() {}\n\
+    void normalMethod() {}\n\
+}\n";
+    let tree = AstParser::parse_source(
+        std::path::Path::new("A.java"),
+        SupportedLanguage::Java,
+        source,
+    )
+    .unwrap();
+    let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Java);
+
+    let cls = syms.iter().find(|s| s.name == "A").unwrap();
+
+    let test_foo = cls.children.iter().find(|c| c.name == "testFoo").unwrap();
+    assert_eq!(
+        test_foo.kind,
+        SymbolKind::Test,
+        "testFoo starts with test + uppercase 5th char"
+    );
+
+    let test_exact = cls.children.iter().find(|c| c.name == "test").unwrap();
+    assert_eq!(
+        test_exact.kind,
+        SymbolKind::Test,
+        "test is exact name match"
+    );
+
+    let test_under = cls
+        .children
+        .iter()
+        .find(|c| c.name == "test_underscore")
+        .unwrap();
+    assert_eq!(
+        test_under.kind,
+        SymbolKind::Test,
+        "test_underscore starts with test_"
+    );
+
+    let testing = cls.children.iter().find(|c| c.name == "testing").unwrap();
+    assert_eq!(
+        testing.kind,
+        SymbolKind::Function,
+        "testing: 5th char is lowercase, no underscore, not a test"
+    );
+
+    let normal = cls
+        .children
+        .iter()
+        .find(|c| c.name == "normalMethod")
+        .unwrap();
+    assert_eq!(
+        normal.kind,
+        SymbolKind::Function,
+        "normalMethod does not match any test pattern"
+    );
+}
+
+/// Rust `#[rstest]` and `#[test_case]` attributes trigger `SymbolKind::Test`.
+#[test]
+fn test_rust_rstest_and_test_case_attributes() {
+    let source = "\
+#[rstest]
+fn test_rstest_example() {}
+
+#[test_case(1, 2)]
+fn test_case_example() {}
+
+fn plain_function() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let rstest = symbols
+        .iter()
+        .find(|s| s.name == "test_rstest_example")
+        .expect("test_rstest_example should be extracted");
+    assert_eq!(rstest.kind, SymbolKind::Test, "#[rstest] should be Test");
+
+    let test_case = symbols
+        .iter()
+        .find(|s| s.name == "test_case_example")
+        .expect("test_case_example should be extracted");
+    assert_eq!(
+        test_case.kind,
+        SymbolKind::Test,
+        "#[test_case] should be Test"
+    );
+
+    let normal = symbols
+        .iter()
+        .find(|s| s.name == "plain_function")
+        .expect("plain_function should be extracted");
+    assert_eq!(
+        normal.kind,
+        SymbolKind::Function,
+        "plain_function has no test attribute and no test-like name"
+    );
+}
+
+/// Go: `TestHandler` is a Test; `BenchmarkFoo` and `helperFn` are Functions.
+#[test]
+fn test_go_test_function_detection() {
+    let source = b"package main\nfunc TestHandler() {}\nfunc BenchmarkFoo() {}\nfunc helperFn() {}\n";
+    let tree = AstParser::parse_source(
+        std::path::Path::new("main.go"),
+        SupportedLanguage::Go,
+        source,
+    )
+    .unwrap();
+    let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+
+    let test_handler = syms.iter().find(|s| s.name == "TestHandler").unwrap();
+    assert_eq!(
+        test_handler.kind,
+        SymbolKind::Test,
+        "TestHandler starts with Test"
+    );
+
+    let benchmark = syms.iter().find(|s| s.name == "BenchmarkFoo").unwrap();
+    assert_eq!(
+        benchmark.kind,
+        SymbolKind::Function,
+        "BenchmarkFoo does not start with Test"
+    );
+
+    let helper = syms.iter().find(|s| s.name == "helperFn").unwrap();
+    assert_eq!(
+        helper.kind,
+        SymbolKind::Function,
+        "helperFn is a regular function"
+    );
+}
+
+/// JS test naming conventions: test_, it_, _test suffix, exact test/it/describe.
+#[test]
+fn test_js_test_naming_conventions() {
+    let source = "\
+function test_something() {}
+function it_does_something() {}
+function something_test() {}
+function test() {}
+function it() {}
+function describe() {}
+function normalFunction() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::JavaScript);
+
+    let expected_tests = [
+        "test_something",
+        "it_does_something",
+        "something_test",
+        "test",
+        "it",
+        "describe",
+    ];
+    for name in &expected_tests {
+        let sym = symbols
+            .iter()
+            .find(|s| s.name == *name)
+            .unwrap_or_else(|| panic!("{name} should be extracted"));
+        assert_eq!(
+            sym.kind,
+            SymbolKind::Test,
+            "{name} should be detected as Test"
+        );
+    }
+
+    let normal = symbols
+        .iter()
+        .find(|s| s.name == "normalFunction")
+        .unwrap();
+    assert_eq!(
+        normal.kind,
+        SymbolKind::Function,
+        "normalFunction should be Function"
+    );
+}
+
+/// `did_you_mean`: exact match short-circuit, close typo, and completely different name.
+#[test]
+fn test_did_you_mean_fuzzy_and_exact() {
+    let syms = vec![
+        ExtractedSymbol {
+            name: "MyHandler".into(),
+            semantic_path: "MyHandler".into(),
+            kind: SymbolKind::Function,
+            byte_range: 0..10,
+            start_line: 0,
+            end_line: 5,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        },
+        ExtractedSymbol {
+            name: "MyHelper".into(),
+            semantic_path: "MyHelper".into(),
+            kind: SymbolKind::Function,
+            byte_range: 11..20,
+            start_line: 6,
+            end_line: 10,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        },
+    ];
+
+    // Exact match short-circuits
+    let exact = did_you_mean(&syms, &SymbolChain::parse("MyHandler").unwrap(), 3);
+    assert_eq!(exact, vec!["MyHandler"], "exact match should short-circuit");
+
+    // Close typo returns suggestion
+    let fuzzy = did_you_mean(&syms, &SymbolChain::parse("MyHandlerr").unwrap(), 3);
+    assert!(
+        fuzzy.contains(&"MyHandler".to_string()),
+        "close typo should suggest MyHandler, got: {fuzzy:?}"
+    );
+
+    // Completely different name returns nothing
+    let none = did_you_mean(
+        &syms,
+        &SymbolChain::parse("ZZZCompletelyDifferentNameXXX").unwrap(),
+        3,
+    );
+    assert!(
+        none.is_empty(),
+        "completely different name should return empty, got: {none:?}"
+    );
+}
+
+/// `resolve_symbol_chain` with overload index: `foo` resolves to first, `foo#2` to second.
+#[test]
+fn test_resolve_symbol_chain_with_overload_index() {
+    let syms = vec![
+        ExtractedSymbol {
+            name: "foo".into(),
+            semantic_path: "foo".into(),
+            kind: SymbolKind::Function,
+            byte_range: 0..10,
+            start_line: 0,
+            end_line: 5,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        },
+        ExtractedSymbol {
+            name: "foo".into(),
+            semantic_path: "foo#2".into(),
+            kind: SymbolKind::Function,
+            byte_range: 11..20,
+            start_line: 6,
+            end_line: 10,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        },
+    ];
+
+    let first = resolve_symbol_chain(&syms, &SymbolChain::parse("foo").unwrap());
+    assert!(first.is_some(), "foo should resolve to first");
+    assert_eq!(first.unwrap().semantic_path, "foo");
+
+    let second = resolve_symbol_chain(&syms, &SymbolChain::parse("foo#2").unwrap());
+    assert!(second.is_some(), "foo#2 should resolve to second");
+    assert_eq!(second.unwrap().semantic_path, "foo#2");
+}
+
+/// JS duplicate function names get unique semantic paths: foo, foo#2, foo#3.
+#[test]
+fn test_js_duplicate_function_names_get_unique_paths() {
+    let source = "\
+function foo() {}
+function foo() {}
+function foo() {}
+function bar() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::JavaScript);
+
+    let foos: Vec<_> = symbols.iter().filter(|s| s.name == "foo").collect();
+    assert_eq!(foos.len(), 3, "should have 3 foo symbols");
+    assert_eq!(foos[0].semantic_path, "foo");
+    assert_eq!(foos[1].semantic_path, "foo#2");
+    assert_eq!(foos[2].semantic_path, "foo#3");
+
+    let bar = symbols.iter().find(|s| s.name == "bar").unwrap();
+    assert_eq!(bar.semantic_path, "bar");
+}
+
+/// Vue SFC with components and self-closing element: verifies template zone
+/// extraction with component promotion and HTML element detection.
+#[test]
+fn test_vue_self_closing_template_element() {
+    let sfc = br#"<template>
+  <div>
+    <MyInput>content</MyInput>
+    <span>text</span>
+  </div>
+</template>
+<script setup lang="ts"></script>
+"#;
+    let multi = crate::vue_zones::parse_vue_multizone(sfc).unwrap();
+    let syms = extract_symbols_from_multizone(&multi);
+
+    let template_sym = syms
+        .iter()
+        .find(|s| s.name == "template")
+        .expect("template zone should exist");
+
+    // MyInput is a component (starts with uppercase) — promoted to top-level of template
+    let my_input = template_sym
+        .children
+        .iter()
+        .find(|c| c.name == "MyInput");
+    assert!(
+        my_input.is_some(),
+        "MyInput component should be extracted"
+    );
+    assert_eq!(
+        my_input.unwrap().kind,
+        crate::surgeon::SymbolKind::Component,
+        "MyInput should be Component kind"
+    );
+    assert_eq!(
+        my_input.unwrap().semantic_path,
+        "template::MyInput",
+        "component should have promoted path"
+    );
+
+    // div is an HTML element at depth 0
+    let div = template_sym.children.iter().find(|c| c.name == "div");
+    assert!(
+        div.is_some(),
+        "div element should be extracted at root depth"
+    );
+    assert_eq!(
+        div.unwrap().kind,
+        crate::surgeon::SymbolKind::HtmlElement,
+        "div should be HtmlElement kind"
+    );
+
+    // span at depth 1 should be emitted (depth < 3)
+    let span = template_sym.children.iter().find(|c| c.name == "span");
+    assert!(
+        span.is_some(),
+        "span at depth 1 should be extracted"
+    );
+    assert_eq!(
+        span.unwrap().kind,
+        crate::surgeon::SymbolKind::HtmlElement,
+        "span should be HtmlElement kind"
+    );
+}
+
+/// `find_enclosing_symbol` returns the narrowest (innermost) match for a line
+/// inside a Go struct's method.
+#[test]
+fn test_find_enclosing_symbol_narrowest_match() {
+    let source = b"package main\n\ntype Server struct{}\n\nfunc (s *Server) Handle() {\n    // line 5 inside method\n}\n";
+    let tree = AstParser::parse_source(
+        std::path::Path::new("main.go"),
+        SupportedLanguage::Go,
+        source,
+    )
+    .unwrap();
+    let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+
+    // Row 5 (0-indexed) is inside Handle method body
+    let result = find_enclosing_symbol_ref(&syms, 5);
+    assert!(
+        result.is_some(),
+        "should find enclosing symbol at row 5 inside Handle"
+    );
+    let sym = result.unwrap();
+    assert_eq!(sym.name, "Handle", "narrowest match should be Handle");
+}

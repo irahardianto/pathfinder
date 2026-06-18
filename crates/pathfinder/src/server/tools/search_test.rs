@@ -1063,3 +1063,39 @@ async fn test_search_low_coverage_hint_emitted() {
     // If coverage >= 50 (binary files don't count), the test is still green —
     // it just confirms the hint correctly stays silent at high coverage.
 }
+
+
+
+
+// ── General search engine error ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_search_engine_error_returns_internal_error() {
+    use pathfinder_search::MockScout;
+
+    let ws_dir = tempfile::tempdir().unwrap();
+    let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // Use MockScout that returns a general error (not invalid pattern)
+    let mock_scout = Arc::new(MockScout::default());
+    mock_scout.set_result(Err("unexpected engine crash".to_owned()));
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+    let server =
+        PathfinderServer::with_all_engines(ws, config, sandbox, mock_scout, surgeon, lawyer);
+
+    let params = SearchParams {
+        query: "hello".to_owned(),
+        mode: SearchMode::Text,
+        path_glob: "**/*.rs".to_owned(),
+        max_results: 10,
+        filter_mode: FilterMode::All,
+        ..Default::default()
+    };
+
+    let result = server.search_codebase_impl(params).await;
+    assert!(result.is_err(), "engine error should return Err");
+}

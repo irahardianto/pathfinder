@@ -861,3 +861,244 @@ async fn test_read_files_text_content_shows_errors_for_missing() {
         "text must indicate the error for missing file, got: {text}"
     );
 }
+
+// ── Concurrency: >5 files triggers the while-loop drain ─────────────────
+
+#[tokio::test]
+async fn test_read_files_concurrency_above_limit() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+
+    // Create 7 source files (> READ_FILES_CONCURRENCY = 5)
+    let file_count = 7;
+    let mut paths = Vec::new();
+    for i in 0..file_count {
+        let name = format!("file{i}.rs");
+        let content = format!("fn func_{i}() {{}}");
+        fs::write(ws_dir.path().join(&name), &content).expect("write");
+        mock_surgeon
+            .read_source_file_results
+            .lock()
+            .unwrap()
+            .push(Ok((content, "rust".to_string(), vec![])));
+        paths.push(name);
+    }
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        mock_surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = ReadParams {
+        paths: Some(paths),
+        detail_level: "source_only".to_string(),
+        max_lines_per_file: 500,
+        ..Default::default()
+    };
+
+    let result = server
+        .read_files_impl(params)
+        .await
+        .expect("should succeed");
+    let response: ReadFilesResponse =
+        serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(response.files.len(), file_count);
+    assert_eq!(response.succeeded, file_count as u32);
+    assert_eq!(response.failed, 0);
+}
+
+// ── Source file error path (non-UnsupportedLanguage) ────────────────────
+
+#[tokio::test]
+async fn test_read_files_source_file_read_error() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+
+    // Create a .rs file (source file) that will trigger an error via mock
+    fs::write(ws_dir.path().join("broken.rs"), "fn main() {}").expect("write");
+    mock_surgeon
+        .read_source_file_results
+        .lock()
+        .unwrap()
+        .push(Err(pathfinder_treesitter::error::SurgeonError::Io(
+            std::sync::Arc::new(std::io::Error::other("disk failure")),
+        )));
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        mock_surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = ReadParams {
+        paths: Some(vec!["broken.rs".to_string()]),
+        detail_level: "source_only".to_string(),
+        max_lines_per_file: 500,
+        ..Default::default()
+    };
+
+    let result = server
+        .read_files_impl(params)
+        .await
+        .expect("should succeed even with single file error");
+    let response: ReadFilesResponse =
+        serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(response.files.len(), 1);
+    assert_eq!(response.failed, 1, "the broken source file should be a failure");
+    assert!(
+        response.files[0].error.is_some(),
+        "error should be populated for broken source file"
+    );
+}
+
+// ── Binary non-source file (InvalidData IO error) ───────────────────────
+
+#[tokio::test]
+async fn test_read_files_binary_non_source_file() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // Write invalid UTF-8 bytes to a .txt file (non-source extension)
+    fs::write(
+        ws_dir.path().join("binary.txt"),
+        &[0xff, 0xfe, 0x00, 0x80, 0x90, 0xa0],
+    )
+    .expect("write");
+
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    let params = ReadParams {
+        paths: Some(vec!["binary.txt".to_string()]),
+        detail_level: "source_only".to_string(),
+        max_lines_per_file: 500,
+        ..Default::default()
+    };
+
+    let result = server
+        .read_files_impl(params)
+        .await
+        .expect("should succeed");
+    let response: ReadFilesResponse =
+        serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(response.files.len(), 1);
+    assert_eq!(response.failed, 1);
+    let err = response.files[0].error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("binary") || err.contains("UTF-8"),
+        "error should indicate binary/non-UTF-8 file, got: {err}"
+    );
+}
+
+// ── General IO error for non-source file (not NotFound, not InvalidData) ──
+
+#[tokio::test]
+async fn test_read_files_non_source_general_io_error() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // Create a directory with a .txt extension — reading it as a file triggers a general IO error
+    let dir_as_file = ws_dir.path().join("fakefile.txt");
+    fs::create_dir_all(&dir_as_file).expect("create dir");
+
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    let params = ReadParams {
+        paths: Some(vec!["fakefile.txt".to_string()]),
+        detail_level: "source_only".to_string(),
+        max_lines_per_file: 500,
+        ..Default::default()
+    };
+
+    let result = server
+        .read_files_impl(params)
+        .await
+        .expect("should succeed");
+    let response: ReadFilesResponse =
+        serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(response.files.len(), 1);
+    assert_eq!(response.failed, 1);
+    let err = response.files[0].error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("failed to read file"),
+        "error should indicate general read failure, got: {err}"
+    );
+}
+
+// ── Language "text" mapped to empty string for non-source files ─────────
+
+#[tokio::test]
+async fn test_read_files_text_language_mapped_to_empty() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // File with no extension — language_from_path returns "text"
+    fs::write(ws_dir.path().join("Makefile"), "all:\n\techo hello").expect("write");
+
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    let params = ReadParams {
+        paths: Some(vec!["Makefile".to_string()]),
+        detail_level: "source_only".to_string(),
+        max_lines_per_file: 500,
+        ..Default::default()
+    };
+
+    let result = server
+        .read_files_impl(params)
+        .await
+        .expect("should succeed");
+    let response: ReadFilesResponse =
+        serde_json::from_value(result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(response.files.len(), 1);
+    assert_eq!(response.succeeded, 1);
+    let lang = response.files[0].language.as_deref().unwrap_or("MISSING");
+    assert_eq!(
+        lang, "",
+        "language 'text' should be mapped to empty string, got: {lang}"
+    );
+}
+

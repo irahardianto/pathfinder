@@ -112,6 +112,7 @@ impl PathfinderServer {
             ));
         }
 
+        let mut indexed_results: Vec<(usize, FileResult)> = Vec::with_capacity(paths.len());
         let mut set = JoinSet::new();
         let mut spawned = 0;
 
@@ -123,8 +124,11 @@ impl PathfinderServer {
             while spawned >= READ_FILES_CONCURRENCY {
                 if let Some(res) = set.join_next().await {
                     spawned -= 1;
-                    if let Err(e) = res {
-                        tracing::error!(tool = "read_files", error = %e, "spawned task panicked");
+                    match res {
+                        Ok((i, result)) => indexed_results.push((i, result)),
+                        Err(e) => {
+                            tracing::error!(tool = "read_files", error = %e, "spawned task panicked");
+                        }
                     }
                 }
             }
@@ -133,13 +137,13 @@ impl PathfinderServer {
             spawned += 1;
         }
 
-        let mut indexed_results: Vec<(usize, FileResult)> = Vec::with_capacity(paths.len());
         while let Some(res) = set.join_next().await {
             match res {
                 Ok((idx, result)) => indexed_results.push((idx, result)),
                 Err(e) => tracing::error!(tool = "read_files", error = %e, "spawned task panicked"),
             }
         }
+
 
         indexed_results.sort_by_key(|(idx, _)| *idx);
         let file_results: Vec<FileResult> = indexed_results.into_iter().map(|(_, r)| r).collect();

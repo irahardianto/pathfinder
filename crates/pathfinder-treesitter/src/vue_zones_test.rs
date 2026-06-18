@@ -179,3 +179,57 @@ fn test_byte_to_point_mid_line() {
     assert_eq!(p.row, 1);
     assert_eq!(p.column, 1);
 }
+
+// ---------------------------------------------------------------
+// Branch-coverage tests V1–V4
+// ---------------------------------------------------------------
+
+/// V1: `</script>` prefix doesn't confuse the zone finder — only `<script>`
+/// opening tags are matched, not closing tags.
+#[test]
+fn test_find_zone_skips_closing_tag() {
+    let src = b"</script>\n<script>content</script>";
+    let zones = scan_vue_zones(src);
+    assert!(zones.script.is_some(), "should find the opening <script>");
+    let zone = zones.script.unwrap();
+    assert_eq!(
+        &src[zone.start_byte..zone.end_byte],
+        b"content",
+        "zone content must be the text between opening and closing tags"
+    );
+}
+
+/// V2: `<script>` with attributes (setup, lang) still correctly extracts
+/// the inner content.
+#[test]
+fn test_scan_vue_zones_script_with_attributes() {
+    let src = b"<script setup lang=\"ts\">\nconsole.log('hi')\n</script>";
+    let zones = scan_vue_zones(src);
+    assert!(zones.script.is_some(), "should find script with attributes");
+    let zone = zones.script.unwrap();
+    let content = &src[zone.start_byte..zone.end_byte];
+    assert_eq!(
+        std::str::from_utf8(content).unwrap(),
+        "\nconsole.log('hi')\n",
+        "zone content must be everything between > and </script>"
+    );
+}
+
+/// V3: `byte_to_point` with offset past the end of source clamps to
+/// source length.
+#[test]
+fn test_byte_to_point_past_end() {
+    let src = b"hello";
+    let pt = byte_to_point(src, 100);
+    assert_eq!(pt.row, 0, "clamped offset on single line → row 0");
+    assert_eq!(pt.column, 5, "clamped to source.len() = 5");
+}
+
+/// V4: `byte_to_point` with empty source at offset 0.
+#[test]
+fn test_byte_to_point_empty_source() {
+    let src = b"";
+    let pt = byte_to_point(src, 0);
+    assert_eq!(pt.row, 0);
+    assert_eq!(pt.column, 0);
+}

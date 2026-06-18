@@ -437,3 +437,112 @@ async fn test_get_repo_map_auto_scaling_for_large_project() {
     let result = server.get_repo_map_impl(params).await;
     assert!(result.is_ok(), "get_repo_map should succeed: {result:?}");
 }
+
+// ── Detail::Structure token clamping ────────────────────────────────────
+
+#[tokio::test]
+async fn test_get_repo_map_detail_structure_clamps_tokens() {
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(ok_result()));
+    let (server, _dir) = make_server(surgeon);
+
+    let mut params = default_params();
+    params.detail = Detail::Structure;
+    params.max_tokens = 10_000; // Should be clamped to min(10_000, 4_000) = 4_000
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(result.is_ok(), "Detail::Structure should succeed: {result:?}");
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+    let max_tokens_used = meta
+        .get("max_tokens_used")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    assert_eq!(
+        max_tokens_used, 4_000,
+        "Detail::Structure should clamp max_tokens to 4000, got {max_tokens_used}"
+    );
+}
+
+// ── Detail::Files depth + token clamping ────────────────────────────────
+
+#[tokio::test]
+async fn test_get_repo_map_detail_files_clamps_depth_and_tokens() {
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(ok_result()));
+    let (server, _dir) = make_server(surgeon);
+
+    let mut params = default_params();
+    params.detail = Detail::Files;
+    params.depth = 10; // Should be clamped to min(10, 3) = 3
+    params.max_tokens = 20_000; // Should be clamped to min(20_000, 8_000) = 8_000
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(result.is_ok(), "Detail::Files should succeed: {result:?}");
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+    let max_tokens_used = meta
+        .get("max_tokens_used")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    assert_eq!(
+        max_tokens_used, 8_000,
+        "Detail::Files should clamp max_tokens to 8000, got {max_tokens_used}"
+    );
+}
+
+// ── Degraded text includes notice prefix ────────────────────────────────
+
+#[tokio::test]
+async fn test_get_repo_map_degraded_text_contains_notice() {
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(ok_result()));
+    let (server, _dir) = make_server(surgeon);
+
+    let mut params = default_params();
+    // Use a ref that doesn't exist → git error → fallback → degraded=true
+    params.changed_since = "nonexistent-ref-for-notice-test".to_owned();
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(
+        result.is_ok(),
+        "git failure should fall back to full map: {result:?}"
+    );
+    let tool_result = result.unwrap();
+
+    // Extract the text content
+    let text = tool_result
+        .content
+        .first()
+        .and_then(|c| {
+            if let rmcp::model::RawContent::Text(t) = &c.raw {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    // Degraded text should have a notice prefix (from format_degraded_notice)
+    assert!(
+        text.contains("DEGRADED") || text.contains("degraded"),
+        "degraded text should contain notice, got: {text}"
+    );
+    assert!(
+        text.contains("skeleton"),
+        "degraded text should still contain skeleton content"
+    );
+}
+

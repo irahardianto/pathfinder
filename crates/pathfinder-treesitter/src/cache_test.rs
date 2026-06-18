@@ -735,3 +735,102 @@ async fn test_get_or_parse_inner_deduplication() {
         "closure should only run once"
     );
 }
+
+// ---------------------------------------------------------------
+// Branch-coverage tests C1–C4
+// ---------------------------------------------------------------
+
+/// C1: `io_err` with `PermissionDenied` returns `SurgeonError::Io`.
+#[test]
+fn test_io_err_permission_denied_returns_io_error() {
+    let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+    let result = io_err(err, Path::new("/tmp/test"));
+    assert!(
+        matches!(result, SurgeonError::Io(_)),
+        "PermissionDenied should map to Io variant, got: {result:?}"
+    );
+}
+
+/// C2: `io_err` with `NotFound` returns `SurgeonError::FileNotFound`.
+#[test]
+fn test_io_err_not_found_returns_file_not_found() {
+    let err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+    let result = io_err(err, Path::new("/tmp/missing"));
+    assert!(
+        matches!(result, SurgeonError::FileNotFound(_)),
+        "NotFound should map to FileNotFound variant, got: {result:?}"
+    );
+}
+
+/// C3: `get_or_parse_preloaded` cache hit — second call with same content and
+/// mtime returns a cache hit without re-parsing.
+#[tokio::test]
+async fn test_get_or_parse_preloaded_cache_hit() {
+    let cache = AstCache::new(2);
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.rs");
+    let content = b"fn main() {}";
+    std::fs::write(&file_path, content).unwrap();
+
+    let mtime = std::fs::metadata(&file_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    let content_arc = Arc::from(content.as_slice());
+
+    // First call — cache miss, full parse
+    let (tree1, src1) = cache
+        .get_or_parse_preloaded(&file_path, SupportedLanguage::Rust, Arc::clone(&content_arc), mtime)
+        .await
+        .unwrap();
+    assert_eq!(src1.len(), content.len());
+
+    // Second call — same content and mtime → cache hit (fast path)
+    let (tree2, src2) = cache
+        .get_or_parse_preloaded(&file_path, SupportedLanguage::Rust, content_arc, mtime)
+        .await
+        .unwrap();
+    assert_eq!(src2.len(), content.len());
+    assert_eq!(
+        tree1.root_node().child_count(),
+        tree2.root_node().child_count(),
+        "cache hit must return identical tree structure"
+    );
+}
+
+/// C4: `get_or_parse_vue_preloaded` cache hit — second call with same content
+/// and mtime returns a cache hit without re-parsing.
+#[tokio::test]
+async fn test_get_or_parse_vue_preloaded_cache_hit() {
+    let cache = AstCache::new(2);
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.vue");
+    let sfc = b"<script setup lang=\"ts\">\nconst x = 1\n</script>\n";
+    std::fs::write(&file_path, sfc).unwrap();
+
+    let mtime = std::fs::metadata(&file_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    // First call — cache miss
+    let (multi1, hash1) = cache
+        .get_or_parse_vue_preloaded(&file_path, sfc, mtime)
+        .await
+        .unwrap();
+    assert!(multi1.script_tree.is_some());
+
+    // Second call — same content and mtime → cache hit
+    let (multi2, hash2) = cache
+        .get_or_parse_vue_preloaded(&file_path, sfc, mtime)
+        .await
+        .unwrap();
+    assert_eq!(hash1, hash2, "cache hit must return identical hash");
+    assert_eq!(
+        multi2.script_tree.is_some(),
+        multi1.script_tree.is_some(),
+        "cache hit must return identical tree presence"
+    );
+}
