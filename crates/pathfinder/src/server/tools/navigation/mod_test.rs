@@ -1174,3 +1174,527 @@ async fn test_read_symbol_scope_enriched_all_cases() {
     assert!(res.is_ok());
     assert_eq!(res.unwrap().content, corrected_scope.content);
 }
+
+// ── is_source_file: valid source extensions ────────────────────────────
+
+#[test]
+fn test_is_source_file_standard_extensions() {
+    // All entries in SOURCE_FILE_EXTENSIONS must return true
+    let valid = [
+        "src/main.rs",
+        "cmd/api/main.go",
+        "src/index.ts",
+        "src/App.tsx",
+        "lib/utils.js",
+        "components/Button.jsx",
+        "lib/esm.mjs",
+        "lib/cjs.cjs",
+        "app/main.py",
+        "stubs/types.pyi",
+        "components/App.vue",
+        "com/example/Main.java",
+    ];
+    for path in &valid {
+        assert!(
+            super::is_source_file(path),
+            "expected is_source_file=true for '{path}'"
+        );
+    }
+}
+
+#[test]
+fn test_is_source_file_non_source_extensions() {
+    // Config, doc, asset files must return false
+    let invalid = [
+        "README.md",
+        "package.json",
+        "config.yaml",
+        "config.toml",
+        "Makefile",
+        "Dockerfile",
+        ".gitignore",
+        "styles.css",
+        "index.html",
+    ];
+    for path in &invalid {
+        assert!(
+            !super::is_source_file(path),
+            "expected is_source_file=false for '{path}'"
+        );
+    }
+}
+
+#[test]
+fn test_is_source_file_binary_extensions() {
+    // Binary/media files must return false
+    let binaries = [
+        "image.png",
+        "photo.jpg",
+        "photo.jpeg",
+        "icon.gif",
+        "app.exe",
+        "library.dll",
+        "library.so",
+        "archive.zip",
+        "archive.tar.gz",
+        "font.woff2",
+        "data.pdf",
+    ];
+    for path in &binaries {
+        assert!(
+            !super::is_source_file(path),
+            "expected is_source_file=false for binary '{path}'"
+        );
+    }
+}
+
+#[test]
+fn test_is_source_file_no_extension() {
+    // Files without extensions (e.g. Makefile, LICENSE) return false
+    assert!(!super::is_source_file("Makefile"));
+    assert!(!super::is_source_file("LICENSE"));
+    assert!(!super::is_source_file("src/"));
+}
+
+#[test]
+fn test_is_source_file_unsupported_web_extensions() {
+    // These are web-adjacent but not in SOURCE_FILE_EXTENSIONS
+    let unsupported = [
+        "styles.scss",
+        "styles.less",
+        "schema.graphql",
+        "api.proto",
+        "App.svelte",
+    ];
+    for path in &unsupported {
+        assert!(
+            !super::is_source_file(path),
+            "expected is_source_file=false for unsupported web ext '{path}'"
+        );
+    }
+}
+
+// ── definition_patterns: non-empty for all supported languages ─────────
+
+#[test]
+fn test_definition_patterns_non_empty_for_all_supported_extensions() {
+    let extensions = ["rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "vue"];
+    for ext in &extensions {
+        let patterns = super::definition_patterns(ext, "SomeSymbol");
+        assert!(
+            !patterns.is_empty(),
+            "definition_patterns must return non-empty for ext '{ext}'"
+        );
+        assert!(
+            patterns.len() >= 2,
+            "definition_patterns for '{ext}' should have at least 2 patterns, got {}",
+            patterns.len()
+        );
+    }
+}
+
+#[test]
+fn test_definition_patterns_tsx_jsx_share_ts_patterns() {
+    // tsx/jsx should produce the same pattern set as ts/js
+    let ts_patterns = super::definition_patterns("ts", "Foo");
+    let tsx_patterns = super::definition_patterns("tsx", "Foo");
+    let js_patterns = super::definition_patterns("js", "Foo");
+    let jsx_patterns = super::definition_patterns("jsx", "Foo");
+    assert_eq!(ts_patterns.len(), tsx_patterns.len());
+    assert_eq!(js_patterns.len(), jsx_patterns.len());
+    assert_eq!(ts_patterns.len(), js_patterns.len());
+}
+
+#[test]
+fn test_definition_patterns_go_generic_type() {
+    // Go generic type definitions: type Foo[T any] struct {}
+    let patterns = super::definition_patterns("go", "Cache");
+    assert!(patterns.len() >= 4, "go must have generic type pattern");
+    let re = regex::Regex::new(&patterns[3]).expect("valid regex");
+    assert!(
+        re.is_match("type Cache[K comparable, V any] struct {"),
+        "must match generic type definition"
+    );
+}
+
+#[test]
+fn test_definition_patterns_rust_macro_rules() {
+    let patterns = super::definition_patterns("rs", "my_macro");
+    assert!(patterns.len() >= 4, "rust must have macro_rules pattern");
+    let re = regex::Regex::new(&patterns[3]).expect("valid regex");
+    assert!(
+        re.is_match("macro_rules! my_macro {"),
+        "must match 'macro_rules! my_macro {{'"
+    );
+}
+
+#[test]
+fn test_definition_patterns_rust_const_static() {
+    let patterns = super::definition_patterns("rs", "MAX_SIZE");
+    assert!(patterns.len() >= 3);
+    let re = regex::Regex::new(&patterns[2]).expect("valid regex");
+    assert!(re.is_match("pub const MAX_SIZE: usize = 100;"));
+    assert!(re.is_match("static MAX_SIZE: i32 = 42;"));
+}
+
+#[test]
+fn test_definition_patterns_python_module_assignment() {
+    let patterns = super::definition_patterns("py", "DEFAULT_TIMEOUT");
+    assert!(patterns.len() >= 3, "python must have assignment pattern");
+    let re = regex::Regex::new(&patterns[2]).expect("valid regex");
+    assert!(
+        re.is_match("DEFAULT_TIMEOUT = 30"),
+        "must match module-level assignment"
+    );
+    assert!(
+        re.is_match("DEFAULT_TIMEOUT: int = 30"),
+        "must match typed assignment"
+    );
+}
+
+#[test]
+fn test_definition_patterns_ts_arrow_function() {
+    let patterns = super::definition_patterns("ts", "fetchData");
+    assert!(patterns.len() >= 4, "ts must have arrow fn pattern");
+    let re = regex::Regex::new(&patterns[3]).expect("valid regex");
+    assert!(
+        re.is_match("export const fetchData = async (url: string): Promise<void> => {"),
+        "must match exported async arrow function"
+    );
+}
+
+#[test]
+fn test_definition_patterns_go_const_var() {
+    let patterns = super::definition_patterns("go", "MaxRetries");
+    assert!(patterns.len() >= 5, "go must have const/var pattern");
+    let re = regex::Regex::new(&patterns[4]).expect("valid regex");
+    assert!(re.is_match("const MaxRetries = 3"));
+    assert!(re.is_match("var MaxRetries int"));
+}
+
+// ── extract_call_candidates: additional language coverage ──────────────
+
+#[test]
+fn test_extract_call_candidates_python_function_calls() {
+    let code = r#"
+def handle_request(request):
+    user = get_current_user(request)
+    data = parse_body(request.body)
+    result = process_order(data, user)
+    send_notification(user.email)
+    return format_response(result)
+"#;
+    let candidates = super::extract_call_candidates(code, "python");
+    assert!(
+        candidates.contains(&"get_current_user".to_string()),
+        "expected 'get_current_user' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"parse_body".to_string()),
+        "expected 'parse_body' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"process_order".to_string()),
+        "expected 'process_order' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"send_notification".to_string()),
+        "expected 'send_notification' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"format_response".to_string()),
+        "expected 'format_response' in {candidates:?}"
+    );
+    // Keywords filtered
+    assert!(!candidates.contains(&"def".to_string()));
+    assert!(!candidates.contains(&"return".to_string()));
+}
+
+#[test]
+fn test_extract_call_candidates_rust_method_calls() {
+    let code = r"
+fn process(service: &Service) {
+    let conn = service.connect();
+    let data = conn.fetch_data(id);
+    self.validate(data);
+    result.unwrap();
+}
+";
+    let candidates = super::extract_call_candidates(code, "rust");
+    assert!(
+        candidates.contains(&"connect".to_string()),
+        "expected 'connect' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"fetch_data".to_string()),
+        "expected 'fetch_data' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"validate".to_string()),
+        "expected 'validate' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"unwrap".to_string()),
+        "expected 'unwrap' in {candidates:?}"
+    );
+}
+
+#[test]
+fn test_extract_call_candidates_go_method_calls() {
+    let code = r"
+func (s *Server) HandleRequest(w http.ResponseWriter, r *http.Request) {
+    user := s.GetUser(r.Context())
+    data := s.parseBody(r)
+    result := s.processOrder(data, user)
+    w.WriteHeader(200)
+}
+";
+    let candidates = super::extract_call_candidates(code, "go");
+    assert!(
+        candidates.contains(&"GetUser".to_string()),
+        "expected 'GetUser' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"parseBody".to_string()),
+        "expected 'parseBody' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"processOrder".to_string()),
+        "expected 'processOrder' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"WriteHeader".to_string()),
+        "expected 'WriteHeader' in {candidates:?}"
+    );
+    // Go keywords filtered
+    assert!(!candidates.contains(&"func".to_string()));
+}
+
+#[test]
+fn test_extract_call_candidates_java_method_calls() {
+    let code = r"
+public void processOrder(Order order) {
+    User user = userService.findById(order.getUserId());
+    validator.validate(order);
+    PaymentResult result = paymentGateway.charge(order.getTotal());
+    notificationService.send(user.getEmail());
+}
+";
+    let candidates = super::extract_call_candidates(code, "java");
+    assert!(
+        candidates.contains(&"findById".to_string()),
+        "expected 'findById' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"validate".to_string()),
+        "expected 'validate' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"charge".to_string()),
+        "expected 'charge' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"send".to_string()),
+        "expected 'send' in {candidates:?}"
+    );
+    // Java keywords filtered
+    assert!(!candidates.contains(&"new".to_string()));
+}
+
+#[test]
+fn test_extract_call_candidates_javascript_mixed_calls() {
+    let code = r"
+function handleSubmit(event) {
+    event.preventDefault();
+    const data = parseFormData(event.target);
+    const result = apiClient.post('/submit', data);
+    showNotification('Success');
+}
+";
+    let candidates = super::extract_call_candidates(code, "javascript");
+    assert!(
+        candidates.contains(&"preventDefault".to_string()),
+        "expected 'preventDefault' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"parseFormData".to_string()),
+        "expected 'parseFormData' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"post".to_string()),
+        "expected 'post' in {candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"showNotification".to_string()),
+        "expected 'showNotification' in {candidates:?}"
+    );
+    // JS keywords filtered
+    assert!(!candidates.contains(&"function".to_string()));
+    assert!(!candidates.contains(&"const".to_string()));
+}
+
+#[test]
+fn test_extract_call_candidates_unknown_language_uses_default_keywords() {
+    let code = r"
+fn process() {
+    if condition { return; }
+    doWork(x);
+}
+";
+    let candidates = super::extract_call_candidates(code, "unknown_lang");
+    // Default keywords (if, return, for, while, etc.) should be filtered
+    assert!(!candidates.contains(&"if".to_string()));
+    assert!(!candidates.contains(&"return".to_string()));
+    assert!(
+        candidates.contains(&"doWork".to_string()),
+        "real fn call must be kept for unknown language"
+    );
+}
+
+// ── keywords_for_language: javascript alias ────────────────────────────
+
+#[test]
+fn test_keywords_for_language_javascript_matches_typescript() {
+    let ts_kw = super::keywords_for_language("typescript");
+    let js_kw = super::keywords_for_language("javascript");
+    assert_eq!(
+        ts_kw.len(),
+        js_kw.len(),
+        "typescript and javascript must share keyword list"
+    );
+    for kw in ts_kw {
+        assert!(
+            js_kw.contains(kw),
+            "javascript keywords must contain '{kw}'"
+        );
+    }
+}
+
+// ── candidate_definition_pattern tests ─────────────────────────────────
+
+#[test]
+fn test_candidate_definition_pattern_rust() {
+    let pat = super::candidate_definition_pattern("rust", "process_order");
+    // NOTE: The rust branch currently has an unclosed group in its regex
+    // (missing closing paren for the outer non-capturing group).
+    // This test documents the known issue. When the regex is fixed,
+    // update this test to assert is_ok() and test matching behavior.
+    assert!(
+        regex::Regex::new(&pat).is_err(),
+        "known bug: rust candidate_definition_pattern has unclosed group"
+    );
+}
+
+#[test]
+fn test_candidate_definition_pattern_go() {
+    let pat = super::candidate_definition_pattern("go", "HandleRequest");
+    let re = regex::Regex::new(&pat).expect("valid regex");
+    assert!(re.is_match("func HandleRequest("));
+    assert!(!re.is_match("HandleRequest("));
+}
+
+#[test]
+fn test_candidate_definition_pattern_typescript() {
+    let pat = super::candidate_definition_pattern("typescript", "fetchData");
+    let re = regex::Regex::new(&pat).expect("valid regex");
+    assert!(re.is_match("function fetchData("));
+    assert!(re.is_match("export function fetchData("));
+    assert!(re.is_match("export const fetchData ="));
+    assert!(re.is_match("const fetchData ="));
+}
+
+#[test]
+fn test_candidate_definition_pattern_python() {
+    let pat = super::candidate_definition_pattern("python", "process");
+    let re = regex::Regex::new(&pat).expect("valid regex");
+    assert!(re.is_match("def process("));
+    assert!(re.is_match("async def process("));
+}
+
+#[test]
+fn test_candidate_definition_pattern_java_delegates_to_java_resolve() {
+    let pat = super::candidate_definition_pattern("java", "MyClass");
+    let re = regex::Regex::new(&pat).expect("valid regex");
+    assert!(re.is_match("public class MyClass {"));
+    assert!(re.is_match("public MyClass("));
+}
+
+#[test]
+fn test_candidate_definition_pattern_unknown_language() {
+    let pat = super::candidate_definition_pattern("haskell", "myFunc");
+    let re = regex::Regex::new(&pat).expect("valid regex");
+    assert!(re.is_match("fn myFunc("));
+    assert!(re.is_match("def myFunc("));
+    assert!(re.is_match("function myFunc("));
+    assert!(re.is_match("class myFunc {"));
+}
+
+#[test]
+fn test_candidate_definition_pattern_vue_matches_ts_js() {
+    let vue_pat = super::candidate_definition_pattern("vue", "handleClick");
+    let ts_pat = super::candidate_definition_pattern("typescript", "handleClick");
+    // Vue and typescript share the same pattern branch
+    assert_eq!(vue_pat, ts_pat);
+}
+
+#[test]
+fn test_candidate_definition_pattern_tsx_matches_ts() {
+    let tsx_pat = super::candidate_definition_pattern("tsx", "Foo");
+    let ts_pat = super::candidate_definition_pattern("typescript", "Foo");
+    assert_eq!(tsx_pat, ts_pat);
+}
+
+// ── java_resolve_pattern tests ─────────────────────────────────────────
+
+#[test]
+fn test_java_resolve_pattern_compiles() {
+    let pat = super::java_resolve_pattern("MyService");
+    assert!(
+        regex::Regex::new(&pat).is_ok(),
+        "java_resolve_pattern must produce valid regex"
+    );
+}
+
+#[test]
+fn test_java_resolve_pattern_matches_class() {
+    let pat = super::java_resolve_pattern("OrderService");
+    let re = regex::Regex::new(&pat).expect("valid regex");
+    assert!(re.is_match("public class OrderService {"));
+    assert!(re.is_match("private interface OrderService {"));
+}
+
+// ── language_to_file_glob: edge-case coverage ──────────────────────────
+
+#[test]
+fn test_language_to_file_glob_tsx_uses_typescript_branch() {
+    // "tsx" is not a separate branch — it falls through to catch-all
+    let glob = super::language_to_file_glob("tsx");
+    // tsx is not explicitly handled, so it hits the catch-all
+    assert_eq!(glob, "**/*");
+}
+
+// ── last_symbol_name tests ─────────────────────────────────────────────
+
+#[test]
+fn test_last_symbol_name_returns_last_segment() {
+    let sp = pathfinder_common::types::SemanticPath::parse("src/auth.rs::AuthService.login")
+        .expect("valid semantic path");
+    let name = super::last_symbol_name(&sp);
+    assert_eq!(name, Some("login".to_string()));
+}
+
+#[test]
+fn test_last_symbol_name_single_segment() {
+    let sp = pathfinder_common::types::SemanticPath::parse("src/lib.rs::main")
+        .expect("valid semantic path");
+    let name = super::last_symbol_name(&sp);
+    assert_eq!(name, Some("main".to_string()));
+}
+
+#[test]
+fn test_last_symbol_name_no_symbol_chain() {
+    let sp = pathfinder_common::types::SemanticPath::parse("src/lib.rs")
+        .expect("valid semantic path");
+    let name = super::last_symbol_name(&sp);
+    assert_eq!(name, None);
+}

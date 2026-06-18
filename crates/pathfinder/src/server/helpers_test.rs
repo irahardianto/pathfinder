@@ -355,3 +355,80 @@ fn test_pathfinder_to_error_data_no_did_you_mean_duplication() {
         error_data.message
     );
 }
+
+// ── millis_to_u64 Tests ─────────────────────────────────────────────
+
+#[test]
+fn test_millis_to_u64_small_value() {
+    assert_eq!(millis_to_u64(42), 42);
+}
+
+#[test]
+fn test_millis_to_u64_zero() {
+    assert_eq!(millis_to_u64(0), 0);
+}
+
+#[test]
+fn test_millis_to_u64_max_u64() {
+    assert_eq!(millis_to_u64(u64::MAX as u128), u64::MAX);
+}
+
+// ── format_degraded_notice Tests ────────────────────────────────────
+
+#[test]
+fn test_format_degraded_notice_no_lsp() {
+    use pathfinder_common::types::DegradedReason;
+
+    let notice = format_degraded_notice(&DegradedReason::NoLsp);
+    assert!(
+        notice.contains("DEGRADED"),
+        "notice should contain 'DEGRADED', got: {notice}"
+    );
+    assert!(
+        notice.contains("no_lsp"),
+        "notice should contain the reason 'no_lsp', got: {notice}"
+    );
+}
+
+#[test]
+fn test_format_degraded_notice_lsp_timeout() {
+    use pathfinder_common::types::DegradedReason;
+
+    let notice = format_degraded_notice(&DegradedReason::LspTimeoutGrepFallback);
+    assert!(
+        notice.contains("DEGRADED"),
+        "notice should contain 'DEGRADED', got: {notice}"
+    );
+    assert!(
+        notice.contains("retry"),
+        "timeout notice should suggest retry, got: {notice}"
+    );
+}
+
+#[test]
+fn test_format_degraded_notice_lsp_error() {
+    use pathfinder_common::types::DegradedReason;
+
+    let notice = format_degraded_notice(&DegradedReason::LspErrorGrepFallback);
+    assert!(
+        notice.contains("DEGRADED"),
+        "notice should contain 'DEGRADED', got: {notice}"
+    );
+}
+
+// ── invalid_params_error Tests ──────────────────────────────────────
+
+#[test]
+fn test_invalid_params_error_creates_invalid_params_code() {
+    let error_data = invalid_params_error("bad input");
+    assert_eq!(
+        error_data.code,
+        ErrorCode::INVALID_PARAMS,
+        "invalid_params_error should produce INVALID_PARAMS code"
+    );
+    assert!(
+        error_data.message.contains("bad input"),
+        "message should contain the input text, got: {}",
+        error_data.message
+    );
+}
