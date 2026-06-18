@@ -824,7 +824,7 @@ fn test_java_resolve_pattern_static_record_and_strictfp_class() {
 
 // ── extract_file_imports tests ────────────────────────────────────────────
 
-/// Helper: write a file to the workspace and call extract_file_imports.
+/// Helper: write a file to the workspace and call `extract_file_imports`.
 async fn extract_imports_for_content(filename: &str, content: &str) -> Vec<String> {
     let ws_dir = make_temp_workspace();
     let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");

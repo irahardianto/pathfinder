@@ -108,9 +108,9 @@ fn test_detail_enum_serde() {
         let detail: Detail = serde_json::from_str(json_str)
             .unwrap_or_else(|e| panic!("failed to deserialize Detail from {json_str}: {e}"));
         match (label, &detail) {
-            ("structure", Detail::Structure) => {}
-            ("files", Detail::Files) => {}
-            ("symbols", Detail::Symbols) => {}
+            ("structure", Detail::Structure)
+            | ("files", Detail::Files)
+            | ("symbols", Detail::Symbols) => {}
             _ => panic!("unexpected Detail variant for {label}: {detail:?}"),
         }
     }
@@ -128,9 +128,9 @@ fn test_search_mode_serde() {
         let mode: SearchMode = serde_json::from_str(json_str)
             .unwrap_or_else(|e| panic!("failed to deserialize SearchMode from {json_str}: {e}"));
         match (label, &mode) {
-            ("text", SearchMode::Text) => {}
-            ("symbol", SearchMode::Symbol) => {}
-            ("regex", SearchMode::Regex) => {}
+            ("text", SearchMode::Text)
+            | ("symbol", SearchMode::Symbol)
+            | ("regex", SearchMode::Regex) => {}
             _ => panic!("unexpected SearchMode variant for {label}: {mode:?}"),
         }
     }
@@ -148,9 +148,9 @@ fn test_trace_scope_serde() {
         let scope: TraceScope = serde_json::from_str(json_str)
             .unwrap_or_else(|e| panic!("failed to deserialize TraceScope from {json_str}: {e}"));
         match (label, &scope) {
-            ("callers", TraceScope::Callers) => {}
-            ("references", TraceScope::References) => {}
-            ("overview", TraceScope::Overview) => {}
+            ("callers", TraceScope::Callers)
+            | ("references", TraceScope::References)
+            | ("overview", TraceScope::Overview) => {}
             _ => panic!("unexpected TraceScope variant for {label}: {scope:?}"),
         }
     }

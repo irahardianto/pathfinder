@@ -370,7 +370,7 @@ fn test_millis_to_u64_zero() {
 
 #[test]
 fn test_millis_to_u64_max_u64() {
-    assert_eq!(millis_to_u64(u64::MAX as u128), u64::MAX);
+    assert_eq!(millis_to_u64(u128::from(u64::MAX)), u64::MAX);
 }
 
 // ── format_degraded_notice Tests ────────────────────────────────────

@@ -179,7 +179,6 @@ async fn test_system_git_rejects_dash_prefix_target() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(
         err.to_string().contains("cannot start with '-'"),
-        "error message should explain the rejection: {}",
-        err
+        "error message should explain the rejection: {err}"
     );
 }

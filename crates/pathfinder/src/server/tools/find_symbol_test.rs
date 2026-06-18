@@ -554,7 +554,7 @@ fn test_is_workspace_file_absolute_path_outside_workspace() -> Result<(), Box<dy
     // /tmp is outside our workspace
     let outside = std::path::Path::new("/tmp/some_file.rs");
     // Only test if /tmp exists
-    if outside.parent().map_or(false, |p| p.exists()) {
+    if outside.parent().is_some_and(std::path::Path::exists) {
         assert!(!is_workspace_file(outside, dir.path(), &canonical));
     }
     Ok(())

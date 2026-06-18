@@ -912,7 +912,7 @@ async fn test_read_files_concurrency_above_limit() {
         serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
     assert_eq!(response.files.len(), file_count);
-    assert_eq!(response.succeeded, file_count as u32);
+    assert_eq!(response.succeeded, u32::try_from(file_count).unwrap());
     assert_eq!(response.failed, 0);
 }
 
@@ -983,7 +983,7 @@ async fn test_read_files_binary_non_source_file() {
     // Write invalid UTF-8 bytes to a .txt file (non-source extension)
     fs::write(
         ws_dir.path().join("binary.txt"),
-        &[0xff, 0xfe, 0x00, 0x80, 0x90, 0xa0],
+        [0xff, 0xfe, 0x00, 0x80, 0x90, 0xa0],
     )
     .expect("write");
 

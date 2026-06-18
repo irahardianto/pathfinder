@@ -1,3 +1,4 @@
+#![allow(clippy::similar_names)]
 // ── language_to_file_glob tests ─────────────────────────────────────────
 
 #[test]
@@ -1376,14 +1377,14 @@ fn test_definition_patterns_go_const_var() {
 
 #[test]
 fn test_extract_call_candidates_python_function_calls() {
-    let code = r#"
+    let code = r"
 def handle_request(request):
     user = get_current_user(request)
     data = parse_body(request.body)
     result = process_order(data, user)
     send_notification(user.email)
     return format_response(result)
-"#;
+";
     let candidates = super::extract_call_candidates(code, "python");
     assert!(
         candidates.contains(&"get_current_user".to_string()),

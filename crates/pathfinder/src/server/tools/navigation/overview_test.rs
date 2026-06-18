@@ -920,7 +920,7 @@ fn test_render_overview_text_format() {
 // ── coverage: overview.rs lines 62-69 (file read failure) ──────────────
 
 /// When the file exists (passes `abs_file.exists()`) but `read_to_string` fails
-/// (e.g., path is a directory), overview continues with empty file_content.
+/// (e.g., path is a directory), overview continues with empty `file_content`.
 /// Covers overview.rs lines 62-69.
 #[tokio::test]
 async fn test_symbol_overview_file_read_failure_continues() {
