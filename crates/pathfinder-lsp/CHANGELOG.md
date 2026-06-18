@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.12.3...pathfinder-mcp-lsp-v0.12.4) - 2026-06-18
+
+### Fixed
+
+- *(clippy)* allow expect_used and unwrap_used in tests at crate roots
+
+### Other
+
+- run cargo fmt --all to fix CI formatting check
+- Extract no_op.rs tests to separate file
+- Extract tests for pathfinder-lsp, pathfinder-search, and pathfinder-treesitter to separate files
+- fix formatting in extracted test modules
+- extract inline tests and add default/error tests to resolve TCV-001
+- *(lsp)* extract inline tests from detect.rs to detect_test.rs to improve test coverage metrics
+
 ## [0.12.3](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.12.2...pathfinder-mcp-lsp-v0.12.3) - 2026-06-18
 
 ### Added

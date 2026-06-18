@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1](https://github.com/irahardianto/pathfinder/compare/v0.20.0...v0.20.1) - 2026-06-18
+
+### Fixed
+
+- *(clippy)* allow expect_used and unwrap_used in tests at crate roots
+- *(common)* add target/ to ALWAYS_EXCLUDED_DIRS; add ALWAYS_EXCLUDED_DIR_NAMES
+
+### Other
+
+- Extract tests for pathfinder-lsp, pathfinder-search, and pathfinder-treesitter to separate files
+- Extract main.rs tests to separate file
+- Extract remaining server and tool tests to separate files
+- Extract health.rs and impact.rs tests to separate files
+- *(navigation)* extract deep_context and definition tests to separate files
+- fix formatting in extracted test modules
+- extract inline tests and add default/error tests to resolve TCV-001
+- Extract pathfinder-common tests to separate files
+- run cargo fmt --all to fix CI formatting check
+- Extract no_op.rs tests to separate file
+- *(lsp)* extract inline tests from detect.rs to detect_test.rs to improve test coverage metrics
+- *(search)* prune excluded dirs at walker level; remove DRY violation in closures
+- *(search)* add criterion benchmark for grep fallback worst-case traversal
+
 ## [0.20.0](https://github.com/irahardianto/pathfinder/compare/v0.19.0...v0.20.0) - 2026-06-18
 
 ### Added
