@@ -1444,5 +1444,6 @@ pub fn language_id_for_extension(ext: &str) -> Option<&'static str> {
 
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "detect_test.rs"]
 mod tests;

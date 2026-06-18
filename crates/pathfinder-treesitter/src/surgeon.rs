@@ -192,3 +192,9 @@ pub trait Surgeon: Send + Sync {
         file_path: &Path,
     ) -> Result<(String, String, Vec<ExtractedSymbol>), SurgeonError>;
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[path = "surgeon_test.rs"]
+mod tests;
+
