@@ -127,3 +127,116 @@ async fn test_get_semantic_path_sandbox_denied() {
     let err = result.unwrap_err();
     assert_eq!(err.code, rmcp::model::ErrorCode(-32001));
 }
+
+#[tokio::test]
+async fn test_get_semantic_path_missing_file_param() {
+    let ws_dir = tempfile::tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let mock_surgeon = MockSurgeon::new();
+
+    let server = make_server(ws, mock_surgeon);
+    let params = LocateParams {
+        file: None,
+        line: Some(1),
+        ..Default::default()
+    };
+
+    let result = server.get_semantic_path_impl(params).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn test_get_semantic_path_missing_line_param() {
+    let ws_dir = tempfile::tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let mock_surgeon = MockSurgeon::new();
+
+    let server = make_server(ws, mock_surgeon);
+    let params = LocateParams {
+        file: Some("src/auth.rs".to_owned()),
+        line: None,
+        ..Default::default()
+    };
+
+    let result = server.get_semantic_path_impl(params).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn test_get_semantic_path_enclosing_symbol_error() {
+    let ws_dir = tempfile::tempdir().expect("temp dir");
+    let file_rel = "src/auth.rs";
+    let file_abs = ws_dir.path().join(file_rel);
+    std::fs::create_dir_all(file_abs.parent().unwrap()).expect("create dir");
+    std::fs::write(&file_abs, "fn login() {}").expect("write file");
+
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let mock_surgeon = MockSurgeon::new();
+    mock_surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .push(Err(pathfinder_treesitter::error::SurgeonError::Io(
+            std::sync::Arc::new(std::io::Error::other("disk error")),
+        )));
+
+    let server = make_server(ws, mock_surgeon);
+    let params = LocateParams {
+        file: Some(file_rel.to_owned()),
+        line: Some(1),
+        ..Default::default()
+    };
+
+    let result = server.get_semantic_path_impl(params).await;
+    assert!(result.is_err(), "surgeon error should propagate");
+}
+
+#[tokio::test]
+async fn test_get_semantic_path_none_symbol_text_format() {
+    let ws_dir = tempfile::tempdir().expect("temp dir");
+    let file_rel = "src/lib.rs";
+    let file_abs = ws_dir.path().join(file_rel);
+    std::fs::create_dir_all(file_abs.parent().unwrap()).expect("create dir");
+    std::fs::write(&file_abs, "use std::io;").expect("write file");
+
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let mock_surgeon = MockSurgeon::new();
+    mock_surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+
+    let server = make_server(ws, mock_surgeon);
+    let params = LocateParams {
+        file: Some(file_rel.to_owned()),
+        line: Some(1),
+        ..Default::default()
+    };
+
+    let result = server.get_semantic_path_impl(params).await;
+    assert!(result.is_ok());
+    let call = result.unwrap();
+
+    // Verify text output contains the expected guidance message
+    let text = call
+        .content
+        .first()
+        .and_then(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        text.contains("is not inside a named symbol"),
+        "text should contain guidance for line not in symbol, got: {text}"
+    );
+    assert!(
+        text.contains("read(filepath="),
+        "text should suggest using read tool, got: {text}"
+    );
+}
