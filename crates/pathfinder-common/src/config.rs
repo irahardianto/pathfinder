@@ -59,7 +59,7 @@ impl PathfinderConfig {
 
         match tokio::fs::metadata(&config_path).await {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!("No pathfinder.config.json found, using defaults");
+                tracing::debug!(workspace = %workspace_root.display(), "No pathfinder.config.json found, using defaults");
                 return Ok(Self::default());
             }
             Err(e) => {
@@ -75,6 +75,7 @@ impl PathfinderConfig {
             tokio::fs::read_to_string(&config_path)
                 .await
                 .map_err(|e| ConfigError::ReadFailed {
+                    // CLONE: config_path is needed for the error struct while the original is moved later
                     path: config_path.clone(),
                     source: e,
                 })?;
@@ -87,7 +88,7 @@ impl PathfinderConfig {
 
         config.validate()?;
 
-        tracing::info!("Loaded configuration from pathfinder.config.json");
+        tracing::info!(workspace = %workspace_root.display(), "Loaded configuration from pathfinder.config.json");
         Ok(config)
     }
 
@@ -102,6 +103,7 @@ impl PathfinderConfig {
             "trace" | "debug" | "info" | "warn" | "error"
         ) {
             return Err(ConfigValidationError::InvalidLogLevel(
+                // CLONE: self.log_level is returned in the error variant
                 self.log_level.clone(),
             ));
         }

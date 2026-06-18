@@ -151,7 +151,7 @@ impl PathfinderServer {
             candidates.len()
         );
 
-        let max_deps = max_results as usize;
+        let max_deps = usize::try_from(max_results).unwrap_or(usize::MAX);
         let mut refs = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
@@ -274,6 +274,46 @@ impl PathfinderServer {
         (incoming, outgoing)
     }
 
+    /// Helper to process grep fallback results, log matches, and update degraded reasons.
+    fn process_grep_fallback_results(
+        grep_in: Option<Vec<crate::server::types::ImpactReference>>,
+        grep_out: Option<Vec<crate::server::types::ImpactReference>>,
+        incoming: &mut Option<Vec<crate::server::types::ImpactReference>>,
+        outgoing: &mut Option<Vec<crate::server::types::ImpactReference>>,
+        degraded_reason: &mut Option<DegradedReason>,
+        fallback_reason: Option<DegradedReason>,
+        log_suffix: &str,
+    ) {
+        let mut grep_fallback_found = false;
+        if let Some(refs) = grep_in {
+            let count = refs.len();
+            *incoming = Some(refs);
+            grep_fallback_found = true;
+            tracing::info!(
+                tool = "find_callers_callees",
+                references_found = count,
+                "find_callers_callees: grep-based fallback references found{}",
+                log_suffix
+            );
+        }
+        if let Some(refs) = grep_out {
+            let count = refs.len();
+            *outgoing = Some(refs);
+            grep_fallback_found = true;
+            tracing::info!(
+                tool = "find_callers_callees",
+                outgoing_found = count,
+                "find_callers_callees: grep-based outgoing deps found{}",
+                log_suffix
+            );
+        }
+        if grep_fallback_found {
+            if let Some(reason) = fallback_reason {
+                *degraded_reason = Some(reason);
+            }
+        }
+    }
+
     /// Performs BFS traversal of the call hierarchy in the specified direction.
     ///
     /// Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
@@ -386,7 +426,7 @@ impl PathfinderServer {
                                     referenced_item.file, referenced_item.name
                                 ),
                                 file: referenced_item.file.clone(),
-                                line: referenced_item.line as usize,
+                                line: usize::try_from(referenced_item.line).unwrap_or(usize::MAX),
                                 snippet: referenced_item
                                     .detail
                                     .unwrap_or_else(|| referenced_item.name.clone()),
@@ -394,7 +434,7 @@ impl PathfinderServer {
                                     CallDirection::Incoming => "incoming".to_owned(),
                                     CallDirection::Outgoing => "outgoing".to_owned(),
                                 },
-                                depth: current_depth as usize,
+                                depth: usize::try_from(current_depth).unwrap_or(0),
                                 confidence: Some("lsp".to_owned()),
                             });
                             *remaining_references -= 1;
@@ -457,6 +497,7 @@ impl PathfinderServer {
         // Parse and validate the semantic path
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
         require_symbol_target(&semantic_path, &params.semantic_path)?;
+        let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -605,7 +646,6 @@ impl PathfinderServer {
                 if incoming.as_ref().is_none_or(Vec::is_empty)
                     && outgoing.as_ref().is_none_or(Vec::is_empty)
                 {
-                    let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
                     let (grep_in, grep_out) = self
                         .run_grep_fallbacks(
                             &symbol_name,
@@ -650,7 +690,6 @@ impl PathfinderServer {
                 if matches!(probe, Ok(Some(_))) {
                     // LSP is warm — definition resolved. But let's check for false negatives (indexing incomplete, etc.)
                     // by running grep fallback.
-                    let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
                     let (grep_in, grep_out) = self
                         .run_grep_fallbacks(
                             &symbol_name,
@@ -681,7 +720,6 @@ impl PathfinderServer {
                     degraded = true;
                     degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
 
-                    let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
                     let (grep_in, grep_out) = self
                         .run_grep_fallbacks(
                             &symbol_name,
@@ -694,28 +732,15 @@ impl PathfinderServer {
                         )
                         .await;
 
-                    let mut grep_fallback_found = false;
-                    if let Some(refs) = grep_in {
-                        incoming = Some(refs);
-                        grep_fallback_found = true;
-                        tracing::info!(
-                            tool = "find_callers_callees",
-                            references_found = incoming.as_ref().map_or(0, Vec::len),
-                            "find_callers_callees: grep-based fallback references found during LSP warmup"
-                        );
-                    }
-                    if let Some(refs) = grep_out {
-                        outgoing = Some(refs);
-                        grep_fallback_found = true;
-                        tracing::info!(
-                            tool = "find_callers_callees",
-                            outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
-                            "find_callers_callees: grep-based outgoing deps found during LSP warmup"
-                        );
-                    }
-                    if grep_fallback_found {
-                        degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-                    }
+                    Self::process_grep_fallback_results(
+                        grep_in,
+                        grep_out,
+                        &mut incoming,
+                        &mut outgoing,
+                        &mut degraded_reason,
+                        Some(DegradedReason::LspWarmupGrepFallback),
+                        " during LSP warmup",
+                    );
                 }
             }
             Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
@@ -728,7 +753,6 @@ impl PathfinderServer {
                     "find_callers_callees: no LSP — attempting grep-based reference fallback"
                 );
 
-                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
                 let (grep_in, grep_out) = self
                     .run_grep_fallbacks(
                         &symbol_name,
@@ -741,28 +765,15 @@ impl PathfinderServer {
                     )
                     .await;
 
-                let mut grep_fallback_found = false;
-                if let Some(refs) = grep_in {
-                    incoming = Some(refs);
-                    grep_fallback_found = true;
-                    tracing::info!(
-                        tool = "find_callers_callees",
-                        references_found = incoming.as_ref().map_or(0, Vec::len),
-                        "find_callers_callees: grep-based fallback references found"
-                    );
-                }
-                if let Some(refs) = grep_out {
-                    outgoing = Some(refs);
-                    grep_fallback_found = true;
-                    tracing::info!(
-                        tool = "find_callers_callees",
-                        outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
-                        "find_callers_callees: grep-based outgoing deps found"
-                    );
-                }
-                if grep_fallback_found {
-                    degraded_reason = Some(DegradedReason::NoLspGrepFallback);
-                }
+                Self::process_grep_fallback_results(
+                    grep_in,
+                    grep_out,
+                    &mut incoming,
+                    &mut outgoing,
+                    &mut degraded_reason,
+                    Some(DegradedReason::NoLspGrepFallback),
+                    "",
+                );
             }
             Err(LspError::Timeout { .. }) => {
                 // LSP timed out — attempt grep-based reference fallback.
@@ -777,7 +788,6 @@ impl PathfinderServer {
                     "find_callers_callees: LSP timed out — attempting grep-based reference fallback"
                 );
 
-                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
                 let (grep_in, grep_out) = self
                     .run_grep_fallbacks(
                         &symbol_name,
@@ -790,22 +800,15 @@ impl PathfinderServer {
                     )
                     .await;
 
-                if let Some(refs) = grep_in {
-                    incoming = Some(refs);
-                    tracing::info!(
-                        tool = "find_callers_callees",
-                        references_found = incoming.as_ref().map_or(0, Vec::len),
-                        "find_callers_callees: grep-based fallback references found after timeout"
-                    );
-                }
-                if let Some(refs) = grep_out {
-                    outgoing = Some(refs);
-                    tracing::info!(
-                        tool = "find_callers_callees",
-                        outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
-                        "find_callers_callees: grep-based outgoing deps found after timeout"
-                    );
-                }
+                Self::process_grep_fallback_results(
+                    grep_in,
+                    grep_out,
+                    &mut incoming,
+                    &mut outgoing,
+                    &mut degraded_reason,
+                    None,
+                    " after timeout",
+                );
             }
             Err(e) => {
                 // LSP returned an unexpected error — not "no LSP" but an operational failure.
@@ -821,7 +824,6 @@ impl PathfinderServer {
                     "call_hierarchy_prepare failed"
                 );
 
-                let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
                 let (grep_in, grep_out) = self
                     .run_grep_fallbacks(
                         &symbol_name,
@@ -834,22 +836,15 @@ impl PathfinderServer {
                     )
                     .await;
 
-                if let Some(refs) = grep_in {
-                    incoming = Some(refs);
-                    tracing::info!(
-                        tool = "find_callers_callees",
-                        references_found = incoming.as_ref().map_or(0, Vec::len),
-                        "find_callers_callees: grep-based fallback references found after LSP error"
-                    );
-                }
-                if let Some(refs) = grep_out {
-                    outgoing = Some(refs);
-                    tracing::info!(
-                        tool = "find_callers_callees",
-                        outgoing_found = outgoing.as_ref().map_or(0, Vec::len),
-                        "find_callers_callees: grep-based outgoing deps found after LSP error"
-                    );
-                }
+                Self::process_grep_fallback_results(
+                    grep_in,
+                    grep_out,
+                    &mut incoming,
+                    &mut outgoing,
+                    &mut degraded_reason,
+                    None,
+                    " after LSP error",
+                );
             }
         }
 
@@ -961,7 +956,7 @@ impl PathfinderServer {
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
 
-            let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+            let symbol_name = symbol_name.clone();
 
             text_parts.push(notice);
             text_parts.push(String::new());
@@ -3833,6 +3828,134 @@ mod tests {
         assert!(
             val.hint.is_none(),
             "hint must be absent when degraded, even if lists are empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_grep_fallback_results_updates_state() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(MockLawyer::default());
+        let (_server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let mut incoming = None;
+        let mut outgoing = None;
+        let mut degraded_reason = None;
+
+        let grep_in = Some(vec![crate::server::types::ImpactReference {
+            semantic_path: "src/auth.rs::login".to_string(),
+            file: "src/auth.rs".to_string(),
+            line: 10,
+            snippet: "fn login()".to_string(),
+            direction: "incoming_heuristic".to_string(),
+            depth: 0,
+            confidence: Some("heuristic".to_owned()),
+        }]);
+        let grep_out = None;
+
+        PathfinderServer::process_grep_fallback_results(
+            grep_in,
+            grep_out,
+            &mut incoming,
+            &mut outgoing,
+            &mut degraded_reason,
+            Some(DegradedReason::LspWarmupGrepFallback),
+            " during warmup",
+        );
+
+        assert!(incoming.is_some());
+        assert_eq!(incoming.unwrap().len(), 1);
+        assert!(outgoing.is_none());
+        assert_eq!(degraded_reason, Some(DegradedReason::LspWarmupGrepFallback));
+    }
+
+    #[tokio::test]
+    async fn test_process_grep_fallback_results_both_none_is_noop() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(MockLawyer::default());
+        let (_server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let mut incoming = None;
+        let mut outgoing = None;
+        let mut degraded_reason = None;
+
+        // Both grep_in and grep_out are None — should be a complete no-op.
+        PathfinderServer::process_grep_fallback_results(
+            None,
+            None,
+            &mut incoming,
+            &mut outgoing,
+            &mut degraded_reason,
+            Some(DegradedReason::NoLspGrepFallback),
+            " (no-op test)",
+        );
+
+        assert!(
+            incoming.is_none(),
+            "incoming should stay None when grep_in is None"
+        );
+        assert!(
+            outgoing.is_none(),
+            "outgoing should stay None when grep_out is None"
+        );
+        assert!(
+            degraded_reason.is_none(),
+            "degraded_reason should NOT be set when no grep results were found"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_grep_fallback_results_both_some() {
+        let surgeon = Arc::new(MockSurgeon::new());
+        let lawyer = Arc::new(MockLawyer::default());
+        let (_server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+        let mut incoming = None;
+        let mut outgoing = None;
+        let mut degraded_reason = None;
+
+        let grep_in = Some(vec![crate::server::types::ImpactReference {
+            semantic_path: "src/auth.rs::login".to_string(),
+            file: "src/auth.rs".to_string(),
+            line: 10,
+            snippet: "fn login()".to_string(),
+            direction: "incoming_heuristic".to_string(),
+            depth: 0,
+            confidence: Some("heuristic".to_owned()),
+        }]);
+        let grep_out = Some(vec![crate::server::types::ImpactReference {
+            semantic_path: "src/db.rs::query".to_string(),
+            file: "src/db.rs".to_string(),
+            line: 42,
+            snippet: "fn query()".to_string(),
+            direction: "outgoing_heuristic".to_string(),
+            depth: 0,
+            confidence: Some("heuristic".to_owned()),
+        }]);
+
+        PathfinderServer::process_grep_fallback_results(
+            grep_in,
+            grep_out,
+            &mut incoming,
+            &mut outgoing,
+            &mut degraded_reason,
+            Some(DegradedReason::NoLspGrepFallback),
+            " (both-some test)",
+        );
+
+        assert!(
+            incoming.is_some(),
+            "incoming should be populated from grep_in"
+        );
+        assert_eq!(incoming.unwrap().len(), 1);
+        assert!(
+            outgoing.is_some(),
+            "outgoing should be populated from grep_out"
+        );
+        assert_eq!(outgoing.unwrap().len(), 1);
+        assert_eq!(
+            degraded_reason,
+            Some(DegradedReason::NoLspGrepFallback),
+            "degraded_reason should be set when grep results found"
         );
     }
 }

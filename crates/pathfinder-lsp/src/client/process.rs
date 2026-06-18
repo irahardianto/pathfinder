@@ -353,6 +353,7 @@ pub(super) async fn spawn_and_initialize(
     Ok((process, reader_handle))
 }
 
+#[allow(unsafe_code)]
 fn is_process_alive(pid: i32) -> bool {
     // On Linux, checking if /proc/{pid} exists is a safe way to check process liveness
     // without using unsafe blocks.
@@ -360,9 +361,22 @@ fn is_process_alive(pid: i32) -> bool {
     if proc_path.exists() {
         proc_path.join(pid.to_string()).exists()
     } else {
-        // Fallback for non-procfs Unix or other platforms
-        let _ = pid;
-        true
+        // On macOS/BSD and other non-procfs Unix systems, use kill(pid, 0).
+        // Signal 0 is never delivered — it only checks if the process exists.
+        // Returns 0 on success (alive), -1 with errno=ESRCH if process is gone.
+        // libc is already in Cargo.toml as a direct dependency.
+        #[cfg(unix)]
+        {
+            // SAFETY: kill(pid, 0) is a safe syscall — it sends no signal and
+            // only checks process existence. It cannot affect any process state.
+            let ret = unsafe { libc::kill(pid, 0) };
+            ret == 0
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            true
+        }
     }
 }
 
@@ -470,7 +484,6 @@ pub(crate) fn resolve_jdtls_data_dir(
 /// See module-level doc for the rationale of each hardening measure (stderr null,
 /// prctl PDEATHSIG, process group, absolute binary path).
 #[allow(unsafe_code)]
-#[allow(clippy::too_many_lines)]
 fn spawn_lsp_child(
     command: &str,
     args: &[String],
@@ -486,131 +499,11 @@ fn spawn_lsp_child(
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
 
-    // When concurrent LSP instances are detected for Rust, isolate the build
-    // artifacts to avoid cargo cache lock contention. Two rust-analyzer processes
-    // sharing the same target/ directory will fight over .cargo-lock and
-    // build cache, causing one or both to stall indefinitely during indexing.
-    if isolate_target_dir && language_id == "rust" {
-        let isolated_target = project_root.join("target").join("pathfinder-lsp");
-        // L-1: Pre-create isolation directory to prevent first-write race.
-        if let Err(e) = std::fs::create_dir_all(&isolated_target) {
-            tracing::warn!(
-                language = language_id,
-                directory = %isolated_target.display(),
-                error = %e,
-                "LSP: failed to create isolated target directory — cache contention may occur"
-            );
-        }
-        cmd.env("CARGO_TARGET_DIR", isolated_target);
-        tracing::info!(
-            language = language_id,
-            "LSP: set CARGO_TARGET_DIR to isolated target to avoid cache contention"
-        );
-    }
-
-    // LSP-HEALTH-001 Task 4.1: gopls cache isolation
-    // When concurrent gopls instances are detected, isolate GOCACHE and GOMODCACHE
-    // to avoid Go module cache lock contention between IDE's gopls and Pathfinder's gopls.
-    if isolate_target_dir && language_id == "go" {
-        let isolated_cache = project_root.join(".pathfinder").join("gopls-cache");
-        // L-1: Pre-create isolation directories to prevent first-write race.
-        let build_cache = isolated_cache.join("build");
-        let mod_cache = isolated_cache.join("mod");
-        if let Err(e) = std::fs::create_dir_all(&build_cache) {
-            tracing::warn!(
-                language = language_id,
-                directory = %build_cache.display(),
-                error = %e,
-                "LSP: failed to create isolated gopls build cache — cache contention may occur"
-            );
-        }
-        if let Err(e) = std::fs::create_dir_all(&mod_cache) {
-            tracing::warn!(
-                language = language_id,
-                directory = %mod_cache.display(),
-                error = %e,
-                "LSP: failed to create isolated gopls mod cache — cache contention may occur"
-            );
-        }
-        cmd.env("GOCACHE", build_cache);
-        cmd.env("GOMODCACHE", mod_cache);
-        tracing::info!(
-            language = language_id,
-            "LSP: set isolated GOCACHE/GOMODCACHE for gopls to avoid cache contention"
-        );
-    }
-
-    // TypeScript cache isolation: tsserver uses TMPDIR for .tsbuildinfo files.
-    // Concurrent tsserver instances (IDE + Pathfinder) sharing the same TMPDIR
-    // can corrupt build info files. Isolate to a per-Pathfinder temp directory.
-    if isolate_target_dir && language_id == "typescript" {
-        let isolated_tmp = project_root.join(".pathfinder").join("tsserver-tmp");
-        // L-1: Pre-create isolation directory to prevent first-write race.
-        if let Err(e) = std::fs::create_dir_all(&isolated_tmp) {
-            tracing::warn!(
-                language = language_id,
-                directory = %isolated_tmp.display(),
-                error = %e,
-                "LSP: failed to create isolated tsserver TMPDIR — .tsbuildinfo contention may occur"
-            );
-        }
-        cmd.env("TMPDIR", &isolated_tmp);
-        tracing::info!(
-            language = language_id,
-            "LSP: set isolated TMPDIR for tsserver to avoid .tsbuildinfo contention"
-        );
-    }
-
-    // Python cache isolation: isolate __pycache__ output to avoid conflicts
-    // between concurrent pyright/ruff instances.
-    if isolate_target_dir && language_id == "python" {
-        let isolated_cache = project_root.join(".pathfinder").join("python-cache");
-        let pyc_dir = isolated_cache.join("pyc");
-        // L-1: Pre-create isolation directory to prevent first-write race.
-        if let Err(e) = std::fs::create_dir_all(&pyc_dir) {
-            tracing::warn!(
-                language = language_id,
-                directory = %pyc_dir.display(),
-                error = %e,
-                "LSP: failed to create isolated Python pycache — cache contention may occur"
-            );
-        }
-        cmd.env("PYTHONPYCACHEPREFIX", &pyc_dir);
-        tracing::info!(
-            language = language_id,
-            "LSP: set isolated PYTHONPYCACHEPREFIX for Python LSP to avoid cache contention"
-        );
-    }
-
-    // jdtls always needs a unique data directory per workspace — NOT gated on
-    // isolate_target_dir because this is a functional requirement, not an
-    // isolation concern. Without -data, jdtls fails or shares state between projects.
-    // jdtls data directory isolation: resolve a unique data dir with advisory
-    // file locking to prevent concurrent Pathfinder instances from colliding.
-    let jdtls_lock = if language_id == "java" {
-        let (data_dir, lock) = resolve_jdtls_data_dir(project_root);
-        cmd.arg("-data").arg(&data_dir);
-        tracing::info!(
-            language = language_id,
-            data_dir = %data_dir.display(),
-            "LSP: set jdtls data directory"
-        );
-        // Ensure .pathfinder/ is in .gitignore (jdtls always creates files here)
-        ensure_pathfinder_in_gitignore(project_root);
-        lock
-    } else {
-        None
-    };
-
-    // prctl(PR_SET_PDEATHSIG) is Linux-only — not available on macOS/BSD even
-    // though they are also "unix". Gate strictly on linux to avoid link errors
-    // when cross-compiling for aarch64-apple-darwin / x86_64-apple-darwin.
-
-    // Ensure .pathfinder/ is in .gitignore when isolation creates files there
-    if isolate_target_dir && language_id != "rust" {
-        // Rust uses target/pathfinder-lsp/ which is already covered by target/ in .gitignore
-        ensure_pathfinder_in_gitignore(project_root);
-    }
+    setup_rust_env(&mut cmd, project_root, isolate_target_dir, language_id);
+    setup_go_env(&mut cmd, project_root, isolate_target_dir, language_id);
+    setup_typescript_env(&mut cmd, project_root, isolate_target_dir, language_id);
+    setup_python_env(&mut cmd, project_root, isolate_target_dir, language_id);
+    let jdtls_lock = setup_java_env(&mut cmd, project_root, language_id);
 
     apply_linux_process_hardening(&mut cmd);
 
@@ -643,6 +536,159 @@ fn spawn_lsp_child(
     let child = child_group.into_inner();
 
     Ok((child, stdin, stdout, jdtls_lock))
+}
+
+fn setup_rust_env(
+    cmd: &mut tokio::process::Command,
+    project_root: &Path,
+    isolate_target_dir: bool,
+    language_id: &str,
+) {
+    // When concurrent LSP instances are detected for Rust, isolate the build
+    // artifacts to avoid cargo cache lock contention. Two rust-analyzer processes
+    // sharing the same target/ directory will fight over .cargo-lock and
+    // build cache, causing one or both to stall indefinitely during indexing.
+    if isolate_target_dir && language_id == "rust" {
+        let isolated_target = project_root.join("target").join("pathfinder-lsp");
+        // L-1: Pre-create isolation directory to prevent first-write race.
+        if let Err(e) = std::fs::create_dir_all(&isolated_target) {
+            tracing::warn!(
+                language = language_id,
+                directory = %isolated_target.display(),
+                error = %e,
+                "LSP: failed to create isolated target directory — cache contention may occur"
+            );
+        }
+        cmd.env("CARGO_TARGET_DIR", isolated_target);
+        tracing::info!(
+            language = language_id,
+            "LSP: set CARGO_TARGET_DIR to isolated target to avoid cache contention"
+        );
+    }
+}
+
+fn setup_go_env(
+    cmd: &mut tokio::process::Command,
+    project_root: &Path,
+    isolate_target_dir: bool,
+    language_id: &str,
+) {
+    // LSP-HEALTH-001 Task 4.1: gopls cache isolation
+    // When concurrent gopls instances are detected, isolate GOCACHE and GOMODCACHE
+    // to avoid Go module cache lock contention between IDE's gopls and Pathfinder's gopls.
+    if isolate_target_dir && language_id == "go" {
+        let isolated_cache = project_root.join(".pathfinder").join("gopls-cache");
+        // L-1: Pre-create isolation directories to prevent first-write race.
+        let build_cache = isolated_cache.join("build");
+        let mod_cache = isolated_cache.join("mod");
+        if let Err(e) = std::fs::create_dir_all(&build_cache) {
+            tracing::warn!(
+                language = language_id,
+                directory = %build_cache.display(),
+                error = %e,
+                "LSP: failed to create isolated gopls build cache — cache contention may occur"
+            );
+        }
+        if let Err(e) = std::fs::create_dir_all(&mod_cache) {
+            tracing::warn!(
+                language = language_id,
+                directory = %mod_cache.display(),
+                error = %e,
+                "LSP: failed to create isolated gopls mod cache — cache contention may occur"
+            );
+        }
+        cmd.env("GOCACHE", build_cache);
+        cmd.env("GOMODCACHE", mod_cache);
+        tracing::info!(
+            language = language_id,
+            "LSP: set isolated GOCACHE/GOMODCACHE for gopls to avoid cache contention"
+        );
+        ensure_pathfinder_in_gitignore(project_root);
+    }
+}
+
+fn setup_typescript_env(
+    cmd: &mut tokio::process::Command,
+    project_root: &Path,
+    isolate_target_dir: bool,
+    language_id: &str,
+) {
+    // TypeScript cache isolation: tsserver uses TMPDIR for .tsbuildinfo files.
+    // Concurrent tsserver instances (IDE + Pathfinder) sharing the same TMPDIR
+    // can corrupt build info files. Isolate to a per-Pathfinder temp directory.
+    if isolate_target_dir && language_id == "typescript" {
+        let isolated_tmp = project_root.join(".pathfinder").join("tsserver-tmp");
+        // L-1: Pre-create isolation directory to prevent first-write race.
+        if let Err(e) = std::fs::create_dir_all(&isolated_tmp) {
+            tracing::warn!(
+                language = language_id,
+                directory = %isolated_tmp.display(),
+                error = %e,
+                "LSP: failed to create isolated tsserver TMPDIR — .tsbuildinfo contention may occur"
+            );
+        }
+        cmd.env("TMPDIR", &isolated_tmp);
+        tracing::info!(
+            language = language_id,
+            "LSP: set isolated TMPDIR for tsserver to avoid .tsbuildinfo contention"
+        );
+        ensure_pathfinder_in_gitignore(project_root);
+    }
+}
+
+fn setup_python_env(
+    cmd: &mut tokio::process::Command,
+    project_root: &Path,
+    isolate_target_dir: bool,
+    language_id: &str,
+) {
+    // Python cache isolation: isolate __pycache__ output to avoid conflicts
+    // between concurrent pyright/ruff instances.
+    if isolate_target_dir && language_id == "python" {
+        let isolated_cache = project_root.join(".pathfinder").join("python-cache");
+        let pyc_dir = isolated_cache.join("pyc");
+        // L-1: Pre-create isolation directory to prevent first-write race.
+        if let Err(e) = std::fs::create_dir_all(&pyc_dir) {
+            tracing::warn!(
+                language = language_id,
+                directory = %pyc_dir.display(),
+                error = %e,
+                "LSP: failed to create isolated Python pycache — cache contention may occur"
+            );
+        }
+        cmd.env("PYTHONPYCACHEPREFIX", &pyc_dir);
+        tracing::info!(
+            language = language_id,
+            "LSP: set isolated PYTHONPYCACHEPREFIX for Python LSP to avoid cache contention"
+        );
+        ensure_pathfinder_in_gitignore(project_root);
+    }
+}
+
+fn setup_java_env(
+    cmd: &mut tokio::process::Command,
+    project_root: &Path,
+    language_id: &str,
+) -> Option<std::fs::File> {
+    // jdtls always needs a unique data directory per workspace — NOT gated on
+    // isolate_target_dir because this is a functional requirement, not an
+    // isolation concern. Without -data, jdtls fails or shares state between projects.
+    // jdtls data directory isolation: resolve a unique data dir with advisory
+    // file locking to prevent concurrent Pathfinder instances from colliding.
+    if language_id == "java" {
+        let (data_dir, lock) = resolve_jdtls_data_dir(project_root);
+        cmd.arg("-data").arg(&data_dir);
+        tracing::info!(
+            language = language_id,
+            data_dir = %data_dir.display(),
+            "LSP: set jdtls data directory"
+        );
+        // Ensure .pathfinder/ is in .gitignore (jdtls always creates files here)
+        ensure_pathfinder_in_gitignore(project_root);
+        lock
+    } else {
+        None
+    }
 }
 
 /// Ensure `.pathfinder/` is listed in the project's `.gitignore`.
@@ -1549,19 +1595,19 @@ mod process_tests {
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
+
     fn test_cleanup_orphaned_jdtls_data_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pathfinder_dir = dir.path().join(".pathfinder");
-        std::fs::create_dir_all(&pathfinder_dir).unwrap();
+        std::fs::create_dir_all(&pathfinder_dir).expect("create .pathfinder dir");
 
         // Create a directory for a dead PID (e.g. 999999)
         let dead_pid_dir = pathfinder_dir.join("jdtls-data-999999");
-        std::fs::create_dir_all(&dead_pid_dir).unwrap();
+        std::fs::create_dir_all(&dead_pid_dir).expect("create dead pid dir");
 
         // Create a directory for our own PID (definitely alive)
         let alive_pid_dir = pathfinder_dir.join(format!("jdtls-data-{}", std::process::id()));
-        std::fs::create_dir_all(&alive_pid_dir).unwrap();
+        std::fs::create_dir_all(&alive_pid_dir).expect("create alive pid dir");
 
         assert!(dead_pid_dir.exists());
         assert!(alive_pid_dir.exists());
@@ -2195,5 +2241,149 @@ mod process_tests {
         // Cleanup
         let _ = child.kill().await;
         let _ = child.wait().await;
+    }
+
+    #[test]
+    fn test_setup_rust_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cmd = tokio::process::Command::new("cargo");
+
+        // Gated on isolate_target_dir && language_id == "rust"
+        super::setup_rust_env(&mut cmd, dir.path(), true, "rust");
+        let std_cmd = cmd.as_std();
+        let envs: std::collections::HashMap<_, _> = std_cmd.get_envs().collect();
+        let cargo_target_dir_opt = envs
+            .get(std::ffi::OsStr::new("CARGO_TARGET_DIR"))
+            .expect("CARGO_TARGET_DIR env var present");
+        let cargo_target_dir = cargo_target_dir_opt.expect("CARGO_TARGET_DIR value present");
+        assert_eq!(
+            cargo_target_dir,
+            dir.path().join("target").join("pathfinder-lsp").as_os_str()
+        );
+
+        // Not rust language_id
+        let mut cmd = tokio::process::Command::new("cargo");
+        super::setup_rust_env(&mut cmd, dir.path(), true, "go");
+        let std_cmd = cmd.as_std();
+        assert!(std_cmd.get_envs().next().is_none());
+    }
+
+    #[test]
+    fn test_setup_go_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cmd = tokio::process::Command::new("go");
+
+        // Gated on isolate_target_dir && language_id == "go"
+        super::setup_go_env(&mut cmd, dir.path(), true, "go");
+        let std_cmd = cmd.as_std();
+        let envs: std::collections::HashMap<_, _> = std_cmd.get_envs().collect();
+        let gocache = envs
+            .get(std::ffi::OsStr::new("GOCACHE"))
+            .expect("GOCACHE env var present")
+            .expect("GOCACHE value present");
+        assert_eq!(
+            gocache,
+            dir.path()
+                .join(".pathfinder")
+                .join("gopls-cache")
+                .join("build")
+                .as_os_str()
+        );
+        let gomodcache = envs
+            .get(std::ffi::OsStr::new("GOMODCACHE"))
+            .expect("GOMODCACHE env var present")
+            .expect("GOMODCACHE value present");
+        assert_eq!(
+            gomodcache,
+            dir.path()
+                .join(".pathfinder")
+                .join("gopls-cache")
+                .join("mod")
+                .as_os_str()
+        );
+
+        // Not go language_id
+        let mut cmd = tokio::process::Command::new("go");
+        super::setup_go_env(&mut cmd, dir.path(), true, "rust");
+        let std_cmd = cmd.as_std();
+        assert!(std_cmd.get_envs().next().is_none());
+    }
+
+    #[test]
+    fn test_setup_typescript_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cmd = tokio::process::Command::new("node");
+
+        // Gated on isolate_target_dir && language_id == "typescript"
+        super::setup_typescript_env(&mut cmd, dir.path(), true, "typescript");
+        let std_cmd = cmd.as_std();
+        let envs: std::collections::HashMap<_, _> = std_cmd.get_envs().collect();
+        let tmpdir = envs
+            .get(std::ffi::OsStr::new("TMPDIR"))
+            .expect("TMPDIR env var present")
+            .expect("TMPDIR value present");
+        assert_eq!(
+            tmpdir,
+            dir.path()
+                .join(".pathfinder")
+                .join("tsserver-tmp")
+                .as_os_str()
+        );
+    }
+
+    #[test]
+    fn test_setup_python_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cmd = tokio::process::Command::new("python");
+
+        // Gated on isolate_target_dir && language_id == "python"
+        super::setup_python_env(&mut cmd, dir.path(), true, "python");
+        let std_cmd = cmd.as_std();
+        let envs: std::collections::HashMap<_, _> = std_cmd.get_envs().collect();
+        let pycache = envs
+            .get(std::ffi::OsStr::new("PYTHONPYCACHEPREFIX"))
+            .expect("PYTHONPYCACHEPREFIX env var present")
+            .expect("PYTHONPYCACHEPREFIX value present");
+        assert_eq!(
+            pycache,
+            dir.path()
+                .join(".pathfinder")
+                .join("python-cache")
+                .join("pyc")
+                .as_os_str()
+        );
+    }
+
+    #[test]
+    fn test_setup_java_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cmd = tokio::process::Command::new("java");
+
+        // Gated on language_id == "java"
+        let lock = super::setup_java_env(&mut cmd, dir.path(), "java");
+        assert!(lock.is_some());
+        let std_cmd = cmd.as_std();
+        let args: Vec<_> = std_cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("-data")));
+        // Verify the -data argument value points to the jdtls data directory
+        let data_idx = args
+            .iter()
+            .position(|a| *a == std::ffi::OsStr::new("-data"))
+            .expect("-data arg position");
+        let data_dir = args[data_idx + 1]
+            .to_str()
+            .expect("data dir is valid UTF-8");
+        // Primary instance (no contention) gets 'jdtls-data' base dir (no PID suffix).
+        // The assertion uses ends_with to reject the PID-suffixed fallback path
+        // 'jdtls-data-<pid>' — both contain the string 'jdtls-data' but only
+        // the primary ends with it exactly.
+        assert!(
+            data_dir.ends_with("jdtls-data"),
+            "Primary instance should use 'jdtls-data' base dir (no PID suffix), got: '{data_dir}'"
+        );
+        assert!(
+            data_dir.contains(".pathfinder"),
+            "data dir '{data_dir}' should be under .pathfinder/"
+        );
     }
 }

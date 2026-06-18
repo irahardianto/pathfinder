@@ -51,8 +51,8 @@ impl TreeSitterSurgeon {
         // ── Vue SFC: multi-zone parse path ────────────────────────────────────
         if lang == SupportedLanguage::Vue {
             let (multi, _content_hash) = self.cache.get_or_parse_vue(&abs_path).await?;
-            let multi_clone = multi.clone();
-            let abs_path_clone = abs_path.clone();
+            let multi_clone = multi.clone(); // CLONE: cloned for spawn_blocking
+            let abs_path_clone = abs_path.clone(); // CLONE: cloned for spawn_blocking error path
             let symbols =
                 tokio::task::spawn_blocking(move || extract_symbols_from_multizone(&multi_clone))
                     .await
@@ -71,9 +71,9 @@ impl TreeSitterSurgeon {
 
         // ── All other languages: single-zone path ─────────────────────────────
         let (tree, source) = self.cache.get_or_parse(&abs_path, lang).await?;
-        let tree_clone = tree.clone();
-        let source_clone = source.clone();
-        let abs_path_clone = abs_path.clone();
+        let tree_clone = tree.clone(); // CLONE: cloned for spawn_blocking
+        let source_clone = source.clone(); // CLONE: cloned for spawn_blocking
+        let abs_path_clone = abs_path.clone(); // CLONE: cloned for spawn_blocking error path
         let symbols = tokio::task::spawn_blocking(move || {
             extract_symbols_from_tree(&tree_clone, &source_clone, lang)
         })
@@ -182,8 +182,8 @@ impl Surgeon for TreeSitterSurgeon {
                 .cache
                 .get_or_parse_vue_preloaded(&abs_path, &content, mtime)
                 .await?;
-            let multi_clone = multi.clone();
-            let abs_path_clone = abs_path.clone();
+            let multi_clone = multi.clone(); // CLONE: cloned for spawn_blocking
+            let abs_path_clone = abs_path.clone(); // CLONE: cloned for spawn_blocking error path
             let symbols =
                 tokio::task::spawn_blocking(move || extract_symbols_from_multizone(&multi_clone))
                     .await
@@ -198,9 +198,9 @@ impl Surgeon for TreeSitterSurgeon {
             .cache
             .get_or_parse_preloaded(&abs_path, lang, content, mtime)
             .await?;
-        let tree_clone = tree.clone();
-        let source_clone = source.clone();
-        let abs_path_clone = abs_path.clone();
+        let tree_clone = tree.clone(); // CLONE: cloned for spawn_blocking
+        let source_clone = source.clone(); // CLONE: cloned for spawn_blocking
+        let abs_path_clone = abs_path.clone(); // CLONE: cloned for spawn_blocking error path
         let symbols = tokio::task::spawn_blocking(move || {
             extract_symbols_from_tree(&tree_clone, &source_clone, lang)
         })

@@ -78,6 +78,8 @@ pub struct Sandbox {
     user_ignore: Option<Gitignore>,
     /// Config-level additional deny patterns (pre-computed for zero-alloc checks).
     additional_deny: Vec<AdditionalDenyPattern>,
+    /// Pre-computed slash-suffixed allowed paths from `GIT_ALLOWLIST`.
+    git_allowlist_slash: Vec<String>,
 }
 
 impl Sandbox {
@@ -141,8 +143,26 @@ impl Sandbox {
                     }
                 } else {
                     AdditionalDenyPattern::Exact {
+                        // CLONE: pattern is borrowed from config and needs to be owned by AdditionalDenyPattern struct
                         pattern: pattern.clone(),
                     }
+                }
+            })
+            .collect();
+
+        // Pre-compute slash-suffixed versions only for bare filename entries
+        // (e.g. ".gitignore" -> ".gitignore/"). Directory entries like
+        // ".github/workflows/" are handled by the `starts_with(allowed)`
+        // branch before reaching `git_allowlist_slash`, so they don't need
+        // a precomputed variant. Using an empty string for directory entries
+        // keeps the index alignment with GIT_ALLOWLIST intact.
+        let git_allowlist_slash = GIT_ALLOWLIST
+            .iter()
+            .map(|allowed| {
+                if allowed.ends_with('/') {
+                    String::new()
+                } else {
+                    format!("{allowed}/")
                 }
             })
             .collect();
@@ -152,6 +172,7 @@ impl Sandbox {
             effective_default_deny,
             user_ignore,
             additional_deny,
+            git_allowlist_slash,
         }
     }
 
@@ -192,7 +213,7 @@ impl Sandbox {
         let path_str = path_to_check.to_string_lossy();
 
         // Tier 1: Hardcoded deny (cannot be overridden)
-        if Self::is_hardcoded_denied(&path_str, path_to_check) {
+        if self.is_hardcoded_denied(&path_str, path_to_check) {
             return Err(PathfinderError::AccessDenied {
                 path: relative_path.to_path_buf(),
                 tier: SandboxTier::HardcodedDeny,
@@ -226,7 +247,7 @@ impl Sandbox {
         Ok(())
     }
 
-    fn is_hardcoded_denied(path_str: &str, path: &Path) -> bool {
+    fn is_hardcoded_denied(&self, path_str: &str, path: &Path) -> bool {
         // Fast-reject: if path doesn't start with '.', it can't match any
         // hardcoded deny pattern (.git/*, .pem, .key, .pfx, .p12).
         // Only check extension for non-dot paths.
@@ -244,7 +265,7 @@ impl Sandbox {
         }
 
         // Path starts with '.' — check git allowlist first (cheapest)
-        for allowed in GIT_ALLOWLIST {
+        for (i, allowed) in GIT_ALLOWLIST.iter().enumerate() {
             if allowed.ends_with('/') {
                 // Directory pattern: use prefix match
                 if path_str.starts_with(allowed) {
@@ -253,7 +274,7 @@ impl Sandbox {
             } else {
                 // Bare filename: exact match or prefix with separator
                 // Prevents ".gitignorex" from matching ".gitignore"
-                if path_str == *allowed || path_str.starts_with(&format!("{allowed}/")) {
+                if path_str == *allowed || path_str.starts_with(&self.git_allowlist_slash[i]) {
                     return false;
                 }
             }
@@ -742,6 +763,20 @@ mod tests {
                 "HARDCODED_DENY_PATTERNS contains non-git pattern: {pattern}. \
                  Update is_hardcoded_denied() to handle it."
             );
+        }
+    }
+
+    #[test]
+    fn test_sandbox_check_performance_and_prefix_matching() {
+        let sandbox = default_sandbox();
+        assert!(sandbox.check(Path::new(".gitignore")).is_ok());
+        assert!(sandbox.check(Path::new(".gitattributes")).is_ok());
+        assert!(sandbox.check(Path::new(".gitignorex")).is_ok());
+        assert!(sandbox.check(Path::new(".git/config")).is_err());
+
+        let path = Path::new(".gitignore");
+        for _ in 0..10000 {
+            let _ = sandbox.check(path);
         }
     }
 }

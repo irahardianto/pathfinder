@@ -377,7 +377,7 @@ pub async fn parse_references_response(
 
         let snippet = read_preview_line(
             &workspace_root.join(&relative_path),
-            (line as usize).saturating_sub(1),
+            usize::try_from(line).unwrap_or(0).saturating_sub(1),
         )
         .await;
 
@@ -740,6 +740,34 @@ mod tests {
         } else {
             panic!("expected Protocol error for invalid URI");
         }
+    }
+
+    #[tokio::test]
+    async fn test_parse_references_response_large_line() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace_root = temp.path();
+        let src_dir = workspace_root.join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        let file_path = src_dir.join("lib.rs");
+        std::fs::write(&file_path, "pub fn helper() {}").expect("write test file");
+
+        let file_uri = Url::from_file_path(&file_path).unwrap().to_string();
+
+        let response = json!([{
+            "uri": file_uri,
+            "range": {
+                "start": { "line": u64::MAX, "character": 8 },
+                "end": { "line": u64::MAX, "character": 14 }
+            }
+        }]);
+
+        let result = parse_references_response(&response, workspace_root)
+            .await
+            .expect("should parse successfully");
+
+        assert_eq!(result.len(), 1);
+        // Since try_from(u64::MAX.saturating_add(1)) overflows u32, line will fall back to 1.
+        assert_eq!(result[0].line, 1);
     }
 
     #[test]

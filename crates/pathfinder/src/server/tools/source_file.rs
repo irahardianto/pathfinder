@@ -263,17 +263,17 @@ impl PathfinderServer {
             "read_source_file: graceful fallback for unsupported language"
         );
 
+        let text = format!(
+            "{content}\n[completed in {duration_ms}ms; unsupported language: raw content only]"
+        );
+
         let metadata = ReadSourceFileMetadata {
             language,
-            content: Some(content.clone()),
+            content: Some(content),
             symbols: vec![],
             duration_ms: Some(millis_to_u64(duration_ms)),
             unsupported_language: Some(true),
         };
-
-        let text = format!(
-            "{content}\n[completed in {duration_ms}ms; unsupported language: raw content only]"
-        );
 
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         result.structured_content = serialize_metadata(&metadata);
@@ -321,20 +321,20 @@ fn build_supported_response(
         _ => (Some(content), map_symbols_compact(symbols, filepath_str)),
     };
 
-    let metadata = ReadSourceFileMetadata {
-        language,
-        content: final_content.clone(),
-        symbols: final_symbols,
-        duration_ms: Some(millis_to_u64(duration_ms)),
-        unsupported_language: None,
-    };
-
     let mut contents = Vec::new();
-    if let Some(text) = final_content {
+    if let Some(ref text) = final_content {
         contents.push(Content::text(format!(
             "{text}\n[completed in {duration_ms}ms]"
         )));
     }
+
+    let metadata = ReadSourceFileMetadata {
+        language,
+        content: final_content,
+        symbols: final_symbols,
+        duration_ms: Some(millis_to_u64(duration_ms)),
+        unsupported_language: None,
+    };
 
     let mut result = CallToolResult::success(contents);
     result.structured_content = serialize_metadata(&metadata);

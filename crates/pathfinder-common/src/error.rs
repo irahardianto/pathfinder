@@ -114,61 +114,13 @@ impl PathfinderError {
     /// `SYMBOL_NOT_FOUND` hints are dynamic and built from the `did_you_mean` suggestions.
     /// All other hints are static strings referencing specific Pathfinder tools.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn hint(&self) -> Option<String> {
         match self {
             Self::SymbolNotFound {
                 semantic_path,
                 did_you_mean,
                 retry_after_seconds,
-            } => {
-                // Spec 2.4: Include retry hint when warm-up is in progress
-                if let Some(seconds) = retry_after_seconds {
-                    return Some(format!(
-                        "LSP is still warming up (initial indexing). Retry in {seconds} seconds."
-                    ));
-                }
-
-                // Detect path separator confusion: agent may have used `.` instead of `::`
-                // (e.g., `src/lib.rs.MyStruct.method` instead of `src/lib.rs::MyStruct.method`)
-                // or used `::` between nested symbols where `.` is expected.
-                let separator_hint = if !semantic_path.contains("::") {
-                    Some(
-                        " Note: semantic paths require '::' between the file and symbol \
-                         (e.g., 'src/lib.rs::MyStruct.method'). \
-                         Nested symbols within the same file use '.' (e.g., 'MyStruct.method')."
-                    )
-                } else if semantic_path.matches("::").count() > 1 {
-                    Some(
-                        " Note: only one '::' is allowed — between the file path and the symbol. \
-                          Nested symbols within the file use '.' (e.g., 'src/lib.rs::Outer.Inner.method')."
-                    )
-                } else {
-                    None
-                };
-
-                if did_you_mean.is_empty() {
-                    // No suggestions — the symbol might be in a different file than what the agent guessed.
-                    // Suggest search to locate the correct file.
-                    let base_name = semantic_path
-                        .split("::")
-                        .last()
-                        .unwrap_or(semantic_path)
-                        .split('.')
-                        .next()
-                        .unwrap_or(semantic_path);
-                    Some(format!(
-                        "Symbol not found in the specified file. Use search(mode=\"symbol\", query=\"{base_name}\") to locate the correct file, or search(query=\"{base_name}\") to search the entire workspace.{}",
-                        separator_hint.unwrap_or("")
-                    ))
-                } else {
-                    Some(format!(
-                        "Did you mean: {}? Use search if the symbol is in a different file, or read to see available symbols in this file.{}",
-                        did_you_mean.join(", "),
-                        separator_hint.unwrap_or("")
-                    ))
-                }
-            }
+            } => Some(Self::hint_symbol_not_found(semantic_path, did_you_mean, *retry_after_seconds)),
             Self::AccessDenied { .. } => {
                 Some("File is outside workspace sandbox. Check .pathfinderignore rules.".to_owned())
             }
@@ -182,43 +134,14 @@ impl PathfinderError {
                     .to_owned(),
             ),
             Self::InvalidSemanticPath { input, issue } => {
-                if issue.contains("symbol target") {
-                    Some(format!(
-                        "'{input}' is a file path without a symbol target. This tool requires 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). If you want the full file content without symbol resolution, use read(filepath=\"{input}\")."
-                    ))
-                } else {
-                    Some(format!(
-                        "'{input}' is not a valid semantic path. Use 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). The '::' separator is required between the file path and symbol name. Nested symbols within the same file use '.' (e.g., 'src/lib.rs::MyStruct.method')."
-                    ))
-                }
+                Some(Self::hint_invalid_semantic_path(input, issue))
             }
             Self::PathTraversal { .. } => Some(
                 "Path traversal is not allowed. Use a relative path without '..' components or absolute paths."
                     .to_owned(),
             ),
-            Self::LspError { message } => {
-                let hint = if message.contains("timed out") || message.contains("timeout") {
-                    format!(
-                         "LSP timed out. The language server may still be indexing, under memory pressure, or deadlocked. \
-                          Workaround: use search + inspect (tree-sitter) instead of \
-                          LSP-dependent tools (locate, trace, inspect). \
-                         Original error: {message}"
-                    )
-                } else if message.contains("connection lost") || message.contains("crashed") {
-                    format!(
-                        "LSP process crashed or disconnected. Pathfinder will attempt to restart it. \
-                         Workaround: use tree-sitter-based tools (search, inspect, read). \
-                         Original error: {message}"
-                    )
-                } else {
-                    format!(
-                        "LSP error: {message}. Workaround: use search for text-based navigation \
-                         or check health for current status."
-                    )
-                };
-                Some(hint)
-            }
-             Self::LspTimeout { timeout_ms } => Some(format!(
+            Self::LspError { message } => Some(Self::hint_lsp_error(message)),
+            Self::LspTimeout { timeout_ms } => Some(format!(
                 "LSP timed out after {timeout_ms}ms. The language server may still be indexing, under memory pressure, or deadlocked. \
                  Workaround: use search + inspect (tree-sitter) instead of \
                  LSP-dependent tools (locate, trace, inspect). \
@@ -230,6 +153,93 @@ impl PathfinderError {
             )),
             _ => None,
         }
+    }
+    fn hint_symbol_not_found(
+        semantic_path: &str,
+        did_you_mean: &[String],
+        retry_after_seconds: Option<u32>,
+    ) -> String {
+        // Spec 2.4: Include retry hint when warm-up is in progress
+        if let Some(seconds) = retry_after_seconds {
+            return format!(
+                "LSP is still warming up (initial indexing). Retry in {seconds} seconds."
+            );
+        }
+
+        // Detect path separator confusion: agent may have used `.` instead of `::`
+        // (e.g., `src/lib.rs.MyStruct.method` instead of `src/lib.rs::MyStruct.method`)
+        // or used `::` between nested symbols where `.` is expected.
+        let separator_hint = if !semantic_path.contains("::") {
+            Some(
+                " Note: semantic paths require '::' between the file and symbol \
+                 (e.g., 'src/lib.rs::MyStruct.method'). \
+                 Nested symbols within the same file use '.' (e.g., 'MyStruct.method').",
+            )
+        } else if semantic_path.matches("::").count() > 1 {
+            Some(
+                " Note: only one '::' is allowed — between the file path and the symbol. \
+                  Nested symbols within the file use '.' (e.g., 'src/lib.rs::Outer.Inner.method').",
+            )
+        } else {
+            None
+        };
+
+        if did_you_mean.is_empty() {
+            // No suggestions — the symbol might be in a different file than what the agent guessed.
+            // Suggest search to locate the correct file.
+            let base_name = semantic_path
+                .split("::")
+                .last()
+                .unwrap_or(semantic_path)
+                .split('.')
+                .next()
+                .unwrap_or(semantic_path);
+            format!(
+                "Symbol not found in the specified file. Use search(mode=\"symbol\", query=\"{base_name}\") to locate the correct file, or search(query=\"{base_name}\") to search the entire workspace.{}",
+                separator_hint.unwrap_or("")
+            )
+        } else {
+            format!(
+                "Did you mean: {}? Use search if the symbol is in a different file, or read to see available symbols in this file.{}",
+                did_you_mean.join(", "),
+                separator_hint.unwrap_or("")
+            )
+        }
+    }
+
+    fn hint_invalid_semantic_path(input: &str, issue: &str) -> String {
+        if issue.contains("symbol target") {
+            format!(
+                "'{input}' is a file path without a symbol target. This tool requires 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). If you want the full file content without symbol resolution, use read(filepath=\"{input}\")."
+            )
+        } else {
+            format!(
+                "'{input}' is not a valid semantic path. Use 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). The '::' separator is required between the file path and symbol name. Nested symbols within the same file use '.' (e.g., 'src/lib.rs::MyStruct.method')."
+            )
+        }
+    }
+
+    fn hint_lsp_error(message: &str) -> String {
+        let hint = if message.contains("timed out") || message.contains("timeout") {
+            format!(
+                 "LSP timed out. The language server may still be indexing, under memory pressure, or deadlocked. \
+                  Workaround: use search + inspect (tree-sitter) instead of \
+                  LSP-dependent tools (locate, trace, inspect). \
+                  Original error: {message}"
+            )
+        } else if message.contains("connection lost") || message.contains("crashed") {
+            format!(
+                "LSP process crashed or disconnected. Pathfinder will attempt to restart it. \
+                 Workaround: use tree-sitter-based tools (search, inspect, read). \
+                 Original error: {message}"
+            )
+        } else {
+            format!(
+                "LSP error: {message}. Workaround: use search for text-based navigation \
+                 or check health for current status."
+            )
+        };
+        hint
     }
 
     /// Serialize to the standard MCP error JSON format.
@@ -650,5 +660,63 @@ mod tests {
         assert_eq!(response.error, "PATH_TRAVERSAL");
         assert_eq!(response.details["path"], "../../etc/passwd");
         assert_eq!(response.details["workspace_root"], "/workspace");
+    }
+
+    #[test]
+    fn test_hint_returns_some_for_all_error_variants() {
+        let errors = vec![
+            PathfinderError::FileNotFound { path: "a".into() },
+            PathfinderError::SymbolNotFound {
+                semantic_path: "a".into(),
+                did_you_mean: vec![],
+                retry_after_seconds: None,
+            },
+            PathfinderError::InvalidSemanticPath {
+                input: "a".into(),
+                issue: "b".into(),
+            },
+            PathfinderError::AmbiguousSymbol {
+                semantic_path: "a".into(),
+                matches: vec![],
+            },
+            PathfinderError::NoLspAvailable {
+                language: "a".into(),
+            },
+            PathfinderError::LspError {
+                message: "a".into(),
+            },
+            PathfinderError::IoError {
+                message: "a".into(),
+            },
+            PathfinderError::LspTimeout { timeout_ms: 0 },
+            PathfinderError::AccessDenied {
+                path: "a".into(),
+                tier: SandboxTier::HardcodedDeny,
+            },
+            PathfinderError::ParseError {
+                path: "a".into(),
+                reason: "a".into(),
+            },
+            PathfinderError::UnsupportedLanguage { path: "a".into() },
+            PathfinderError::TokenBudgetExceeded { used: 0, budget: 0 },
+            PathfinderError::PathTraversal {
+                path: "a".into(),
+                workspace_root: "b".into(),
+            },
+        ];
+
+        for err in errors {
+            match err {
+                PathfinderError::AmbiguousSymbol { .. }
+                | PathfinderError::IoError { .. }
+                | PathfinderError::ParseError { .. }
+                | PathfinderError::TokenBudgetExceeded { .. } => {
+                    assert!(err.hint().is_none(), "expected None hint for {err:?}");
+                }
+                _ => {
+                    assert!(err.hint().is_some(), "expected Some hint for {err:?}");
+                }
+            }
+        }
     }
 }

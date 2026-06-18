@@ -398,14 +398,16 @@ fn detect_languages_shallow(
     detected
 }
 
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub abs_path: PathBuf,
+    pub rel_path: PathBuf,
+}
+
 /// Generate an AST-based skeleton of a directory.
 ///
 /// # Errors
 /// Returns `SurgeonError` if an operation on the AST fails.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Sequential directory-walk pipeline; splitting into sub-functions would obscure the linear data flow without improving readability"
-)]
 #[allow(clippy::items_after_statements)]
 pub async fn generate_skeleton_text(
     surgeon: &impl crate::surgeon::Surgeon,
@@ -414,7 +416,6 @@ pub async fn generate_skeleton_text(
     config: &SkeletonConfig<'_>,
 ) -> Result<RepoMapResult, SurgeonError> {
     use ignore::WalkBuilder;
-    use pathfinder_common::types::VersionHash;
 
     let abs_target = workspace_root.join(target_path);
 
@@ -460,11 +461,6 @@ pub async fn generate_skeleton_text(
     builder.add_custom_ignore_filename(".pathfinderignore");
 
     let walker = builder.build();
-
-    struct FileEntry {
-        abs_path: PathBuf,
-        rel_path: PathBuf,
-    }
 
     let mut file_entries: Vec<FileEntry> = Vec::new();
     let mut tech_stack: Vec<crate::language::SupportedLanguage> = Vec::default();
@@ -534,205 +530,18 @@ pub async fn generate_skeleton_text(
     }
 
     // ── Symbols mode: full AST symbol hierarchy (default) ────────────
-
-    const READ_CONCURRENCY: usize = 32;
-
-    struct ProcessedFile {
-        rel_path: PathBuf,
-        skeleton: String,
-        skeleton_tokens: u32,
-    }
-
-    struct FileProcessOutput {
-        processed: Option<ProcessedFile>,
-        version_entry: Option<(String, String)>,
-        has_symbols: bool,
-        truncated: bool,
-    }
-
-    let visibility = config.visibility.to_string();
-    let include_tests = config.include_tests;
-    let max_tokens_per_file = config.max_tokens_per_file;
-    let workspace_root = workspace_root.to_path_buf();
-
-    use futures::stream::{self, StreamExt};
-
-    let process_stream = stream::iter(file_entries).map(|entry| {
-        let workspace_root = workspace_root.clone();
-        let visibility = visibility.clone();
-
-        async move {
-            let (read_result, meta_result) = tokio::join!(
-                tokio::fs::read(&entry.abs_path),
-                tokio::fs::metadata(&entry.abs_path)
-            );
-            let mtime = meta_result
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
-            let source = match read_result {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %entry.rel_path.display(),
-                        error = %e,
-                        "get_repo_map: skipping file (read failed)"
-                    );
-                    return FileProcessOutput {
-                        processed: None,
-                        version_entry: None,
-                        has_symbols: false,
-                        truncated: false,
-                    };
-                }
-            };
-
-            let hash = VersionHash::compute(&source);
-            let path_str = entry.rel_path.display().to_string();
-            let hash_short = hash.short().to_owned();
-
-            let content_arc: std::sync::Arc<[u8]> = std::sync::Arc::from(source);
-
-            let raw_symbols = match surgeon
-                .extract_symbols_preloaded(&workspace_root, &entry.rel_path, content_arc, mtime)
-                .await
-            {
-                Ok(syms) => syms,
-                Err(e) => {
-                    tracing::debug!(
-                        path = %entry.rel_path.display(),
-                        error = %e,
-                        "get_repo_map: skipping file (symbol extraction failed)"
-                    );
-                    return FileProcessOutput {
-                        processed: None,
-                        version_entry: Some((path_str, hash_short)),
-                        has_symbols: false,
-                        truncated: false,
-                    };
-                }
-            };
-
-            let symbols = filter_by_visibility(raw_symbols, &visibility, include_tests);
-
-            if symbols.is_empty() {
-                return FileProcessOutput {
-                    processed: None,
-                    version_entry: Some((path_str, hash_short)),
-                    has_symbols: false,
-                    truncated: false,
-                };
-            }
-
-            let (file_skeleton, truncated) = render_file_skeleton(&symbols, max_tokens_per_file);
-            let file_skeleton_tokens = estimate_tokens(&file_skeleton);
-
-            FileProcessOutput {
-                processed: Some(ProcessedFile {
-                    rel_path: entry.rel_path,
-                    skeleton: file_skeleton,
-                    skeleton_tokens: file_skeleton_tokens,
-                }),
-                version_entry: Some((path_str, hash_short)),
-                has_symbols: true,
-                truncated,
-            }
-        }
-    });
-
-    let process_results: Vec<FileProcessOutput> = process_stream
-        .buffer_unordered(READ_CONCURRENCY)
-        .collect()
-        .await;
-
-    let mut processed: Vec<ProcessedFile> = Vec::new();
-    let mut files_with_symbols = 0;
-    let mut version_hashes = HashMap::default();
-    let mut per_file_truncated_paths: Vec<String> = Vec::new();
-
-    for output in process_results {
-        if let Some((path, hash)) = output.version_entry {
-            version_hashes.insert(path, hash);
-        }
-        if output.has_symbols {
-            files_with_symbols += 1;
-        }
-        if output.truncated {
-            if let Some(ref pf) = output.processed {
-                per_file_truncated_paths.push(pf.rel_path.display().to_string());
-            }
-        }
-        if let Some(pf) = output.processed {
-            processed.push(pf);
-        }
-    }
-
-    processed.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-
-    let mut skeleton_out = String::default();
-    let mut current_tokens: u32 = 0;
-    let mut files_rendered: usize = 0;
-    let mut files_truncated: usize = 0;
-    let mut truncated_paths: Vec<String> = Vec::new();
-
-    for pf in &processed {
-        if current_tokens + pf.skeleton_tokens > config.max_tokens {
-            if current_tokens + 50 <= config.max_tokens {
-                use std::fmt::Write;
-                let _ = writeln!(
-                    skeleton_out,
-                    "\n// [... Omitted {} due to token budget]",
-                    pf.rel_path.display()
-                );
-                current_tokens += 50;
-            }
-            files_truncated += 1;
-            truncated_paths.push(pf.rel_path.display().to_string());
-            continue;
-        }
-
-        let path_header = format!(
-            "\nFile: {}\n{}\n",
-            pf.rel_path.display(),
-            "=".repeat(pf.rel_path.display().to_string().len() + 6)
-        );
-
-        let header_tokens = estimate_tokens(&path_header);
-        current_tokens += header_tokens + pf.skeleton_tokens;
-        files_rendered += 1;
-        skeleton_out.push_str(&path_header);
-        skeleton_out.push_str(&pf.skeleton);
-    }
-
-    truncated_paths.extend(per_file_truncated_paths);
-    truncated_paths.sort();
-    truncated_paths.dedup();
-
-    let coverage_percent = if files_in_scope > 0 {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let percent = ((files_with_symbols as f32 / files_in_scope as f32) * 100.0) as u8;
-        percent
-    } else {
-        100
-    };
-
-    Ok(RepoMapResult {
-        skeleton: skeleton_out.trim().to_string(),
-        // Use as_str() to emit canonical lowercase language IDs (e.g. "java", "rust")
-        // instead of format!("{l:?}") which would emit Rust Debug repr ("Java", "Rust").
-        tech_stack: tech_stack.iter().map(|l| l.as_str().to_owned()).collect(),
-        files_scanned: files_rendered,
-        files_truncated,
-        truncated_paths,
+    generate_symbols_skeleton(
+        surgeon,
+        workspace_root,
+        file_entries,
+        config.visibility,
+        config.include_tests,
+        config.max_tokens,
+        config.max_tokens_per_file,
+        &tech_stack,
         files_in_scope,
-        coverage_percent,
-        version_hashes,
-    })
+    )
+    .await
 }
 
 /// Well-known manifest/config files that `Structure` mode includes in its
@@ -946,6 +755,223 @@ async fn generate_files_skeleton(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "Extracted sequential skeleton generation logic"
+)]
+async fn generate_symbols_skeleton(
+    surgeon: &impl crate::surgeon::Surgeon,
+    workspace_root: &Path,
+    file_entries: Vec<FileEntry>,
+    visibility: &str,
+    include_tests: bool,
+    max_tokens: u32,
+    max_tokens_per_file: u32,
+    tech_stack: &[crate::language::SupportedLanguage],
+    files_in_scope: usize,
+) -> Result<RepoMapResult, SurgeonError> {
+    use futures::stream::{self, StreamExt};
+    use pathfinder_common::types::VersionHash;
+
+    const READ_CONCURRENCY: usize = 32;
+
+    struct ProcessedFile {
+        rel_path: PathBuf,
+        skeleton: String,
+        skeleton_tokens: u32,
+    }
+
+    struct FileProcessOutput {
+        processed: Option<ProcessedFile>,
+        version_entry: Option<(String, String)>,
+        has_symbols: bool,
+        truncated: bool,
+    }
+
+    let visibility = visibility.to_string();
+    let workspace_root = workspace_root.to_path_buf();
+
+    let process_stream = stream::iter(file_entries).map(|entry| {
+        let workspace_root = workspace_root.clone();
+        let visibility = visibility.clone();
+
+        async move {
+            let (read_result, meta_result) = tokio::join!(
+                tokio::fs::read(&entry.abs_path),
+                tokio::fs::metadata(&entry.abs_path)
+            );
+            let mtime = meta_result
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+            let source = match read_result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %entry.rel_path.display(),
+                        error = %e,
+                        "get_repo_map: skipping file (read failed)"
+                    );
+                    return FileProcessOutput {
+                        processed: None,
+                        version_entry: None,
+                        has_symbols: false,
+                        truncated: false,
+                    };
+                }
+            };
+
+            let hash = VersionHash::compute(&source);
+            let path_str = entry.rel_path.display().to_string();
+            let hash_short = hash.short().to_owned();
+
+            let content_arc: std::sync::Arc<[u8]> = std::sync::Arc::from(source);
+
+            let raw_symbols = match surgeon
+                .extract_symbols_preloaded(&workspace_root, &entry.rel_path, content_arc, mtime)
+                .await
+            {
+                Ok(syms) => syms,
+                Err(e) => {
+                    tracing::debug!(
+                        path = %entry.rel_path.display(),
+                        error = %e,
+                        "get_repo_map: skipping file (symbol extraction failed)"
+                    );
+                    return FileProcessOutput {
+                        processed: None,
+                        version_entry: Some((path_str, hash_short)),
+                        has_symbols: false,
+                        truncated: false,
+                    };
+                }
+            };
+
+            let symbols = filter_by_visibility(raw_symbols, &visibility, include_tests);
+
+            if symbols.is_empty() {
+                return FileProcessOutput {
+                    processed: None,
+                    version_entry: Some((path_str, hash_short)),
+                    has_symbols: false,
+                    truncated: false,
+                };
+            }
+
+            let (file_skeleton, truncated) = render_file_skeleton(&symbols, max_tokens_per_file);
+            let file_skeleton_tokens = estimate_tokens(&file_skeleton);
+
+            FileProcessOutput {
+                processed: Some(ProcessedFile {
+                    rel_path: entry.rel_path,
+                    skeleton: file_skeleton,
+                    skeleton_tokens: file_skeleton_tokens,
+                }),
+                version_entry: Some((path_str, hash_short)),
+                has_symbols: true,
+                truncated,
+            }
+        }
+    });
+
+    let process_results: Vec<FileProcessOutput> = process_stream
+        .buffer_unordered(READ_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut processed: Vec<ProcessedFile> = Vec::new();
+    let mut files_with_symbols = 0;
+    let mut version_hashes = HashMap::default();
+    let mut per_file_truncated_paths: Vec<String> = Vec::new();
+
+    for output in process_results {
+        if let Some((path, hash)) = output.version_entry {
+            version_hashes.insert(path, hash);
+        }
+        if output.has_symbols {
+            files_with_symbols += 1;
+        }
+        if output.truncated {
+            if let Some(ref pf) = output.processed {
+                per_file_truncated_paths.push(pf.rel_path.display().to_string());
+            }
+        }
+        if let Some(pf) = output.processed {
+            processed.push(pf);
+        }
+    }
+
+    processed.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    let mut skeleton_out = String::default();
+    let mut current_tokens: u32 = 0;
+    let mut files_rendered: usize = 0;
+    let mut files_truncated: usize = 0;
+    let mut truncated_paths: Vec<String> = Vec::new();
+
+    for pf in &processed {
+        // Estimate the header cost before the budget gate so the gate accurately
+        // reflects the total cost of rendering this file (header + skeleton).
+        // The header format is "\nFile: {path}\n{sep}\n" — compute the real cost here
+        // to avoid silently exceeding max_tokens after admission.
+        let path_header = format!(
+            "\nFile: {}\n{}\n",
+            pf.rel_path.display(),
+            "=".repeat(pf.rel_path.display().to_string().len() + 6)
+        );
+        let header_tokens = estimate_tokens(&path_header);
+        let total_cost = pf.skeleton_tokens.saturating_add(header_tokens);
+
+        if current_tokens + total_cost > max_tokens {
+            if current_tokens + 50 <= max_tokens {
+                let _ = writeln!(
+                    skeleton_out,
+                    "\n// [... Omitted {} due to token budget]",
+                    pf.rel_path.display()
+                );
+                current_tokens += 50;
+            }
+            files_truncated += 1;
+            truncated_paths.push(pf.rel_path.display().to_string());
+            continue;
+        }
+
+        current_tokens += total_cost;
+        files_rendered += 1;
+        skeleton_out.push_str(&path_header);
+        skeleton_out.push_str(&pf.skeleton);
+    }
+
+    truncated_paths.extend(per_file_truncated_paths);
+    truncated_paths.sort();
+    truncated_paths.dedup();
+
+    let coverage_percent = if files_in_scope > 0 {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let percent = ((files_with_symbols as f32 / files_in_scope as f32) * 100.0) as u8;
+        percent
+    } else {
+        100
+    };
+
+    Ok(RepoMapResult {
+        skeleton: skeleton_out.trim().to_string(),
+        tech_stack: tech_stack.iter().map(|l| l.as_str().to_owned()).collect(),
+        files_scanned: files_rendered,
+        files_truncated,
+        truncated_paths,
+        files_in_scope,
+        coverage_percent,
+        version_hashes,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -966,6 +992,111 @@ mod tests {
             access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn test_generate_symbols_skeleton_respects_token_budget() {
+        let surgeon = MockSurgeon::default();
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .expect("lock success")
+            .push(Ok(vec![
+                make_sym("foo", SymbolKind::Function),
+                make_sym("bar", SymbolKind::Function),
+            ]));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("main.rs");
+        std::fs::write(&file_path, "fn foo() {} fn bar() {}").expect("write file");
+
+        let files = vec![FileEntry {
+            abs_path: file_path.clone(),
+            rel_path: PathBuf::from("main.rs"),
+        }];
+
+        let res = generate_symbols_skeleton(
+            &surgeon,
+            dir.path(),
+            files.clone(),
+            "all",
+            true,
+            1000,
+            2000,
+            &[crate::language::SupportedLanguage::Rust],
+            1,
+        )
+        .await
+        .expect("generate_symbols_skeleton");
+        assert!(res.skeleton.contains("func foo"));
+        assert!(res.skeleton.contains("func bar"));
+        assert_eq!(res.files_scanned, 1);
+        assert_eq!(res.files_truncated, 0);
+
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .expect("lock success")
+            .push(Ok(vec![
+                make_sym("foo", SymbolKind::Function),
+                make_sym("bar", SymbolKind::Function),
+            ]));
+        let res = generate_symbols_skeleton(
+            &surgeon,
+            dir.path(),
+            files,
+            "all",
+            true,
+            5,
+            2000,
+            &[crate::language::SupportedLanguage::Rust],
+            1,
+        )
+        .await
+        .expect("generate_symbols_skeleton");
+        assert_eq!(res.files_scanned, 0);
+        assert_eq!(res.files_truncated, 1);
+        assert!(res.skeleton.is_empty() || res.skeleton.contains("Omitted"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_symbols_skeleton_visibility_filter() {
+        let surgeon = MockSurgeon::default();
+        let mut sym_pub = make_sym("foo_pub", SymbolKind::Function);
+        sym_pub.access_level = crate::surgeon::AccessLevel::Public;
+        let mut sym_priv = make_sym("foo_priv", SymbolKind::Function);
+        sym_priv.access_level = crate::surgeon::AccessLevel::Private;
+
+        surgeon
+            .extract_symbols_results
+            .lock()
+            .expect("lock success")
+            .push(Ok(vec![sym_pub, sym_priv]));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("main.rs");
+        std::fs::write(&file_path, "pub fn foo_pub() {} fn foo_priv() {}").expect("write file");
+
+        let files = vec![FileEntry {
+            abs_path: file_path,
+            rel_path: PathBuf::from("main.rs"),
+        }];
+
+        let res = generate_symbols_skeleton(
+            &surgeon,
+            dir.path(),
+            files,
+            "public",
+            false,
+            1000,
+            2000,
+            &[crate::language::SupportedLanguage::Rust],
+            1,
+        )
+        .await
+        .expect("generate_symbols_skeleton");
+        assert!(res.skeleton.contains("func foo_pub"));
+        assert!(!res.skeleton.contains("func foo_priv"));
     }
 
     #[test]

@@ -93,6 +93,7 @@ pub(crate) enum ProcessEntry {
     Unavailable(UnavailableState),
 }
 
+#[derive(Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)]
 struct ValidationStatusInput<'a> {
     command: &'a str,
@@ -105,7 +106,7 @@ struct ValidationStatusInput<'a> {
     indexing_complete: bool,
     uptime_seconds: u64,
     server_name: Option<&'a str>,
-    indexing_source: Option<String>,
+    indexing_source: Option<&'a str>,
     indexing_duration_secs: Option<u64>,
     indexing_progress_pct: Option<u8>,
     registrations_received: u32,
@@ -127,10 +128,8 @@ impl ProcessEntry {
                         .lock()
                         .as_ref()
                         .map(|source| match source {
-                            IndexingCompletionSource::Progress => "progress".to_string(),
-                            IndexingCompletionSource::TimeoutFallback => {
-                                "timeout_fallback".to_string()
-                            }
+                            IndexingCompletionSource::Progress => "progress",
+                            IndexingCompletionSource::TimeoutFallback => "timeout_fallback",
                         });
                 let indexing_duration_secs = *state.indexing_duration_secs.lock();
                 let indexing_progress_pct = *state.indexing_progress_percent.lock();
@@ -201,6 +200,37 @@ pub(crate) fn grace_period_for_language(language_id: &str) -> u64 {
 ///
 /// MT-2: `server_name` added so the status carries the server identity for
 /// per-server push diagnostics config selection in validation tools.
+fn build_language_status(
+    input: &ValidationStatusInput<'_>,
+    validation: bool,
+    reason: String,
+    diagnostics_strategy: String,
+    supports_diagnostics: bool,
+    navigation_ready: Option<bool>,
+) -> crate::types::LspLanguageStatus {
+    crate::types::LspLanguageStatus {
+        validation,
+        reason,
+        navigation_ready,
+        indexing_complete: Some(input.indexing_complete),
+        uptime_seconds: Some(input.uptime_seconds),
+        diagnostics_strategy: Some(diagnostics_strategy),
+        supports_definition: Some(input.supports_definition),
+        supports_call_hierarchy: Some(input.supports_call_hierarchy),
+        supports_diagnostics: Some(supports_diagnostics),
+        supports_formatting: Some(input.supports_formatting),
+        server_name: input.server_name.map(ToOwned::to_owned),
+        indexing_source: input.indexing_source.map(ToOwned::to_owned),
+        indexing_duration_secs: input.indexing_duration_secs,
+        indexing_progress_percent: if input.indexing_complete {
+            None
+        } else {
+            input.indexing_progress_pct
+        },
+        registrations_received: Some(input.registrations_received),
+    }
+}
+
 fn validation_status_from_parts(
     input: ValidationStatusInput<'_>,
 ) -> crate::types::LspLanguageStatus {
@@ -237,55 +267,32 @@ fn validation_status_from_parts(
     };
 
     match input.diagnostics_strategy {
-        DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => crate::types::LspLanguageStatus {
-            validation: true,
-            reason: format!(
+        DiagnosticsStrategy::Pull | DiagnosticsStrategy::Push => {
+            let reason = format!(
                 "LSP connected and supports validation ({})",
                 if matches!(input.diagnostics_strategy, DiagnosticsStrategy::Pull) {
                     "pull diagnostics"
                 } else {
                     "push diagnostics"
                 }
-            ),
+            );
+            build_language_status(
+                &input,
+                true,
+                reason,
+                input.diagnostics_strategy.as_str().to_owned(),
+                true,
+                navigation_ready,
+            )
+        }
+        DiagnosticsStrategy::None => build_language_status(
+            &input,
+            false,
+            "LSP connected but does not support diagnostics".to_owned(),
+            "none".to_owned(),
+            false,
             navigation_ready,
-            indexing_complete: Some(input.indexing_complete),
-            uptime_seconds: Some(input.uptime_seconds),
-            diagnostics_strategy: Some(input.diagnostics_strategy.as_str().to_owned()),
-            supports_definition: Some(input.supports_definition),
-            supports_call_hierarchy: Some(input.supports_call_hierarchy),
-            supports_diagnostics: Some(true),
-            supports_formatting: Some(input.supports_formatting),
-            server_name: input.server_name.map(ToOwned::to_owned),
-            indexing_source: input.indexing_source,
-            indexing_duration_secs: input.indexing_duration_secs,
-            indexing_progress_percent: if input.indexing_complete {
-                None
-            } else {
-                input.indexing_progress_pct
-            },
-            registrations_received: Some(input.registrations_received),
-        },
-        DiagnosticsStrategy::None => crate::types::LspLanguageStatus {
-            validation: false,
-            reason: "LSP connected but does not support diagnostics".to_owned(),
-            navigation_ready,
-            indexing_complete: Some(input.indexing_complete),
-            uptime_seconds: Some(input.uptime_seconds),
-            diagnostics_strategy: Some("none".to_owned()),
-            supports_definition: Some(input.supports_definition),
-            supports_call_hierarchy: Some(input.supports_call_hierarchy),
-            supports_diagnostics: Some(false),
-            supports_formatting: Some(input.supports_formatting),
-            server_name: input.server_name.map(ToOwned::to_owned),
-            indexing_source: input.indexing_source,
-            indexing_duration_secs: input.indexing_duration_secs,
-            indexing_progress_percent: if input.indexing_complete {
-                None
-            } else {
-                input.indexing_progress_pct
-            },
-            registrations_received: Some(input.registrations_received),
-        },
+        ),
     }
 }
 
@@ -362,7 +369,7 @@ mod tests {
         indexing_complete: bool,
         uptime_seconds: u64,
         server_name: Option<&str>,
-        indexing_source: Option<String>,
+        indexing_source: Option<&str>,
         indexing_duration_secs: Option<u64>,
         indexing_progress_pct: Option<u8>,
         registrations_received: u32,
@@ -1467,5 +1474,91 @@ mod tests {
         assert_eq!(grace_period_for_language("go"), 0);
         assert_eq!(grace_period_for_language("python"), 0);
         assert_eq!(grace_period_for_language("unknown"), 0);
+    }
+
+    #[test]
+    fn test_build_language_status_helper() {
+        let input = ValidationStatusInput {
+            command: "rust-analyzer",
+            language_id: "rust",
+            running: true,
+            diagnostics_strategy: DiagnosticsStrategy::Pull,
+            supports_definition: true,
+            supports_call_hierarchy: true,
+            supports_formatting: true,
+            indexing_complete: true,
+            uptime_seconds: 120,
+            server_name: Some("rust-analyzer"),
+            indexing_source: Some("progress"),
+            indexing_duration_secs: Some(15),
+            indexing_progress_pct: None,
+            registrations_received: 2,
+        };
+
+        let status = build_language_status(
+            &input,
+            true,
+            "LSP connected".to_string(),
+            "pull".to_string(),
+            true,
+            Some(true),
+        );
+
+        assert!(status.validation);
+        assert_eq!(status.reason, "LSP connected");
+        assert_eq!(status.navigation_ready, Some(true));
+        assert_eq!(status.indexing_complete, Some(true));
+        assert_eq!(status.uptime_seconds, Some(120));
+        assert_eq!(status.diagnostics_strategy, Some("pull".to_string()));
+        assert_eq!(status.supports_definition, Some(true));
+        assert_eq!(status.supports_call_hierarchy, Some(true));
+        assert_eq!(status.supports_diagnostics, Some(true));
+        assert_eq!(status.supports_formatting, Some(true));
+        assert_eq!(status.server_name, Some("rust-analyzer".to_string()));
+        assert_eq!(status.indexing_source, Some("progress".to_string()));
+        assert_eq!(status.indexing_duration_secs, Some(15));
+        assert_eq!(status.indexing_progress_percent, None);
+        assert_eq!(status.registrations_received, Some(2));
+    }
+
+    #[test]
+    fn test_build_language_status_suppresses_progress_pct_when_indexing_complete() {
+        // Verifies the branch: if indexing_complete { None } else { pct }.
+        // When indexing is done, the in-flight progress percent must be cleared
+        // to prevent stale values from reaching callers.
+        let input = ValidationStatusInput {
+            running: true,
+            command: "rust-analyzer",
+            language_id: "rust",
+            diagnostics_strategy: DiagnosticsStrategy::Push,
+            indexing_complete: true,
+            uptime_seconds: 60,
+            supports_definition: true,
+            supports_call_hierarchy: true,
+            supports_formatting: false,
+            server_name: None,
+            indexing_source: Some("progress"),
+            indexing_duration_secs: Some(10),
+            // Non-None: if the suppression branch is missing, this leaks through.
+            indexing_progress_pct: Some(95),
+            registrations_received: 0,
+        };
+
+        let status = build_language_status(
+            &input,
+            true,
+            "ready".to_string(),
+            "push".to_string(),
+            true,
+            Some(true),
+        );
+
+        // The 95% in-flight value must be suppressed because indexing is complete.
+        assert_eq!(
+            status.indexing_progress_percent, None,
+            "indexing_progress_percent must be None when indexing_complete=true, \
+             regardless of the in-flight pct value"
+        );
+        assert_eq!(status.indexing_complete, Some(true));
     }
 }

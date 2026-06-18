@@ -67,6 +67,7 @@ impl MockScout {
     /// Returns a snapshot of all `SearchParams` passed to `search()`.
     #[must_use]
     pub fn calls(&self) -> Vec<SearchParams> {
+        // CLONE: snapshot of call history for caller inspection
         self.calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -88,6 +89,7 @@ impl Scout for MockScout {
                 .calls
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // CLONE: record search params for later assertion
             guard.push(params.clone());
         }
 

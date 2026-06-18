@@ -225,10 +225,54 @@ impl PathfinderServer {
 
         let duration_ms = start.elapsed().as_millis();
 
+        let (degraded, degraded_reason, lsp_readiness, warm_start_in_progress) =
+            Self::resolve_degraded_reason(
+                impact_degraded,
+                impact_reason,
+                refs_degraded,
+                refs_reason,
+            );
+
+        let response = crate::server::types::SymbolOverviewResponse {
+            source,
+            impact: impact.clone(),
+            references: references.clone(),
+            files_referenced,
+            degraded,
+            impact_degraded,
+            references_degraded: refs_degraded,
+            degraded_reason,
+            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
+            lsp_readiness,
+            warm_start_in_progress,
+        };
+
+        let text = Self::render_overview_text(
+            &params.semantic_path,
+            scope.start_line,
+            scope.end_line,
+            &scope.content,
+            impact.as_ref(),
+            references.as_deref(),
+            files_referenced,
+            degraded,
+            degraded_reason,
+            duration_ms,
+        );
+
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
+        result.structured_content = serialize_metadata(&response);
+        Ok(result)
+    }
+
+    pub(super) fn resolve_degraded_reason(
+        impact_degraded: bool,
+        impact_reason: Option<DegradedReason>,
+        refs_degraded: bool,
+        refs_reason: Option<DegradedReason>,
+    ) -> (bool, Option<DegradedReason>, Option<String>, Option<bool>) {
         let degraded = impact_degraded || refs_degraded;
-        // Item 12: Prefer warming_up reason when any sub-tool reports it.
-        // This gives agents a more accurate signal — if any sub-tool thinks
-        // the LSP is warming up, the composite should reflect that.
         let is_warming = |r: &Option<DegradedReason>| {
             matches!(
                 r,
@@ -266,41 +310,45 @@ impl PathfinderServer {
             Some("ready".to_owned())
         };
 
-        // Item 10: Derive warm_start_in_progress from composite lsp_readiness
-        // instead of copying from refs metadata (which can contradict the
-        // composite readiness signal).
         let warm_start_in_progress = match lsp_readiness.as_deref() {
             Some("warming_up") => Some(true),
             Some("ready") => Some(false),
             _ => None,
         };
 
-        let response = crate::server::types::SymbolOverviewResponse {
-            source,
-            impact: impact.clone(),
-            references: references.clone(),
-            files_referenced,
+        (
             degraded,
-            impact_degraded,
-            references_degraded: refs_degraded,
             degraded_reason,
-            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
             warm_start_in_progress,
-        };
+        )
+    }
 
-        let line_count = scope.end_line - scope.start_line + 1;
-        let mut source_block = format!("SYMBOL: {} ({} lines)\n", params.semantic_path, line_count);
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_overview_text(
+        semantic_path: &str,
+        start_line: usize,
+        end_line: usize,
+        scope_content: &str,
+        impact: Option<&crate::server::types::ImpactSummary>,
+        references: Option<&[crate::server::types::SymbolOverviewReference]>,
+        files_referenced: usize,
+        degraded: bool,
+        degraded_reason: Option<DegradedReason>,
+        duration_ms: u128,
+    ) -> String {
+        let line_count = end_line - start_line + 1;
+        let mut source_block = format!("SYMBOL: {semantic_path} ({line_count} lines)\n");
         if line_count <= 10 {
             source_block.push_str("```\n");
-            source_block.push_str(&scope.content);
-            if !scope.content.ends_with('\n') {
+            source_block.push_str(scope_content);
+            if !scope_content.ends_with('\n') {
                 source_block.push('\n');
             }
             source_block.push_str("```\n");
         }
 
-        let impact_block = if let Some(ref imp) = impact {
+        let impact_block = if let Some(imp) = impact {
             let inc = imp.incoming.as_ref().map_or(0, Vec::len);
             let out = imp.outgoing.as_ref().map_or(0, Vec::len);
             let deg = if imp.degraded { " (degraded)" } else { "" };
@@ -309,7 +357,7 @@ impl PathfinderServer {
             "CALLERS: unavailable\nCALLEES: unavailable\n".to_owned()
         };
 
-        let refs_block = if let Some(ref refs) = references {
+        let refs_block = if let Some(refs) = references {
             let total = refs.len();
             format!("REFERENCES: {total} total across {files_referenced} files\n")
         } else {
@@ -317,23 +365,19 @@ impl PathfinderServer {
         };
 
         let degraded_block = if degraded {
-            let notice = degraded_reason
-                .as_ref()
-                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
+            let notice = degraded_reason.map_or_else(
+                || "DEGRADED (unknown)".to_owned(),
+                |r| format_degraded_notice(&r),
+            );
             format!("{notice}\n")
         } else {
             "DEGRADED: no (LSP-backed, authoritative)\n".to_owned()
         };
 
         let extra = if degraded { "\n" } else { "" };
-        let text = format!(
+        format!(
             "{source_block}{impact_block}{refs_block}{degraded_block}{extra}[completed in {duration_ms}ms]"
-        );
-
-        let mut result =
-            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
-        result.structured_content = serialize_metadata(&response);
-        Ok(result)
+        )
     }
 }
 
@@ -1203,5 +1247,61 @@ mod tests {
         assert!(text.contains("SYMBOL: src/auth.rs::login (3 lines)"));
         // Assert source code is embedded in text
         assert!(text.contains("```\nfn login() {\n    println!(\"hello\");\n}\n```"));
+    }
+
+    #[test]
+    fn test_resolve_degraded_reason_scenarios() {
+        // Scenario 1: No degradation
+        let (degraded, reason, readiness, warm) =
+            PathfinderServer::resolve_degraded_reason(false, None, false, None);
+        assert!(!degraded);
+        assert!(reason.is_none());
+        assert_eq!(readiness, Some("ready".to_string()));
+        assert_eq!(warm, Some(false));
+
+        // Scenario 2: One degraded, warming up
+        let (degraded, reason, readiness, warm) = PathfinderServer::resolve_degraded_reason(
+            true,
+            Some(DegradedReason::LspWarmupGrepFallback),
+            false,
+            None,
+        );
+        assert!(degraded);
+        assert_eq!(reason, Some(DegradedReason::LspWarmupGrepFallback));
+        assert_eq!(readiness, Some("warming_up".to_string()));
+        assert_eq!(warm, Some(true));
+
+        // Scenario 3: Both degraded, one warming up, one not
+        let (degraded, reason, readiness, warm) = PathfinderServer::resolve_degraded_reason(
+            true,
+            Some(DegradedReason::NoLsp),
+            true,
+            Some(DegradedReason::LspTimeoutGrepFallback),
+        );
+        assert!(degraded);
+        assert_eq!(reason, Some(DegradedReason::LspTimeoutGrepFallback));
+        assert_eq!(readiness, Some("warming_up".to_string()));
+        assert_eq!(warm, Some(true));
+    }
+
+    #[test]
+    fn test_render_overview_text_format() {
+        let text = PathfinderServer::render_overview_text(
+            "src/auth.rs::login",
+            10,
+            12,
+            "fn login() {}",
+            None,
+            None,
+            0,
+            false,
+            None,
+            123,
+        );
+
+        assert!(text.contains("SYMBOL: src/auth.rs::login (3 lines)"));
+        assert!(text.contains("CALLERS: unavailable"));
+        assert!(text.contains("REFERENCES: unavailable"));
+        assert!(text.contains("[completed in 123ms]"));
     }
 }

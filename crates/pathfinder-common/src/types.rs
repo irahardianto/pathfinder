@@ -204,8 +204,10 @@ impl VersionHash {
     pub fn compute_from_raw(hash_bytes: [u8; 32]) -> Self {
         // "sha256:" (7 bytes) + 64 hex chars = 71 bytes total
         let mut buf = String::with_capacity(Self::PREFIX.len() + 64);
+        // SAFETY: writing to a `String` via `fmt::Write` is infallible; the `Err` variant is unreachable.
         let _ = std::fmt::write(&mut buf, std::format_args!("{}", Self::PREFIX));
         for b in hash_bytes {
+            // SAFETY: writing to a `String` via `fmt::Write` is infallible; the `Err` variant is unreachable.
             let _ = std::fmt::write(&mut buf, std::format_args!("{b:02x}"));
         }
         Self(buf)
@@ -389,6 +391,7 @@ impl WorkspaceRoot {
         if is_absolute || has_traversal {
             return Err(PathfinderError::PathTraversal {
                 path: relative.to_path_buf(),
+                // CLONE: self.0 (workspace root PathBuf) is cloned to populate the error struct
                 workspace_root: self.0.clone(),
             });
         }

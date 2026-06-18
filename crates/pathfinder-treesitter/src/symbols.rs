@@ -592,6 +592,91 @@ fn detect_java_access_level(node: Node) -> crate::surgeon::AccessLevel {
 /// - Go: function name starting with `Test` in `*_test.go` file
 /// - Java: `@Test` annotation in modifiers
 /// - Plus naming conventions as fallback: `test_` prefix, `_test` suffix
+fn is_rust_test(node: Node<'_>, source: &[u8], func_name: Option<&str>) -> bool {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "attribute_item" || kind == "inner_attribute_item" {
+            if let Some(attr_text) = source.get(child.byte_range()) {
+                let attr = String::from_utf8_lossy(attr_text);
+                if attr.contains("#[test]")
+                    || attr.contains("#[tokio::test")
+                    || attr.contains("#[rstest]")
+                    || attr.contains("#[test_case")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(name) = func_name {
+        name.starts_with("test_") || name.ends_with("_test")
+    } else {
+        false
+    }
+}
+
+fn is_python_test(node: Node<'_>, source: &[u8], func_name: Option<&str>) -> bool {
+    let mut check_node = node;
+    loop {
+        if let Some(node_bytes) = source.get(check_node.byte_range()) {
+            let node_text = String::from_utf8_lossy(node_bytes);
+            if node_text.contains("@pytest")
+                || node_text.contains("unittest")
+                || node_text.contains("@given")
+            {
+                return true;
+            }
+        }
+        if check_node.kind() == "decorated_definition" {
+            break;
+        }
+        match check_node.parent() {
+            Some(parent) if parent.kind() == "decorated_definition" => {
+                check_node = parent;
+            }
+            _ => break,
+        }
+    }
+    if let Some(name) = func_name {
+        name.starts_with("test_")
+    } else {
+        false
+    }
+}
+
+fn is_java_test(node: Node<'_>, source: &[u8], func_name: Option<&str>) -> bool {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "modifiers" {
+            if let Some(mod_text) = source.get(child.byte_range()) {
+                let modifiers = String::from_utf8_lossy(mod_text);
+                if modifiers.contains("@Test")
+                    || modifiers.contains("@org.junit.Test")
+                    || modifiers.contains("@ParameterizedTest")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(name) = func_name {
+        name == "test"
+            || name.starts_with("test_")
+            || (name.starts_with("test") && name.chars().nth(4).is_some_and(char::is_uppercase))
+    } else {
+        false
+    }
+}
+
+/// Detect if a function node is a test function using language-specific rules.
+///
+/// Checks for:
+/// - Rust: `#[test]`, `#[tokio::test]`, etc. in `attribute_item` children
+/// - Python: `@pytest.mark` decorator or function named `test_*`
+/// - Go: function name starting with `Test` in `*_test.go` file
+/// - Java: `@Test` annotation in modifiers
+/// - Plus naming conventions as fallback: `test_` prefix, `_test` suffix
 fn is_test_function(
     node: Node<'_>,
     lang: SupportedLanguage,
@@ -599,57 +684,8 @@ fn is_test_function(
     func_name: Option<&str>,
 ) -> bool {
     match lang {
-        SupportedLanguage::Rust => {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                let kind = child.kind();
-                if kind == "attribute_item" || kind == "inner_attribute_item" {
-                    if let Some(attr_text) = source.get(child.byte_range()) {
-                        let attr = String::from_utf8_lossy(attr_text);
-                        if attr.contains("#[test]")
-                            || attr.contains("#[tokio::test")
-                            || attr.contains("#[rstest]")
-                            || attr.contains("#[test_case")
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
-            if let Some(name) = func_name {
-                name.starts_with("test_") || name.ends_with("_test")
-            } else {
-                false
-            }
-        }
-        SupportedLanguage::Python => {
-            let mut check_node = node;
-            loop {
-                if let Some(node_bytes) = source.get(check_node.byte_range()) {
-                    let node_text = String::from_utf8_lossy(node_bytes);
-                    if node_text.contains("@pytest")
-                        || node_text.contains("unittest")
-                        || node_text.contains("@given")
-                    {
-                        return true;
-                    }
-                }
-                if check_node.kind() == "decorated_definition" {
-                    break;
-                }
-                match check_node.parent() {
-                    Some(parent) if parent.kind() == "decorated_definition" => {
-                        check_node = parent;
-                    }
-                    _ => break,
-                }
-            }
-            if let Some(name) = func_name {
-                name.starts_with("test_")
-            } else {
-                false
-            }
-        }
+        SupportedLanguage::Rust => is_rust_test(node, source, func_name),
+        SupportedLanguage::Python => is_python_test(node, source, func_name),
         SupportedLanguage::TypeScript
         | SupportedLanguage::Tsx
         | SupportedLanguage::JavaScript
@@ -672,27 +708,7 @@ fn is_test_function(
                 false
             }
         }
-        SupportedLanguage::Java => {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if child.kind() == "modifiers" {
-                    if let Some(mod_text) = source.get(child.byte_range()) {
-                        let modifiers = String::from_utf8_lossy(mod_text);
-                        if modifiers.contains("@Test")
-                            || modifiers.contains("@org.junit.Test")
-                            || modifiers.contains("@ParameterizedTest")
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
-            if let Some(name) = func_name {
-                name.starts_with("test")
-            } else {
-                false
-            }
-        }
+        SupportedLanguage::Java => is_java_test(node, source, func_name),
     }
 }
 
@@ -873,94 +889,91 @@ pub fn resolve_symbol_chain<'a>(
     result
 }
 
-/// Merge Rust Impl methods directly under their associated Struct/Enum/Interface symbols.
-/// This prevents `SYMBOL_NOT_FOUND` when tools target methods using `MyStruct.method` instead
-/// of distinguishing between multiple Impl blocks.
-fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
-    fn merge_recursive(syms: &mut Vec<ExtractedSymbol>) {
-        let mut extracted_methods: std::collections::HashMap<String, Vec<ExtractedSymbol>> =
-            std::collections::HashMap::new();
-        let mut impl_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+fn merge_rust_impl_blocks_recursive(syms: &mut Vec<ExtractedSymbol>) {
+    let mut extracted_methods: std::collections::HashMap<String, Vec<ExtractedSymbol>> =
+        std::collections::HashMap::new();
+    let mut impl_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
-        // 1. Remove all Impl blocks and extract their children
-        syms.retain_mut(|s| {
-            if s.kind == SymbolKind::Impl {
-                let entry = extracted_methods.entry(s.name.clone()).or_default();
-                for mut method in std::mem::take(&mut s.children) {
-                    // Update method's semantic path to be under the struct instead of the Impl
-                    // Impl blocks have `#` suffix, we want it under the Struct which doesn't
-                    if let Some((parent_path, method_name)) = method.semantic_path.rsplit_once('.')
-                    {
-                        // strip #[0-9]+ from the end of the parent path
-                        let clean_parent = match parent_path.rfind('#') {
-                            Some(idx)
-                                if parent_path[idx + 1..].chars().all(|c| c.is_ascii_digit()) =>
-                            {
-                                &parent_path[..idx]
-                            }
-                            _ => parent_path,
-                        };
-                        method.semantic_path = format!("{clean_parent}.{method_name}");
-                    }
-                    entry.push(method);
+    // 1. Remove all Impl blocks and extract their children
+    syms.retain_mut(|s| {
+        if s.kind == SymbolKind::Impl {
+            let entry = extracted_methods.entry(s.name.clone()).or_default();
+            for mut method in std::mem::take(&mut s.children) {
+                // Update method's semantic path to be under the struct instead of the Impl
+                // Impl blocks have `#` suffix, we want it under the Struct which doesn't
+                if let Some((parent_path, method_name)) = method.semantic_path.rsplit_once('.') {
+                    // strip #[0-9]+ from the end of the parent path
+                    let clean_parent = match parent_path.rfind('#') {
+                        Some(idx) if parent_path[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
+                            &parent_path[..idx]
+                        }
+                        _ => parent_path,
+                    };
+                    method.semantic_path = format!("{clean_parent}.{method_name}");
                 }
-
-                let clean_name = s.name.split('#').next().unwrap_or(&s.name);
-                let count = impl_counts.entry(clean_name.to_string()).or_insert(0);
-                *count += 1;
-
-                let suffix = if *count > 1 {
-                    format!("#{count}")
-                } else {
-                    String::default()
-                };
-
-                s.name = format!("impl {clean_name}{suffix}");
-                s.semantic_path.clone_from(&s.name);
+                entry.push(method);
             }
-            true
-        });
 
-        // 2. Append methods to the matching structural type
-        for s in syms.iter_mut() {
-            if matches!(
-                s.kind,
-                SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Interface | SymbolKind::Class
-            ) {
-                if let Some(methods) = extracted_methods.remove(&s.name) {
-                    s.children.extend(methods);
-                }
-            }
+            let clean_name = s.name.split('#').next().unwrap_or(&s.name);
+            let count = impl_counts.entry(clean_name.to_string()).or_insert(0);
+            *count += 1;
+
+            let suffix = if *count > 1 {
+                format!("#{count}")
+            } else {
+                String::default()
+            };
+
+            s.name = format!("impl {clean_name}{suffix}");
+            s.semantic_path.clone_from(&s.name);
         }
+        true
+    });
 
-        // 3. Re-insert remaining methods for types not in this scope (e.g. `impl ExternalType {}`)
-        for (name, methods) in extracted_methods {
-            if methods.is_empty() {
-                continue;
-            }
-            syms.push(ExtractedSymbol {
-                name: name.clone(),
-                semantic_path: name.clone(),
-                kind: SymbolKind::Impl,
-                byte_range: 0..0,
-                start_line: 0,
-                end_line: 0,
-                name_column: 0,
-                access_level: crate::surgeon::AccessLevel::Private,
-                children: methods,
-            });
-        }
-
-        // 4. Recurse into children
-        for s in syms.iter_mut() {
-            if !s.children.is_empty() {
-                merge_recursive(&mut s.children);
+    // 2. Append methods to the matching structural type
+    for s in syms.iter_mut() {
+        if matches!(
+            s.kind,
+            SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Interface | SymbolKind::Class
+        ) {
+            if let Some(methods) = extracted_methods.remove(&s.name) {
+                s.children.extend(methods);
             }
         }
     }
 
-    merge_recursive(symbols);
+    // 3. Re-insert remaining methods for types not in this scope (e.g. `impl ExternalType {}`)
+    for (name, methods) in extracted_methods {
+        if methods.is_empty() {
+            continue;
+        }
+        syms.push(ExtractedSymbol {
+            name: name.clone(),
+            semantic_path: name.clone(),
+            kind: SymbolKind::Impl,
+            byte_range: 0..0,
+            start_line: 0,
+            end_line: 0,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Private,
+            children: methods,
+        });
+    }
+
+    // 4. Recurse into children
+    for s in syms.iter_mut() {
+        if !s.children.is_empty() {
+            merge_rust_impl_blocks_recursive(&mut s.children);
+        }
+    }
+}
+
+/// Merge Rust Impl methods directly under their associated Struct/Enum/Interface symbols.
+/// This prevents `SYMBOL_NOT_FOUND` when tools target methods using `MyStruct.method` instead
+/// of distinguishing between multiple Impl blocks.
+fn merge_rust_impl_blocks(symbols: &mut Vec<ExtractedSymbol>) {
+    merge_rust_impl_blocks_recursive(symbols);
 }
 
 /// Computes string similarity to offer did-you-mean suggestions.
@@ -1164,6 +1177,62 @@ pub fn extract_template_symbols(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<
     symbols
 }
 
+fn process_html_child_element(
+    child: tree_sitter::Node<'_>,
+    name: &str,
+    source: &[u8],
+    parent_path: &str,
+    depth: usize,
+    out: &mut Vec<ExtractedSymbol>,
+    tag_counts: &mut std::collections::HashMap<String, usize>,
+) {
+    let is_component = name.chars().next().is_some_and(char::is_uppercase);
+    let sym_kind = if is_component {
+        crate::surgeon::SymbolKind::Component
+    } else {
+        crate::surgeon::SymbolKind::HtmlElement
+    };
+
+    let count = tag_counts.entry(name.to_owned()).or_insert(0);
+    *count += 1;
+    let nth = *count;
+    let sym_name = if nth == 1 {
+        name.to_owned()
+    } else {
+        format!("{name}[{nth}]")
+    };
+
+    // Components are promoted to top-level paths (template.MyButton).
+    // HTML elements retain hierarchical paths (template.div.span).
+    let sym_path = if is_component {
+        format!("template::{sym_name}")
+    } else {
+        format!("{parent_path}::{sym_name}")
+    };
+
+    let should_emit = is_component || depth < 3;
+
+    if should_emit {
+        out.push(ExtractedSymbol {
+            name: sym_name,
+            semantic_path: sym_path.clone(),
+            kind: sym_kind,
+            byte_range: child.byte_range(),
+            start_line: child.start_position().row,
+            end_line: child.end_position().row,
+            name_column: child.start_position().column,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: Vec::new(), // Always flat
+        });
+
+        // Recurse into children
+        walk_html_elements_flat(child, source, &sym_path, depth + 1, out, tag_counts);
+    } else {
+        // Recurse into children
+        walk_html_elements_flat(child, source, parent_path, depth + 1, out, tag_counts);
+    }
+}
+
 /// Recursive HTML element walker that flattens elements into a single list.
 fn walk_html_elements_flat(
     node: tree_sitter::Node<'_>,
@@ -1179,51 +1248,7 @@ fn walk_html_elements_flat(
         let tag_name_opt = resolve_tag_name(kind, child, source);
 
         if let Some(ref name) = tag_name_opt {
-            let is_component = name.chars().next().is_some_and(char::is_uppercase);
-            let sym_kind = if is_component {
-                crate::surgeon::SymbolKind::Component
-            } else {
-                crate::surgeon::SymbolKind::HtmlElement
-            };
-
-            let count = tag_counts.entry(name.clone()).or_insert(0);
-            *count += 1;
-            let nth = *count;
-            let sym_name = if nth == 1 {
-                name.clone()
-            } else {
-                format!("{name}[{nth}]")
-            };
-
-            // Components are promoted to top-level paths (template.MyButton).
-            // HTML elements retain hierarchical paths (template.div.span).
-            let sym_path = if is_component {
-                format!("template::{sym_name}")
-            } else {
-                format!("{parent_path}::{sym_name}")
-            };
-
-            let should_emit = is_component || depth < 3;
-
-            if should_emit {
-                out.push(ExtractedSymbol {
-                    name: sym_name,
-                    semantic_path: sym_path.clone(),
-                    kind: sym_kind,
-                    byte_range: child.byte_range(),
-                    start_line: child.start_position().row,
-                    end_line: child.end_position().row,
-                    name_column: child.start_position().column,
-                    access_level: crate::surgeon::AccessLevel::Public,
-                    children: Vec::new(), // Always flat
-                });
-
-                // Recurse into children
-                walk_html_elements_flat(child, source, &sym_path, depth + 1, out, tag_counts);
-            } else {
-                // Recurse into children
-                walk_html_elements_flat(child, source, parent_path, depth + 1, out, tag_counts);
-            }
+            process_html_child_element(child, name, source, parent_path, depth, out, tag_counts);
         } else {
             walk_html_elements_flat(child, source, parent_path, depth, out, tag_counts);
         }
@@ -1570,6 +1595,43 @@ fn extract_at_rule_name(node: tree_sitter::Node<'_>, source: &[u8]) -> String {
     }
 }
 
+fn parse_css_selector_name(selector: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    match selector.kind() {
+        "class_selector" => {
+            // class_selector → `.` + class_name
+            let mut cc = selector.walk();
+            let found = selector
+                .named_children(&mut cc)
+                .find(|n| n.kind() == "class_name");
+            let range = found.map(|n| n.byte_range());
+            range
+                .and_then(|r| source.get(r))
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(|s| format!(".{}", s.trim()))
+        }
+        "id_selector" => {
+            // id_selector → `#` + id_name
+            let mut cc = selector.walk();
+            let found = selector
+                .named_children(&mut cc)
+                .find(|n| n.kind() == "id_name");
+            let range = found.map(|n| n.byte_range());
+            range
+                .and_then(|r| source.get(r))
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(|s| format!("#{}", s.trim()))
+        }
+        "tag_name" => {
+            // Bare element type selector
+            source
+                .get(selector.byte_range())
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(|s| s.trim().to_owned())
+        }
+        _ => None,
+    }
+}
+
 /// Extract selector symbols from a single `rule_set` node.
 fn extract_css_rule_set(
     node: tree_sitter::Node<'_>,
@@ -1589,40 +1651,7 @@ fn extract_css_rule_set(
 
     let mut sel_cursor = sel_node.walk();
     for selector in sel_node.named_children(&mut sel_cursor) {
-        let name_opt = match selector.kind() {
-            "class_selector" => {
-                // class_selector → `.` + class_name
-                let mut cc = selector.walk();
-                let found = selector
-                    .named_children(&mut cc)
-                    .find(|n| n.kind() == "class_name");
-                let range = found.map(|n| n.byte_range());
-                range
-                    .and_then(|r| source.get(r))
-                    .and_then(|b| std::str::from_utf8(b).ok())
-                    .map(|s| format!(".{}", s.trim()))
-            }
-            "id_selector" => {
-                // id_selector → `#` + id_name
-                let mut cc = selector.walk();
-                let found = selector
-                    .named_children(&mut cc)
-                    .find(|n| n.kind() == "id_name");
-                let range = found.map(|n| n.byte_range());
-                range
-                    .and_then(|r| source.get(r))
-                    .and_then(|b| std::str::from_utf8(b).ok())
-                    .map(|s| format!("#{}", s.trim()))
-            }
-            "tag_name" => {
-                // Bare element type selector
-                source
-                    .get(selector.byte_range())
-                    .and_then(|b| std::str::from_utf8(b).ok())
-                    .map(|s| s.trim().to_owned())
-            }
-            _ => None,
-        };
+        let name_opt = parse_css_selector_name(selector, source);
 
         if let Some(sel_name) = name_opt {
             if sel_name.is_empty() {
@@ -1864,6 +1893,166 @@ mod tests {
     use crate::language::SupportedLanguage;
     use crate::parser::AstParser;
     use pathfinder_common::types::SymbolChain;
+
+    #[test]
+    fn test_is_rust_test_helper() {
+        let source = r"
+            #[test]
+            fn my_test() {}
+
+            fn normal_fn() {}
+        ";
+        let source_bytes = source.as_bytes();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.rs"),
+            SupportedLanguage::Rust,
+            source_bytes,
+        )
+        .unwrap();
+        let root = tree.root_node();
+        let mut fns = Vec::new();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "function_item" {
+                fns.push(child);
+            }
+        }
+        assert_eq!(fns.len(), 2);
+        assert!(is_rust_test(fns[0], source_bytes, Some("my_test")));
+        assert!(!is_rust_test(fns[1], source_bytes, Some("normal_fn")));
+    }
+
+    #[test]
+    fn test_is_python_test_helper() {
+        let source = r"
+@pytest.mark.asyncio
+def test_foo():
+    pass
+
+def normal_fn():
+    pass
+        ";
+        let source_bytes = source.as_bytes();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.py"),
+            SupportedLanguage::Python,
+            source_bytes,
+        )
+        .unwrap();
+        let root = tree.root_node();
+        let mut fns = Vec::new();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "function_definition" || child.kind() == "decorated_definition" {
+                fns.push(child);
+            }
+        }
+        assert_eq!(fns.len(), 2);
+        assert!(is_python_test(fns[0], source_bytes, Some("test_foo")));
+        assert!(!is_python_test(fns[1], source_bytes, Some("normal_fn")));
+    }
+
+    #[test]
+    fn test_is_java_test_helper() {
+        let source = r"
+            class A {
+                @Test
+                void testMethod() {}
+
+                void normalMethod() {}
+
+                void testability() {}
+            }
+        ";
+        let source_bytes = source.as_bytes();
+        let tree = AstParser::parse_source(
+            std::path::Path::new("dummy.java"),
+            SupportedLanguage::Java,
+            source_bytes,
+        )
+        .unwrap();
+        let root = tree.root_node();
+        let class_decl = root.named_child(0).unwrap();
+        let class_body = class_decl.child_by_field_name("body").unwrap();
+        let mut fns = Vec::new();
+        let mut cursor = class_body.walk();
+        for child in class_body.named_children(&mut cursor) {
+            if child.kind() == "method_declaration" {
+                fns.push(child);
+            }
+        }
+        assert_eq!(fns.len(), 3);
+        assert!(is_java_test(fns[0], source_bytes, Some("testMethod")));
+        assert!(!is_java_test(fns[1], source_bytes, Some("normalMethod")));
+        assert!(!is_java_test(fns[2], source_bytes, Some("testability")));
+    }
+
+    #[test]
+    fn test_parse_css_selector_name_helper() {
+        let source = r"
+            .my-class {}
+            #my-id {}
+            div {}
+        ";
+        let source_bytes = source.as_bytes();
+        // CSS uses HTML parser for Vue zone integration or similar, let's use supported language HTML/CSS, but SupportedLanguage is Vue / Go / Rust / Java / Python / TypeScript / Tsx / JavaScript.
+        // Wait, SupportedLanguage has Go, Rust, Java, Python, TypeScript, Tsx, JavaScript, Vue.
+        // Wait, what SupportedLanguage does CSS use? Let's check SupportedLanguage definition.
+        // Oh, let's check SupportedLanguage enum. It has TypeScript, Tsx, JavaScript, Vue, Rust, Go, Python, Java.
+        // Let's use SupportedLanguage::Vue which has CSS zones or check how we can parse CSS.
+        // Let's see: how is CSS parsed in symbols.rs?
+        // extract_style_symbols takes a tree which is tree_sitter::Tree.
+        // We can parse it as SupportedLanguage::Vue? No, Vue zones are parsed with tree-sitter-css.
+        // Wait! In parser.rs, does AstParser support CSS directly?
+        // Let's check parser.rs or SupportedLanguage.
+        // Actually, CSS is parsed as part of Vue zones or custom.
+        // Let's check if SupportedLanguage has a HTML or CSS parser.
+        // In language.rs, let's grep for SupportedLanguage variants.
+        // Let's check how SupportedLanguage is defined or just use Vue language, or let's use the HTML/CSS tree-sitter parser directly.
+        // Since tree-sitter-css is in Cargo.toml (tree-sitter-css = \"0.25\"), let's see how it's initialized.
+        // Let's check parser.rs or just call tree_sitter::Parser directly with tree_sitter_css::LANGUAGE.
+        // Yes, that is extremely safe and doesn't rely on SupportedLanguage mapping!
+        // Let's write the CSS parsing code:
+        // let mut parser = tree_sitter::Parser::new().unwrap();
+        // parser.set_language(&tree_sitter_css::LANGUAGE.into()).unwrap();
+        // let tree = parser.parse(source, None).unwrap();
+        // Wait, let's check if tree_sitter_css is imported. In Cargo.toml, it was `tree-sitter-css = "0.25"`.
+        // Let's check if we can import `tree_sitter_css`. Yes, we can just use `tree_sitter_css::LANGUAGE` or `tree_sitter_css::language()`.
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_css::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let mut selectors = Vec::new();
+        let mut cursor = root.walk();
+        for rule_set in root.named_children(&mut cursor) {
+            if rule_set.kind() == "rule_set" {
+                let mut c = rule_set.walk();
+                let selectors_node = rule_set
+                    .named_children(&mut c)
+                    .find(|n| n.kind() == "selectors")
+                    .unwrap();
+                let mut sel_cursor = selectors_node.walk();
+                for sel in selectors_node.named_children(&mut sel_cursor) {
+                    selectors.push(sel);
+                }
+            }
+        }
+        assert_eq!(selectors.len(), 3);
+        assert_eq!(
+            parse_css_selector_name(selectors[0], source_bytes).unwrap(),
+            ".my-class"
+        );
+        assert_eq!(
+            parse_css_selector_name(selectors[1], source_bytes).unwrap(),
+            "#my-id"
+        );
+        assert_eq!(
+            parse_css_selector_name(selectors[2], source_bytes).unwrap(),
+            "div"
+        );
+    }
 
     fn parse_and_extract(source: &str, lang: SupportedLanguage) -> Vec<ExtractedSymbol> {
         let source_bytes = source.as_bytes();

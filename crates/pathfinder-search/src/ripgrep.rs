@@ -364,7 +364,7 @@ pub struct RipgrepScout;
 /// pre-gitignore counting walk and the post-gitignore collection walk, preventing
 /// the filtering logic from drifting between the two.
 #[inline]
-fn filter_entry_impl(
+fn filter_entry(
     relative: &str,
     path: &std::path::Path,
     glob: &str,
@@ -407,25 +407,10 @@ fn filter_entry_impl(
     true
 }
 
-/// Convenience wrapper around [`filter_entry_impl`] that always skips binary files.
-///
-/// Used by the post-gitignore walk in [`walk_files`] where binary files should
-/// be excluded from the collected results.
-#[inline]
-fn filter_entry(
-    relative: &str,
-    path: &std::path::Path,
-    glob: &str,
-    glob_matcher: &globset::GlobSet,
-    exclude_matcher: Option<&globset::GlobSet>,
-) -> bool {
-    filter_entry_impl(relative, path, glob, glob_matcher, exclude_matcher, true)
-}
-
 impl RipgrepScout {
     /// Build a `RegexMatcher` from `params`, respecting `is_regex`.
     /// Uses thread-local cache to avoid re-compiling the same pattern.
-    #[tracing::instrument(skip(params))]
+    #[tracing::instrument(skip_all)]
     fn build_matcher(params: &SearchParams) -> Result<RegexMatcher, SearchError> {
         let pattern = if params.is_regex {
             params.query.clone()
@@ -456,7 +441,7 @@ impl RipgrepScout {
     /// plus the count of files skipped because they matched known binary extensions, and the count of
     /// gitignored files that matched the glob but were excluded by gitignore.
     #[allow(clippy::type_complexity)]
-    #[tracing::instrument(skip(params))]
+    #[tracing::instrument(skip_all)]
     fn walk_files(
         params: &SearchParams,
     ) -> Result<(Vec<(PathBuf, String)>, usize, usize), SearchError> {
@@ -517,7 +502,7 @@ impl RipgrepScout {
                 Err(_) => continue,
             };
 
-            if filter_entry_impl(
+            if filter_entry(
                 &relative,
                 &path,
                 glob,
@@ -551,6 +536,7 @@ impl RipgrepScout {
                 glob,
                 &glob_matcher,
                 exclude_matcher.as_ref(),
+                true,
             ) {
                 files.push((path, relative));
             }
@@ -571,7 +557,7 @@ impl RipgrepScout {
 
 #[async_trait::async_trait]
 impl Scout for RipgrepScout {
-    #[tracing::instrument(skip(self, params))]
+    #[tracing::instrument(skip(self), fields(query = %params.query, workspace = %params.workspace_root.display()))]
     async fn search(&self, params: &SearchParams) -> Result<SearchResult, SearchError> {
         let params_clone = params.clone();
         tokio::task::spawn_blocking(move || {
@@ -1744,6 +1730,7 @@ mod missing_coverage_tests {
                 "**/*",
                 &glob_matcher,
                 None,
+                true,
             ),
             ".git/config should be excluded"
         );
@@ -1756,6 +1743,7 @@ mod missing_coverage_tests {
                 "**/*",
                 &glob_matcher,
                 None,
+                true,
             ),
             ".qlty/cache/index should be excluded"
         );
@@ -1768,6 +1756,7 @@ mod missing_coverage_tests {
                 "**/*",
                 &glob_matcher,
                 None,
+                true,
             ),
             ".github/ must not be excluded by .git/ rule"
         );
@@ -1780,6 +1769,7 @@ mod missing_coverage_tests {
                 "**/*",
                 &glob_matcher,
                 None,
+                true,
             ),
             ".gitignore must not be excluded by .git/ rule"
         );
@@ -2137,5 +2127,34 @@ mod batch03c_tests {
     #[test]
     fn test_decode_line_crlf_stripped() {
         assert_eq!(decode_line(b"line content\r\n"), "line content");
+    }
+
+    #[test]
+    fn test_filter_entry_binary_handling() {
+        let glob_matcher = globset::GlobBuilder::new("**/*")
+            .literal_separator(false)
+            .build()
+            .and_then(|g| globset::GlobSet::builder().add(g).build())
+            .unwrap();
+
+        let path_txt = std::path::Path::new("src/main.txt");
+        let path_png = std::path::Path::new("src/logo.png");
+
+        assert!(filter_entry(
+            "src/main.txt",
+            path_txt,
+            "**/*",
+            &glob_matcher,
+            None,
+            false
+        ));
+        assert!(filter_entry(
+            "src/logo.png",
+            path_png,
+            "**/*",
+            &glob_matcher,
+            None,
+            false
+        ));
     }
 }

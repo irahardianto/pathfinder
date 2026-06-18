@@ -431,14 +431,7 @@ impl super::LspClient {
         })
     }
 
-    #[allow(clippy::too_many_lines)]
-    pub(crate) async fn start_process(
-        &self,
-        descriptor: LanguageLsp,
-        attempt: u32,
-    ) -> Result<(), LspError> {
-        let language_id = descriptor.language_id.clone();
-
+    fn handle_restart_backoff(language_id: &str, attempt: u32) -> Option<Duration> {
         if attempt > 0 {
             let capped_delay_attempt = std::cmp::min(attempt, 31);
             let delay = Duration::from_secs(std::cmp::min(
@@ -451,6 +444,116 @@ impl super::LspClient {
                 delay_ms = delay.as_millis(),
                 "LSP: restart with backoff"
             );
+            Some(delay)
+        } else {
+            None
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup_indexing_watchers(
+        language_id: &str,
+        notif_rx: tokio::sync::broadcast::Receiver<serde_json::Value>,
+        spawned_at: Instant,
+    ) -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<parking_lot::Mutex<Option<IndexingCompletionSource>>>,
+        Arc<parking_lot::Mutex<Option<u64>>>,
+        Arc<parking_lot::Mutex<Option<u8>>>,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indexing_completion_source = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_duration_secs = Arc::new(parking_lot::Mutex::new(None));
+        let indexing_progress = Arc::new(parking_lot::Mutex::new(None::<u8>));
+
+        let progress_handle = tokio::spawn(progress_watcher_task(
+            language_id.to_string(),
+            notif_rx,
+            Arc::clone(&indexing_complete),
+            Arc::clone(&indexing_completion_source),
+            Arc::clone(&indexing_duration_secs),
+            Arc::clone(&indexing_progress),
+            spawned_at,
+        ));
+
+        let indexing_timeout_handle = Self::spawn_indexing_timeout_fallback(
+            language_id,
+            &indexing_complete,
+            &indexing_completion_source,
+            &indexing_duration_secs,
+            spawned_at,
+        );
+
+        (
+            indexing_complete,
+            indexing_completion_source,
+            indexing_duration_secs,
+            indexing_progress,
+            progress_handle,
+            indexing_timeout_handle,
+        )
+    }
+
+    fn setup_registration_watcher(
+        language_id: &str,
+        server_req_rx: tokio::sync::broadcast::Receiver<serde_json::Value>,
+        live_capabilities: &Arc<
+            parking_lot::RwLock<crate::client::capabilities::DetectedCapabilities>,
+        >,
+        transport: &Arc<dyn LspTransport>,
+    ) -> tokio::task::JoinHandle<()> {
+        let transport_for_reg = Arc::clone(transport);
+        let caps_for_reg = Arc::clone(live_capabilities);
+        let lang_id_for_reg = language_id.to_string();
+        tokio::spawn(registration_watcher_task(
+            lang_id_for_reg,
+            server_req_rx,
+            caps_for_reg,
+            transport_for_reg,
+        ))
+    }
+
+    async fn handle_shutdown_abort_cleanup(
+        &self,
+        language_id: &str,
+        handles: (
+            tokio::task::JoinHandle<()>,
+            tokio::task::JoinHandle<()>,
+            tokio::task::JoinHandle<()>,
+            tokio::task::JoinHandle<()>,
+        ),
+        transport: Arc<dyn LspTransport>,
+        lifecycle: &ProcessLifecycle,
+    ) {
+        handles.0.abort();
+        handles.1.abort();
+        handles.2.abort();
+        handles.3.abort();
+
+        // Gracefully shutdown the LSP process
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            transport.shutdown(&self.dispatcher, language_id),
+        )
+        .await;
+
+        // Fallback: force-kill via lifecycle handle if shutdown didn't work
+        let mut child = lifecycle.child.lock().await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    #[expect(clippy::too_many_lines, reason = "Sequential initialization flow")]
+    pub(crate) async fn start_process(
+        &self,
+        descriptor: LanguageLsp,
+        attempt: u32,
+    ) -> Result<(), LspError> {
+        let language_id = descriptor.language_id.clone();
+
+        if let Some(delay) = Self::handle_restart_backoff(&language_id, attempt) {
             tokio::time::sleep(delay).await;
         }
 
@@ -473,9 +576,6 @@ impl super::LspClient {
         let init_options = descriptor.init_options.clone();
 
         // M-6: Pre-create notification channels BEFORE spawning the reader.
-        // The reader task dispatches to these channels immediately on startup.
-        // Without pre-creation, any server requests (e.g. client/registerCapability)
-        // sent during the initialize handshake would be silently dropped.
         let notif_rx = self
             .dispatcher
             .subscribe_notifications_for_language(&language_id);
@@ -522,9 +622,7 @@ impl super::LspClient {
             }
         };
 
-        // C-2: Track reader liveness via an atomic flag. The reader task sets
-        // this to false on exit. The supervisor's remove_if checks it to
-        // distinguish the old entry from a replacement spawned by crash recovery.
+        // C-2: Track reader liveness via an atomic flag.
         let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let reader_alive_for_reader = Arc::clone(&reader_alive);
 
@@ -561,39 +659,16 @@ impl super::LspClient {
             );
         }
 
-        let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let indexing_completion_source = Arc::new(parking_lot::Mutex::new(None));
-        let indexing_duration_secs = Arc::new(parking_lot::Mutex::new(None));
-        let indexing_progress = Arc::new(parking_lot::Mutex::new(None::<u8>));
         let spawned_at = Instant::now();
 
-        let indexing_flag = Arc::clone(&indexing_complete);
-        let indexing_source_flag = Arc::clone(&indexing_completion_source);
-        let indexing_duration_flag = Arc::clone(&indexing_duration_secs);
-        let indexing_progress_flag = Arc::clone(&indexing_progress);
-        let spawned_at_for_watcher = spawned_at;
-        // M-6: Use pre-created receiver so we don't miss notifications
-        // dispatched between reader start and watcher spawn.
-        let progress_handle = tokio::spawn(progress_watcher_task(
-            language_id.clone(),
-            notif_rx,
-            indexing_flag,
-            indexing_source_flag,
-            indexing_duration_flag,
-            indexing_progress_flag,
-            spawned_at_for_watcher,
-        ));
-
-        // H-2: Store the indexing timeout handle so it gets aborted on restart.
-        // Without this, a stale timeout task can overwrite the NEW process's
-        // indexing_complete with stale timing data.
-        let indexing_timeout_handle = Self::spawn_indexing_timeout_fallback(
-            &language_id,
-            &indexing_complete,
-            &indexing_completion_source,
-            &indexing_duration_secs,
-            spawned_at,
-        );
+        let (
+            indexing_complete,
+            indexing_completion_source,
+            indexing_duration_secs,
+            indexing_progress,
+            progress_handle,
+            indexing_timeout_handle,
+        ) = Self::setup_indexing_watchers(&language_id, notif_rx, spawned_at);
 
         let live_capabilities = Arc::new(parking_lot::RwLock::new(process.capabilities.clone()));
 
@@ -603,18 +678,13 @@ impl super::LspClient {
         };
 
         let transport: Arc<dyn LspTransport> = Arc::new(process);
-        let transport_for_reg = Arc::clone(&transport);
 
-        let caps_for_reg = Arc::clone(&live_capabilities);
-        let lang_id_for_reg = language_id.clone();
-        // M-6: Use pre-created receiver so we don't miss server requests
-        // dispatched between reader start and watcher spawn.
-        let registration_handle = tokio::spawn(registration_watcher_task(
-            lang_id_for_reg,
+        let registration_handle = Self::setup_registration_watcher(
+            &language_id,
             server_req_rx,
-            caps_for_reg,
-            transport_for_reg,
-        ));
+            &live_capabilities,
+            &transport,
+        );
 
         if in_coexistence_mode {
             tracing::warn!(
@@ -624,9 +694,7 @@ impl super::LspClient {
             );
         }
 
-        // C-1: Check shutdown signal before inserting process. If shutdown was
-        // called while spawn_and_initialize was running (up to 120s for jdtls),
-        // inserting now would orphan the process — idle_timeout_task already exited.
+        // C-1: Check shutdown signal before inserting process.
         if self
             .shutdown_requested
             .load(std::sync::atomic::Ordering::Acquire)
@@ -636,25 +704,18 @@ impl super::LspClient {
                 "LSP: shutdown requested during init, aborting process insertion"
             );
 
-            // CRITICAL: Kill the child process before returning.
-            // The process was successfully spawned by spawn_and_initialize,
-            // so we must not orphan it.
-            progress_handle.abort();
-            registration_handle.abort();
-            supervisor_handle.abort();
-            indexing_timeout_handle.abort();
-
-            // Gracefully shutdown the LSP process
-            let _ = tokio::time::timeout(
-                Duration::from_secs(2),
-                transport.shutdown(&self.dispatcher, &language_id),
+            self.handle_shutdown_abort_cleanup(
+                &language_id,
+                (
+                    progress_handle,
+                    registration_handle,
+                    supervisor_handle,
+                    indexing_timeout_handle,
+                ),
+                transport,
+                &lifecycle,
             )
             .await;
-
-            // Fallback: force-kill via lifecycle handle if shutdown didn't work
-            let mut child = lifecycle.child.lock().await;
-            let _ = child.kill().await;
-            let _ = child.wait().await;
 
             return Err(LspError::ConnectionLost);
         }
@@ -685,7 +746,7 @@ impl super::LspClient {
         Ok(())
     }
 
-    #[allow(clippy::unused_self, clippy::too_many_lines)]
+    #[allow(clippy::unused_self)]
     pub(crate) fn detect_concurrent_lsp(&self, language_id: &str, command: &str) -> bool {
         let binary_name = Path::new(command)
             .file_name()
@@ -708,169 +769,180 @@ impl super::LspClient {
 
         #[cfg(target_os = "linux")]
         {
-            let our_pid = std::process::id();
-
-            if let Ok(entries) = std::fs::read_dir("/proc") {
-                let mut external_count = 0;
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let is_numeric = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
-                    if !is_numeric {
-                        continue;
-                    }
-
-                    let cmdline_path = path.join("cmdline");
-                    let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) else {
-                        continue;
-                    };
-                    if !cmdline.contains(binary_name) {
-                        continue;
-                    }
-
-                    let status_path = path.join("status");
-                    let status_content = std::fs::read_to_string(&status_path).ok();
-                    let parent_pid: u32 = status_content
-                        .as_deref()
-                        .and_then(|status| {
-                            status
-                                .lines()
-                                .find(|l| l.starts_with("PPid:"))
-                                .and_then(|l| l.split_whitespace().nth(1))
-                                .and_then(|v| v.parse().ok())
-                        })
-                        .unwrap_or(0);
-
-                    // MAJOR: Check if the process is a zombie.
-                    // Zombies still have /proc entries but are not actually running.
-                    // State codes: R=running, S=sleeping, D=disk sleep,
-                    // Z=zombie, T=stopped, t=tracing stop, X=dead.
-                    let is_zombie = status_content
-                        .as_deref()
-                        .and_then(|status| {
-                            status
-                                .lines()
-                                .find(|l| l.starts_with("State:"))
-                                .and_then(|l| l.split_whitespace().nth(1))
-                                .map(|state| state == "Z" || state == "X" || state == "T")
-                        })
-                        .unwrap_or(false);
-
-                    if is_zombie {
-                        tracing::trace!(
-                            binary = binary_name,
-                            "detect_concurrent_lsp: skipping zombie process"
-                        );
-                        continue;
-                    }
-
-                    if parent_pid == our_pid {
-                        tracing::trace!(
-                            binary = binary_name,
-                            "detect_concurrent_lsp: skipping own child process"
-                        );
-                        continue;
-                    }
-
-                    external_count += 1;
-                }
-
-                if external_count > 0 {
-                    let isolation_desc = match language_id {
-                        "rust" => "Cargo target directory",
-                        "go" => "Go build cache (GOCACHE/GOMODCACHE)",
-                        "typescript" => "TypeScript temp directory (TMPDIR)",
-                        "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
-                        _ => "No",
-                    };
-                    tracing::warn!(
-                        language = language_id,
-                        binary = binary_name,
-                        external_instances = external_count,
-                        "LSP: detected {} external concurrent instances of {binary_name}. \
-                         {} build artifact isolation will be applied to avoid cache lock contention. \
-                         First-time indexing may take 30-60s for this workspace.",
-                        external_count,
-                        isolation_desc
-                    );
-                    return true;
-                }
-            }
+            Self::detect_concurrent_lsp_linux(language_id, binary_name)
         }
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
-            let our_pid = std::process::id();
-            let output = std::process::Command::new("ps")
-                .args(["-axo", "pid,ppid,state,comm"])
-                .output();
-
-            if let Ok(out) = output {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut external_count = 0;
-                for line in stdout.lines().skip(1) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() < 4 {
-                        continue;
-                    }
-                    let pid_str = parts[0];
-                    let ppid_str = parts[1];
-                    let state = parts[2];
-                    let comm = parts[3..].join(" ");
-
-                    let Ok(pid) = pid_str.parse::<u32>() else {
-                        continue;
-                    };
-                    if pid == our_pid {
-                        continue;
-                    }
-
-                    let Ok(ppid) = ppid_str.parse::<u32>() else {
-                        continue;
-                    };
-
-                    if !comm.contains(binary_name) {
-                        continue;
-                    }
-
-                    let is_zombie = state.contains('Z') || state.contains('T');
-                    if is_zombie {
-                        continue;
-                    }
-
-                    if ppid == our_pid {
-                        continue;
-                    }
-
-                    external_count += 1;
-                }
-
-                if external_count > 0 {
-                    let isolation_desc = match language_id {
-                        "rust" => "Cargo target directory",
-                        "go" => "Go build cache (GOCACHE/GOMODCACHE)",
-                        "typescript" => "TypeScript temp directory (TMPDIR)",
-                        "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
-                        _ => "No",
-                    };
-                    tracing::warn!(
-                        language = language_id,
-                        binary = binary_name,
-                        external_instances = external_count,
-                        "LSP: detected {} external concurrent instances of {binary_name}. \
-                         {} build artifact isolation will be applied to avoid cache lock contention. \
-                         First-time indexing may take 30-60s for this workspace.",
-                        external_count,
-                        isolation_desc
-                    );
-                    return true;
-                }
-            }
+            Self::detect_concurrent_lsp_macos(language_id, binary_name)
         }
 
-        let _ = (language_id, binary_name);
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+        {
+            let _ = (language_id, binary_name);
+            false
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn detect_concurrent_lsp_linux(language_id: &str, binary_name: &str) -> bool {
+        let our_pid = std::process::id();
+
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            let mut external_count = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_numeric = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+                if !is_numeric {
+                    continue;
+                }
+
+                let cmdline_path = path.join("cmdline");
+                let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) else {
+                    continue;
+                };
+                if !cmdline.contains(binary_name) {
+                    continue;
+                }
+
+                let status_path = path.join("status");
+                let status_content = std::fs::read_to_string(&status_path).ok();
+                let parent_pid: u32 = status_content
+                    .as_deref()
+                    .and_then(|status| {
+                        status
+                            .lines()
+                            .find(|l| l.starts_with("PPid:"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse().ok())
+                    })
+                    .unwrap_or(0);
+
+                let is_zombie = status_content
+                    .as_deref()
+                    .and_then(|status| {
+                        status
+                            .lines()
+                            .find(|l| l.starts_with("State:"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .map(|state| state == "Z" || state == "X" || state == "T")
+                    })
+                    .unwrap_or(false);
+
+                if is_zombie {
+                    tracing::trace!(
+                        binary = binary_name,
+                        "detect_concurrent_lsp: skipping zombie process"
+                    );
+                    continue;
+                }
+
+                if parent_pid == our_pid {
+                    tracing::trace!(
+                        binary = binary_name,
+                        "detect_concurrent_lsp: skipping own child process"
+                    );
+                    continue;
+                }
+
+                external_count += 1;
+            }
+
+            if external_count > 0 {
+                let isolation_desc = match language_id {
+                    "rust" => "Cargo target directory",
+                    "go" => "Go build cache (GOCACHE/GOMODCACHE)",
+                    "typescript" => "TypeScript temp directory (TMPDIR)",
+                    "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
+                    _ => "No",
+                };
+                tracing::warn!(
+                    language = language_id,
+                    binary = binary_name,
+                    external_instances = external_count,
+                    "LSP: detected {} external concurrent instances of {binary_name}. \
+                     {} build artifact isolation will be applied to avoid cache lock contention. \
+                     First-time indexing may take 30-60s for this workspace.",
+                    external_count,
+                    isolation_desc
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn detect_concurrent_lsp_macos(language_id: &str, binary_name: &str) -> bool {
+        let our_pid = std::process::id();
+        let output = std::process::Command::new("ps")
+            .args(["-axo", "pid,ppid,state,comm"])
+            .output();
+
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut external_count = 0;
+            for line in stdout.lines().skip(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 4 {
+                    continue;
+                }
+                let pid_str = parts[0];
+                let ppid_str = parts[1];
+                let state = parts[2];
+                let comm = parts[3..].join(" ");
+
+                let Ok(pid) = pid_str.parse::<u32>() else {
+                    continue;
+                };
+                if pid == our_pid {
+                    continue;
+                }
+
+                let Ok(ppid) = ppid_str.parse::<u32>() else {
+                    continue;
+                };
+
+                if !comm.contains(binary_name) {
+                    continue;
+                }
+
+                let is_zombie = state.contains('Z') || state.contains('T');
+                if is_zombie {
+                    continue;
+                }
+
+                if ppid == our_pid {
+                    continue;
+                }
+
+                external_count += 1;
+            }
+
+            if external_count > 0 {
+                let isolation_desc = match language_id {
+                    "rust" => "Cargo target directory",
+                    "go" => "Go build cache (GOCACHE/GOMODCACHE)",
+                    "typescript" => "TypeScript temp directory (TMPDIR)",
+                    "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
+                    _ => "No",
+                };
+                tracing::warn!(
+                    language = language_id,
+                    binary = binary_name,
+                    external_instances = external_count,
+                    "LSP: detected {} external concurrent instances of {binary_name}. \
+                     {} build artifact isolation will be applied to avoid cache lock contention. \
+                     First-time indexing may take 30-60s for this workspace.",
+                    external_count,
+                    isolation_desc
+                );
+                return true;
+            }
+        }
         false
     }
 
@@ -1109,7 +1181,7 @@ impl super::LspClient {
 mod tests {
     use super::*;
     use crate::client::tests::{client_no_languages, client_with_descriptors, make_running_client};
-    use crate::client::{DetectedCapabilities, DiagnosticsStrategy};
+    use crate::client::{DetectedCapabilities, DiagnosticsStrategy, LspClient};
     use crate::lawyer::Lawyer;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1153,6 +1225,132 @@ mod tests {
             indexing_timeout_for_language("csharp"),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn test_handle_restart_backoff() {
+        let _client = client_no_languages();
+        // attempt = 0 -> None
+        assert!(LspClient::handle_restart_backoff("rust", 0).is_none());
+
+        // attempt = 1 -> Some(1s)
+        let delay = LspClient::handle_restart_backoff("rust", 1);
+        assert_eq!(delay, Some(Duration::from_secs(1)));
+
+        // attempt = 2 -> Some(2s)
+        let delay = LspClient::handle_restart_backoff("rust", 2);
+        assert_eq!(delay, Some(Duration::from_secs(2)));
+
+        // attempt = 30 -> capped at MAX_BACKOFF_SECS
+        let delay = LspClient::handle_restart_backoff("rust", 30);
+        assert_eq!(delay, Some(Duration::from_secs(MAX_BACKOFF_SECS)));
+    }
+
+    #[tokio::test]
+    async fn test_setup_indexing_watchers() {
+        let _client = client_no_languages();
+        let (_tx, rx) = tokio::sync::broadcast::channel(10);
+        let spawned_at = Instant::now();
+
+        let (
+            indexing_complete,
+            indexing_completion_source,
+            indexing_duration_secs,
+            indexing_progress,
+            progress_handle,
+            indexing_timeout_handle,
+        ) = LspClient::setup_indexing_watchers("rust", rx, spawned_at);
+
+        assert!(!indexing_complete.load(Ordering::Relaxed));
+        assert!(indexing_completion_source.lock().is_none());
+        assert!(indexing_duration_secs.lock().is_none());
+        assert!(indexing_progress.lock().is_none());
+
+        // Cleanup
+        progress_handle.abort();
+        indexing_timeout_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_setup_registration_watcher() {
+        let _client = client_no_languages();
+        let (_tx, rx) = tokio::sync::broadcast::channel(10);
+        let live_capabilities = Arc::new(parking_lot::RwLock::new(DetectedCapabilities::default()));
+
+        let (fake_transport, _fake_transport_rx) = make_running_client("rust");
+        let entry = fake_transport.processes.get("rust").unwrap();
+        let ProcessEntry::Running(state) = entry.value() else {
+            panic!("running")
+        };
+        let transport = Arc::clone(&state.transport);
+
+        let handle =
+            LspClient::setup_registration_watcher("rust", rx, &live_capabilities, &transport);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_handle_shutdown_abort_cleanup() {
+        let client = client_no_languages();
+
+        let progress_handle = tokio::spawn(async {});
+        let registration_handle = tokio::spawn(async {});
+        let supervisor_handle = tokio::spawn(async {});
+        let indexing_timeout_handle = tokio::spawn(async {});
+
+        let (fake_client, _fake_rx) = make_running_client("rust");
+        let entry = fake_client.processes.get("rust").unwrap();
+        let ProcessEntry::Running(state) = entry.value() else {
+            panic!("running")
+        };
+        let transport = Arc::clone(&state.transport);
+        let lifecycle = state.lifecycle.clone().unwrap_or_else(|| {
+            let child = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("exit 0")
+                .spawn()
+                .unwrap();
+            ProcessLifecycle {
+                child: Arc::new(tokio::sync::Mutex::new(child)),
+            }
+        });
+
+        client
+            .handle_shutdown_abort_cleanup(
+                "rust",
+                (
+                    progress_handle,
+                    registration_handle,
+                    supervisor_handle,
+                    indexing_timeout_handle,
+                ),
+                transport,
+                &lifecycle,
+            )
+            .await;
+
+        // Verify child wait was called (by waiting on the process group/child)
+        let mut child = lifecycle.child.lock().await;
+        let wait_res = child.wait().await;
+        assert!(wait_res.is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_detect_concurrent_lsp_linux() {
+        let _client = client_no_languages();
+        let found =
+            LspClient::detect_concurrent_lsp_linux("rust", "some-dummy-nonexistent-binary-name");
+        assert!(!found);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn test_detect_concurrent_lsp_macos() {
+        let _client = client_no_languages();
+        let found =
+            LspClient::detect_concurrent_lsp_macos("rust", "some-dummy-nonexistent-binary-name");
+        assert!(!found);
     }
 
     #[tokio::test]
