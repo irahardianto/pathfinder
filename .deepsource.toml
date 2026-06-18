@@ -27,6 +27,9 @@ test_patterns = [
 # to remain a top-level key. TOML array-of-tables ([[...]]) creates a scope
 # that captures any keys defined after them.
 exclude_patterns = [
+  # ── Test modules ──
+  "**/*_test.rs",
+
   # ── Non-source directories ──
   ".agents/**",
   "docs/**",
