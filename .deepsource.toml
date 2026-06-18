@@ -107,6 +107,23 @@ exclude_patterns = [
   "crates/pathfinder-lsp/src/client/protocol.rs",
   "crates/pathfinder-lsp/src/lawyer.rs",
   "crates/pathfinder-lsp/src/client/process.rs",
+  "crates/pathfinder-lsp/src/client/background.rs",
+  "crates/pathfinder-lsp/src/client/capabilities.rs",
+  "crates/pathfinder-lsp/src/client/detect.rs",
+  "crates/pathfinder-lsp/src/client/document.rs",
+  "crates/pathfinder-lsp/src/client/lawyer_impl.rs",
+  "crates/pathfinder-lsp/src/client/lifecycle.rs",
+  "crates/pathfinder-lsp/src/client/mod.rs",
+  "crates/pathfinder-common/src/types.rs",
+  "crates/pathfinder-common/src/sandbox.rs",
+  "crates/pathfinder-common/src/git.rs",
+  "crates/pathfinder-common/src/error.rs",
+  "crates/pathfinder-common/src/config.rs",
+  "crates/pathfinder-search/src/searcher.rs",
+  "crates/pathfinder-search/src/types.rs",
+  "crates/pathfinder-treesitter/src/surgeon.rs",
+  "crates/pathfinder/src/server/types.rs",
+  "crates/pathfinder/src/server/tools/mod.rs",
 ]
 
 # ──────────────────────────────────────────────
