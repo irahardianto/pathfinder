@@ -41,3 +41,8 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 [[bench]]
 name = "search_bench"
 harness = false
+
+[[bench]]
+name = "grep_fallback_bench"
+harness = false
+
