@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0](https://github.com/irahardianto/pathfinder/compare/v0.19.0...v0.20.0) - 2026-06-18
+
+### Added
+
+- *(search)* implement search coverage metrics and low-coverage hint
+- *(server)* update explore and read tool for structure mode and short hashes
+- *(search)* expose search parameters and fix hardcoded defaults
+- *(lsp)* detail indexing completion fallback behavior and timeout diagnostics
+- *(treesitter)* implement structure detail mode in skeleton generation
+- *(treesitter)* support nested function parsing in Python and JS/TS
+
+### Fixed
+
+- *(trait)* add trait kind mapping in find_symbol
+- *(hygiene)* exclude .qlty/ from search ALWAYS_EXCLUDED_DIRS
+- *(test)* make monorepo TS detection test CI-agnostic
+- *(lsp)* handle missing tsconfig gracefully in monorepo fallback
+- *(search)* unify walk_files counting path through filter_entry_impl
+
+### Other
+
+- audit remediation and testability improvements across workspace
+- *(server)* exhaustive TrustLevel match; extract run_grep_fallbacks; remove dead is_test_file
+- update README, agent routing, and skills for pathfinder MCP
+- *(types)* sanitize tool descriptions and references in server types
+- *(common)* replace stringly-typed fields with enums; add config validation
+- *(lsp)* introduce ValidationStatusInput; fix clientInfo version and weak test
+- *(treesitter)* simplify cache get_or_parse; fix duplicate doc comments
+
 ## [0.19.0](https://github.com/irahardianto/pathfinder/compare/v0.18.0...v0.19.0) - 2026-06-15
 
 ### Added

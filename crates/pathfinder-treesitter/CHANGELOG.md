@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.10.6...pathfinder-mcp-treesitter-v0.11.0) - 2026-06-18
+
+### Added
+
+- *(treesitter)* implement structure detail mode in skeleton generation
+- *(treesitter)* support nested function parsing in Python and JS/TS
+
+### Other
+
+- audit remediation and testability improvements across workspace
+- *(treesitter)* simplify cache get_or_parse; fix duplicate doc comments
+
 ## [0.10.6](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.10.5...pathfinder-mcp-treesitter-v0.10.6) - 2026-06-15
 
 ### Other
