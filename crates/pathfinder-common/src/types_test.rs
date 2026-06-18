@@ -551,3 +551,56 @@ fn test_guidance_git_error() {
     assert_eq!(g.fallback_tool, None);
     assert!(!g.permanent);
 }
+
+#[test]
+fn test_filter_mode_serde_roundtrip() {
+    let variants = [
+        (FilterMode::CodeOnly, "\"code_only\""),
+        (FilterMode::CommentsOnly, "\"comments_only\""),
+        (FilterMode::All, "\"all\""),
+    ];
+    for (variant, expected_json) in variants {
+        let serialized = serde_json::to_string(&variant).expect("FilterMode should serialize");
+        assert_eq!(serialized, expected_json);
+        let deserialized: FilterMode =
+            serde_json::from_str(&serialized).expect("FilterMode should deserialize");
+        assert_eq!(deserialized, variant);
+    }
+}
+
+#[test]
+fn test_visibility_default_is_public() {
+    assert_eq!(Visibility::default(), Visibility::Public);
+}
+
+#[test]
+fn test_version_hash_compute_from_raw() {
+    let raw_bytes: [u8; 32] = [
+        0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+        0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04,
+        0x05, 0x06, 0x07, 0x08,
+    ];
+    let hash = VersionHash::compute_from_raw(raw_bytes);
+    let s = hash.as_str();
+    assert!(s.starts_with("sha256:"), "should have sha256 prefix");
+    // Verify hex encoding of the first few bytes
+    assert!(s.contains("abcdef01"), "should contain hex of first 4 bytes");
+    // Total length: 7 (prefix) + 64 (hex) = 71
+    assert_eq!(s.len(), 71);
+    // All chars after prefix should be hex
+    let hex_part = &s["sha256:".len()..];
+    assert!(
+        hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+        "all chars after prefix must be hex"
+    );
+}
+
+#[test]
+fn test_workspace_root_path_accessor() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = WorkspaceRoot::new(dir.path()).expect("create workspace root");
+    let path = root.path();
+    // path() should return the canonicalized path
+    let canonical = dir.path().canonicalize().expect("canonicalize");
+    assert_eq!(path, canonical.as_path());
+}

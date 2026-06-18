@@ -166,3 +166,22 @@ async fn test_get_changed_files_since_invalid_target_returns_error() {
 
     assert!(result.is_empty());
 }
+
+#[tokio::test]
+async fn test_system_git_rejects_dash_prefix_target() {
+    // SystemGit validates that target doesn't start with '-' to prevent
+    // argument injection (e.g., "--exec=malicious" passed as a git ref).
+    let workspace = tempfile::tempdir().expect("create tempdir");
+    let runner = SystemGit;
+    let result = runner
+        .diff_name_only(workspace.path(), "--exec=evil")
+        .await;
+    assert!(result.is_err(), "target starting with '-' must be rejected");
+    let err = result.expect_err("should be an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("cannot start with '-'"),
+        "error message should explain the rejection: {}",
+        err
+    );
+}

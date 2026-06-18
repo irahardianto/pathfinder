@@ -117,3 +117,51 @@ fn test_extract_vue_script_no_script_block() {
     // No script block -> returns empty (parser creates valid empty AST)
     assert!(result.is_empty() || std::str::from_utf8(&result).unwrap().trim().is_empty());
 }
+
+#[test]
+fn test_as_str_all_languages() {
+    assert_eq!(SupportedLanguage::Go.as_str(), "go");
+    assert_eq!(SupportedLanguage::TypeScript.as_str(), "typescript");
+    assert_eq!(SupportedLanguage::Python.as_str(), "python");
+    assert_eq!(SupportedLanguage::Rust.as_str(), "rust");
+    assert_eq!(SupportedLanguage::JavaScript.as_str(), "javascript");
+    assert_eq!(SupportedLanguage::Tsx.as_str(), "typescript");
+    assert_eq!(SupportedLanguage::Vue.as_str(), "vue");
+    assert_eq!(SupportedLanguage::Java.as_str(), "java");
+}
+
+#[test]
+fn test_grammar_rust_loads() {
+    let _rust = SupportedLanguage::Rust.grammar();
+}
+
+#[test]
+fn test_grammar_javascript_loads() {
+    let _js = SupportedLanguage::JavaScript.grammar();
+}
+
+#[test]
+fn test_grammar_tsx_loads() {
+    let _tsx = SupportedLanguage::Tsx.grammar();
+}
+
+#[test]
+fn test_preprocess_source_non_vue() {
+    let source = b"fn main() {}";
+    let result = SupportedLanguage::Rust.preprocess_source(source);
+    assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(&*result, source);
+
+    let ts_source = b"export function foo() {}";
+    let ts_result = SupportedLanguage::TypeScript.preprocess_source(ts_source);
+    assert!(matches!(ts_result, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(&*ts_result, ts_source);
+}
+
+#[test]
+fn test_detect_jsx_extension() {
+    assert_eq!(
+        SupportedLanguage::detect(Path::new("component.jsx")),
+        Some(SupportedLanguage::JavaScript)
+    );
+}

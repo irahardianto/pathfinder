@@ -2068,3 +2068,49 @@ fn test_js_nested_function_captured_as_child() {
     assert_eq!(inner.kind, SymbolKind::Function);
     assert_eq!(inner.semantic_path, "outer.inner");
 }
+
+#[test]
+fn test_find_enclosing_symbol_ref_returns_reference() {
+    let source = b"package main\n\nfunc Handler() {\n  // line 3\n  println(\"hello\")\n}\n";
+    let tree = AstParser::parse_source(
+        std::path::Path::new("dummy.go"),
+        SupportedLanguage::Go,
+        source,
+    )
+    .unwrap();
+    let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Go);
+
+    // Row 3 (0-indexed) is inside Handler
+    let sym_ref = find_enclosing_symbol_ref(&syms, 3);
+    assert!(sym_ref.is_some(), "should find enclosing symbol ref at row 3");
+    let sym = sym_ref.unwrap();
+    assert_eq!(sym.name, "Handler");
+    assert_eq!(sym.kind, SymbolKind::Function);
+    assert!(sym.start_line <= 3);
+    assert!(sym.end_line >= 3);
+}
+
+#[test]
+fn test_did_you_mean_empty_symbols() {
+    let empty_symbols: Vec<ExtractedSymbol> = vec![];
+    let chain = SymbolChain::parse("NonExistent").unwrap();
+    let suggestions = did_you_mean(&empty_symbols, &chain, 3);
+    assert!(
+        suggestions.is_empty(),
+        "empty symbol list should produce empty suggestions"
+    );
+}
+
+#[test]
+fn test_symbol_chain_first_segment() {
+    let chain = SymbolChain::parse("MyStruct.method").unwrap();
+    assert_eq!(chain.segments.len(), 2);
+    assert_eq!(chain.segments[0].name, "MyStruct");
+    assert_eq!(chain.segments[1].name, "method");
+    assert!(chain.segments[0].overload_index.is_none());
+
+    let chain2 = SymbolChain::parse("Foo.bar#2").unwrap();
+    assert_eq!(chain2.segments[0].name, "Foo");
+    assert_eq!(chain2.segments[1].name, "bar");
+    assert_eq!(chain2.segments[1].overload_index, Some(2));
+}

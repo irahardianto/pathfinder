@@ -400,3 +400,47 @@ fn test_hint_returns_some_for_all_error_variants() {
         }
     }
 }
+
+#[test]
+fn test_hint_symbol_not_found_no_separator() {
+    let err = PathfinderError::SymbolNotFound {
+        semantic_path: "AuthService.login".into(),
+        did_you_mean: vec![],
+        retry_after_seconds: None,
+    };
+    let hint = err.hint().expect("should have hint");
+    assert!(
+        hint.contains("require '::'"),
+        "hint should mention requiring '::' separator: {hint}"
+    );
+}
+
+#[test]
+fn test_hint_symbol_not_found_multiple_separators() {
+    let err = PathfinderError::SymbolNotFound {
+        semantic_path: "src/lib.rs::Outer::Inner".into(),
+        did_you_mean: vec![],
+        retry_after_seconds: None,
+    };
+    let hint = err.hint().expect("should have hint");
+    assert!(
+        hint.contains("only one '::'"),
+        "hint should mention only one '::' allowed: {hint}"
+    );
+}
+
+#[test]
+fn test_to_details_symbol_not_found_no_retry() {
+    let err = PathfinderError::SymbolNotFound {
+        semantic_path: "src/auth.ts::login".into(),
+        did_you_mean: vec!["logout".into()],
+        retry_after_seconds: None,
+    };
+    let details = err.to_error_response().details;
+    assert!(
+        details.get("retry_after_seconds").is_none(),
+        "retry_after_seconds should be absent when None"
+    );
+    // did_you_mean should still be present
+    assert!(details.get("did_you_mean").is_some());
+}

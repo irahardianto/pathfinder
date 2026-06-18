@@ -667,3 +667,108 @@ async fn test_concurrent_symbol_extraction_vue_stress() {
         .collect::<Vec<_>>()
         .await;
 }
+
+#[tokio::test]
+async fn test_read_source_file_go() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+    writeln!(
+        file,
+        "package main\n\nfunc Hello() {{}}\nfunc World() {{}}\n"
+    )
+    .unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    let (content, lang, symbols) = surgeon
+        .read_source_file(&workspace_root, relative)
+        .await
+        .unwrap();
+
+    assert_eq!(lang, "go");
+    assert!(content.contains("func Hello()"));
+    assert!(content.contains("func World()"));
+    assert!(symbols.iter().any(|s| s.name == "Hello"));
+    assert!(symbols.iter().any(|s| s.name == "World"));
+}
+
+#[tokio::test]
+async fn test_read_source_file_typescript() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".ts").tempfile().unwrap();
+    writeln!(
+        file,
+        "export function greet(name: string): string {{\n  return `Hello ${{name}}`;\n}}\n"
+    )
+    .unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    let (content, lang, symbols) = surgeon
+        .read_source_file(&workspace_root, relative)
+        .await
+        .unwrap();
+
+    assert_eq!(lang, "typescript");
+    assert!(content.contains("greet"));
+    assert!(symbols.iter().any(|s| s.name == "greet"));
+}
+
+#[tokio::test]
+async fn test_generate_skeleton_delegates_to_repo_map() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("lib.rs");
+    std::fs::write(
+        &file_path,
+        "pub struct Config {\n    pub name: String,\n}\n\npub fn process() {}\n",
+    )
+    .unwrap();
+
+    let workspace_root = dir.path().to_path_buf();
+    let config = crate::repo_map::SkeletonConfig::new(10000, 5, "all", 2000);
+
+    let result = surgeon
+        .generate_skeleton(&workspace_root, std::path::Path::new(""), &config)
+        .await
+        .unwrap();
+
+    assert!(
+        result.skeleton.contains("Config"),
+        "skeleton should contain struct name Config, got: {}",
+        result.skeleton
+    );
+    assert!(
+        result.skeleton.contains("process"),
+        "skeleton should contain function name process, got: {}",
+        result.skeleton
+    );
+}
+
+#[tokio::test]
+async fn test_enclosing_symbol_detail_returns_symbol_info() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+    writeln!(
+        file,
+        "package main\n\nfunc MyHandler() {{\n\t// handler logic\n\tprintln(\"hello\")\n}}\n"
+    )
+    .unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    // Line 4 (1-indexed) is inside MyHandler
+    let detail = surgeon
+        .enclosing_symbol_detail(&workspace_root, relative, 4)
+        .await
+        .unwrap();
+
+    assert!(
+        detail.is_some(),
+        "should find enclosing symbol detail on line 4"
+    );
+    let sym = detail.unwrap();
+    assert_eq!(sym.name, "MyHandler");
+    assert!(sym.start_line <= 3); // 0-indexed row 2 = line 3
+    assert!(sym.end_line >= 4); // 0-indexed row 5 = line 6
+}

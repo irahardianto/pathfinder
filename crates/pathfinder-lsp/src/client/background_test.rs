@@ -691,3 +691,157 @@ async fn test_registration_watcher_lagged_continues() {
 
     let _ = tokio::time::timeout(std::time::Duration::from_millis(100), handle).await;
 }
+
+#[tokio::test]
+async fn test_collect_idle_languages_returns_stale_entries() {
+    use crate::client::fake_transport::FakeTransport;
+    use crate::client::process::LspTransport;
+
+    let processes = DashMap::new();
+    let dispatcher = Arc::new(RequestDispatcher::new());
+
+    // Create a FakeTransport with last_used set far in the past (over 15 min).
+    let fake_transport = Arc::new(FakeTransport::new());
+    fake_transport.set_dispatcher(Arc::clone(&dispatcher));
+    // Set last_used to 20 minutes ago (well past the 15-min idle timeout).
+    let stale_time = Instant::now()
+        .checked_sub(Duration::from_mins(20))
+        .expect("time subtraction should not underflow");
+    fake_transport.set_last_used(stale_time);
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let idle = collect_idle_languages(&processes);
+    assert_eq!(idle.len(), 1, "should collect 1 stale language");
+    assert_eq!(idle[0], "rust");
+}
+
+#[tokio::test]
+async fn test_collect_idle_languages_skips_recent() {
+    use crate::client::fake_transport::FakeTransport;
+    use crate::client::process::LspTransport;
+
+    let processes = DashMap::new();
+    let dispatcher = Arc::new(RequestDispatcher::new());
+
+    // Create a FakeTransport with last_used set to now (recent activity).
+    let fake_transport = Arc::new(FakeTransport::new());
+    fake_transport.set_dispatcher(Arc::clone(&dispatcher));
+    // last_used defaults to Instant::now() in FakeTransport::new(), so it's recent.
+
+    processes.insert(
+        "go".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let idle = collect_idle_languages(&processes);
+    assert!(
+        idle.is_empty(),
+        "should not collect recently-used languages, got: {idle:?}"
+    );
+}
+
+#[test]
+fn test_collect_idle_languages_skips_unavailable_entries() {
+    let processes = DashMap::new();
+
+    // Unavailable entries should be ignored by collect_idle_languages.
+    processes.insert(
+        "python".to_owned(),
+        ProcessEntry::Unavailable(crate::client::UnavailableState {
+            unavailable_since: Instant::now()
+                .checked_sub(Duration::from_mins(30))
+                .unwrap(),
+            backoff_attempt: 1,
+        }),
+    );
+
+    let idle = collect_idle_languages(&processes);
+    assert!(
+        idle.is_empty(),
+        "should not collect Unavailable entries, got: {idle:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_collect_idle_languages_skips_in_flight() {
+    use crate::client::fake_transport::FakeTransport;
+    use crate::client::process::LspTransport;
+    use std::sync::atomic::Ordering;
+
+    let processes = DashMap::new();
+    let dispatcher = Arc::new(RequestDispatcher::new());
+
+    let fake_transport = Arc::new(FakeTransport::new());
+    fake_transport.set_dispatcher(Arc::clone(&dispatcher));
+    // Set last_used to 20 minutes ago (stale).
+    let stale_time = Instant::now()
+        .checked_sub(Duration::from_mins(20))
+        .expect("time subtraction should not underflow");
+    fake_transport.set_last_used(stale_time);
+    // But set in_flight to 1 (active request in progress).
+    fake_transport.in_flight().store(1, Ordering::Release);
+
+    processes.insert(
+        "typescript".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let idle = collect_idle_languages(&processes);
+    assert!(
+        idle.is_empty(),
+        "should not collect languages with in-flight requests, got: {idle:?}"
+    );
+}
+

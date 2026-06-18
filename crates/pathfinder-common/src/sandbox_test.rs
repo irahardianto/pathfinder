@@ -388,3 +388,61 @@ fn test_sandbox_check_performance_and_prefix_matching() {
         let _ = sandbox.check(path);
     }
 }
+
+#[test]
+fn test_hardcoded_deny_p12_extension() {
+    let sandbox = default_sandbox();
+    let result = sandbox.check(Path::new("certs/client.p12"));
+    assert!(result.is_err(), ".p12 extension should be denied");
+    if let Err(PathfinderError::AccessDenied { tier, .. }) = result {
+        assert!(matches!(tier, SandboxTier::HardcodedDeny));
+    }
+}
+
+#[test]
+fn test_hardcoded_deny_case_insensitive_extension() {
+    let sandbox = default_sandbox();
+    assert!(
+        sandbox.check(Path::new("certs/server.PEM")).is_err(),
+        ".PEM (uppercase) should be denied"
+    );
+    assert!(
+        sandbox.check(Path::new("keys/key.KEY")).is_err(),
+        ".KEY (uppercase) should be denied"
+    );
+}
+
+#[test]
+fn test_additional_deny_directory_exact_match() {
+    let config = SandboxConfig {
+        additional_deny: vec!["temp/".to_owned()],
+        allow_override: vec![],
+    };
+    let sandbox = Sandbox::with_user_rules(std::env::temp_dir().as_path(), &config, None);
+    assert!(
+        sandbox.check(Path::new("temp")).is_err(),
+        "exact match 'temp' without trailing slash should be denied by 'temp/' pattern"
+    );
+}
+
+#[test]
+fn test_additional_deny_directory_ends_with() {
+    let config = SandboxConfig {
+        additional_deny: vec!["temp/".to_owned()],
+        allow_override: vec![],
+    };
+    let sandbox = Sandbox::with_user_rules(std::env::temp_dir().as_path(), &config, None);
+    assert!(
+        sandbox.check(Path::new("src/temp")).is_err(),
+        "'src/temp' should be denied because it ends with '/temp'"
+    );
+}
+
+#[test]
+fn test_default_deny_env_nested_path() {
+    let sandbox = default_sandbox();
+    assert!(
+        sandbox.check(Path::new("config/.env")).is_err(),
+        "'config/.env' should be denied by default deny rules matching .env basename"
+    );
+}

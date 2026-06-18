@@ -747,3 +747,165 @@ async fn test_search_offset_with_truncation() {
         result.total_matches
     );
 }
+
+// ── GAP: strip_line_endings tests ─────────────────────────────────
+
+#[test]
+fn test_strip_line_endings_crlf() {
+    let input = b"hello\r\n";
+    let result = strip_line_endings(input);
+    assert_eq!(result, b"hello");
+}
+
+#[test]
+fn test_strip_line_endings_bare_cr() {
+    let input = b"hello\r";
+    let result = strip_line_endings(input);
+    assert_eq!(result, b"hello");
+}
+
+#[test]
+fn test_strip_line_endings_lf_only() {
+    let input = b"hello\n";
+    let result = strip_line_endings(input);
+    assert_eq!(result, b"hello");
+}
+
+#[test]
+fn test_strip_line_endings_no_ending() {
+    let input = b"hello";
+    let result = strip_line_endings(input);
+    assert_eq!(result, b"hello");
+}
+
+// ── GAP: safe_truncate_bytes at multibyte boundary ────────────────
+
+#[test]
+fn test_safe_truncate_bytes_at_multibyte_boundary() {
+    // 'é' is 2 bytes in UTF-8 (0xC3 0xA9). "héllo" = [h, 0xC3, 0xA9, l, l, o]
+    let input = "héllo";
+    let bytes = input.as_bytes();
+    // Truncate at byte 2 — splits the 'é' char (byte 1 is 0xC3, byte 2 is 0xA9).
+    let result = safe_truncate_bytes(bytes, 2);
+    // Should back up to byte 1 (before the multibyte sequence).
+    assert!(
+        std::str::from_utf8(result).is_ok(),
+        "result should be valid UTF-8"
+    );
+    assert_eq!(std::str::from_utf8(result).unwrap(), "h");
+}
+
+// ── GAP: decode_line tests ────────────────────────────────────────
+
+#[test]
+fn test_decode_line_valid_utf8() {
+    let input = b"hello world\n";
+    let result = decode_line(input);
+    assert_eq!(result, "hello world");
+}
+
+#[test]
+fn test_decode_line_invalid_utf8() {
+    // 0xFF is never valid in UTF-8
+    let input: Vec<u8> = vec![b'h', b'e', 0xFF, b'l', b'o', b'\n'];
+    let result = decode_line(&input);
+    // Lossy conversion replaces invalid bytes with U+FFFD
+    assert!(result.contains('\u{FFFD}'), "should contain replacement char");
+    // Short enough that no truncation suffix is expected from length, but
+    // decode_line adds "... [TRUNCATED]" on lossy conversion regardless.
+    assert!(
+        result.ends_with("... [TRUNCATED]"),
+        "lossy conversion should add truncated suffix: {result}"
+    );
+}
+
+// ── GAP: binary_skipped count in results ──────────────────────────
+
+#[tokio::test]
+async fn test_binary_skipped_count_in_results() {
+    let ws = make_workspace(&[
+        ("src/main.rs", "needle\n"),
+        ("assets/image.png", "needle\n"),
+        ("lib/module.dll", "needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let result = scout
+        .search(&params_for(&ws, "needle"))
+        .await
+        .expect("search should succeed");
+
+    assert!(
+        result.binary_skipped > 0,
+        "binary_skipped should be > 0, got {}",
+        result.binary_skipped
+    );
+    // Only the .rs file should produce a match
+    assert_eq!(result.total_matches, 1);
+    assert_eq!(result.matches[0].file, "src/main.rs");
+}
+
+// ── GAP: files_searched count ─────────────────────────────────────
+
+#[tokio::test]
+async fn test_files_searched_count() {
+    let ws = make_workspace(&[
+        ("a.rs", "needle\n"),
+        ("b.rs", "no match here\n"),
+        ("c.rs", "needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let result = scout
+        .search(&params_for(&ws, "needle"))
+        .await
+        .expect("search should succeed");
+
+    // All 3 text files should be searched, even if not all contain matches
+    assert_eq!(
+        result.files_searched, 3,
+        "all text files should be searched"
+    );
+    assert_eq!(result.total_matches, 2);
+}
+
+// ── GAP: search empty workspace ───────────────────────────────────
+
+#[tokio::test]
+async fn test_search_empty_workspace() {
+    let ws = tempfile::tempdir().expect("create tempdir");
+    let scout = RipgrepScout;
+    let result = scout
+        .search(&params_for(&ws, "anything"))
+        .await
+        .expect("search should succeed on empty workspace");
+
+    assert_eq!(result.total_matches, 0);
+    assert!(result.matches.is_empty());
+    assert!(!result.truncated);
+    assert_eq!(result.files_searched, 0);
+}
+
+// ── GAP: search with empty query ──────────────────────────────────
+
+#[tokio::test]
+async fn test_search_empty_query() {
+    let ws = make_workspace(&[("src/main.rs", "fn main() {}\n")]);
+    let scout = RipgrepScout;
+    let result = scout.search(&params_for(&ws, "")).await;
+
+    // Empty query may either error (invalid pattern) or return matches on every line.
+    // Either is acceptable behavior — we just verify no panic.
+    match result {
+        Ok(r) => {
+            // If it succeeds, the empty pattern matches every line
+            assert!(r.files_searched > 0, "should search at least one file");
+        }
+        Err(e) => {
+            // If it errors, it should be an InvalidPattern error
+            assert!(
+                matches!(e, SearchError::InvalidPattern(_)),
+                "unexpected error type: {e:?}"
+            );
+        }
+    }
+}
+

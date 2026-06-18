@@ -413,3 +413,150 @@ async fn test_lawyer_references_request_error_returns_error() {
         "should return ConnectionLost, got: {result:?}"
     );
 }
+
+#[tokio::test]
+async fn test_capability_status_unknown_language() {
+    // A client with only "rust" registered should not return status for "python".
+    // capability_status iterates descriptors, so only "rust" appears.
+    let (client, _fake) = make_running_client("rust");
+
+    let status = client.capability_status().await;
+
+    assert!(
+        status.contains_key("rust"),
+        "should contain status for the registered language"
+    );
+    assert!(
+        !status.contains_key("python"),
+        "should not contain status for an unregistered language"
+    );
+
+    // Verify the status has populated fields (reason is non-empty).
+    let rust_status = &status["rust"];
+    assert!(
+        !rust_status.reason.is_empty(),
+        "status reason should be populated"
+    );
+}
+
+#[tokio::test]
+async fn test_capability_status_lazy_start_entry() {
+    // A client with descriptors but no running process should report "lazy start".
+    use crate::client::tests::client_with_descriptors;
+    use std::collections::HashMap;
+
+    let client = client_with_descriptors(vec!["go"], HashMap::new());
+
+    let status = client.capability_status().await;
+
+    assert!(status.contains_key("go"), "should have entry for 'go'");
+    let go_status = &status["go"];
+    assert!(
+        go_status.validation,
+        "lazy start should report validation=true"
+    );
+    assert!(
+        go_status.reason.contains("available (lazy start)"),
+        "reason should mention lazy start, got: {}",
+        go_status.reason
+    );
+}
+
+#[tokio::test]
+async fn test_missing_languages_returns_populated_entries() {
+    use crate::client::detect::MissingLanguage;
+    use dashmap::DashMap;
+    use tokio::sync::broadcast;
+
+    let missing = vec![
+        MissingLanguage {
+            language_id: "python".to_owned(),
+            marker_file: "pyproject.toml".to_owned(),
+            tried_binaries: vec!["pyright".to_owned()],
+            install_hint: "pip install pyright".to_owned(),
+        },
+        MissingLanguage {
+            language_id: "go".to_owned(),
+            marker_file: "go.mod".to_owned(),
+            tried_binaries: vec!["gopls".to_owned()],
+            install_hint: "go install golang.org/x/tools/gopls@latest".to_owned(),
+        },
+    ];
+
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let client = LspClient {
+        descriptors: Arc::new(Vec::new()),
+        missing_languages: Arc::new(missing),
+        processes: Arc::new(DashMap::new()),
+        init_locks: Arc::new(DashMap::new()),
+        dispatcher: Arc::new(crate::client::protocol::RequestDispatcher::new()),
+        shutdown_tx: Arc::new(shutdown_tx),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        doc_versions: Arc::new(DashMap::new()),
+        warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        spawner: std::sync::Arc::new(
+            crate::client::process::test_mocks::MockProcessSpawner::failing(),
+        ),
+    };
+
+    let result = client.missing_languages();
+    assert_eq!(result.len(), 2, "should return 2 missing languages");
+    assert_eq!(result[0].language_id, "python");
+    assert_eq!(result[1].language_id, "go");
+    assert_eq!(result[0].marker_file, "pyproject.toml");
+    assert_eq!(result[1].tried_binaries, vec!["gopls".to_owned()]);
+}
+
+#[tokio::test]
+async fn test_missing_languages_empty_when_none() {
+    use crate::client::tests::client_no_languages;
+
+    let client = client_no_languages();
+    let result = client.missing_languages();
+    assert!(
+        result.is_empty(),
+        "should return empty vec when no languages are missing"
+    );
+}
+
+#[tokio::test]
+async fn test_force_respawn_delegation_no_descriptor() {
+    // force_respawn for a language with no descriptor should return NoLspAvailable.
+    use crate::client::tests::client_no_languages;
+
+    let client = client_no_languages();
+    let result = client.force_respawn("nonexistent").await;
+
+    assert!(
+        matches!(result, Err(LspError::NoLspAvailable)),
+        "force_respawn with no descriptor should return NoLspAvailable, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_is_warm_start_complete_delegation_default_false() {
+    use crate::client::tests::client_no_languages;
+
+    let client = client_no_languages();
+    // Default is false (warm_start_complete AtomicBool initialized to false).
+    assert!(
+        !client.is_warm_start_complete(),
+        "is_warm_start_complete should default to false"
+    );
+}
+
+#[tokio::test]
+async fn test_is_warm_start_complete_delegation_after_set() {
+    use crate::client::tests::client_no_languages;
+
+    let client = client_no_languages();
+    // Simulate warm start completion by setting the flag.
+    client
+        .warm_start_complete
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    assert!(
+        client.is_warm_start_complete(),
+        "is_warm_start_complete should return true after flag is set"
+    );
+}
