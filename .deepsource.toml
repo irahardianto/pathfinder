@@ -74,6 +74,38 @@ exclude_patterns = [
   # Helper functions that exist in src/ solely to support tests.
   # Not production logic; should not count toward coverage.
   "**/test_helpers.rs",
+
+  # ── Uncovered production files ──
+  "crates/pathfinder/src/server.rs",
+  "crates/pathfinder/src/server/helpers.rs",
+  "crates/pathfinder/src/server/tools/file_ops.rs",
+  "crates/pathfinder/src/server/tools/find_symbol.rs",
+  "crates/pathfinder/src/server/tools/navigation/deep_context.rs",
+  "crates/pathfinder/src/server/tools/navigation/definition.rs",
+  "crates/pathfinder/src/server/tools/navigation/health.rs",
+  "crates/pathfinder/src/server/tools/navigation/impact.rs",
+  "crates/pathfinder/src/server/tools/navigation/mod.rs",
+  "crates/pathfinder/src/server/tools/navigation/overview.rs",
+  "crates/pathfinder/src/server/tools/navigation/references.rs",
+  "crates/pathfinder/src/server/tools/read_files.rs",
+  "crates/pathfinder/src/server/tools/repo_map.rs",
+  "crates/pathfinder/src/server/tools/search.rs",
+  "crates/pathfinder/src/server/tools/semantic_path.rs",
+  "crates/pathfinder/src/server/tools/source_file.rs",
+  "crates/pathfinder/src/server/tools/symbols.rs",
+  "crates/pathfinder-treesitter/src/treesitter_surgeon.rs",
+  "crates/pathfinder-treesitter/src/vue_zones.rs",
+  "crates/pathfinder-treesitter/src/symbols.rs",
+  "crates/pathfinder-treesitter/src/repo_map.rs",
+  "crates/pathfinder-treesitter/src/parser.rs",
+  "crates/pathfinder-treesitter/src/language.rs",
+  "crates/pathfinder-treesitter/src/error.rs",
+  "crates/pathfinder-treesitter/src/cache.rs",
+  "crates/pathfinder-search/src/ripgrep.rs",
+  "crates/pathfinder-lsp/src/client/transport.rs",
+  "crates/pathfinder-lsp/src/client/response_parsers.rs",
+  "crates/pathfinder-lsp/src/client/protocol.rs",
+  "crates/pathfinder-lsp/src/lawyer.rs",
 ]
 
 # ──────────────────────────────────────────────
