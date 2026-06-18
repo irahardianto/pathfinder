@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// Build a sandbox with no disk I/O and no user-defined ignore rules.

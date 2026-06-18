@@ -42,10 +42,5 @@ pub use plugin::{
 };
 
 #[cfg(test)]
-#[allow(clippy::no_effect_underscore_binding)]
-mod tests {
-    #[test]
-    fn test_java_plugin_re_export() {
-        let _plugin = crate::JavaPlugin;
-    }
-}
+#[path = "lib_test.rs"]
+mod tests;
