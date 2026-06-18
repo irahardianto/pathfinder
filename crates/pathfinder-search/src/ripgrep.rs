@@ -13,7 +13,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch};
 use ignore::WalkBuilder;
 use lru::LruCache;
-use pathfinder_common::types::{VersionHash, ALWAYS_EXCLUDED_DIRS};
+use pathfinder_common::types::{VersionHash, ALWAYS_EXCLUDED_DIRS, ALWAYS_EXCLUDED_DIR_NAMES};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -470,19 +470,40 @@ impl RipgrepScout {
             )
         };
 
-        let walker = WalkBuilder::new(&params.workspace_root)
+        // Walker-level directory pruning callback.
+        //
+        // Prevents `WalkBuilder` from descending into directories listed in
+        // `ALWAYS_EXCLUDED_DIR_NAMES`. This is the performance-critical filter:
+        // by returning `false` for a directory entry, the walker skips the
+        // entire subtree (no syscalls for its children).
+        fn prune_excluded_dirs(entry: &ignore::DirEntry) -> bool {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                if let Some(name) = entry.file_name().to_str() {
+                    if ALWAYS_EXCLUDED_DIR_NAMES.contains(&name) {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+
+        let mut walker_builder = WalkBuilder::new(&params.workspace_root);
+        walker_builder
             .hidden(false)
             .git_ignore(true)
             .git_global(false)
             .git_exclude(false)
-            .build();
+            .filter_entry(prune_excluded_dirs);
+        let walker = walker_builder.build();
 
-        let walker_no_ignore = WalkBuilder::new(&params.workspace_root)
+        let mut walker_no_ignore_builder = WalkBuilder::new(&params.workspace_root);
+        walker_no_ignore_builder
             .hidden(false)
             .git_ignore(false)
             .git_global(false)
             .git_exclude(false)
-            .build();
+            .filter_entry(prune_excluded_dirs);
+        let walker_no_ignore = walker_no_ignore_builder.build();
 
         let mut files = Vec::new();
         let mut binary_skipped: usize = 0;
@@ -1708,6 +1729,35 @@ mod missing_coverage_tests {
         assert_eq!(result.files_searched, 1, "only main.rs should be searched");
     }
 
+    #[tokio::test]
+    async fn test_search_excludes_target_directory() {
+        let dir = make_workspace(&[
+            ("src/main.rs", "fn main() { findme(); }"),
+            ("target/debug/build/some_crate/output", "findme"),
+            ("target/release/binary", "findme"),
+        ]);
+
+        let scout = RipgrepScout;
+        let params = SearchParams {
+            workspace_root: dir.path().to_path_buf(),
+            query: "findme".to_owned(),
+            ..Default::default()
+        };
+        let result = scout.search(&params).await.expect("search should succeed");
+
+        assert_eq!(
+            result.matches.len(),
+            1,
+            "target/ files should be excluded, got matches in: {:?}",
+            result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+        );
+        assert_eq!(result.matches[0].file, "src/main.rs");
+        assert_eq!(
+            result.files_searched, 1,
+            "only src/main.rs should be searched"
+        );
+    }
+
     /// Regression test: `.github/` must NOT be excluded by the `.git/` entry
     /// in `ALWAYS_EXCLUDED_DIRS`. Previously the Windows-path check stripped
     /// the trailing `/` producing `.git`, which prefix-matched `.github/`.
@@ -1773,6 +1823,66 @@ mod missing_coverage_tests {
             ),
             ".gitignore must not be excluded by .git/ rule"
         );
+
+        // target/ files MUST be excluded.
+        assert!(
+            !filter_entry(
+                "target/debug/build.rs",
+                std::path::Path::new("target/debug/build.rs"),
+                "**/*",
+                &glob_matcher,
+                None,
+                true,
+            ),
+            "target/debug/build.rs should be excluded"
+        );
+
+        // But a file _named_ "target" at root level should NOT be excluded
+        // (ALWAYS_EXCLUDED_DIRS uses trailing '/' to require directory prefix).
+        assert!(
+            filter_entry(
+                "target",
+                std::path::Path::new("target"),
+                "**/*",
+                &glob_matcher,
+                None,
+                true,
+            ),
+            "a file named 'target' (not a dir prefix) should not be excluded"
+        );
+    }
+
+    /// Verify that `ALWAYS_EXCLUDED_DIRS` and `ALWAYS_EXCLUDED_DIR_NAMES`
+    /// have matching entries. Catches drift between the two constants.
+    #[test]
+    fn test_excluded_dirs_constants_are_consistent() {
+        use pathfinder_common::types::ALWAYS_EXCLUDED_DIR_NAMES;
+
+        assert_eq!(
+            ALWAYS_EXCLUDED_DIRS.len(),
+            ALWAYS_EXCLUDED_DIR_NAMES.len(),
+            "ALWAYS_EXCLUDED_DIRS and ALWAYS_EXCLUDED_DIR_NAMES must have the same length"
+        );
+
+        // Each entry in ALWAYS_EXCLUDED_DIR_NAMES must correspond to an entry
+        // in ALWAYS_EXCLUDED_DIRS with a trailing '/'.
+        for name in ALWAYS_EXCLUDED_DIR_NAMES {
+            let with_slash = format!("{name}/");
+            assert!(
+                ALWAYS_EXCLUDED_DIRS.contains(&with_slash.as_str()),
+                "ALWAYS_EXCLUDED_DIR_NAMES entry '{name}' has no matching '{with_slash}' in ALWAYS_EXCLUDED_DIRS"
+            );
+        }
+
+        // Reverse check: each entry in ALWAYS_EXCLUDED_DIRS must correspond
+        // to an entry in ALWAYS_EXCLUDED_DIR_NAMES (without the trailing '/').
+        for dir in ALWAYS_EXCLUDED_DIRS {
+            let without_slash = dir.trim_end_matches('/');
+            assert!(
+                ALWAYS_EXCLUDED_DIR_NAMES.contains(&without_slash),
+                "ALWAYS_EXCLUDED_DIRS entry '{dir}' has no matching '{without_slash}' in ALWAYS_EXCLUDED_DIR_NAMES"
+            );
+        }
     }
 }
 
