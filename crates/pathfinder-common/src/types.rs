@@ -10,17 +10,38 @@ use std::path::{Path, PathBuf};
 
 /// Directories that should always be excluded from search and file traversal.
 ///
-/// These are never source code and cause false positives in grep fallback.
-/// Used by both the sandbox (file access control) and search (file walking).
-/// Includes both Unix (`/`) and Windows (`\`) path separators.
+/// These are never source code and would cause false positives in grep fallback.
+/// Used by the search walker (`filter_entry` in `ripgrep.rs`) to skip files
+/// whose relative path starts with any of these prefixes.
+/// Each entry has a trailing `/` for prefix-based path matching.
 pub const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
     ".git/",
     "node_modules/",
+    "target/",
     "vendor/",
     ".idea/",
     ".vscode/",
     "__pycache__/",
     ".qlty/",
+];
+
+/// Bare directory names (without trailing `/`) for walker-level pruning.
+///
+/// These correspond exactly to [`ALWAYS_EXCLUDED_DIRS`] but without the
+/// trailing separator, for use with `WalkBuilder::filter_entry` which
+/// receives individual directory entries by name.
+///
+/// Kept as a separate constant so the walker can do a fast `entry.file_name()`
+/// comparison without stripping suffixes at runtime.
+pub const ALWAYS_EXCLUDED_DIR_NAMES: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "vendor",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    ".qlty",
 ];
 
 /// A parsed semantic path in the format `file_path[::symbol_chain]`.
