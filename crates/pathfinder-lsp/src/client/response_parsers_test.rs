@@ -455,3 +455,325 @@ async fn test_read_preview_line_bounds() {
     assert!(snippet.len() <= 512);
     assert!(snippet.chars().all(|c| c == 'a'));
 }
+
+// ── parse_definition_response edge cases ────────────────────────────────
+
+#[tokio::test]
+async fn test_parse_definition_response_empty_uri() {
+    // Location with empty URI should return Protocol error
+    let response = json!({
+        "uri": "",
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 5 }
+        }
+    });
+    let result = parse_definition_response(response, Path::new("/workspace")).await;
+    assert!(result.is_err(), "empty URI should return error");
+}
+
+#[tokio::test]
+async fn test_parse_definition_response_array_multiple() {
+    // Multiple locations: should return the first and log debug
+    let response = json!([
+        {
+            "uri": "file:///project/src/a.rs",
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 5 }
+            }
+        },
+        {
+            "uri": "file:///project/src/b.rs",
+            "range": {
+                "start": { "line": 1, "character": 0 },
+                "end": { "line": 1, "character": 5 }
+            }
+        }
+    ]);
+    let result = parse_definition_response(response, Path::new("/"))
+        .await
+        .expect("ok");
+    let loc = result.expect("should return first location");
+    assert!(loc.file.contains("a.rs"));
+}
+
+// ── parse_definition_response_multi edge cases ──────────────────────────
+
+#[tokio::test]
+async fn test_parse_definition_response_multi_null() {
+    let result = parse_definition_response_multi(&json!(null), Path::new("/workspace")).await;
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn test_parse_definition_response_multi_single_object() {
+    // Single non-array response should still return one location
+    let response = json!({
+        "uri": "file:///project/src/lib.rs",
+        "range": {
+            "start": { "line": 5, "character": 3 },
+            "end": { "line": 5, "character": 10 }
+        }
+    });
+    let result = parse_definition_response_multi(&response, Path::new("/")).await;
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].line, 6);
+    assert!(result[0].file.contains("lib.rs"));
+}
+
+#[tokio::test]
+async fn test_parse_definition_response_multi_with_null_items() {
+    let response = json!([
+        null,
+        {
+            "uri": "file:///project/src/lib.rs",
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 5 }
+            }
+        }
+    ]);
+    let result = parse_definition_response_multi(&response, Path::new("/")).await;
+    assert_eq!(result.len(), 1, "null items should be skipped");
+}
+
+// ── parse_single_definition_location edge cases ─────────────────────────
+
+#[tokio::test]
+async fn test_parse_single_definition_location_null() {
+    let result = parse_single_definition_location(&json!(null), Path::new("/")).await;
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn test_parse_single_definition_location_empty_uri() {
+    let loc = json!({
+        "uri": "",
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 5 }
+        }
+    });
+    let result = parse_single_definition_location(&loc, Path::new("/")).await;
+    assert!(
+        result.is_none(),
+        "empty URI should return None from single location parser"
+    );
+}
+
+// ── parse_references_response edge cases ────────────────────────────────
+
+#[tokio::test]
+async fn test_parse_references_response_not_array() {
+    let response = json!({"not": "array"});
+    let result = parse_references_response(&response, Path::new("/workspace")).await;
+    assert!(result.is_err(), "non-array response should error");
+}
+
+#[tokio::test]
+async fn test_parse_references_response_missing_range() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let ws = temp.path();
+    let src = ws.join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    let file = src.join("lib.rs");
+    std::fs::write(&file, "fn test() {}").expect("write");
+    let uri = Url::from_file_path(&file).unwrap().to_string();
+
+    let response = json!([{
+        "uri": uri
+        // missing "range" field
+    }]);
+    let result = parse_references_response(&response, ws).await;
+    assert!(result.is_err(), "missing range should error");
+    if let Err(LspError::Protocol(msg)) = result {
+        assert!(msg.contains("missing range"));
+    } else {
+        panic!("expected Protocol error for missing range");
+    }
+}
+
+#[tokio::test]
+async fn test_parse_references_response_missing_uri_skipped() {
+    // Entry with no "uri" key should be skipped
+    let response = json!([{
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 5 }
+        }
+    }]);
+    let result = parse_references_response(&response, Path::new("/workspace"))
+        .await
+        .expect("should not error");
+    assert!(result.is_empty(), "entry without uri should be skipped");
+}
+
+// ── parse_call_hierarchy_calls edge cases ───────────────────────────────
+
+#[test]
+fn test_parse_call_hierarchy_calls_no_ranges() {
+    // Entry with item but no ranges_key should produce empty call_sites
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_uri = Url::from_file_path(temp.path().join("test.rs"))
+        .unwrap()
+        .to_string();
+    let response = json!([{
+        "from": {
+            "name": "caller",
+            "kind": 12,
+            "uri": file_uri,
+            "selectionRange": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 6 }
+            }
+        }
+        // No "fromRanges" key
+    }]);
+    let result =
+        parse_call_hierarchy_calls_response(&response, temp.path(), "from", "fromRanges")
+            .expect("ok");
+    assert_eq!(result.len(), 1);
+    assert!(
+        result[0].call_sites.is_empty(),
+        "missing ranges key should produce empty call_sites"
+    );
+}
+
+#[test]
+fn test_parse_call_hierarchy_calls_empty_ranges() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_uri = Url::from_file_path(temp.path().join("test.rs"))
+        .unwrap()
+        .to_string();
+    let response = json!([{
+        "from": {
+            "name": "caller",
+            "kind": 6,
+            "uri": file_uri,
+            "selectionRange": {
+                "start": { "line": 1, "character": 4 },
+                "end": { "line": 1, "character": 10 }
+            }
+        },
+        "fromRanges": []
+    }]);
+    let result =
+        parse_call_hierarchy_calls_response(&response, temp.path(), "from", "fromRanges")
+            .expect("ok");
+    assert_eq!(result.len(), 1);
+    assert!(result[0].call_sites.is_empty());
+}
+
+// ── read_preview_line edge cases ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_read_preview_line_nonexistent_file() {
+    let result = read_preview_line(Path::new("/nonexistent/file.rs"), 0).await;
+    assert!(result.is_empty(), "non-existent file should return empty");
+}
+
+#[tokio::test]
+async fn test_read_preview_line_multiline() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file = temp.path().join("multi.rs");
+    std::fs::write(&file, "line0\nline1\nline2\n").expect("write");
+
+    let line0 = read_preview_line(&file, 0).await;
+    assert_eq!(line0, "line0");
+
+    let line1 = read_preview_line(&file, 1).await;
+    assert_eq!(line1, "line1");
+
+    let line2 = read_preview_line(&file, 2).await;
+    assert_eq!(line2, "line2");
+}
+
+#[tokio::test]
+async fn test_read_preview_line_beyond_eof() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file = temp.path().join("short.rs");
+    std::fs::write(&file, "only line\n").expect("write");
+
+    let result = read_preview_line(&file, 5).await;
+    assert!(result.is_empty(), "line beyond EOF should return empty");
+}
+
+// ── parse_uri_and_range edge cases ──────────────────────────────────────
+
+#[test]
+fn test_parse_uri_and_range_empty_uri() {
+    let loc = json!({
+        "uri": "",
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 5 }
+        }
+    });
+    assert!(
+        parse_uri_and_range(&loc).is_none(),
+        "empty URI should return None"
+    );
+}
+
+#[test]
+fn test_parse_uri_and_range_missing_uri() {
+    let loc = json!({
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 5 }
+        }
+    });
+    let result = parse_uri_and_range(&loc);
+    assert!(
+        result.is_none(),
+        "location without URI should return None"
+    );
+}
+
+#[test]
+fn test_parse_uri_and_range_with_target_uri() {
+    let loc = json!({
+        "targetUri": "file:///project/src/types.rs",
+        "targetRange": {
+            "start": { "line": 10, "character": 0 },
+            "end": { "line": 20, "character": 1 }
+        },
+        "targetSelectionRange": {
+            "start": { "line": 10, "character": 4 },
+            "end": { "line": 10, "character": 9 }
+        }
+    });
+    let result = parse_uri_and_range(&loc);
+    assert!(result.is_some());
+    let (uri, line, col, _) = result.unwrap();
+    assert!(uri.contains("types.rs"));
+    assert_eq!(line, 10);
+    assert_eq!(col, 4);
+}
+
+// ── parse_call_hierarchy_prepare edge cases ──────────────────────────────
+
+#[test]
+fn test_parse_call_hierarchy_prepare_no_detail() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_uri = Url::from_file_path(temp.path().join("test.rs"))
+        .unwrap()
+        .to_string();
+    let response = json!([{
+        "name": "no_detail_fn",
+        "kind": 12,
+        "uri": file_uri,
+        "selectionRange": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 12 }
+        }
+        // No "detail" field
+    }]);
+    let result = parse_call_hierarchy_prepare_response(&response, temp.path()).expect("ok");
+    assert_eq!(result.len(), 1);
+    assert!(
+        result[0].detail.is_none(),
+        "missing detail should be None"
+    );
+}

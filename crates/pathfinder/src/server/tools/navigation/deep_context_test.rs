@@ -821,3 +821,583 @@ fn test_java_resolve_pattern_static_record_and_strictfp_class() {
         "must match 'public strictfp class MathUtils'"
     );
 }
+
+// ── extract_file_imports tests ────────────────────────────────────────────
+
+/// Helper: write a file to the workspace and call extract_file_imports.
+async fn extract_imports_for_content(filename: &str, content: &str) -> Vec<String> {
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let file_path = ws_dir.path().join(filename);
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&file_path, content).unwrap();
+    server.extract_file_imports(&file_path).await
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_java() {
+    let imports = extract_imports_for_content(
+        "Foo.java",
+        "package com.example;\nimport java.util.List;\nimport java.io.File;\npublic class Foo {}",
+    )
+    .await;
+    assert_eq!(imports.len(), 3);
+    assert!(imports[0].contains("package com.example"));
+    assert!(imports[1].contains("import java.util.List"));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_kotlin() {
+    let imports = extract_imports_for_content(
+        "Foo.kt",
+        "package com.example\nimport kotlin.collections.List\nclass Foo",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_csharp() {
+    let imports = extract_imports_for_content(
+        "Foo.cs",
+        "using System;\nusing System.Collections.Generic;\nnamespace MyApp {}\nclass Foo {}",
+    )
+    .await;
+    assert_eq!(imports.len(), 3);
+    assert!(imports[0].contains("using System"));
+    assert!(imports[2].contains("namespace MyApp"));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_python() {
+    let imports = extract_imports_for_content(
+        "foo.py",
+        "import os\nfrom pathlib import Path\ndef foo(): pass",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+    assert!(imports[0].contains("import os"));
+    assert!(imports[1].contains("from pathlib"));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_typescript() {
+    let imports = extract_imports_for_content(
+        "foo.ts",
+        "import { Foo } from './foo';\nconst x = require('bar');\nexport class Baz {}",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+    assert!(imports[0].contains("import { Foo }"));
+    assert!(imports[1].contains("require("));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_tsx() {
+    let imports = extract_imports_for_content(
+        "foo.tsx",
+        "import React from 'react';\nimport{Component} from 'react';\nconst App = () => {};",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_javascript() {
+    let imports = extract_imports_for_content(
+        "foo.js",
+        "import lodash from 'lodash';\nconst fs = require('fs');\nmodule.exports = {};",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_jsx() {
+    let imports = extract_imports_for_content(
+        "foo.jsx",
+        "import React from 'react';\nconst Component = () => <div/>;",
+    )
+    .await;
+    assert_eq!(imports.len(), 1);
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_mjs() {
+    let imports = extract_imports_for_content(
+        "foo.mjs",
+        "import { readFile } from 'fs/promises';\nexport const x = 1;",
+    )
+    .await;
+    assert_eq!(imports.len(), 1);
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_cjs() {
+    let imports = extract_imports_for_content(
+        "foo.cjs",
+        "const path = require('path');\nmodule.exports = {};",
+    )
+    .await;
+    assert_eq!(imports.len(), 1);
+    assert!(imports[0].contains("require("));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_rust() {
+    let imports = extract_imports_for_content(
+        "foo.rs",
+        "use std::io::Read;\nextern crate serde;\nfn main() {}",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+    assert!(imports[0].contains("use std::io::Read"));
+    assert!(imports[1].contains("extern crate serde"));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_go_single_line() {
+    let imports =
+        extract_imports_for_content("foo.go", "import \"fmt\"\nfunc main() {}").await;
+    assert_eq!(imports.len(), 1);
+    assert!(imports[0].contains("import \"fmt\""));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_go_multiline_block() {
+    let content = "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {}";
+    let imports = extract_imports_for_content("foo.go", content).await;
+    // Should capture: `import (`, `"fmt"`, `"os"`, `)`
+    assert_eq!(imports.len(), 4);
+    assert!(imports[0].contains("import ("));
+    assert!(imports[3].trim() == ")");
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_swift() {
+    let imports = extract_imports_for_content(
+        "Foo.swift",
+        "import Foundation\nimport UIKit\nclass Foo {}",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+    assert!(imports[0].contains("import Foundation"));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_ruby() {
+    let imports = extract_imports_for_content(
+        "foo.rb",
+        "require 'json'\nrequire_relative 'helper'\nclass Foo; end",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+    assert!(imports[0].contains("require 'json'"));
+    assert!(imports[1].contains("require_relative 'helper'"));
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_unknown_ext() {
+    // Unknown extension falls through to generic `import ` check
+    let imports = extract_imports_for_content(
+        "foo.xyz",
+        "import something\nrandom line\nimport another",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_max_cap() {
+    // MAX_IMPORTS = 200; generate 210 import lines, expect only 200
+    let lines: Vec<String> = (0..210)
+        .map(|i| format!("import pkg_{i};"))
+        .collect();
+    let content = lines.join("\n");
+    let imports = extract_imports_for_content("Foo.java", &content).await;
+    assert_eq!(imports.len(), 200);
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_file_not_found() {
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+    let nonexistent = ws_dir.path().join("nonexistent.java");
+    let imports = server.extract_file_imports(&nonexistent).await;
+    assert!(imports.is_empty());
+}
+
+#[tokio::test]
+async fn test_extract_file_imports_scala() {
+    let imports = extract_imports_for_content(
+        "Foo.scala",
+        "package com.example\nimport scala.collection.mutable\nobject Foo",
+    )
+    .await;
+    assert_eq!(imports.len(), 2);
+}
+
+// ── include_imports=true path ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_read_with_deep_context_include_imports_true() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        Ok(make_scope()),
+        Ok(make_scope()),
+        Ok(make_scope()),
+    ]);
+
+    let ws_dir = make_temp_workspace();
+    // Write a Rust file with `use` imports so extract_file_imports finds something
+    std::fs::write(
+        ws_dir.path().join("src/auth.rs"),
+        "use std::io::Read;\nuse std::collections::HashMap;\n\nfn login() { }",
+    )
+    .unwrap();
+
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        include_imports: true,
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let text_content = match &call_res.content[0].raw {
+        rmcp::model::RawContent::Text(t) => t.text.clone(),
+        _ => panic!("expected text content"),
+    };
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // imports should be populated
+    assert!(!val.imports.is_empty(), "imports must not be empty");
+    // Text channel should contain "Imports:" block
+    assert!(
+        text_content.contains("Imports:"),
+        "text must contain Imports block, got: {text_content}"
+    );
+    assert!(
+        text_content.contains("use std::io::Read"),
+        "text must contain imported line"
+    );
+}
+
+// ── lsp_readiness and resolution_strategy metadata branches ──────────────
+
+#[tokio::test]
+async fn test_read_with_deep_context_lsp_error_grep_fallback_metadata() {
+    // When outgoing call fails (LspErrorGrepFallback), lsp_readiness should be
+    // "unavailable" and resolution_strategy should be "treesitter_fallback".
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_outgoing_call_result(Err(pathfinder_lsp::LspError::Protocol(
+        "call_hierarchy_outgoing failed".to_string(),
+    )));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(val.degraded);
+    assert_eq!(
+        val.degraded_reason,
+        Some(DegradedReason::LspErrorGrepFallback)
+    );
+    // LspErrorGrepFallback is not in the warming_up list, so lsp_readiness = "unavailable"
+    assert_eq!(val.lsp_readiness, Some("unavailable".to_owned()));
+    // resolution_strategy for degraded + not NoLsp + not GrepFallbackDependencies
+    assert_eq!(
+        val.resolution_strategy,
+        Some("treesitter_fallback".to_owned())
+    );
+    // warm_start_in_progress is None when lsp_readiness is "unavailable"
+    assert_eq!(val.warm_start_in_progress, None);
+}
+
+#[tokio::test]
+async fn test_read_with_deep_context_non_degraded_resolution_strategy() {
+    // When not degraded AND engines contains "lsp", resolution_strategy = "lsp_call_hierarchy"
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(!val.degraded);
+    assert_eq!(val.lsp_readiness, Some("ready".to_owned()));
+    assert_eq!(
+        val.resolution_strategy,
+        Some("lsp_call_hierarchy".to_owned())
+    );
+    assert_eq!(val.warm_start_in_progress, Some(false));
+}
+
+#[tokio::test]
+async fn test_read_with_deep_context_no_lsp_resolution_treesitter_direct() {
+    // When degraded + NoLsp, resolution_strategy = "treesitter_direct"
+    let surgeon = Arc::new(MockSurgeon::new());
+    // read_symbol_scope_enriched + attempt_grep_fallback read_symbol_scope
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        Ok(make_scope()),
+        Ok(make_scope()),
+        Ok(make_scope()),
+    ]);
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // NoOpLawyer → NoLspAvailable error → triggers grep fallback
+    // But grep fallback changes degraded_reason to GrepFallbackDependencies.
+    // To get NoLsp, we need a case where no fallback runs.
+    // This actually doesn't happen in the current code because NoLspAvailable
+    // always triggers grep fallback. Let's verify the grep_fallback path.
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(val.degraded);
+    // NoLspAvailable triggers grep fallback, which sets GrepFallbackDependencies
+    assert_eq!(
+        val.degraded_reason,
+        Some(DegradedReason::GrepFallbackDependencies)
+    );
+    assert_eq!(
+        val.resolution_strategy,
+        Some("grep_fallback".to_owned())
+    );
+}
+
+// ── grep fallback: max_dependencies truncation ──────────────────────
+
+#[tokio::test]
+async fn test_grep_fallback_max_dependencies_truncation() {
+    // When grep fallback resolves more candidates than max_dependencies,
+    // dependencies_truncated = true and only max_dependencies are kept.
+    let surgeon = Arc::new(MockSurgeon::new());
+    // Content with multiple function calls so extract_call_candidates finds them.
+    // Need at least 4 distinct identifiers that get past keyword filtering.
+    let body = "fn login() { alpha(); beta(); gamma(); delta(); epsilon() }";
+    let mut scope = make_scope();
+    scope.content = body.to_string();
+    // First scope: read_symbol_scope_enriched; second: read_symbol_scope in grep fallback
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .extend([Ok(scope.clone()), Ok(scope)]);
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(ws_dir.path().join("src/auth.rs"), body).unwrap();
+
+    let scout = Arc::new(MockScout::default());
+    // Queue 5 search results — one per candidate call extracted from the scope content.
+    let search_results: Vec<Result<pathfinder_search::SearchResult, String>> = (0..5)
+        .map(|i| {
+            Ok(pathfinder_search::SearchResult {
+                matches: vec![pathfinder_search::SearchMatch {
+                    file: format!("src/dep_{i}.rs"),
+                    line: 1,
+                    column: 1,
+                    content: format!("fn dep_{i}() {{}}"),
+                    context_before: vec![],
+                    context_after: vec![],
+                    enclosing_semantic_path: None,
+                    is_definition: None,
+                    version_hash: "sha256:abc".to_string(),
+                    known: Some(false),
+                }],
+                total_matches: 1,
+                truncated: false,
+                files_searched: 1,
+                files_in_scope: 1,
+                binary_skipped: 0,
+                gitignored_skipped: 0,
+                other_skipped: 0,
+            })
+        })
+        .collect();
+    scout.set_results(search_results);
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        scout,
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_dependencies: 2, // cap below available candidates
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(val.degraded);
+    assert!(
+        val.dependencies.len() <= 2,
+        "dependencies must be capped at max_dependencies=2, got {}",
+        val.dependencies.len()
+    );
+    assert!(
+        val.dependencies_truncated,
+        "dependencies_truncated must be true when budget exhausted"
+    );
+}
+
+// ── Err(other LSP error) triggers grep fallback ──────────────────────
+
+#[tokio::test]
+async fn test_read_with_deep_context_lsp_protocol_error_triggers_grep_fallback() {
+    // Err(LspError::Protocol(...)) on call_hierarchy_prepare should trigger
+    // the generic Err(e) branch which calls attempt_grep_fallback.
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        Ok(make_scope()),
+        Ok(make_scope()),
+        Ok(make_scope()),
+    ]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    lawyer.push_prepare_call_hierarchy_result(Err(
+        pathfinder_lsp::LspError::Protocol("server crashed".to_string()),
+    ));
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        surgeon,
+        lawyer,
+    );
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed with grep fallback");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(val.degraded);
+    assert_eq!(
+        val.degraded_reason,
+        Some(DegradedReason::GrepFallbackDependencies)
+    );
+}

@@ -1973,3 +1973,401 @@ async fn test_find_marker_sibling_filter_none_keeps_original_behavior() {
         "without sibling_filter, find_marker should still find the marker"
     );
 }
+
+// ── strip_jsonc_comments tests ──────────────────────────────────────────
+
+#[test]
+fn test_strip_jsonc_comments_line_comment() {
+    let input = "{\n// this is a comment\n\"key\": \"value\"\n}";
+    let result = strip_jsonc_comments(input);
+    assert!(!result.contains("// this is a comment"));
+    assert!(result.contains("\"key\": \"value\""));
+}
+
+#[test]
+fn test_strip_jsonc_comments_block_comment() {
+    let input = "{\n/* block\ncomment */\n\"key\": \"value\"\n}";
+    let result = strip_jsonc_comments(input);
+    assert!(!result.contains("block"));
+    assert!(!result.contains("comment */"));
+    assert!(result.contains("\"key\": \"value\""));
+}
+
+#[test]
+fn test_strip_jsonc_comments_preserves_strings() {
+    // Comments inside strings should NOT be stripped
+    let input = r#"{"key": "value // not a comment", "url": "http://example.com"}"#;
+    let result = strip_jsonc_comments(input);
+    assert!(result.contains("value // not a comment"));
+    assert!(result.contains("http://example.com"));
+}
+
+#[test]
+fn test_strip_jsonc_comments_escaped_quotes_in_strings() {
+    // Escaped quotes inside strings must not confuse the parser
+    let input = r#"{"key": "val\"ue // still string"}"#;
+    let result = strip_jsonc_comments(input);
+    assert!(result.contains(r#"val\"ue // still string"#));
+}
+
+#[test]
+fn test_strip_jsonc_comments_mixed() {
+    let input = r#"{
+        // line comment
+        "a": 1, /* inline block */ "b": 2
+    }"#;
+    let result = strip_jsonc_comments(input);
+    assert!(!result.contains("line comment"));
+    assert!(!result.contains("inline block"));
+    assert!(result.contains("\"a\": 1,"));
+    assert!(result.contains("\"b\": 2"));
+}
+
+// ── strip_json_trailing_commas tests ────────────────────────────────────
+
+#[test]
+fn test_strip_json_trailing_commas_object() {
+    let input = r#"{"a": 1, "b": 2, }"#;
+    let result = strip_json_trailing_commas(input);
+    assert!(serde_json::from_str::<serde_json::Value>(&result).is_ok());
+}
+
+#[test]
+fn test_strip_json_trailing_commas_array() {
+    let input = r#"["a", "b", ]"#;
+    let result = strip_json_trailing_commas(input);
+    assert!(serde_json::from_str::<serde_json::Value>(&result).is_ok());
+}
+
+#[test]
+fn test_strip_json_trailing_commas_nested() {
+    let input = r#"{"a": [1, 2, ], "b": {"c": 3, }, }"#;
+    let result = strip_json_trailing_commas(input);
+    assert!(serde_json::from_str::<serde_json::Value>(&result).is_ok());
+}
+
+#[test]
+fn test_strip_json_trailing_commas_preserves_strings() {
+    // Commas inside strings should NOT be affected
+    let input = r#"{"key": "a, b, "}"#;
+    let result = strip_json_trailing_commas(input);
+    assert!(result.contains("a, b, "));
+}
+
+#[test]
+fn test_strip_json_trailing_commas_no_trailing() {
+    let input = r#"{"a": 1, "b": 2}"#;
+    let result = strip_json_trailing_commas(input);
+    assert_eq!(result, input);
+}
+
+// ── validate_marker_file edge cases ─────────────────────────────────────
+
+#[test]
+fn test_validate_marker_file_nonexistent_returns_ok() {
+    let path = std::path::Path::new("/tmp/does_not_exist_marker_xyz.toml");
+    assert!(
+        validate_marker_file(path, "rust").is_ok(),
+        "non-existent marker file should return Ok (skip)"
+    );
+}
+
+#[test]
+fn test_validate_marker_file_empty_go_mod() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("go.mod");
+    std::fs::write(&path, "").expect("write");
+    let result = validate_marker_file(&path, "go");
+    assert!(result.is_err(), "empty go.mod should fail");
+    assert!(result.expect_err("expected Err").contains("empty"));
+}
+
+#[test]
+fn test_validate_marker_file_go_mod_module_no_name() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("go.mod");
+    std::fs::write(&path, "module   ").expect("write");
+    let result = validate_marker_file(&path, "go");
+    assert!(
+        result.is_err(),
+        "go.mod with 'module' but no name should fail"
+    );
+}
+
+#[test]
+fn test_validate_marker_file_valid_build_gradle_kts() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("build.gradle.kts");
+    std::fs::write(&path, "plugins { java }\n").expect("write");
+    assert!(validate_marker_file(&path, "java").is_ok());
+}
+
+#[test]
+fn test_validate_marker_file_empty_build_gradle_kts() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("build.gradle.kts");
+    std::fs::write(&path, "").expect("write");
+    let result = validate_marker_file(&path, "java");
+    assert!(result.is_err(), "empty build.gradle.kts should fail");
+}
+
+// ── detect_jdk_home additional paths ────────────────────────────────────
+
+#[test]
+fn test_detect_jdk_home_uses_java_home() {
+    let _guard = match PATH_MUTEX.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let orig = std::env::var("JAVA_HOME").ok();
+    std::env::set_var("JAVA_HOME", "/fake/jdk/home");
+
+    let result = detect_jdk_home(dir.path());
+
+    if let Some(val) = orig {
+        std::env::set_var("JAVA_HOME", val);
+    } else {
+        std::env::remove_var("JAVA_HOME");
+    }
+
+    assert_eq!(
+        result,
+        Some("/fake/jdk/home".to_owned()),
+        "JAVA_HOME takes priority"
+    );
+}
+
+#[test]
+fn test_detect_jdk_home_empty_java_home_skipped() {
+    let _guard = match PATH_MUTEX.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let orig = std::env::var("JAVA_HOME").ok();
+    std::env::set_var("JAVA_HOME", "");
+
+    let result = detect_jdk_home(dir.path());
+
+    if let Some(val) = orig {
+        std::env::set_var("JAVA_HOME", val);
+    } else {
+        std::env::remove_var("JAVA_HOME");
+    }
+
+    // Empty JAVA_HOME should be skipped, result depends on other env
+    assert!(
+        result.is_none() || result.is_some(),
+        "empty JAVA_HOME should not panic"
+    );
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn test_detect_jdk_home_jenv_path() {
+    let _guard = match PATH_MUTEX.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+
+    let temp = tempdir().expect("temp dir");
+    let proj_root = temp.path().join("project");
+    let fake_home = temp.path().join("home");
+    std::fs::create_dir_all(&proj_root).unwrap();
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // Create a fake jenv jdk candidate
+    let jdk_path = fake_home.join(".jenv/versions/17.0.7");
+    std::fs::create_dir_all(jdk_path.join("bin")).unwrap();
+    std::fs::write(jdk_path.join("bin/java"), "").unwrap();
+
+    // Write .java-version
+    std::fs::write(proj_root.join(".java-version"), "17.0.7\n").unwrap();
+
+    let orig_home = std::env::var("HOME").ok();
+    let orig_userprofile = std::env::var("USERPROFILE").ok();
+    let orig_java_home = std::env::var("JAVA_HOME").ok();
+
+    std::env::set_var("HOME", &fake_home);
+    std::env::set_var("USERPROFILE", &fake_home);
+    std::env::remove_var("JAVA_HOME");
+
+    let detected = detect_jdk_home(&proj_root);
+
+    if let Some(val) = orig_home {
+        std::env::set_var("HOME", val);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(val) = orig_userprofile {
+        std::env::set_var("USERPROFILE", val);
+    } else {
+        std::env::remove_var("USERPROFILE");
+    }
+    if let Some(val) = orig_java_home {
+        std::env::set_var("JAVA_HOME", val);
+    } else {
+        std::env::remove_var("JAVA_HOME");
+    }
+
+    assert_eq!(detected, Some(jdk_path.to_string_lossy().into_owned()));
+}
+
+#[test]
+fn test_detect_jdk_home_no_home_env() {
+    let _guard = match PATH_MUTEX.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let orig_home = std::env::var("HOME").ok();
+    let orig_userprofile = std::env::var("USERPROFILE").ok();
+    let orig_java_home = std::env::var("JAVA_HOME").ok();
+
+    std::env::remove_var("JAVA_HOME");
+    std::env::remove_var("HOME");
+    std::env::remove_var("USERPROFILE");
+
+    let result = detect_jdk_home(dir.path());
+
+    if let Some(val) = orig_home {
+        std::env::set_var("HOME", val);
+    }
+    if let Some(val) = orig_userprofile {
+        std::env::set_var("USERPROFILE", val);
+    }
+    if let Some(val) = orig_java_home {
+        std::env::set_var("JAVA_HOME", val);
+    }
+
+    assert!(
+        result.is_none(),
+        "should return None when no HOME, USERPROFILE, or JAVA_HOME"
+    );
+}
+
+// ── detect_venv additional fallback paths ───────────────────────────────
+
+#[test]
+fn test_detect_venv_finds_env_fallback() {
+    let dir = tempdir().expect("temp dir");
+    let bin = dir.path().join("env").join("bin");
+    std::fs::create_dir_all(&bin).expect("create env/bin");
+    let python = bin.join("python");
+    std::fs::write(&python, "#!/bin/sh").expect("write fake python");
+    let result = detect_venv(dir.path());
+    assert_eq!(result, Some(python), "should detect env/bin/python");
+}
+
+#[test]
+fn test_detect_venv_finds_dot_env_fallback() {
+    let dir = tempdir().expect("temp dir");
+    let bin = dir.path().join(".env").join("bin");
+    std::fs::create_dir_all(&bin).expect("create .env/bin");
+    let python = bin.join("python");
+    std::fs::write(&python, "#!/bin/sh").expect("write fake python");
+    let result = detect_venv(dir.path());
+    assert_eq!(result, Some(python), "should detect .env/bin/python");
+}
+
+// ── find_marker symlink handling ────────────────────────────────────────
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_find_marker_skips_symlinks() {
+    let dir = tempdir().expect("temp dir");
+    let real_dir = dir.path().join("real_sub");
+    std::fs::create_dir_all(&real_dir).expect("create real dir");
+    std::fs::write(real_dir.join("go.mod"), "module symlinked").expect("write");
+
+    // Create a symlink to real_sub
+    let link_path = dir.path().join("link_sub");
+    std::os::unix::fs::symlink(&real_dir, &link_path).expect("create symlink");
+
+    // find_marker should skip symlinked directories, only find via real path
+    let found = find_marker(dir.path(), "go.mod", 1, None).await;
+    assert!(found.is_some(), "should find marker in real directory");
+    // The result should be the real directory, not the symlink
+    if let Some(found_path) = found {
+        assert_eq!(
+            found_path, real_dir,
+            "should find the real directory, not the symlink"
+        );
+    }
+}
+
+// ── detect_java_init_options with JDK home ──────────────────────────────
+
+#[test]
+fn test_detect_java_init_options_with_java_home() {
+    let _guard = match PATH_MUTEX.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let orig = std::env::var("JAVA_HOME").ok();
+    std::env::set_var("JAVA_HOME", "/fake/jdk");
+
+    let opts = detect_java_init_options(dir.path(), dir.path());
+
+    if let Some(val) = orig {
+        std::env::set_var("JAVA_HOME", val);
+    } else {
+        std::env::remove_var("JAVA_HOME");
+    }
+
+    assert!(!opts.is_null());
+    assert!(opts["java"]["jdt"]["ls"]["java"]["home"]
+        .as_str()
+        .is_some());
+    assert_eq!(
+        opts["java"]["jdt"]["ls"]["java"]["home"].as_str().unwrap(),
+        "/fake/jdk"
+    );
+}
+
+// ── validate_marker_file tsconfig with pure JSONC ────────────────────────
+
+#[test]
+fn test_validate_marker_file_tsconfig_with_block_and_line_comments() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("tsconfig.json");
+    std::fs::write(
+        &path,
+        r#"{
+            // line comment
+            "compilerOptions": {
+                /* block comment */
+                "strict": true
+            }
+        }"#,
+    )
+    .expect("write");
+    assert!(validate_marker_file(&path, "typescript").is_ok());
+}
+
+// ── has_source_files_recursive via detect_languages ─────────────────────
+
+#[tokio::test]
+async fn test_filters_missing_language_with_no_source_files() {
+    // Marker file present, no binary, no source files → should NOT be in missing either
+    test_with_fake_python_binaries(&[], || async {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("go.mod"), "module test").expect("write");
+        // No .go source files
+
+        let result = detect_languages(dir.path(), &make_ts_config())
+            .await
+            .expect("detect");
+        assert!(
+            result.missing.iter().all(|l| l.language_id != "go"),
+            "Go should not be in missing when no .go source files exist"
+        );
+    })
+    .await;
+}

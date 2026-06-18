@@ -402,3 +402,205 @@ fn test_pre_enrichment_dedup_preserves_all_unique() {
     assert_eq!(matches.len(), pre_count);
     assert_eq!(matches.len(), 3);
 }
+
+// ── Additional kind_matches_filter coverage ────────────────────────────
+
+#[test]
+fn test_kind_matches_filter_enum_exact() {
+    assert!(kind_matches_filter("enum", "enum"));
+    assert!(!kind_matches_filter("enum", "class"));
+    assert!(!kind_matches_filter("class", "enum"));
+}
+
+#[test]
+fn test_kind_matches_filter_constant_aliases() {
+    // filter="constant" should accept const, static, let
+    assert!(kind_matches_filter("const", "constant"));
+    assert!(kind_matches_filter("static", "constant"));
+    assert!(kind_matches_filter("let", "constant"));
+    assert!(kind_matches_filter("constant", "constant"));
+    // But not function-like things
+    assert!(!kind_matches_filter("function", "constant"));
+}
+
+#[test]
+fn test_kind_matches_filter_module_aliases() {
+    // filter="module" should accept mod, namespace
+    assert!(kind_matches_filter("mod", "module"));
+    assert!(kind_matches_filter("namespace", "module"));
+    assert!(kind_matches_filter("module", "module"));
+    assert!(!kind_matches_filter("class", "module"));
+}
+
+#[test]
+fn test_kind_matches_filter_struct_exact_only() {
+    // filter="struct" should only match struct, not class
+    assert!(kind_matches_filter("struct", "struct"));
+    assert!(!kind_matches_filter("class", "struct"));
+    assert!(!kind_matches_filter("interface", "struct"));
+}
+
+#[test]
+fn test_kind_matches_filter_unknown_filter_returns_false() {
+    // A filter value that doesn't match any known category returns false
+    // (unless kind == filter, which always returns true via exact match)
+    assert!(!kind_matches_filter("function", "banana"));
+    assert!(!kind_matches_filter("class", "banana"));
+    // kind == filter exact match always returns true, even for unknown categories
+    assert!(kind_matches_filter("banana", "banana"));
+    // But mismatched unknowns return false
+    assert!(!kind_matches_filter("apple", "banana"));
+}
+
+#[test]
+fn test_kind_matches_filter_interface_class_cross() {
+    // filter="class" accepts class, struct, interface
+    assert!(kind_matches_filter("struct", "class"));
+    assert!(kind_matches_filter("interface", "class"));
+    assert!(kind_matches_filter("class", "class"));
+    assert!(!kind_matches_filter("enum", "class"));
+}
+
+// ── Additional truncate_preview coverage ────────────────────────────
+
+#[test]
+fn test_truncate_preview_exact_boundary() {
+    // When content.len() == max_chars, no truncation
+    assert_eq!(truncate_preview("12345", 5), "12345");
+}
+
+#[test]
+fn test_truncate_preview_unicode_shorter_than_max() {
+    // Unicode string with fewer chars than max_chars — no truncation
+    // "αβγ" has 3 chars but 6 bytes
+    let unicode = "αβγ";
+    assert_eq!(truncate_preview(unicode, 10), "αβγ");
+}
+
+#[test]
+fn test_truncate_preview_unicode_at_char_boundary() {
+    // Unicode string where char count > max_chars but byte count also > max_chars
+    // "αβγδε" has 5 chars, we want 3 → "αβγ..."
+    let unicode = "αβγδε";
+    assert_eq!(truncate_preview(unicode, 3), "αβγ...");
+}
+
+// ── Additional extract_name_from_line coverage ──────────────────────
+
+#[test]
+fn test_extract_name_from_line_var_let_const() {
+    assert_eq!(extract_name_from_line("const MAX_SIZE = 100"), "MAX_SIZE");
+    assert_eq!(
+        extract_name_from_line("let myVariable = 42"),
+        "myVariable"
+    );
+    assert_eq!(extract_name_from_line("var count = 0"), "count");
+    assert_eq!(extract_name_from_line("static INSTANCE = null"), "INSTANCE");
+}
+
+#[test]
+fn test_extract_name_from_line_mod_impl() {
+    assert_eq!(extract_name_from_line("mod utils;"), "utils");
+    assert_eq!(extract_name_from_line("impl MyStruct {"), "MyStruct");
+}
+
+// ── Additional extract_identifier_prefix coverage ───────────────────
+
+#[test]
+fn test_extract_identifier_prefix_single_char() {
+    assert_eq!(extract_identifier_prefix("x"), Some("x"));
+    assert_eq!(extract_identifier_prefix("_"), Some("_"));
+}
+
+#[test]
+fn test_extract_identifier_prefix_with_special_chars() {
+    // Stops at first non-identifier char
+    assert_eq!(extract_identifier_prefix("a.b"), Some("a"));
+    assert_eq!(extract_identifier_prefix("x+y"), Some("x"));
+    assert_eq!(extract_identifier_prefix("foo[0]"), Some("foo"));
+}
+
+// ── Additional is_workspace_file coverage ───────────────────────────
+
+#[test]
+fn test_is_workspace_file_absolute_path_inside_workspace() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Absolute path that resolves to inside the workspace should return true
+    let dir = tempfile::tempdir()?;
+    let canonical = dir.path().canonicalize()?;
+    std::fs::create_dir_all(dir.path().join("src"))?;
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}")?;
+
+    let abs_path = dir.path().join("src/main.rs");
+    assert!(is_workspace_file(&abs_path, dir.path(), &canonical));
+    Ok(())
+}
+
+#[test]
+fn test_is_workspace_file_absolute_path_nonexistent_fails() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Absolute path to non-existent file should fail canonicalize and return false
+    let dir = tempfile::tempdir()?;
+    let canonical = dir.path().canonicalize()?;
+
+    let abs_path = dir.path().join("nonexistent/deep/file.rs");
+    assert!(!is_workspace_file(&abs_path, dir.path(), &canonical));
+    Ok(())
+}
+
+#[test]
+fn test_is_workspace_file_absolute_path_outside_workspace() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = tempfile::tempdir()?;
+    let canonical = dir.path().canonicalize()?;
+
+    // /tmp is outside our workspace
+    let outside = std::path::Path::new("/tmp/some_file.rs");
+    // Only test if /tmp exists
+    if outside.parent().map_or(false, |p| p.exists()) {
+        assert!(!is_workspace_file(outside, dir.path(), &canonical));
+    }
+    Ok(())
+}
+
+// ── Additional relevance_score coverage ─────────────────────────────
+
+#[test]
+fn test_relevance_score_empty_strings() {
+    // Empty query matches empty text exactly
+    assert_eq!(relevance_score("", ""), 3);
+    // Empty query is prefix of everything
+    assert_eq!(relevance_score("", "anything"), 2);
+}
+
+// ── infer_kind_from_line additional coverage ────────────────────────
+
+#[test]
+fn test_infer_kind_from_line_enum() {
+    assert_eq!(infer_kind_from_line("enum Color {"), "enum");
+    assert_eq!(infer_kind_from_line("pub enum Direction {"), "enum");
+}
+
+#[test]
+fn test_infer_kind_from_line_var_let() {
+    assert_eq!(infer_kind_from_line("var x = 10"), "constant");
+    assert_eq!(infer_kind_from_line("let y = 20"), "constant");
+}
+
+#[test]
+fn test_infer_kind_from_line_module() {
+    assert_eq!(infer_kind_from_line("module MyModule"), "module");
+}
+
+// ── extract_symbol_name_from_path edge cases ────────────────────────
+
+#[test]
+fn test_extract_symbol_name_from_path_no_separator() {
+    assert_eq!(extract_symbol_name_from_path("noseparator"), "");
+}
+
+#[test]
+fn test_extract_symbol_name_from_path_empty() {
+    assert_eq!(extract_symbol_name_from_path(""), "");
+}
+
