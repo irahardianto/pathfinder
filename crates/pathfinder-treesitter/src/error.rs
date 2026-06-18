@@ -73,4 +73,3 @@ impl From<SurgeonError> for pathfinder_common::error::PathfinderError {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "error_test.rs"]
 mod tests;
-

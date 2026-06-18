@@ -1,6 +1,6 @@
 use super::*;
-use std::path::Path;
 use pathfinder_common::types::{SemanticPath, SymbolScope};
+use std::path::Path;
 
 struct DummySurgeon;
 

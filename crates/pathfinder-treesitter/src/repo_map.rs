@@ -972,7 +972,6 @@ async fn generate_symbols_skeleton(
     })
 }
 
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "repo_map_test.rs"]

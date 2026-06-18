@@ -484,7 +484,6 @@ fn build_file_groups(
         .collect()
 }
 
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "search_test.rs"]

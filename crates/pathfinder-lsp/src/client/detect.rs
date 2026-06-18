@@ -1442,7 +1442,6 @@ pub fn language_id_for_extension(ext: &str) -> Option<&'static str> {
     crate::plugin::plugin_for_extension(ext).map(crate::plugin::LanguagePlugin::language_id)
 }
 
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "detect_test.rs"]

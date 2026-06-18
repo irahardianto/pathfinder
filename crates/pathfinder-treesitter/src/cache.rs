@@ -450,7 +450,6 @@ impl AstCache {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "cache_test.rs"]

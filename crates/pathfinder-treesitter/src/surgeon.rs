@@ -197,4 +197,3 @@ pub trait Surgeon: Send + Sync {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "surgeon_test.rs"]
 mod tests;
-
