@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! The Surgeon — Tree-sitter engine for AST-aware operations in Pathfinder.
 //!
 //! This crate provides the [`Surgeon`] trait and its default implementation,

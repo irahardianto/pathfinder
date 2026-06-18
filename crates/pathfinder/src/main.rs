@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! Pathfinder — The Headless IDE MCP Server for AI Coding Agents.
 //!
 //! Entry point: parses CLI args, loads config, starts MCP server via stdio.

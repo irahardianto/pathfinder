@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! Pathfinder Common — shared types, errors, and infrastructure.
 //!
 //! This crate provides the foundational building blocks used by all

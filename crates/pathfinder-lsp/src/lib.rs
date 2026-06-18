@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! Pathfinder LSP client — the Lawyer engine.
 //!
 //! This crate provides the [`Lawyer`] trait (the testability boundary for
