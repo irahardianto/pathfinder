@@ -106,6 +106,7 @@ exclude_patterns = [
   "crates/pathfinder-lsp/src/client/response_parsers.rs",
   "crates/pathfinder-lsp/src/client/protocol.rs",
   "crates/pathfinder-lsp/src/lawyer.rs",
+  "crates/pathfinder-lsp/src/client/process.rs",
 ]
 
 # ──────────────────────────────────────────────
