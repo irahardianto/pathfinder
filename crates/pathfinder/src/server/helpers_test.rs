@@ -432,3 +432,22 @@ fn test_invalid_params_error_creates_invalid_params_code() {
         error_data.message
     );
 }
+
+#[test]
+fn test_pathfinder_to_error_data_ambiguous_symbol() {
+    let err = PathfinderError::AmbiguousSymbol {
+        semantic_path: "src/auth.ts::login".into(),
+        matches: vec!["match1".to_owned(), "match2".to_owned()],
+    };
+    let error_data = pathfinder_to_error_data(&err);
+    assert!(error_data.message.contains("Matches found: match1, match2"));
+}
+
+#[test]
+fn test_format_degraded_notice_unsupported_language() {
+    use pathfinder_common::types::DegradedReason;
+
+    let notice = format_degraded_notice(&DegradedReason::UnsupportedLanguage);
+    assert!(notice.contains("DEGRADED (unsupported_language)"));
+    assert!(notice.contains("results are UNAVAILABLE for this language"));
+}

@@ -1,6 +1,7 @@
 use super::*;
 use crate::client::fake_transport::FakeTransport;
-use crate::client::tests::make_running_client;
+use crate::client::tests::{client_with_descriptors, make_running_client};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn make_running_client_with_caps(language_id: &str) -> (LspClient, Arc<FakeTransport>) {
@@ -559,4 +560,85 @@ async fn test_is_warm_start_complete_delegation_after_set() {
         client.is_warm_start_complete(),
         "is_warm_start_complete should return true after flag is set"
     );
+}
+
+#[tokio::test]
+async fn test_lawyer_warm_start_for_languages() {
+    let client = client_with_descriptors(vec!["rust"], HashMap::new());
+    let lawyer: &dyn Lawyer = &client;
+    let handles = lawyer.warm_start_for_languages(&["rust".to_owned()]);
+    assert_eq!(handles.len(), 1);
+}
+
+#[tokio::test]
+async fn test_lawyer_touch_language() {
+    let (client, _fake) = make_running_client("rust");
+    let lawyer: &dyn Lawyer = &client;
+    lawyer.touch_language("rust");
+}
+
+#[tokio::test]
+async fn test_lawyer_open_document() {
+    let (client, _fake) = make_running_client("rust");
+    let workspace = Path::new("/workspace");
+    let lawyer: &dyn Lawyer = &client;
+    let result = lawyer
+        .open_document(workspace, Path::new("src/main.rs"), "fn main() {}")
+        .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_lawyer_goto_definition_uri_error() {
+    let (client, _fake) = make_running_client_with_caps("rust");
+    let result = client
+        .goto_definition(Path::new("relative_path"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(result.is_err());
+    match result {
+        Err(LspError::Protocol(msg)) => assert!(msg.contains("cannot convert file path to URI")),
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_lawyer_call_hierarchy_prepare_uri_error() {
+    let (client, _fake) = make_running_client_with_caps("rust");
+    let result = client
+        .call_hierarchy_prepare(Path::new("relative_path"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_lawyer_references_uri_error() {
+    let (client, _fake) = make_running_client_with_caps("rust");
+    let result = client
+        .references(Path::new("relative_path"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_lawyer_goto_implementation_uri_error() {
+    let (client, _fake) = make_running_client_with_caps("rust");
+    let result = client
+        .goto_implementation(Path::new("relative_path"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_lawyer_force_respawn() {
+    let (client, _fake) = make_running_client("rust");
+    let lawyer: &dyn Lawyer = &client;
+    let result = lawyer.force_respawn("rust").await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_lawyer_warm_start_for_languages_and_track() {
+    let client = client_with_descriptors(vec!["rust"], HashMap::new());
+    let lawyer: &dyn Lawyer = &client;
+    lawyer.warm_start_for_languages_and_track(&["rust".to_owned()]);
 }

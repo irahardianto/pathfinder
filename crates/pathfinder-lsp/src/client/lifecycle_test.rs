@@ -2884,3 +2884,295 @@ async fn test_notify_running_process_succeeds() {
         "notify on running process should succeed: {result:?}"
     );
 }
+
+#[tokio::test]
+async fn test_touch_language_updates_last_used_on_running() {
+    let (client, _fake) = make_running_client("rust");
+
+    let before = {
+        let entry = client.processes.get("rust").unwrap();
+        if let ProcessEntry::Running(state) = entry.value() {
+            state.transport.last_used()
+        } else {
+            panic!("expected Running");
+        }
+    };
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    client.touch_language("rust");
+
+    let after = {
+        let entry = client.processes.get("rust").unwrap();
+        if let ProcessEntry::Running(state) = entry.value() {
+            state.transport.last_used()
+        } else {
+            panic!("expected Running");
+        }
+    };
+
+    assert!(
+        after > before,
+        "touch_language should update last_used timestamp"
+    );
+}
+
+#[tokio::test]
+async fn test_warm_start_for_languages_tasks_executed() {
+    let client = client_with_descriptors(vec!["rust"], HashMap::new());
+    let handles = client.warm_start_for_languages(&["rust".to_owned()]);
+    assert_eq!(handles.len(), 1);
+    for h in handles {
+        let _ = h.await;
+    }
+}
+
+const PYTHON_LSP_SERVER: &str = r#"
+import sys, json, time
+
+def read_msg():
+    content_len = None
+    while True:
+        line = b""
+        while not line.endswith(b"\n"):
+            c = sys.stdin.buffer.read(1)
+            if not c:
+                return None
+            line += c
+        line = line.strip()
+        if not line:
+            break
+        if line.startswith(b"Content-Length:"):
+            content_len = int(line.split(b":")[1].strip())
+    if content_len is None:
+        return None
+    body = sys.stdin.buffer.read(content_len)
+    return json.loads(body.decode('utf-8'))
+
+def write_msg(msg):
+    body = json.dumps(msg).encode('utf-8')
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode('utf-8') + body)
+    sys.stdout.buffer.flush()
+
+# Process initialize request
+msg = read_msg()
+if msg and "id" in msg:
+    opts = msg.get("params", {}).get("initializationOptions", {})
+    if isinstance(opts, dict) and opts.get("sleep_before_respond"):
+        time.sleep(0.5)
+    write_msg({
+        "jsonrpc": "2.0",
+        "id": msg["id"],
+        "result": {
+            "capabilities": {
+                "definitionProvider": True,
+                "callHierarchyProvider": True,
+                "referencesProvider": True,
+                "implementationProvider": True
+            }
+        }
+    })
+
+# Read loop
+while True:
+    msg = read_msg()
+    if msg is None:
+        break
+"#;
+
+#[tokio::test]
+async fn test_start_process_success_path_with_python_lsp() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let descriptor = LanguageLsp {
+        language_id: "python-test".to_owned(),
+        command: "python3".to_owned(),
+        args: vec!["-c".to_owned(), PYTHON_LSP_SERVER.to_owned()],
+        root: dir.path().to_path_buf(),
+        init_timeout_secs: Some(5),
+        auto_plugins: vec![],
+        init_options: serde_json::Value::Null,
+    };
+
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+    let client = LspClient {
+        descriptors: Arc::new(vec![descriptor.clone()]),
+        missing_languages: Arc::new(Vec::new()),
+        processes: Arc::new(DashMap::new()),
+        init_locks: Arc::new(DashMap::new()),
+        dispatcher: Arc::new(RequestDispatcher::new()),
+        shutdown_tx: Arc::new(shutdown_tx),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        doc_versions: Arc::new(DashMap::new()),
+        warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+    };
+
+    let result = client.start_process(descriptor, 0).await;
+    assert!(
+        result.is_ok(),
+        "should successfully start and initialize: {result:?}"
+    );
+
+    let entry = client.processes.get("python-test");
+    assert!(entry.is_some());
+    let is_running = matches!(entry.unwrap().value(), ProcessEntry::Running(_));
+    assert!(is_running, "process should be running");
+
+    // Clean up
+    client.shutdown();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_start_process_shutdown_during_init() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let descriptor = LanguageLsp {
+        language_id: "python-test".to_owned(),
+        command: "python3".to_owned(),
+        args: vec!["-c".to_owned(), PYTHON_LSP_SERVER.to_owned()],
+        root: dir.path().to_path_buf(),
+        init_timeout_secs: Some(5),
+        auto_plugins: vec![],
+        init_options: serde_json::json!({
+            "sleep_before_respond": true
+        }),
+    };
+
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+    let client = LspClient {
+        descriptors: Arc::new(vec![descriptor.clone()]),
+        missing_languages: Arc::new(Vec::new()),
+        processes: Arc::new(DashMap::new()),
+        init_locks: Arc::new(DashMap::new()),
+        dispatcher: Arc::new(RequestDispatcher::new()),
+        shutdown_tx: Arc::new(shutdown_tx),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        doc_versions: Arc::new(DashMap::new()),
+        warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+    };
+
+    let client_clone = client.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        client_clone.shutdown();
+    });
+
+    let result = client.start_process(descriptor, 0).await;
+    assert!(
+        matches!(result, Err(LspError::ConnectionLost)),
+        "should return ConnectionLost because shutdown was requested: {result:?}"
+    );
+
+    let entry = client.processes.get("python-test");
+    assert!(entry.is_none(), "process should not be inserted");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_detect_concurrent_lsp_linux_detailed_paths() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let sleep_bin = which::which("sleep")
+        .or_else(|_| {
+            which::which("/usr/bin/sleep").map(|_| std::path::PathBuf::from("/usr/bin/sleep"))
+        })
+        .or_else(|_| which::which("/bin/sleep").map(|_| std::path::PathBuf::from("/bin/sleep")))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/sleep"));
+    let unique_sleep = temp_dir.path().join("unique_sleep_bin");
+    std::fs::copy(&sleep_bin, &unique_sleep).expect("copy sleep");
+
+    let true_bin = which::which("true")
+        .or_else(|_| {
+            which::which("/usr/bin/true").map(|_| std::path::PathBuf::from("/usr/bin/true"))
+        })
+        .or_else(|_| which::which("/bin/true").map(|_| std::path::PathBuf::from("/bin/true")))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/true"));
+    let unique_true = temp_dir.path().join("unique_true_bin");
+    std::fs::copy(&true_bin, &unique_true).expect("copy true");
+
+    // 1. Own child process (should be skipped)
+    let mut child = std::process::Command::new(&unique_sleep)
+        .arg("10")
+        .spawn()
+        .unwrap();
+
+    let found_child = LspClient::detect_concurrent_lsp_linux("rust", "unique_sleep_bin");
+
+    // 2. Zombie child process (should be skipped)
+    let mut zombie = std::process::Command::new(&unique_true).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let found_zombie = LspClient::detect_concurrent_lsp_linux("rust", "unique_true_bin");
+
+    let mut orphaned_shell = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} 5 &", unique_sleep.display()))
+        .spawn()
+        .unwrap();
+    let _ = orphaned_shell.wait();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let found_external = LspClient::detect_concurrent_lsp_linux("rust", "unique_sleep_bin");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = zombie.kill();
+    let _ = zombie.wait();
+
+    assert!(!found_child);
+    assert!(!found_zombie);
+    assert!(found_external);
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[test]
+fn test_detect_concurrent_lsp_macos_detailed_paths() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let sleep_bin = which::which("sleep")
+        .or_else(|_| {
+            which::which("/usr/bin/sleep").map(|_| std::path::PathBuf::from("/usr/bin/sleep"))
+        })
+        .or_else(|_| which::which("/bin/sleep").map(|_| std::path::PathBuf::from("/bin/sleep")))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/sleep"));
+    let unique_sleep = temp_dir.path().join("unique_sleep_bin");
+    std::fs::copy(&sleep_bin, &unique_sleep).expect("copy sleep");
+
+    let true_bin = which::which("true")
+        .or_else(|_| {
+            which::which("/usr/bin/true").map(|_| std::path::PathBuf::from("/usr/bin/true"))
+        })
+        .or_else(|_| which::which("/bin/true").map(|_| std::path::PathBuf::from("/bin/true")))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/true"));
+    let unique_true = temp_dir.path().join("unique_true_bin");
+    std::fs::copy(&true_bin, &unique_true).expect("copy true");
+
+    // 1. Own child process (should be skipped)
+    let mut child = std::process::Command::new(&unique_sleep)
+        .arg("10")
+        .spawn()
+        .unwrap();
+
+    let found_child = LspClient::detect_concurrent_lsp_macos("rust", "unique_sleep_bin");
+
+    // 2. Zombie child process (should be skipped)
+    let mut zombie = std::process::Command::new(&unique_true).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let found_zombie = LspClient::detect_concurrent_lsp_macos("rust", "unique_true_bin");
+
+    let mut orphaned_shell = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} 5 &", unique_sleep.display()))
+        .spawn()
+        .unwrap();
+    let _ = orphaned_shell.wait();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let found_external = LspClient::detect_concurrent_lsp_macos("rust", "unique_sleep_bin");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = zombie.kill();
+    let _ = zombie.wait();
+
+    assert!(!found_child);
+    assert!(!found_zombie);
+    assert!(found_external);
+}

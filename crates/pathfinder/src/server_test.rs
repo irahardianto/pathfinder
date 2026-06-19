@@ -1028,3 +1028,103 @@ async fn test_deserialization_error_wrapping() {
     let result = server.read_file_impl(params).await;
     assert!(result.is_err(), "empty filepath should error");
 }
+
+#[tokio::test]
+async fn test_server_new_constructor() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let server = PathfinderServer::new(ws, config).await;
+
+    // Verify server basic capability
+    let info = server.get_info();
+    assert_eq!(info.server_info.name, "pathfinder");
+}
+
+#[tokio::test]
+async fn test_thin_outer_handlers() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_scout = MockScout::default();
+    let mock_surgeon = MockSurgeon::new();
+
+    // Mock surgeon explore response
+    mock_surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(pathfinder_treesitter::repo_map::RepoMapResult {
+            skeleton: "class Test {}".to_string(),
+            tech_stack: vec!["TypeScript".to_string()],
+            files_scanned: 1,
+            files_truncated: 0,
+            truncated_paths: vec![],
+            files_in_scope: 1,
+            coverage_percent: 100,
+            version_hashes: std::collections::HashMap::default(),
+        }));
+
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(mock_scout),
+        Arc::new(mock_surgeon),
+    );
+
+    // 1. explore
+    let explore_params = ExploreParams {
+        path: ".".to_owned(),
+        ..Default::default()
+    };
+    let res = server.explore(Parameters(explore_params)).await;
+    assert!(res.is_ok());
+
+    // 2. search
+    let search_params = SearchParams {
+        query: "test".to_owned(),
+        ..Default::default()
+    };
+    let res = server.search(Parameters(search_params)).await;
+    assert!(res.is_ok());
+
+    // 3. read
+    let read_params = ReadParams {
+        filepath: Some("nonexistent.txt".to_string()),
+        ..Default::default()
+    };
+    let res = server.read(Parameters(read_params)).await;
+    assert!(res.is_err()); // nonexistent file should error
+
+    // 4. inspect
+    let inspect_params = InspectParams {
+        semantic_path: "src/lib.rs::hello".to_string(),
+        ..Default::default()
+    };
+    let res = server.inspect(Parameters(inspect_params)).await;
+    assert!(res.is_err()); // nonexistent file in path
+
+    // 5. locate
+    let locate_params = LocateParams {
+        semantic_path: Some("src/lib.rs::hello".to_string()),
+        ..Default::default()
+    };
+    let res = server.locate(Parameters(locate_params)).await;
+    assert!(res.is_err());
+
+    // 6. trace
+    let trace_params = TraceParams {
+        semantic_path: "src/lib.rs::hello".to_string(),
+        ..Default::default()
+    };
+    let res = server.trace(Parameters(trace_params)).await;
+    assert!(res.is_err());
+
+    // 7. health
+    let health_params = HealthParams::default();
+    let res = server.health(Parameters(health_params)).await;
+    assert!(res.is_ok());
+}

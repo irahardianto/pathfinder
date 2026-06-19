@@ -772,3 +772,104 @@ async fn test_enclosing_symbol_detail_returns_symbol_info() {
     assert!(sym.start_line <= 3); // 0-indexed row 2 = line 3
     assert!(sym.end_line >= 4); // 0-indexed row 5 = line 6
 }
+
+#[tokio::test]
+async fn test_read_symbol_scope_missing_chain() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let workspace_root = PathBuf::from("/");
+    let sp = SemanticPath {
+        file_path: PathBuf::from("dummy.go"),
+        symbol_chain: None,
+    };
+    let err = surgeon
+        .read_symbol_scope(&workspace_root, &sp)
+        .await
+        .unwrap_err();
+    match err {
+        SurgeonError::SymbolNotFound { .. } => {}
+        _ => panic!("Expected SymbolNotFound"),
+    }
+}
+
+#[tokio::test]
+async fn test_read_symbol_scope_invalid_utf8() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+    // Write invalid UTF-8 bytes inside the function body
+    file.write_all(b"package main\n\nfunc Login() {\n\t// \xc3\x28\n}\n")
+        .unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+    let sp = SemanticPath::parse(&format!("{}::Login", relative.display())).unwrap();
+
+    let err = surgeon
+        .read_symbol_scope(&workspace_root, &sp)
+        .await
+        .unwrap_err();
+    match err {
+        SurgeonError::ParseError { reason, .. } => {
+            assert!(reason.contains("not valid UTF-8"));
+        }
+        _ => panic!("Expected ParseError, got: {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_read_source_file_invalid_utf8() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".go").tempfile().unwrap();
+    file.write_all(b"package main\n\n// \xc3\x28").unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    let err = surgeon
+        .read_source_file(&workspace_root, relative)
+        .await
+        .unwrap_err();
+    match err {
+        SurgeonError::ParseError { reason, .. } => {
+            assert!(reason.contains("not valid UTF-8"));
+        }
+        _ => panic!("Expected ParseError, got: {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_extract_symbols_preloaded_unsupported_language() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let workspace_root = PathBuf::from("/");
+    let err = surgeon
+        .extract_symbols_preloaded(
+            &workspace_root,
+            Path::new("dummy.txt"),
+            Arc::from(b"hello".as_slice()),
+            std::time::SystemTime::now(),
+        )
+        .await
+        .unwrap_err();
+    match err {
+        SurgeonError::UnsupportedLanguage(_) => {}
+        _ => panic!("Expected UnsupportedLanguage"),
+    }
+}
+
+#[tokio::test]
+async fn test_vue_sfc_no_script_block() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".vue").tempfile().unwrap();
+    file.write_all(b"<template><div>Hello</div></template>")
+        .unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    let (content, lang, symbols) = surgeon
+        .read_source_file(&workspace_root, relative)
+        .await
+        .unwrap();
+
+    assert_eq!(lang, "vue");
+    assert!(content.contains("<template>"));
+    // Since there is no script block, symbols will only contain template zone components if any, or be empty
+    let template_sym = symbols.iter().find(|s| s.name == "template");
+    assert!(template_sym.is_some());
+}

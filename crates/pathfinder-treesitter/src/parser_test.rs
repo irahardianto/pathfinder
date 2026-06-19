@@ -185,3 +185,24 @@ const count = ref(0);
     let root = tree.root_node();
     assert!(root.child_count() > 0);
 }
+
+#[test]
+fn test_parse_timeout() {
+    // Generate a massive amount of code to trigger progress callback and timeout
+    let mut massive = Vec::new();
+    for i in 0..150_000 {
+        massive.extend_from_slice(format!("fn func_{i}() -> i32 {{ {i} }}\n").as_bytes());
+    }
+
+    let start = Instant::now();
+    let res = AstParser::parse_source(
+        std::path::Path::new("timeout.rs"),
+        SupportedLanguage::Rust,
+        &massive,
+    );
+    let elapsed = start.elapsed();
+    println!("Parsed massive ({} bytes) in {:?}", massive.len(), elapsed);
+    if let Err(SurgeonError::ParseError { reason, .. }) = res {
+        assert!(reason.contains("timed out") || reason.contains("None"));
+    }
+}

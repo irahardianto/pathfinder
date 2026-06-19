@@ -461,3 +461,91 @@ async fn test_mock_stdout_only_headers_no_body() {
         other => panic!("expected Io error for missing body, got: {other:?}"),
     }
 }
+
+struct StatefulFailingWriter {
+    write_count: usize,
+    fail_on_write_count: Option<usize>,
+    fail_on_flush: bool,
+}
+
+impl tokio::io::AsyncWrite for StatefulFailingWriter {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        self.write_count += 1;
+        if let Some(target) = self.fail_on_write_count {
+            if self.write_count == target {
+                return std::task::Poll::Ready(Err(std::io::Error::other("mock write error")));
+            }
+        }
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        if self.fail_on_flush {
+            std::task::Poll::Ready(Err(std::io::Error::other("mock flush error")))
+        } else {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn test_write_message_fail_on_header() {
+    let mut writer = StatefulFailingWriter {
+        write_count: 0,
+        fail_on_write_count: Some(1),
+        fail_on_flush: false,
+    };
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "test"});
+    let result = write_message(&mut writer, &msg).await;
+    assert!(result.is_err());
+    match result {
+        Err(LspError::Io(err)) => assert!(err.to_string().contains("writing LSP header")),
+        other => panic!("expected LspError::Io(writing LSP header), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_write_message_fail_on_body() {
+    let mut writer = StatefulFailingWriter {
+        write_count: 0,
+        fail_on_write_count: Some(2),
+        fail_on_flush: false,
+    };
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "test"});
+    let result = write_message(&mut writer, &msg).await;
+    assert!(result.is_err());
+    match result {
+        Err(LspError::Io(err)) => assert!(err.to_string().contains("writing LSP body")),
+        other => panic!("expected LspError::Io(writing LSP body), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_write_message_fail_on_flush() {
+    let mut writer = StatefulFailingWriter {
+        write_count: 0,
+        fail_on_write_count: None,
+        fail_on_flush: true,
+    };
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "test"});
+    let result = write_message(&mut writer, &msg).await;
+    assert!(result.is_err());
+    match result {
+        Err(LspError::Io(err)) => assert!(err.to_string().contains("flushing LSP writer")),
+        other => panic!("expected LspError::Io(flushing LSP writer), got {other:?}"),
+    }
+}

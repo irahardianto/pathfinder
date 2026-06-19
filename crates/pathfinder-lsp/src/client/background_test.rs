@@ -842,3 +842,845 @@ async fn test_collect_idle_languages_skips_in_flight() {
         "should not collect languages with in-flight requests, got: {idle:?}"
     );
 }
+
+#[tokio::test]
+async fn test_reader_supervisor_crash_cancels_and_clears_docs() {
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+
+    doc_versions.insert(
+        "file:///foo.rs".to_string(),
+        ("rust".to_string(), std::sync::atomic::AtomicI32::new(1)),
+    );
+    doc_versions.insert(
+        "file:///bar.go".to_string(),
+        ("go".to_string(), std::sync::atomic::AtomicI32::new(1)),
+    );
+
+    let reader_handle = tokio::spawn(async {
+        panic!("simulated reader crash");
+    });
+    let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::clone(&reader_alive),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    reader_supervisor_task(
+        "rust".to_owned(),
+        reader_handle,
+        reader_alive,
+        Arc::clone(&processes),
+        dispatcher,
+        Arc::clone(&doc_versions),
+    )
+    .await;
+
+    assert!(!doc_versions.contains_key("file:///foo.rs"));
+    assert!(doc_versions.contains_key("file:///bar.go"));
+
+    let entry = processes.get("rust");
+    assert!(entry.is_some());
+    assert!(matches!(
+        entry.unwrap().value(),
+        ProcessEntry::Unavailable(_)
+    ));
+}
+
+#[tokio::test]
+async fn test_progress_watcher_warns_on_late_end() {
+    let (tx, rx) = broadcast::channel::<serde_json::Value>(5);
+    let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let indexing_source = Arc::new(parking_lot::Mutex::new(None));
+    let indexing_duration = Arc::new(parking_lot::Mutex::new(None));
+    let indexing_progress = Arc::new(parking_lot::Mutex::new(None));
+
+    let handle = tokio::spawn(progress_watcher_task(
+        "rust".to_owned(),
+        rx,
+        Arc::clone(&indexing_complete),
+        Arc::clone(&indexing_source),
+        Arc::clone(&indexing_duration),
+        Arc::clone(&indexing_progress),
+        Instant::now(),
+    ));
+
+    let msg = json!({
+        "jsonrpc": "2.0",
+        "method": "$/progress",
+        "params": {
+            "token": "indexing",
+            "value": {
+                "kind": "end"
+            }
+        }
+    });
+    tx.send(msg).unwrap();
+
+    drop(tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_idle_timeout_task_shutdown() {
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+    let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let handle = tokio::spawn(idle_timeout_task(
+        Arc::clone(&processes),
+        dispatcher,
+        doc_versions,
+        shutdown_rx,
+    ));
+
+    shutdown_tx.send(()).unwrap();
+    let _ = tokio::time::timeout(Duration::from_millis(500), handle)
+        .await
+        .expect("task did not exit on shutdown signal");
+    assert!(processes.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_idle_timeout_task_reaps_zombies_and_idle() {
+    use crate::client::process::LspTransport;
+
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+    let (_shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+    doc_versions.insert(
+        "file:///foo.rs".to_string(),
+        ("rust".to_string(), std::sync::atomic::AtomicI32::new(1)),
+    );
+
+    let dead_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    dead_transport.kill();
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: dead_transport as Arc<dyn crate::client::process::LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let idle_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    let stale_time = Instant::now().checked_sub(Duration::from_mins(20)).unwrap();
+    idle_transport.set_last_used(stale_time);
+
+    processes.insert(
+        "go".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: idle_transport as Arc<dyn crate::client::process::LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let handle = tokio::spawn(idle_timeout_task(
+        Arc::clone(&processes),
+        dispatcher,
+        Arc::clone(&doc_versions),
+        shutdown_rx,
+    ));
+
+    tokio::time::sleep(Duration::from_secs(65)).await;
+
+    let entry_rust = processes.get("rust");
+    assert!(entry_rust.is_some());
+    assert!(matches!(
+        entry_rust.unwrap().value(),
+        ProcessEntry::Unavailable(_)
+    ));
+    assert!(!doc_versions.contains_key("file:///foo.rs"));
+
+    assert!(!processes.contains_key("go"));
+
+    handle.abort();
+}
+
+use crate::client::process::LspTransport;
+use crate::client::ProcessLifecycle;
+use crate::client::UnavailableState;
+
+#[tokio::test]
+async fn test_progress_watcher_processes_normal_messages() {
+    let (tx, rx) = broadcast::channel::<serde_json::Value>(5);
+    let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let indexing_source = Arc::new(parking_lot::Mutex::new(None));
+    let indexing_duration = Arc::new(parking_lot::Mutex::new(None));
+    let indexing_progress = Arc::new(parking_lot::Mutex::new(None));
+
+    let handle = tokio::spawn(progress_watcher_task(
+        "rust".to_owned(),
+        rx,
+        Arc::clone(&indexing_complete),
+        Arc::clone(&indexing_source),
+        Arc::clone(&indexing_duration),
+        Arc::clone(&indexing_progress),
+        Instant::now(),
+    ));
+
+    // Send a report progress message
+    let report_msg = json!({
+        "jsonrpc": "2.0",
+        "method": "$/progress",
+        "params": {
+            "token": "indexing",
+            "value": {
+                "kind": "report",
+                "percentage": 50
+            }
+        }
+    });
+    tx.send(report_msg).unwrap();
+
+    // Send an end progress message
+    let end_msg = json!({
+        "jsonrpc": "2.0",
+        "method": "$/progress",
+        "params": {
+            "token": "indexing",
+            "value": {
+                "kind": "end"
+            }
+        }
+    });
+    tx.send(end_msg).unwrap();
+
+    drop(tx);
+    let _ = handle.await;
+
+    // Verify it was marked as complete and duration is set
+    assert!(indexing_complete.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(
+        *indexing_source.lock(),
+        Some(IndexingCompletionSource::Progress)
+    );
+}
+
+#[tokio::test]
+async fn test_progress_watcher_handles_lagged() {
+    let (tx, rx) = broadcast::channel::<serde_json::Value>(1);
+    let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let indexing_source = Arc::new(parking_lot::Mutex::new(None));
+    let indexing_duration = Arc::new(parking_lot::Mutex::new(None));
+    let indexing_progress = Arc::new(parking_lot::Mutex::new(None));
+
+    // Send two messages to a channel of capacity 1 to force lag
+    let report_msg = json!({
+        "jsonrpc": "2.0",
+        "method": "$/progress",
+        "params": {
+            "token": "indexing",
+            "value": {
+                "kind": "report",
+                "percentage": 50
+            }
+        }
+    });
+    tx.send(report_msg.clone()).unwrap();
+    tx.send(report_msg).unwrap(); // This will overflow the queue
+
+    let handle = tokio::spawn(progress_watcher_task(
+        "rust".to_owned(),
+        rx,
+        Arc::clone(&indexing_complete),
+        Arc::clone(&indexing_source),
+        Arc::clone(&indexing_duration),
+        Arc::clone(&indexing_progress),
+        Instant::now(),
+    ));
+
+    drop(tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_registration_watcher_applies_capability_updates() {
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let rx = dispatcher.subscribe_server_requests_for_language("rust");
+    let live_capabilities = Arc::new(parking_lot::RwLock::new(
+        crate::client::DetectedCapabilities::default(),
+    ));
+    let transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    transport.set_response("", json!({}));
+
+    let handle = tokio::spawn(registration_watcher_task(
+        "rust".to_owned(),
+        rx,
+        Arc::clone(&live_capabilities),
+        transport as Arc<dyn LspTransport>,
+    ));
+
+    let register_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 123,
+        "method": "client/registerCapability",
+        "params": {
+            "registrations": [{
+                "id": "reg-1",
+                "method": "textDocument/definition",
+                "registerOptions": {}
+            }]
+        }
+    });
+    dispatcher.dispatch_response_for_language("rust", &register_msg);
+
+    // Give watcher time to process
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Verify capability was updated
+    assert!(live_capabilities.read().definition_provider);
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_registration_watcher_applies_unregistrations() {
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let rx = dispatcher.subscribe_server_requests_for_language("rust");
+    let live_capabilities = Arc::new(parking_lot::RwLock::new(
+        crate::client::DetectedCapabilities::default(),
+    ));
+    let transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    transport.set_response("", json!({}));
+
+    // Pre-register capability
+    {
+        let mut caps = live_capabilities.write();
+        caps.apply_registration("textDocument/definition", "reg-1", &json!({}));
+        assert!(caps.definition_provider);
+    }
+
+    let handle = tokio::spawn(registration_watcher_task(
+        "rust".to_owned(),
+        rx,
+        Arc::clone(&live_capabilities),
+        transport as Arc<dyn LspTransport>,
+    ));
+
+    let unregister_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 124,
+        "method": "client/unregisterCapability",
+        "params": {
+            "unregistrations": [{
+                "id": "reg-1"
+            }]
+        }
+    });
+    dispatcher.dispatch_response_for_language("rust", &unregister_msg);
+
+    // Give watcher time to process
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Verify capability was unregistered
+    assert!(!live_capabilities.read().definition_provider);
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_registration_watcher_handles_lagged() {
+    let (tx, rx) = broadcast::channel::<serde_json::Value>(1);
+    let live_capabilities = Arc::new(parking_lot::RwLock::new(
+        crate::client::DetectedCapabilities::default(),
+    ));
+    let transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+
+    // Send two messages to force lagged
+    let msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "client/registerCapability",
+        "params": {
+            "registrations": []
+        }
+    });
+    tx.send(msg.clone()).unwrap();
+    tx.send(msg).unwrap();
+
+    let handle = tokio::spawn(registration_watcher_task(
+        "rust".to_owned(),
+        rx,
+        Arc::clone(&live_capabilities),
+        transport as Arc<dyn LspTransport>,
+    ));
+
+    drop(tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_registration_watcher_empty_unregister_payload() {
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let rx = dispatcher.subscribe_server_requests_for_language("rust");
+    let live_capabilities = Arc::new(parking_lot::RwLock::new(
+        crate::client::DetectedCapabilities::default(),
+    ));
+    let transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+
+    let handle = tokio::spawn(registration_watcher_task(
+        "rust".to_owned(),
+        rx,
+        Arc::clone(&live_capabilities),
+        transport as Arc<dyn LspTransport>,
+    ));
+
+    // Send unregisterCapability without unregistrations array (covers line 576)
+    let unregister_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 125,
+        "method": "client/unregisterCapability",
+        "params": {}
+    });
+    dispatcher.dispatch_response_for_language("rust", &unregister_msg);
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_reader_supervisor_clears_doc_versions_with_zero_cleared() {
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+
+    // Do NOT insert any document versions for "rust" to keep cleared = 0 (covers line 89 branch)
+    doc_versions.insert(
+        "file:///bar.go".to_string(),
+        ("go".to_string(), std::sync::atomic::AtomicI32::new(1)),
+    );
+
+    let reader_handle = tokio::spawn(async {
+        panic!("simulated reader crash");
+    });
+    let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::clone(&reader_alive),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    reader_supervisor_task(
+        "rust".to_owned(),
+        reader_handle,
+        reader_alive,
+        Arc::clone(&processes),
+        dispatcher,
+        Arc::clone(&doc_versions),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_reader_supervisor_raced_or_already_removed() {
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+
+    let reader_handle = tokio::spawn(async {});
+    let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    // Run supervisor when process is NOT in map (covers line 113)
+    reader_supervisor_task(
+        "rust".to_owned(),
+        reader_handle,
+        reader_alive,
+        Arc::clone(&processes),
+        dispatcher,
+        Arc::clone(&doc_versions),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_idle_timeout_task_unavailable_ignored_in_collect() {
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+    let (_shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+    // Insert an Unavailable entry (covers line 330)
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Unavailable(UnavailableState {
+            unavailable_since: Instant::now(),
+            backoff_attempt: 1,
+        }),
+    );
+
+    let handle = tokio::spawn(idle_timeout_task(
+        Arc::clone(&processes),
+        dispatcher,
+        doc_versions,
+        shutdown_rx,
+    ));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_idle_timeout_task_reap_race_and_remove_if_false() {
+    use crate::client::process::LspTransport;
+
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+    // We insert two dead processes: "rust" and "go".
+    // "rust" has a lifecycle child process.
+    let child_rust = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let dead_transport_rust = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    dead_transport_rust.kill();
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: dead_transport_rust as Arc<dyn LspTransport>,
+            lifecycle: Some(ProcessLifecycle {
+                child: Arc::new(tokio::sync::Mutex::new(child_rust)),
+            }),
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let dead_transport_go = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    dead_transport_go.kill();
+
+    processes.insert(
+        "go".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: dead_transport_go as Arc<dyn LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let processes_clone = Arc::clone(&processes);
+    let handle = tokio::spawn(idle_timeout_task(
+        processes_clone,
+        dispatcher,
+        doc_versions,
+        shutdown_rx,
+    ));
+
+    let processes_for_race = Arc::clone(&processes);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        processes_for_race.insert(
+            "go".to_owned(),
+            ProcessEntry::Unavailable(UnavailableState {
+                unavailable_since: Instant::now(),
+                backoff_attempt: 2,
+            }),
+        );
+    });
+
+    tokio::time::sleep(Duration::from_secs(65)).await;
+
+    let entry_rust = processes.get("rust");
+    assert!(entry_rust.is_some());
+    assert!(matches!(
+        entry_rust.unwrap().value(),
+        ProcessEntry::Unavailable(_)
+    ));
+
+    let entry_go = processes.get("go");
+    assert!(entry_go.is_some());
+    if let Some(entry) = entry_go {
+        if let ProcessEntry::Unavailable(ref state) = entry.value() {
+            assert_eq!(state.backoff_attempt, 2);
+        } else {
+            panic!("expected Unavailable for go");
+        }
+    }
+
+    shutdown_tx.send(()).unwrap();
+    let _ = handle.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_idle_timeout_task_idle_race_remove_if_false() {
+    use crate::client::process::LspTransport;
+
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+    // We insert two idle candidate processes: "rust" and "go".
+    // "rust" has a lifecycle child process.
+    let child_rust = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let idle_transport_rust = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    let stale_time = Instant::now().checked_sub(Duration::from_mins(20)).unwrap();
+    idle_transport_rust.set_last_used(stale_time);
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: idle_transport_rust as Arc<dyn LspTransport>,
+            lifecycle: Some(ProcessLifecycle {
+                child: Arc::new(tokio::sync::Mutex::new(child_rust)),
+            }),
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let idle_transport_go = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    idle_transport_go.set_last_used(stale_time);
+
+    processes.insert(
+        "go".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: idle_transport_go as Arc<dyn LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    let processes_clone = Arc::clone(&processes);
+    let handle = tokio::spawn(idle_timeout_task(
+        processes_clone,
+        dispatcher,
+        doc_versions,
+        shutdown_rx,
+    ));
+
+    let processes_for_race = Arc::clone(&processes);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        // Modify "go" so remove_if predicate on line 399 returns false (covers line 399 and 440)
+        processes_for_race.insert(
+            "go".to_owned(),
+            ProcessEntry::Unavailable(UnavailableState {
+                unavailable_since: Instant::now(),
+                backoff_attempt: 3,
+            }),
+        );
+    });
+
+    tokio::time::sleep(Duration::from_secs(65)).await;
+
+    // Verify "rust" was reaped (removed from map because it was idle)
+    assert!(!processes.contains_key("rust"));
+
+    // Verify "go" was kept as Unavailable because remove_if returned false
+    let entry_go = processes.get("go");
+    assert!(entry_go.is_some());
+    if let Some(entry) = entry_go {
+        if let ProcessEntry::Unavailable(ref state) = entry.value() {
+            assert_eq!(state.backoff_attempt, 3);
+        } else {
+            panic!("expected Unavailable for go");
+        }
+    }
+
+    shutdown_tx.send(()).unwrap();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_reader_supervisor_clears_doc_versions_with_lifecycle() {
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+
+    let child = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let reader_handle = tokio::spawn(async {
+        panic!("simulated reader crash");
+    });
+    let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            lifecycle: Some(ProcessLifecycle {
+                child: Arc::new(tokio::sync::Mutex::new(child)),
+            }),
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::clone(&reader_alive),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![],
+        })),
+    );
+
+    reader_supervisor_task(
+        "rust".to_owned(),
+        reader_handle,
+        reader_alive,
+        Arc::clone(&processes),
+        dispatcher,
+        Arc::clone(&doc_versions),
+    )
+    .await;
+}

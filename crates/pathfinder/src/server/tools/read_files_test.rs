@@ -1104,3 +1104,123 @@ async fn test_read_files_text_language_mapped_to_empty() {
         "language 'text' should be mapped to empty string, got: {lang}"
     );
 }
+
+#[tokio::test]
+async fn test_read_impl_validation_errors() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    // Both filepath and paths set
+    let params = ReadParams {
+        filepath: Some("test.txt".to_string()),
+        paths: Some(vec!["test.txt".to_string()]),
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // Neither filepath nor paths set
+    let params = ReadParams {
+        filepath: None,
+        paths: None,
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // end_line < start_line
+    let params = ReadParams {
+        filepath: Some("test.txt".to_string()),
+        start_line: 10,
+        end_line: Some(5),
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+}
+
+#[tokio::test]
+async fn test_read_files_missing_paths() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    let params = ReadParams {
+        paths: None,
+        ..Default::default()
+    };
+    let res = server.read_files_impl(params).await;
+    assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn test_read_single_file_edge_cases() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+
+    // Write source file
+    fs::write(ws_dir.path().join("test.rs"), "fn main() {}").expect("write");
+
+    // Case 1: mock_surgeon returns success but structured_content / metadata is missing,
+    // raw text fallback is used.
+    let mut call_res = CallToolResult::success(vec![rmcp::model::Content::text("raw text")]);
+    call_res.structured_content = None; // Ensure structured_content is None
+
+    mock_surgeon
+        .read_source_file_results
+        .lock()
+        .unwrap()
+        .push(Ok((String::new(), "text".to_string(), vec![]))); // raw fallback maps language
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        mock_surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = ReadParams {
+        max_lines_per_file: 10,
+        ..Default::default()
+    };
+
+    // We can invoke read_single_file directly since it's pub(crate)
+    let res = server.read_single_file("test.rs", &params).await;
+    assert_eq!(res.language.as_deref(), Some("text"));
+    assert_eq!(res.content, Some(String::new()));
+}
