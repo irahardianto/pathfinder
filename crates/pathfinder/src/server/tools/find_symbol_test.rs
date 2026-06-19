@@ -1,4 +1,13 @@
 use super::*;
+use crate::server::types::SearchParams as SearchToolParams;
+use pathfinder_common::config::PathfinderConfig;
+use pathfinder_common::sandbox::Sandbox;
+use pathfinder_common::types::WorkspaceRoot;
+use pathfinder_search::{MockScout, SearchMatch, SearchResult};
+use pathfinder_treesitter::mock::MockSurgeon;
+use pathfinder_treesitter::surgeon::{AccessLevel, ExtractedSymbol};
+use std::sync::Arc;
+use tempfile::tempdir;
 
 #[test]
 fn test_is_valid_identifier_start() {
@@ -599,4 +608,239 @@ fn test_extract_symbol_name_from_path_no_separator() {
 #[test]
 fn test_extract_symbol_name_from_path_empty() {
     assert_eq!(extract_symbol_name_from_path(""), "");
+}
+
+#[test]
+fn test_truncate_preview_unicode_char_count_less_than_max() {
+    // "こんにちは" has 5 characters but 15 bytes.
+    // 8 is less than 15 (bytes) but greater than 5 (chars).
+    assert_eq!(truncate_preview("こんにちは", 8), "こんにちは");
+}
+
+#[tokio::test]
+async fn test_find_symbol_impl_validation_errors() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    // Empty query
+    let params = SearchToolParams {
+        query: String::new(),
+        ..Default::default()
+    };
+    let res = server.find_symbol_impl(params).await;
+    assert!(res.is_err());
+    let Err(err) = res else {
+        panic!("expected error")
+    };
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+    // Query with path separators
+    let params = SearchToolParams {
+        query: "foo/bar".to_string(),
+        ..Default::default()
+    };
+    let res = server.find_symbol_impl(params).await;
+    assert!(res.is_err());
+    let Err(err2) = res else {
+        panic!("expected error")
+    };
+    assert_eq!(err2.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn test_find_symbol_impl_various_filters_and_fallbacks() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // Mock scout returning a mix of matches:
+    // 1. Unsafe path (with ..)
+    // 2. Denied path (denied by sandbox)
+    // 3. Prefix mismatch
+    // 4. Successful match with treesitter detail returning None (uses fallback)
+    // 5. Successful match with treesitter detail returning empty semantic path (uses fallback)
+    // 6. Match skipped due to kind filter mismatch
+    // 7. Successful match with empty fallback name (skipped)
+    let mock_scout = MockScout::default();
+    mock_scout.set_result(Ok(SearchResult {
+        matches: vec![
+            SearchMatch {
+                file: "../outside.rs".to_owned(),
+                line: 1,
+                column: 0,
+                content: "fn test() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "123".to_owned(),
+                known: None,
+            },
+            SearchMatch {
+                file: ".git/denied.rs".to_owned(), // denied by sandbox
+                line: 1,
+                column: 0,
+                content: "fn test() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "123".to_owned(),
+                known: None,
+            },
+            SearchMatch {
+                file: "src/prefix_mismatch.rs".to_owned(),
+                line: 1,
+                column: 0,
+                content: "fn test() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "123".to_owned(),
+                known: None,
+            },
+            SearchMatch {
+                file: "target_dir/match_fallback.rs".to_owned(),
+                line: 5,
+                column: 0,
+                content: "fn my_fallback() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "123".to_owned(),
+                known: None,
+            },
+            SearchMatch {
+                file: "target_dir/match_empty_ts.rs".to_owned(),
+                line: 10,
+                column: 0,
+                content: "fn my_empty_ts() {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "123".to_owned(),
+                known: None,
+            },
+            SearchMatch {
+                file: "target_dir/match_kind_mismatch.rs".to_owned(),
+                line: 15,
+                column: 0,
+                content: "struct Mismatch {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "123".to_owned(),
+                known: None,
+            },
+        ],
+        total_matches: 6,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }));
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+    // Match 4: returns Ok(None) -> uses fallback "my_fallback"
+    mock_surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+
+    // Match 5: returns Ok(Some(ExtractedSymbol)) with empty semantic_path -> uses fallback "my_empty_ts"
+    mock_surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(ExtractedSymbol {
+            name: String::new(),
+            semantic_path: String::new(),
+            kind: SymbolKind::Function,
+            byte_range: 0..10,
+            start_line: 10,
+            end_line: 10,
+            name_column: 0,
+            access_level: AccessLevel::Public,
+            children: vec![],
+        })));
+
+    // Match 6: returns Ok(None) -> fallback kind is "struct", but filter is "function" -> filtered out
+    mock_surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(mock_scout.clone()),
+        mock_surgeon,
+    );
+
+    let params = SearchToolParams {
+        query: "my".to_string(),
+        path_glob: "target_dir/*".to_string(),
+        kind: Some("function".to_string()),
+        ..Default::default()
+    };
+
+    let Json(res) = server.find_symbol_impl(params).await.expect("success");
+    // Should return 2 matches: my_fallback and my_empty_ts (sorted alphabetically by file name when relevance scores are equal)
+    assert_eq!(res.symbols.len(), 2);
+    assert_eq!(
+        res.symbols[0].semantic_path,
+        "target_dir/match_empty_ts.rs::my_empty_ts"
+    );
+    assert_eq!(
+        res.symbols[1].semantic_path,
+        "target_dir/match_fallback.rs::my_fallback"
+    );
+}
+
+#[tokio::test]
+async fn test_find_symbol_impl_scout_error_fallback() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_scout = MockScout::default();
+    mock_scout.set_result(Err("search failed".to_string()));
+
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(mock_scout),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    let params = SearchToolParams {
+        query: "test".to_string(),
+        ..Default::default()
+    };
+
+    let Json(res) = server.find_symbol_impl(params).await.expect("success");
+    assert_eq!(res.symbols.len(), 0);
+    assert_eq!(res.total_found, 0);
 }
