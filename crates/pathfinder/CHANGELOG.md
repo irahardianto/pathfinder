@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0](https://github.com/irahardianto/pathfinder/compare/v0.20.1...v0.21.0) - 2026-06-19
+
+### Added
+
+- *(mcp)* support multi-glob exclusions, brace expansion, and improved tool schemas
+
+### Other
+
+- *(pathfinder)* resolve clippy warnings in find_symbol_test
+- apply rustfmt styling changes across test suites
+- add unit test for SourceSymbol deserialization defaulting
+- fix clippy warnings in test files to pass CI
+- run cargo fmt --all to fix CI formatting check
+- *(TCV-001)* add unit tests for symbols.rs to reach 100% coverage
+- *(TCV-001)* round 4 - add 60+ tests, fix read_files concurrency bug
+- add 15 lifecycle tests + 8 semantic_path tests (TCV-001)
+- add 97 tests for LSP detect/parsers, deep_context, find_symbol (TCV-001)
+- add 56 server crate tests for types, helpers, and navigation (TCV-001)
+- add 59 unit tests to cover uncovered production lines (TCV-001)
+
 ## [0.20.1](https://github.com/irahardianto/pathfinder/compare/v0.20.0...v0.20.1) - 2026-06-18
 
 ### Fixed
