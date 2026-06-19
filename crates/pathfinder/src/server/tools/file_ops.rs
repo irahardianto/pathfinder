@@ -81,10 +81,13 @@ impl PathfinderServer {
         let total_lines = u32::try_from(all_lines.len()).unwrap_or(u32::MAX);
         let file_size_bytes = u64::try_from(raw_content.len()).unwrap_or(u64::MAX);
         let start_idx = params.start_line.saturating_sub(1) as usize;
-        let end_idx = (start_idx + max_lines as usize).min(all_lines.len());
-        let page_lines = &all_lines[start_idx..end_idx];
+        let (page_lines, truncated) = if start_idx < all_lines.len() {
+            let end_idx = (start_idx + max_lines as usize).min(all_lines.len());
+            (&all_lines[start_idx..end_idx], end_idx < all_lines.len())
+        } else {
+            (&[] as &[&str], false)
+        };
         let lines_returned = u32::try_from(page_lines.len()).unwrap_or(u32::MAX);
-        let truncated = end_idx < all_lines.len();
         // Prefix each line with its 1-indexed line number so agents can reference
         // locations without a follow-up call. Width is padded to align columns.
         let content: String = page_lines

@@ -189,7 +189,7 @@ impl PathfinderServer {
                     query: pattern,
                     is_regex: true,
                     path_glob: glob.clone(),
-                    exclude_glob: "**/node_modules/**".to_string(),
+                    exclude_glob: vec!["**/node_modules/**".to_string()],
                     max_results: 100,
                     offset: 0,
                     context_lines: 0,

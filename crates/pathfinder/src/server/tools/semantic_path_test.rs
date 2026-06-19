@@ -240,3 +240,51 @@ async fn test_get_semantic_path_none_symbol_text_format() {
         "text should suggest using read tool, got: {text}"
     );
 }
+
+#[tokio::test]
+async fn test_get_semantic_path_line_zero_rejected() {
+    let ws_dir = tempfile::tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let mock_surgeon = MockSurgeon::new();
+
+    let server = make_server(ws, mock_surgeon);
+    let params = LocateParams {
+        file: Some("src/auth.rs".to_owned()),
+        line: Some(0),
+        ..Default::default()
+    };
+
+    let result = server.get_semantic_path_impl(params).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("1-indexed"),
+        "error should mention 1-indexed, got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_get_semantic_path_empty_file_rejected() {
+    let ws_dir = tempfile::tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let mock_surgeon = MockSurgeon::new();
+
+    let server = make_server(ws, mock_surgeon);
+    let params = LocateParams {
+        file: Some(String::new()),
+        line: Some(1),
+        ..Default::default()
+    };
+
+    let result = server.get_semantic_path_impl(params).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("must not be empty"),
+        "error should mention file must not be empty, got: {}",
+        err.message
+    );
+}

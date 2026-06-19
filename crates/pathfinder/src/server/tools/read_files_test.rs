@@ -78,6 +78,17 @@ async fn test_read_files_happy_path() {
         assert!(file.version_hash.is_some());
         assert!(file.error.is_none());
     }
+
+    let text = match &result.content[0].raw {
+        rmcp::model::RawContent::Text(t) => t.text.clone(),
+        _ => panic!("expected text content"),
+    };
+    assert!(text.contains("1: fn main() {}"));
+    assert!(text.contains("2: fn test() {}"));
+    assert!(text.contains("1: const x = 1;"));
+    assert!(text.contains("2: const y = 2;"));
+    assert!(text.contains("1: def foo():"));
+    assert!(text.contains("2:     pass"));
 }
 
 #[tokio::test]
@@ -384,7 +395,7 @@ async fn test_read_files_max_lines_per_file_truncation() {
 
     let content_lines: Vec<&str> = file_result.content.as_ref().unwrap().lines().collect();
     assert_eq!(content_lines.len(), 3);
-    assert_eq!(file_result.total_lines.unwrap(), 3);
+    assert_eq!(file_result.total_lines.unwrap(), 10);
     assert_eq!(content_lines[0], "line1");
     assert_eq!(content_lines[2], "line3");
 }
@@ -1223,4 +1234,135 @@ async fn test_read_single_file_edge_cases() {
     let res = server.read_single_file("test.rs", &params).await;
     assert_eq!(res.language.as_deref(), Some("text"));
     assert_eq!(res.content, Some(String::new()));
+}
+
+#[tokio::test]
+async fn test_read_impl_validation_gaps() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    // 1. Unknown detail_level
+    let params = ReadParams {
+        filepath: Some("test.rs".to_string()),
+        detail_level: "invalid_level".to_string(),
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // 2. start_line == 0
+    let params = ReadParams {
+        filepath: Some("test.rs".to_string()),
+        start_line: 0,
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // 3. end_line == Some(0)
+    let params = ReadParams {
+        filepath: Some("test.rs".to_string()),
+        end_line: Some(0),
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // 4. Batch mode with non-default start_line
+    let params = ReadParams {
+        paths: Some(vec!["test.rs".to_string()]),
+        start_line: 5,
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // 5. Batch mode with end_line set
+    let params = ReadParams {
+        paths: Some(vec!["test.rs".to_string()]),
+        end_line: Some(10),
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // 6. max_lines_per_file == 0
+    let params = ReadParams {
+        filepath: Some("test.rs".to_string()),
+        max_lines_per_file: 0,
+        ..Default::default()
+    };
+    let res = server.read_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+}
+
+#[tokio::test]
+async fn test_read_file_beyond_eof_no_panic() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::new()),
+    );
+
+    // Write a config/raw file with 3 lines
+    fs::write(ws_dir.path().join("config.toml"), "line1\nline2\nline3\n").expect("write");
+
+    // start_line beyond EOF
+    let params = ReadParams {
+        filepath: Some("config.toml".to_string()),
+        start_line: 10,
+        ..Default::default()
+    };
+
+    let res = server.read_impl(params).await;
+    assert!(
+        res.is_ok(),
+        "should not panic or error, should return empty content gracefully"
+    );
+    let tool_res = res.unwrap();
+    let metadata: crate::server::types::ReadFileMetadata =
+        serde_json::from_value(tool_res.structured_content.unwrap()).unwrap();
+
+    assert_eq!(metadata.lines_returned, 0);
+    assert_eq!(metadata.total_lines, 3);
+    assert!(!metadata.truncated);
 }

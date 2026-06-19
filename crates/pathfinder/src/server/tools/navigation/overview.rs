@@ -90,11 +90,15 @@ impl PathfinderServer {
             }
         };
 
+        // Clamp max_references to [1, 500] — sub-calls also clamp, but being explicit here
+        // makes the bound visible at the orchestration level.
+        let max_references = params.max_references.clamp(1, 500);
+
         let impact_params = crate::server::types::TraceParams {
             semantic_path: params.semantic_path.clone(),
             scope: crate::server::types::TraceScope::Callers,
             max_depth: 2,
-            max_references: params.max_references,
+            max_references,
             offset: 0,
         };
 
@@ -164,7 +168,7 @@ impl PathfinderServer {
             semantic_path: params.semantic_path.clone(),
             scope: crate::server::types::TraceScope::References,
             max_depth: 0,
-            max_references: params.max_references,
+            max_references,
             offset: 0,
         };
 

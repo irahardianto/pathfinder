@@ -274,6 +274,7 @@ Parameter guidance:
   Exactly one of `filepath` or `paths` must be provided.
 - `detail_level`: `\"source_only\"` (lowest tokens), `\"compact\"` (default), `\"symbols\"` (tree only), `\"full\"` (source + nested AST).
 - `start_line`/`end_line`: Restrict output to a line range.
+- `max_lines_per_file`: Maximum lines returned per file (defaults to 500). Applies to batch mode and config/raw files.
 
 Examples:
 - `read(filepath=\"src/auth.ts\", detail_level=\"compact\")` — single source file
@@ -354,7 +355,11 @@ Parameter guidance:
 - `max_references=50` (default): Cap output for all scopes. In `overview` mode, applies to both caller/callee and reference limits.
 - `offset`: Pagination offset. Applies to `scope=\"references\"` only; ignored for `callers` and `overview`.
 
-LSP-powered. When `degraded=true`: results are best-effort, not confirmed-zero.
+LSP-powered. Response field semantics when `degraded=true`:
+- `incoming`/`outgoing` are `null` — LSP was unavailable and no heuristic results found. Callers are **unknown**.
+- `incoming`/`outgoing` contain results with `confidence: \"heuristic\"` — grep-based fallback found candidates (may include false positives).
+- `incoming`/`outgoing` are `[]` — LSP confirmed zero callers/callees exist (only when `degraded=false`).
+Never treat `null` as \"no callers\" — it means the answer is unknown. Use `search` as a fallback.
 
 Examples:
 - `trace(semantic_path=\"src/auth.ts::AuthService.login\")` — callers/callees

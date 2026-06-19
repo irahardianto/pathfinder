@@ -2205,9 +2205,9 @@ mod process_tests {
         let r2 = mock.spawn("cmd2", &["--stdio".to_owned()], dir.path(), "go", true);
         let r3 = mock.spawn("cmd3", &[], dir.path(), "python", false);
 
-        assert!(r1.is_ok());
-        assert!(r2.is_ok());
-        assert!(r3.is_ok());
+        assert!(r1.is_ok(), "r1 failed with: {:?}", r1.as_ref().err());
+        assert!(r2.is_ok(), "r2 failed with: {:?}", r2.as_ref().err());
+        assert!(r3.is_ok(), "r3 failed with: {:?}", r3.as_ref().err());
 
         assert_eq!(mock.call_count(), 3);
         {

@@ -440,7 +440,7 @@ impl RipgrepScout {
     /// Returns `(files, binary_skipped, gitignored_skipped)` — tuples of `(absolute_path, relative_path_string)`
     /// plus the count of files skipped because they matched known binary extensions, and the count of
     /// gitignored files that matched the glob but were excluded by gitignore.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_lines)]
     #[tracing::instrument(skip_all)]
     fn walk_files(
         params: &SearchParams,
@@ -455,19 +455,31 @@ impl RipgrepScout {
             .and_then(|g| globset::GlobSet::builder().add(g).build())
             .map_err(|e| SearchError::InvalidPattern(format!("invalid path_glob: {e}")))?;
 
-        // Build a globset for the exclude_glob pattern (optional).
+        // Build a globset for the exclude_glob patterns (optional).
         let exclude_matcher = if exclude_glob.is_empty() {
             None
         } else {
-            Some(
-                globset::GlobBuilder::new(exclude_glob)
-                    .literal_separator(false)
-                    .build()
-                    .and_then(|g| globset::GlobSet::builder().add(g).build())
-                    .map_err(|e| {
-                        SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
-                    })?,
-            )
+            let mut builder = globset::GlobSetBuilder::new();
+            let mut has_patterns = false;
+            for pattern in exclude_glob {
+                if !pattern.is_empty() {
+                    let g = globset::GlobBuilder::new(pattern)
+                        .literal_separator(false)
+                        .build()
+                        .map_err(|e| {
+                            SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
+                        })?;
+                    builder.add(g);
+                    has_patterns = true;
+                }
+            }
+            if has_patterns {
+                Some(builder.build().map_err(|e| {
+                    SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
+                })?)
+            } else {
+                None
+            }
         };
 
         // Walker-level directory pruning callback.

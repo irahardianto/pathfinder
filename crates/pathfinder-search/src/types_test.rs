@@ -101,3 +101,25 @@ fn test_search_result_serde_roundtrip() {
     assert_eq!(deserialized.matches.len(), 1);
     assert_eq!(deserialized.matches[0], original.matches[0]);
 }
+
+/// `SearchMatch.version_hash` schema must describe the short (7-char hex) format,
+/// not claim to be a full SHA-256 hash.
+#[test]
+fn test_search_match_version_hash_schema_describes_short_format() {
+    let schema = schemars::schema_for!(SearchMatch);
+    let schema_json = serde_json::to_value(&schema).expect("schema to JSON");
+
+    let description = schema_json["properties"]["version_hash"]["description"]
+        .as_str()
+        .expect("`version_hash` must have a description");
+
+    assert!(
+        !description.contains("SHA-256 hash"),
+        "`SearchMatch.version_hash` doc must NOT say 'SHA-256 hash' — the actual \
+         value is a 7-char truncated hex. Got: {description:?}"
+    );
+    assert!(
+        description.contains("7-char") || description.contains("short") || description.contains("fingerprint"),
+        "`SearchMatch.version_hash` doc must describe the short/fingerprint format. Got: {description:?}"
+    );
+}

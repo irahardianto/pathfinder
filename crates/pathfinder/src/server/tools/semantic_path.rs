@@ -17,6 +17,10 @@ impl PathfinderServer {
     ///
     /// Walks the Tree-sitter AST of the file and returns the
     /// semantic path of the symbol that encloses the line.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sequential validation pipeline: params → sandbox → file existence → tree-sitter. Extraction would fragment the linear flow."
+    )]
     pub(crate) async fn get_semantic_path_impl(
         &self,
         params: LocateParams,
@@ -26,9 +30,21 @@ impl PathfinderServer {
             .file
             .as_ref()
             .ok_or_else(|| rmcp::model::ErrorData::invalid_params("file is required", None))?;
+        if file.is_empty() {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "file must not be empty",
+                None,
+            ));
+        }
         let line = params
             .line
             .ok_or_else(|| rmcp::model::ErrorData::invalid_params("line is required", None))?;
+        if line == 0 {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "line must be >= 1 (1-indexed)",
+                None,
+            ));
+        }
 
         tracing::info!(
             tool = "get_semantic_path",

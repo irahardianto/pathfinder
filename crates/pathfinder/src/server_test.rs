@@ -1,5 +1,7 @@
 use super::*;
-use crate::server::types::{Detail, ExploreParams, InspectParams, ReadParams, SearchParams};
+use crate::server::types::{
+    Detail, ExcludeGlob, ExploreParams, InspectParams, ReadParams, SearchParams,
+};
 use pathfinder_search::{MockScout, SearchMatch, SearchResult};
 use pathfinder_treesitter::mock::MockSurgeon;
 use pathfinder_treesitter::surgeon::{AccessLevel, ExtractedSymbol, SymbolKind};
@@ -881,7 +883,7 @@ async fn test_search_codebase_exclude_glob_forwarded_to_scout() {
 
     let params = SearchParams {
         query: "anything".to_owned(),
-        exclude_glob: "**/*.test.*".to_owned(),
+        exclude_glob: ExcludeGlob::Single("**/*.test.*".to_owned()),
         ..Default::default()
     };
 
@@ -893,7 +895,8 @@ async fn test_search_codebase_exclude_glob_forwarded_to_scout() {
     let calls = mock_scout.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].exclude_glob, "**/*.test.*",
+        calls[0].exclude_glob,
+        vec!["**/*.test.*".to_owned()],
         "exclude_glob must be forwarded to the scout"
     );
 }

@@ -4,9 +4,8 @@
 //! (`ready`, `warming_up`, `starting`, `unavailable`, `degraded`) along with
 //! capability signals and degraded tool information.
 
-use crate::server::helpers::{pathfinder_to_error_data, serialize_metadata};
+use crate::server::helpers::serialize_metadata;
 use crate::server::PathfinderServer;
-use pathfinder_common::error::PathfinderError;
 
 /// Re-probe interval for "ready" languages to check liveness.
 /// Re-probes every 2 minutes to detect LSPs that became non-responsive after
@@ -25,14 +24,22 @@ impl PathfinderServer {
         &self,
         params: crate::server::types::HealthParams,
     ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
+        if let Some(ref action) = params.action {
+            if action != "restart" {
+                return Err(crate::server::helpers::invalid_params_error(
+                    "invalid `action`: must be 'restart'",
+                ));
+            }
+        }
+
         // IW-4: Handle action="restart" before the normal health query flow.
         if params.action.as_deref() == Some("restart") {
             let lang = match &params.language {
                 Some(l) => l.clone(),
                 None => {
-                    return Err(pathfinder_to_error_data(&PathfinderError::IoError {
-                        message: "health action='restart' requires 'language' to be set".to_owned(),
-                    }));
+                    return Err(crate::server::helpers::invalid_params_error(
+                        "health action='restart' requires 'language' to be set",
+                    ));
                 }
             };
             tracing::info!(language = %lang, "lsp_health: restart requested by agent");
@@ -386,10 +393,25 @@ impl PathfinderServer {
             if lang_health.supports_call_hierarchy == Some(false)
                 && lang_health.supports_definition == Some(true)
             {
-                known_limitations.push(format!(
-                    "{}: call hierarchy not supported — trace uses grep fallback (less accurate)",
-                    lang_health.language
-                ));
+                let is_ts_js = lang_health.server_name.as_ref().is_some_and(|n| {
+                    let lower = n.to_lowercase();
+                    lower.contains("typescript")
+                        || lower.contains("tsserver")
+                        || lower.contains("vtsls")
+                        || lower.contains("typescript-language-server")
+                });
+
+                if is_ts_js {
+                    known_limitations.push(format!(
+                        "{}: TypeScript/JavaScript language servers do not support call hierarchy. trace uses grep fallback (less accurate)",
+                        lang_health.language
+                    ));
+                } else {
+                    known_limitations.push(format!(
+                        "{}: call hierarchy not supported — trace uses grep fallback (less accurate)",
+                        lang_health.language
+                    ));
+                }
             }
         }
 
@@ -815,19 +837,38 @@ pub(super) fn compute_degraded_tools(
     }
 
     if status.supports_call_hierarchy != Some(true) {
+        let is_ts_js = status.server_name.as_ref().is_some_and(|n| {
+            let lower = n.to_lowercase();
+            lower.contains("typescript")
+                || lower.contains("tsserver")
+                || lower.contains("vtsls")
+                || lower.contains("typescript-language-server")
+        });
+
+        let trace_desc = if is_ts_js {
+            "TypeScript/JavaScript language servers do not support call hierarchy. trace uses grep fallback (less accurate)."
+                .to_owned()
+        } else {
+            "Uses text search instead of call hierarchy. May over/under-count references."
+                .to_owned()
+        };
+
+        let inspect_desc = if is_ts_js {
+            "TypeScript/JavaScript language servers do not support call hierarchy. inspect returns source only, no dependency signatures."
+                .to_owned()
+        } else {
+            "Returns source only, no dependency signatures. Use search as alternative.".to_owned()
+        };
+
         degraded.push(crate::server::types::DegradedToolInfo {
             tool: "trace(scope=\"callers\")".to_owned(),
             severity: "grep_fallback".to_owned(),
-            description:
-                "Uses text search instead of call hierarchy. May over/under-count references."
-                    .to_owned(),
+            description: trace_desc,
         });
         degraded.push(crate::server::types::DegradedToolInfo {
             tool: "inspect(include_dependencies=true)".to_owned(),
             severity: "unavailable".to_owned(),
-            description:
-                "Returns source only, no dependency signatures. Use search as alternative."
-                    .to_owned(),
+            description: inspect_desc,
         });
     }
 

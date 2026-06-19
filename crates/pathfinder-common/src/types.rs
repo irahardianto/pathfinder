@@ -23,6 +23,15 @@ pub const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
     ".vscode/",
     "__pycache__/",
     ".qlty/",
+    // Build output and cache directories — never source code
+    "dist/",
+    "build/",
+    ".next/",
+    ".turbo/",
+    ".gradle/",
+    "coverage/",
+    ".nyc_output/",
+    ".mypy_cache/",
 ];
 
 /// Bare directory names (without trailing `/`) for walker-level pruning.
@@ -42,6 +51,15 @@ pub const ALWAYS_EXCLUDED_DIR_NAMES: &[&str] = &[
     ".vscode",
     "__pycache__",
     ".qlty",
+    // Build output and cache directories — matching ALWAYS_EXCLUDED_DIRS
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+    ".gradle",
+    "coverage",
+    ".nyc_output",
+    ".mypy_cache",
 ];
 
 /// A parsed semantic path in the format `file_path[::symbol_chain]`.

@@ -1,7 +1,8 @@
 //! `explore` tool — AST-based repository skeleton with token budgeting.
 
 use crate::server::helpers::{
-    format_degraded_notice, millis_to_u64, pathfinder_to_error_data, serialize_metadata,
+    format_degraded_notice, invalid_params_error, millis_to_u64, pathfinder_to_error_data,
+    serialize_metadata,
 };
 use crate::server::types::{
     default_max_tokens, Detail, ExploreParams, LspCapabilities, RepoCapabilities,
@@ -145,6 +146,7 @@ impl PathfinderServer {
             max_tokens_used: 0,
             lsp_status,
             duration_ms: None,
+            hint: None,
         };
         // Produce an actionable message so the agent knows WHY the result is empty
         // and what to do next, rather than seeing a silent empty response.
@@ -178,6 +180,13 @@ impl PathfinderServer {
         tracing::info!(tool = "get_repo_map", path = %params.path, "get_repo_map: start");
 
         let target_path = Path::new(&params.path);
+
+        // Validation check for mutually exclusive parameters: include_extensions and exclude_extensions
+        if !params.include_extensions.is_empty() && !params.exclude_extensions.is_empty() {
+            return Err(invalid_params_error(
+                "`include_extensions` and `exclude_extensions` are mutually exclusive; you cannot provide both",
+            ));
+        }
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(target_path) {
@@ -229,7 +238,9 @@ impl PathfinderServer {
             // Only auto-scale when the user didn't explicitly set a value
             let source_file_count = count_source_files(self.workspace_root.path()).await;
             if source_file_count > 20 {
-                let scaled = (u32::try_from(source_file_count).unwrap_or(u32::MAX) * 800)
+                let scaled = u32::try_from(source_file_count)
+                    .unwrap_or(u32::MAX)
+                    .saturating_mul(800)
                     .clamp(16_000, 48_000);
                 tracing::info!(
                     tool = "get_repo_map",
@@ -308,6 +319,15 @@ impl PathfinderServer {
         let lsp_status = derive_lsp_status(&capability_status);
         let duration_ms = start.elapsed().as_millis();
 
+        let hint = if result.coverage_percent < 100 {
+            Some(format!(
+                "Repository map is incomplete (coverage: {}%). To scan more files, increase max_tokens (currently {}).",
+                result.coverage_percent, max_tokens
+            ))
+        } else {
+            None
+        };
+
         let metadata = crate::server::types::GetRepoMapMetadata {
             tech_stack: result.tech_stack,
             files_scanned: result.files_scanned,
@@ -330,9 +350,10 @@ impl PathfinderServer {
             max_tokens_used: max_tokens,
             lsp_status,
             duration_ms: Some(millis_to_u64(duration_ms)),
+            hint: hint.clone(),
         };
 
-        let text = if degraded {
+        let mut text = if degraded {
             let notice = degraded_reason
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
@@ -343,6 +364,10 @@ impl PathfinderServer {
         } else {
             format!("{}\n[completed in {duration_ms}ms]", result.skeleton)
         };
+
+        if let Some(ref h) = hint {
+            text = format!("{text}\n\nHint: {h}");
+        }
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(&metadata);

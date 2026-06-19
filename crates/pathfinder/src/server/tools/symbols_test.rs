@@ -255,3 +255,72 @@ async fn test_read_symbol_scope_surgeon_error() {
     let err = result.unwrap_err();
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS); // SymbolNotFound maps to invalid params
 }
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_inspect_impl_invalid_max_dependencies() {
+    let ws_dir = tempdir().unwrap();
+    let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let file_path = ws.path().join("test.rs");
+    let content = "fn test() {}\n";
+    tokio::fs::write(&file_path, content).await.unwrap();
+
+    let mock_surgeon = MockSurgeon::new();
+    let expected_scope = pathfinder_common::types::SymbolScope {
+        content: content.to_owned(),
+        start_line: 1,
+        end_line: 1,
+        name_column: 0,
+        language: "rust".to_owned(),
+    };
+    mock_surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(expected_scope.clone()));
+    mock_surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(expected_scope));
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(mock_surgeon),
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    // Case 1: max_dependencies == 0
+    let params = InspectParams {
+        semantic_path: "test.rs::test".to_owned(),
+        include_dependencies: true,
+        max_dependencies: 0,
+        ..Default::default()
+    };
+    let res = server.inspect_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    // Case 2: max_dependencies > 500
+    let params = InspectParams {
+        semantic_path: "test.rs::test".to_owned(),
+        include_dependencies: true,
+        max_dependencies: 501,
+        ..Default::default()
+    };
+    let res = server.inspect_impl(params).await;
+    assert!(res.is_err());
+    assert_eq!(
+        res.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+}

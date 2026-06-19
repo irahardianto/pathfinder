@@ -462,6 +462,103 @@ async fn test_read_with_deep_context_grep_fallback_resolves_candidates() {
     );
 }
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_attempt_grep_fallback_semantic_path_is_hierarchical() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    let mut scope = make_scope();
+    scope.content = "fn login() -> bool { validate_token() }".to_string();
+    // First read: read_symbol_scope_enriched (for login)
+    // Second read: read_symbol_scope (candidate extraction)
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .extend([Ok(scope.clone()), Ok(scope)]);
+
+    // When the grep fallback resolves the "validate_token" candidate to src/token.rs:5,
+    // we want to mock treesitter enclosing_symbol_detail returning a qualified path.
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(pathfinder_treesitter::surgeon::ExtractedSymbol {
+            name: "validate_token".to_owned(),
+            semantic_path: "TokenValidator.validate_token".to_owned(),
+            start_line: 4,
+            end_line: 8,
+            name_column: 4,
+            kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
+            byte_range: 0..0,
+            access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
+            children: vec![],
+        })));
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(
+        ws_dir.path().join("src/auth.rs"),
+        "fn login() -> bool { validate_token() }",
+    )
+    .unwrap();
+
+    let scout = Arc::new(MockScout::default());
+    scout.set_result(Ok(pathfinder_search::SearchResult {
+        matches: vec![pathfinder_search::SearchMatch {
+            file: "src/token.rs".to_string(),
+            line: 5,
+            column: 1,
+            content: "fn validate_token() -> bool { true }".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "sha256:abc".to_string(),
+            known: Some(false),
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }));
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        scout,
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(val.degraded);
+    assert_eq!(
+        val.degraded_reason,
+        Some(DegradedReason::GrepFallbackDependencies)
+    );
+    assert_eq!(val.dependencies.len(), 1);
+    assert_eq!(
+        val.dependencies[0].semantic_path, "src/token.rs::TokenValidator.validate_token",
+        "grep fallback dependency path should be qualified using surgeon enclosing_symbol_detail"
+    );
+}
+
 // ── detail: None fallback ────────────────────────────────────────
 
 #[tokio::test]
@@ -1389,5 +1486,214 @@ async fn test_read_with_deep_context_lsp_protocol_error_triggers_grep_fallback()
     assert_eq!(
         val.degraded_reason,
         Some(DegradedReason::GrepFallbackDependencies)
+    );
+}
+
+// ── ENRICH-2: inspect dependency semantic paths are hierarchically qualified ──
+
+/// When LSP returns an outgoing callee whose file+line maps to a method inside a
+/// struct/class, the dependency `semantic_path` should use the treesitter-qualified
+/// chain: `src/token.rs::TokenValidator.validate_token` instead of
+/// `src/token.rs::validate_token`.
+#[tokio::test]
+async fn test_inspect_dependency_semantic_path_is_hierarchical_when_surgeon_qualifies() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    // Surgeon returns a qualified chain for the callee's file+line
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(pathfinder_treesitter::surgeon::ExtractedSymbol {
+            name: "validate_token".to_owned(),
+            semantic_path: "TokenValidator.validate_token".to_owned(),
+            start_line: 14, // 0-indexed (LSP line 15 → 14)
+            end_line: 20,
+            name_column: 4,
+            kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
+            byte_range: 0..0,
+            access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
+            children: vec![],
+        })));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(), // flat LSP name
+            kind: "function".into(),
+            detail: Some("fn validate_token() -> bool".into()),
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(!val.degraded);
+    assert_eq!(val.dependencies.len(), 1);
+    assert_eq!(
+        val.dependencies[0].semantic_path, "src/token.rs::TokenValidator.validate_token",
+        "dependency path must use qualified treesitter chain, not flat LSP name"
+    );
+    assert_eq!(val.dependencies[0].signature, "fn validate_token() -> bool");
+    assert_eq!(val.dependencies[0].file, "src/token.rs");
+    assert_eq!(val.dependencies[0].line, 15);
+}
+
+/// When Surgeon returns Ok(None) for a callee's file+line (top-level function),
+/// the dependency `semantic_path` must fall back to the flat LSP name cleanly.
+#[tokio::test]
+async fn test_inspect_dependency_semantic_path_falls_back_to_flat_when_surgeon_returns_none() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    // Surgeon returns None → flat fallback
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: Some("fn validate_token() -> bool".into()),
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(!val.degraded);
+    assert_eq!(val.dependencies.len(), 1);
+    assert_eq!(
+        val.dependencies[0].semantic_path, "src/token.rs::validate_token",
+        "flat fallback must be used when surgeon returns None"
+    );
+}
+
+/// When Surgeon returns an error for a callee's file+line, inspect must NOT
+/// panic or propagate — it must fall back to the flat LSP name silently.
+#[tokio::test]
+async fn test_inspect_dependency_semantic_path_falls_back_on_surgeon_error() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    // Surgeon returns an error
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Err(pathfinder_treesitter::SurgeonError::ParseError {
+            path: std::path::PathBuf::from("src/token.rs"),
+            reason: "parse failed".to_owned(),
+        }));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: Some("fn validate_token() -> bool".into()),
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = InspectParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("surgeon error must not propagate to caller");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(
+        !val.degraded,
+        "surgeon error in enrichment must not degrade inspect"
+    );
+    assert_eq!(val.dependencies.len(), 1);
+    assert_eq!(
+        val.dependencies[0].semantic_path, "src/token.rs::validate_token",
+        "surgeon error must cause flat-name fallback, not panic"
     );
 }

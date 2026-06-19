@@ -1621,6 +1621,123 @@ async fn test_outgoing_fallback_dedup_by_semantic_path() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_grep_outgoing_fallback_semantic_path_is_hierarchical() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            content: "fn handle(&self) { self.validate(); }".to_string(),
+            start_line: 9,
+            end_line: 9,
+            name_column: 0,
+            language: "rust".to_string(),
+        },
+    ));
+
+    // When grep_outgoing_fallback resolves "validate" to src/validator.rs:1,
+    // we want to mock treesitter enclosing_symbol_detail returning a qualified path.
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(pathfinder_treesitter::surgeon::ExtractedSymbol {
+            name: "validate".to_owned(),
+            semantic_path: "TokenValidator.validate".to_owned(),
+            start_line: 0,
+            end_line: 4,
+            name_column: 4,
+            kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
+            byte_range: 0..0,
+            access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
+            children: vec![],
+        })));
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(
+        ws_dir.path().join("src/handler.rs"),
+        "fn handle(&self) { self.validate(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        ws_dir.path().join("src/validator.rs"),
+        "fn validate() -> bool { true }",
+    )
+    .unwrap();
+
+    let scout = Arc::new(MockScout::default());
+
+    let validate_match = pathfinder_search::SearchMatch {
+        file: "src/validator.rs".to_string(),
+        line: 1,
+        column: 0,
+        content: "fn validate() -> bool { true }".to_string(),
+        context_before: vec![],
+        context_after: vec![],
+        enclosing_semantic_path: None,
+        is_definition: None,
+        version_hash: "sha256:abc".to_string(),
+        known: Some(false),
+    };
+    let empty_result = Ok(pathfinder_search::SearchResult {
+        matches: vec![],
+        total_matches: 0,
+        truncated: false,
+        files_searched: 0,
+        files_in_scope: 0,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    });
+    let validate_result = Ok(pathfinder_search::SearchResult {
+        matches: vec![validate_match],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 0,
+        files_in_scope: 0,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    });
+
+    scout.set_results(vec![
+        empty_result.clone(),    // incoming search
+        validate_result.clone(), // outgoing candidate search
+    ]);
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        scout,
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = crate::server::types::TraceParams {
+        semantic_path: "src/handler.rs::handle".to_owned(),
+        max_depth: 2,
+        ..Default::default()
+    };
+
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+    assert!(!outgoing.is_empty());
+    assert_eq!(
+        outgoing[0].semantic_path, "src/validator.rs::TokenValidator.validate",
+        "grep fallback path should be qualified using surgeon enclosing_symbol_detail"
+    );
+}
+
+#[tokio::test]
 async fn test_outgoing_fallback_definition_file_exclusion() {
     // When a candidate resolves to the definition file, it should be excluded.
     // Test uses scope with only one candidate (validate) and sets up search
@@ -2901,5 +3018,284 @@ async fn test_process_grep_fallback_results_both_some() {
         degraded_reason,
         Some(DegradedReason::NoLspGrepFallback),
         "degraded_reason should be set when grep results found"
+    );
+}
+
+// ── ENRICH-1: BFS output semantic paths are hierarchically qualified ─────────
+
+/// When LSP returns a caller whose file+line maps to a method inside a struct/impl,
+/// the output `semantic_path` should use the treesitter-qualified chain, not the flat
+/// LSP name. For example: `src/server.rs::Server.handle_request` instead of
+/// `src/server.rs::handle_request`.
+#[tokio::test]
+async fn test_bfs_output_semantic_path_is_hierarchical_when_surgeon_qualifies() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    // Surgeon will be called to enrich the incoming caller's file+line.
+    // Return a qualified chain: "Server.handle_request".
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(pathfinder_treesitter::surgeon::ExtractedSymbol {
+            name: "handle_request".to_owned(),
+            semantic_path: "Server.handle_request".to_owned(), // qualified chain
+            start_line: 19, // 0-indexed (LSP line 20 → surgeon line 19)
+            end_line: 25,
+            name_column: 4,
+            kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
+            byte_range: 0..0,
+            access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
+            children: vec![],
+        })));
+    // Surgeon called once more for the outgoing callee (validate_token → top-level fn).
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None)); // flat fallback for outgoing
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "handle_request".into(), // flat LSP name
+            kind: "function".into(),
+            detail: Some("fn handle_request()".into()),
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![20],
+    }]));
+
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: Some("fn validate_token() -> bool".into()),
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(!val.degraded);
+    let incoming = val.incoming.as_ref().expect("incoming must be Some");
+    let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+    assert_eq!(incoming.len(), 1);
+    // Hierarchical: treesitter qualified chain used
+    assert_eq!(
+        incoming[0].semantic_path, "src/server.rs::Server.handle_request",
+        "incoming path must use qualified treesitter chain, not flat LSP name"
+    );
+    assert_eq!(outgoing.len(), 1);
+    // Flat: surgeon returned None → falls back to LSP bare name
+    assert_eq!(
+        outgoing[0].semantic_path, "src/token.rs::validate_token",
+        "outgoing path must fall back to flat name when surgeon returns None"
+    );
+}
+
+/// When Surgeon returns Ok(None) for a reference's file+line (e.g., top-level function),
+/// the output `semantic_path` must fall back to the flat LSP name cleanly.
+#[tokio::test]
+async fn test_bfs_output_semantic_path_falls_back_to_flat_when_surgeon_returns_none() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    // Both enrichment calls return None → flat fallback for both
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .extend([Ok(None), Ok(None)]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "caller_fn".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/main.rs".into(),
+            line: 5,
+            column: 0,
+            data: None,
+        },
+        call_sites: vec![5],
+    }]));
+
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "helper".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/helpers.rs".into(),
+            line: 10,
+            column: 0,
+            data: None,
+        },
+        call_sites: vec![5],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(!val.degraded);
+    let incoming = val.incoming.as_ref().expect("incoming must be Some");
+    let outgoing = val.outgoing.as_ref().expect("outgoing must be Some");
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(
+        incoming[0].semantic_path, "src/main.rs::caller_fn",
+        "flat fallback must be used when surgeon returns None"
+    );
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].semantic_path, "src/helpers.rs::helper");
+}
+
+/// When Surgeon returns an error for a reference's file+line, the BFS must NOT
+/// panic or propagate the error — it must fall back to the flat LSP name silently.
+#[tokio::test]
+async fn test_bfs_output_semantic_path_falls_back_on_surgeon_error() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    // Surgeon returns parse error for the enrichment call
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Err(pathfinder_treesitter::SurgeonError::ParseError {
+            path: std::path::PathBuf::from("src/server.rs"),
+            reason: "parse failed".to_owned(),
+        }));
+    // Second enrichment (outgoing) also errors
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Err(pathfinder_treesitter::SurgeonError::ParseError {
+            path: std::path::PathBuf::from("src/token.rs"),
+            reason: "parse failed".to_owned(),
+        }));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "handle_request".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![20],
+    }]));
+
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("surgeon error must not propagate to caller");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(
+        !val.degraded,
+        "surgeon error in enrichment must not degrade the call"
+    );
+    let incoming = val.incoming.as_ref().expect("incoming must be Some");
+    assert_eq!(incoming.len(), 1);
+    // Must fall back to flat name silently
+    assert_eq!(
+        incoming[0].semantic_path, "src/server.rs::handle_request",
+        "surgeon error must cause flat-name fallback, not panic"
     );
 }

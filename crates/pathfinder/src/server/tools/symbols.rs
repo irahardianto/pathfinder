@@ -1,8 +1,8 @@
 //! `inspect` tool (symbol scope mode) — AST-based symbol extraction via Tree-sitter.
 
 use crate::server::helpers::{
-    millis_to_u64, parse_semantic_path, pathfinder_to_error_data, require_symbol_target,
-    serialize_metadata,
+    invalid_params_error, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
+    require_symbol_target, serialize_metadata,
 };
 use crate::server::types::InspectParams;
 use crate::server::PathfinderServer;
@@ -15,6 +15,12 @@ impl PathfinderServer {
         params: InspectParams,
     ) -> Result<CallToolResult, ErrorData> {
         if params.include_dependencies {
+            if params.max_dependencies == 0 {
+                return Err(invalid_params_error("`max_dependencies` must be >= 1"));
+            }
+            if params.max_dependencies > 500 {
+                return Err(invalid_params_error("`max_dependencies` must be <= 500"));
+            }
             self.read_with_deep_context_impl(params).await
         } else {
             self.read_symbol_scope_impl(params).await

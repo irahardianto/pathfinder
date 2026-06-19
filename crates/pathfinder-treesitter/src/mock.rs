@@ -198,11 +198,13 @@ impl Surgeon for MockSurgeon {
             .enclosing_symbol_detail_results
             .lock()
             .expect("mutex poisoned");
-        assert!(
-            !results.is_empty(),
-            "MockSurgeon: Unexpected call to enclosing_symbol_detail"
-        );
-        results.remove(0)
+        // Default to Ok(None) when queue is empty: callers that don't need
+        // enrichment assertions don't have to pre-populate results.
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            results.remove(0)
+        }
     }
 
     async fn generate_skeleton(

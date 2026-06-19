@@ -30,7 +30,7 @@ fn bench_real_workspace_grep_fallback(c: &mut Criterion) {
         query: "NONEXISTENT_SYMBOL_XYZ_12345".to_owned(),
         is_regex: false,
         path_glob: "**/*".to_owned(),
-        exclude_glob: String::default(),
+        exclude_glob: Vec::new(),
         max_results: 1,
         offset: 0,
         context_lines: 0,

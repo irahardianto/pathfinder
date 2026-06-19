@@ -268,7 +268,7 @@ async fn test_search_exclude_glob_skips_matching_files() {
     let params = SearchParams {
         workspace_root: ws.path().to_path_buf(),
         query: "needle".to_owned(),
-        exclude_glob: "**/*.test.*".to_owned(),
+        exclude_glob: vec!["**/*.test.*".to_owned()],
         ..Default::default()
     };
     let result = scout.search(&params).await.expect("search should succeed");
@@ -375,7 +375,7 @@ async fn test_search_invalid_glob_returns_error() {
     let params2 = SearchParams {
         workspace_root: ws.path().to_path_buf(),
         query: "main".to_owned(),
-        exclude_glob: "[invalid glob".to_owned(),
+        exclude_glob: vec!["[invalid glob".to_owned()],
         ..Default::default()
     };
     let err2 = scout.search(&params2).await;
@@ -910,4 +910,224 @@ async fn test_search_empty_query() {
             );
         }
     }
+}
+
+// ── P1-B: New build/cache directory exclusions ─────────────────────
+
+/// Searches into `dist/` must be excluded by default — these are build
+/// artefacts, not source code, and produce false-positive matches.
+#[tokio::test]
+async fn test_search_excludes_dist_directory() {
+    let ws = make_workspace(&[
+        ("dist/bundle.js", "needle_in_dist\n"),
+        ("dist/index.html", "needle_in_dist\n"),
+        ("src/main.rs", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        "dist/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/main.rs");
+}
+
+/// Searches into `build/` must be excluded by default.
+#[tokio::test]
+async fn test_search_excludes_build_directory() {
+    let ws = make_workspace(&[
+        ("build/output.so", "needle_in_build\n"),
+        ("src/main.go", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        "build/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/main.go");
+}
+
+/// Searches into `.next/` (Next.js output) must be excluded by default.
+#[tokio::test]
+async fn test_search_excludes_next_directory() {
+    let ws = make_workspace(&[
+        (".next/server/pages/index.js", "needle_in_next\n"),
+        ("src/pages/index.tsx", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        ".next/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/pages/index.tsx");
+}
+
+/// Searches into `.turbo/` (Turborepo cache) must be excluded by default.
+#[tokio::test]
+async fn test_search_excludes_turbo_directory() {
+    let ws = make_workspace(&[
+        (".turbo/cache/xyz/meta.json", "needle_in_turbo\n"),
+        ("src/index.ts", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        ".turbo/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/index.ts");
+}
+
+/// Searches into `.gradle/` (Gradle cache) must be excluded by default.
+#[tokio::test]
+async fn test_search_excludes_gradle_directory() {
+    let ws = make_workspace(&[
+        (".gradle/caches/module.jar", "needle_in_gradle\n"),
+        ("src/main/java/Main.java", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        ".gradle/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/main/java/Main.java");
+}
+
+/// Searches into `coverage/` (test coverage reports) must be excluded by default.
+#[tokio::test]
+async fn test_search_excludes_coverage_directory() {
+    let ws = make_workspace(&[
+        ("coverage/lcov.info", "needle_in_coverage\n"),
+        ("coverage/index.html", "needle_in_coverage\n"),
+        ("src/auth.rs", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        "coverage/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/auth.rs");
+}
+
+/// Searches into `.nyc_output/` (NYC/Istanbul coverage output) must be excluded.
+#[tokio::test]
+async fn test_search_excludes_nyc_output_directory() {
+    let ws = make_workspace(&[
+        (".nyc_output/coverage.json", "needle_in_nyc\n"),
+        ("src/index.js", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        ".nyc_output/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/index.js");
+}
+
+/// Searches into `.mypy_cache/` (mypy type-checker cache) must be excluded.
+#[tokio::test]
+async fn test_search_excludes_mypy_cache_directory() {
+    let ws = make_workspace(&[
+        (".mypy_cache/3.11/builtins.pyi", "needle_in_mypy\n"),
+        ("src/app.py", "legitimate_needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches,
+        1,
+        ".mypy_cache/ should be excluded, but got matches in: {:?}",
+        result.matches.iter().map(|m| &m.file).collect::<Vec<_>>()
+    );
+    assert_eq!(result.matches[0].file, "src/app.py");
+}
+
+#[tokio::test]
+async fn test_search_exclude_glob_multiple_patterns() {
+    let ws = make_workspace(&[
+        ("src/main.rs", "needle\n"),
+        ("src/main.test.rs", "needle\n"),
+        ("src/main.spec.rs", "needle\n"),
+    ]);
+    let scout = RipgrepScout;
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        exclude_glob: vec!["**/*.test.*".to_owned(), "**/*.spec.*".to_owned()],
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search should succeed");
+
+    assert_eq!(
+        result.total_matches, 1,
+        "test and spec files should both be excluded"
+    );
+    assert_eq!(result.matches[0].file, "src/main.rs");
 }

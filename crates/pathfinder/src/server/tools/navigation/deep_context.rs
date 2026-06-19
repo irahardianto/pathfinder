@@ -206,7 +206,7 @@ impl PathfinderServer {
                 is_regex: true,
                 max_results: max_results_per_candidate,
                 path_glob: language_to_file_glob(language).to_string(),
-                exclude_glob: String::default(),
+                exclude_glob: Vec::new(),
                 context_lines: 0,
                 offset: 0,
             })
@@ -285,7 +285,9 @@ impl PathfinderServer {
                     continue;
                 }
 
-                let dep_path = format!("{file}::{candidate}");
+                // Enrich the grep-resolved candidate name to a qualified treesitter path.
+                // Falls back to `file::candidate` when Surgeon returns None or errors.
+                let dep_path = self.enrich_semantic_path(&file, line, &candidate).await;
                 // Item 1: Dedup by semantic_path to avoid duplicates when
                 // multiple candidates resolve to the same definition.
                 if dependencies.iter().any(|d| d.semantic_path == dep_path) {
@@ -356,7 +358,11 @@ impl PathfinderServer {
                     }
 
                     let signature = callee.detail.clone().unwrap_or_else(|| callee.name.clone());
-                    let sp = format!("{}::{}", callee.file, callee.name);
+                    // Enrich the flat LSP name to a qualified treesitter path.
+                    // Falls back to `file::flat_name` when Surgeon returns None or errors.
+                    let sp = self
+                        .enrich_semantic_path(&callee.file, callee.line, &callee.name)
+                        .await;
                     // Dedup by semantic_path to avoid duplicates from LSP returning
                     // the same callee multiple times.
                     if dependencies.iter().any(|d| d.semantic_path == sp) {

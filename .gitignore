@@ -21,6 +21,8 @@ Thumbs.db
 # causes DeepSource to fail to match source lines and stay in WAITING state.
 lcov.info
 coverage/
+coverage.txt
+coverage_detail.txt
 
 .agents/
 .claude/

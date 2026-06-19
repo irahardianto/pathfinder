@@ -50,7 +50,6 @@ async fn test_search_codebase_degraded_on_unsupported_language() {
         max_results: 10,
         context_lines: 0,
         known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -143,7 +142,6 @@ async fn test_search_group_by_file_with_known_files() {
         max_results: 10,
         context_lines: 0,
         known_files: vec!["src/main.rs".to_owned()],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -360,8 +358,6 @@ async fn test_search_degraded_filter_bypassed_returns_matches() {
         path_glob: "**/*.xyz".to_owned(),
         max_results: 10,
         context_lines: 0,
-        known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -431,8 +427,6 @@ async fn test_search_hint_populated_when_filter_removes_all_results() {
         path_glob: "**/*.rs".to_owned(),
         max_results: 10,
         context_lines: 0,
-        known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -498,8 +492,6 @@ async fn test_search_hint_absent_when_no_filter_applied() {
         path_glob: "**/*.rs".to_owned(),
         max_results: 10,
         context_lines: 0,
-        known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -560,8 +552,6 @@ async fn test_search_next_offset_populated_when_truncated() {
         path_glob: "**/*.rs".to_owned(),
         max_results: 2,
         context_lines: 0,
-        known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -620,8 +610,6 @@ async fn test_search_binary_skipped_counted() {
         path_glob: "**/*".to_owned(),
         max_results: 10,
         context_lines: 0,
-        known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -660,8 +648,6 @@ async fn test_search_codebase_invalid_regex_returns_invalid_params() {
         path_glob: "**/*.rs".to_owned(),
         max_results: 10,
         context_lines: 0,
-        known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };
@@ -697,8 +683,6 @@ async fn test_search_zero_total_matches_hint() {
         path_glob: "**/*.rs".to_owned(),
         max_results: 10,
         context_lines: 0,
-        known_files: vec![],
-        exclude_glob: String::default(),
         offset: 0,
         ..Default::default()
     };

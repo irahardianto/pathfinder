@@ -110,7 +110,7 @@ fn create_workspace(file_count: usize, files_with_needle: usize) -> WorkspaceFix
         query: "generate_token".to_owned(),
         is_regex: false,
         path_glob: "**/*".to_owned(),
-        exclude_glob: String::default(),
+        exclude_glob: Vec::new(),
         max_results: 50,
         offset: 0,
         context_lines: 2,

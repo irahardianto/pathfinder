@@ -92,7 +92,6 @@ impl PathfinderServer {
             max_results: params.max_references,
             context_lines: 0,
             known_files: vec![],
-            exclude_glob: String::new(),
             offset: params.offset,
             kind: None,
             ..Default::default()
@@ -210,6 +209,12 @@ impl PathfinderServer {
         params: crate::server::types::TraceParams,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
+
+        // Clamp max_references to [1, 500] to bound grep fallback and pagination.
+        let params = crate::server::types::TraceParams {
+            max_references: params.max_references.clamp(1, 500),
+            ..params
+        };
 
         tracing::info!(
             tool = "find_all_references",

@@ -45,6 +45,37 @@ impl PathfinderServer {
     /// - `filepath` provided + source extension → `read_source_file_impl`
     /// - `filepath` provided + config extension → `read_file_impl`
     pub(crate) async fn read_impl(&self, params: ReadParams) -> Result<CallToolResult, ErrorData> {
+        let detail_level = params.detail_level.as_str();
+        if detail_level != "source_only"
+            && detail_level != "compact"
+            && detail_level != "symbols"
+            && detail_level != "full"
+        {
+            return Err(invalid_params_error(
+                "invalid `detail_level`: must be 'source_only', 'compact', 'symbols', or 'full'",
+            ));
+        }
+
+        if params.start_line == 0 {
+            return Err(invalid_params_error("`start_line` must be >= 1"));
+        }
+
+        if let Some(end) = params.end_line {
+            if end == 0 {
+                return Err(invalid_params_error("`end_line` must be >= 1"));
+            }
+        }
+
+        if params.max_lines_per_file == 0 {
+            return Err(invalid_params_error("`max_lines_per_file` must be >= 1"));
+        }
+
+        if params.paths.is_some() && (params.start_line != 1 || params.end_line.is_some()) {
+            return Err(invalid_params_error(
+                "`start_line` and `end_line` are not supported in batch mode (use single-file `filepath` mode instead)",
+            ));
+        }
+
         // Exactly one of filepath / paths must be set.
         match (&params.filepath, &params.paths) {
             (Some(_), Some(_)) => Err(invalid_params_error(
@@ -75,6 +106,7 @@ impl PathfinderServer {
     ///
     /// Reads multiple files in a single call with per-file error resilience.
     /// Files are processed sequentially to avoid file descriptor exhaustion.
+    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip(self, params), fields(count = %params.paths.as_ref().map_or(0, std::vec::Vec::len)))]
     pub(crate) async fn read_files_impl(
         &self,
@@ -176,7 +208,13 @@ impl PathfinderServer {
         for file in &response.files {
             if let Some(ref content) = file.content {
                 text_parts.push(format!("--- {} ---", file.path));
-                text_parts.push(content.clone());
+                let numbered_content = content
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| format!("{}: {}", i + 1, line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                text_parts.push(numbered_content);
             } else if let Some(ref error) = file.error {
                 text_parts.push(format!("--- {} (error: {}) ---", file.path, error));
             }
@@ -261,8 +299,8 @@ impl PathfinderServer {
                             pathfinder_common::types::VersionHash::compute(content.as_bytes())
                                 .short()
                                 .to_owned();
+                        let total = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
                         let truncated = truncate_content(&content, params.max_lines_per_file);
-                        let total = u32::try_from(truncated.lines().count()).unwrap_or(u32::MAX);
                         (Some(truncated), Some(total), Some(version_hash))
                     } else {
                         (None, None, None)
@@ -335,8 +373,8 @@ impl PathfinderServer {
             let version_hash = pathfinder_common::types::VersionHash::compute(content.as_bytes())
                 .short()
                 .to_owned();
-            let content = truncate_content(&content, params.max_lines_per_file);
             let total_lines = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
+            let content = truncate_content(&content, params.max_lines_per_file);
             let language = language_from_path(Path::new(file_path));
             let language = if language == "text" {
                 String::new()

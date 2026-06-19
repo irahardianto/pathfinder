@@ -98,7 +98,7 @@ impl PathfinderServer {
             query: params.query.clone(),
             is_regex,
             path_glob: params.path_glob.clone(),
-            exclude_glob: params.exclude_glob.clone(),
+            exclude_glob: params.exclude_glob.to_vec(),
             max_results: params.max_results as usize,
             offset: params.offset as usize,
             context_lines: params.context_lines as usize,

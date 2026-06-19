@@ -548,3 +548,76 @@ async fn test_get_repo_map_degraded_text_contains_notice() {
         "degraded text should still contain skeleton content"
     );
 }
+
+// ── mutually exclusive extensions error ───────────────────────────────
+
+#[tokio::test]
+async fn test_get_repo_map_mutually_exclusive_extensions_error() {
+    let (server, _dir) = make_server(MockSurgeon::default());
+    let mut params = default_params();
+    params.include_extensions = vec!["rs".to_owned()];
+    params.exclude_extensions = vec!["go".to_owned()];
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(
+        result.is_err(),
+        "should fail when both include and exclude extensions are provided"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        "should be invalid params error"
+    );
+    assert!(
+        err.message.contains("mutually exclusive"),
+        "error message should mention mutual exclusion, got: {:?}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_get_repo_map_hint_when_coverage_under_100() {
+    let mut low_cov = ok_result();
+    low_cov.coverage_percent = 75; // Under 100%
+
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(low_cov));
+    let (server, _dir) = make_server(surgeon);
+
+    let result = server.get_repo_map_impl(default_params()).await;
+    assert!(result.is_ok(), "should succeed");
+    let tool_result = result.unwrap();
+
+    // Check text response contains hint
+    let text = tool_result
+        .content
+        .first()
+        .and_then(|c| {
+            if let rmcp::model::RawContent::Text(t) = &c.raw {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    assert!(
+        text.contains("Hint: Repository map is incomplete"),
+        "text should contain the hint, got: {text}"
+    );
+
+    // Check metadata contains hint
+    let meta = tool_result.structured_content.as_ref().unwrap();
+    assert!(
+        meta.get("hint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .contains("Repository map is incomplete"),
+        "metadata hint should be set, got: {:?}",
+        meta.get("hint")
+    );
+}

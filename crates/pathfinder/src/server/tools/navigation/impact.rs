@@ -59,7 +59,7 @@ impl PathfinderServer {
             max_results: 20,
             context_lines: 0,
             known_files: vec![],
-            exclude_glob: String::new(),
+
             offset: 0,
             kind: None,
             ..Default::default()
@@ -123,6 +123,10 @@ impl PathfinderServer {
     ///
     /// Returns `Some(refs)` if outgoing dependencies found, `None` if none found.
     /// Updates `files_referenced` with the files containing matches.
+    // This function is ~102 lines because the search loop is one cohesive unit.
+    // Splitting it into helpers would require passing many local state variables
+    // without a meaningful reduction in complexity.
+    #[allow(clippy::too_many_lines)]
     async fn grep_outgoing_fallback(
         &self,
         scope_content: &str,
@@ -171,7 +175,7 @@ impl PathfinderServer {
                     is_regex: true,
                     max_results: 4,
                     path_glob: path_glob.to_string(),
-                    exclude_glob: String::default(),
+                    exclude_glob: Vec::new(),
                     context_lines: 0,
                     offset: 0,
                 })
@@ -196,7 +200,15 @@ impl PathfinderServer {
                             continue;
                         }
 
-                        let semantic_path = format!("{}::{}", m.file, candidate);
+                        // Enrich the grep-resolved candidate name to a qualified treesitter path.
+                        // Falls back to `file::candidate` when Surgeon returns None or errors.
+                        let semantic_path = self
+                            .enrich_semantic_path(
+                                &m.file,
+                                u32::try_from(m.line).unwrap_or(0),
+                                &candidate,
+                            )
+                            .await;
 
                         if seen.contains(&semantic_path) {
                             continue;
@@ -420,11 +432,18 @@ impl PathfinderServer {
                         if seen.insert(key) {
                             queue.push_back((referenced_item.clone(), current_depth + 1));
 
+                            // Enrich the flat LSP name to a qualified treesitter path.
+                            // Falls back to `file::flat_name` when Surgeon returns None or errors.
+                            let semantic_path = self
+                                .enrich_semantic_path(
+                                    &referenced_item.file,
+                                    referenced_item.line,
+                                    &referenced_item.name,
+                                )
+                                .await;
+
                             references.push(crate::server::types::ImpactReference {
-                                semantic_path: format!(
-                                    "{}::{}",
-                                    referenced_item.file, referenced_item.name
-                                ),
+                                semantic_path,
                                 file: referenced_item.file.clone(),
                                 line: usize::try_from(referenced_item.line).unwrap_or(usize::MAX),
                                 snippet: referenced_item
@@ -480,8 +499,9 @@ impl PathfinderServer {
         // Also floor at 1 to guarantee at least one level of traversal.
         let max_depth = params.max_depth.clamp(1, 5);
         let project_only = true;
-        // Clamp max_references to minimum 1 to prevent silently empty results.
-        let max_references = params.max_references.max(1);
+        // Clamp max_references to [1, 500] to prevent unbounded memory growth and LSP calls.
+        // Floor at 1 prevents silently empty results; ceiling at 500 bounds BFS traversal.
+        let max_references = params.max_references.clamp(1, 500);
         // Split budget between incoming and outgoing. Give any odd slot to incoming.
         let half = max_references / 2;
         let mut remaining_incoming = half + max_references % 2;

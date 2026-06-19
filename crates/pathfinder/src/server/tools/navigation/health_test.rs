@@ -1925,6 +1925,9 @@ async fn test_lsp_health_restart_missing_language() {
     };
     let result = server.lsp_health_impl(params).await;
     assert!(result.is_err());
+    // Must be INVALID_PARAMS, not INTERNAL_ERROR — this is a client input validation failure.
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 }
 
 #[tokio::test]
@@ -2287,5 +2290,83 @@ async fn test_health_indexing_complete_false_when_one_indexing() {
     assert!(
         !val.indexing_complete,
         "indexing_complete should be false when any language is still indexing"
+    );
+}
+
+#[tokio::test]
+async fn test_health_invalid_action_returns_invalid_params() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    // action = "invalid_action"
+    let params = crate::server::types::HealthParams {
+        language: Some("rust".to_string()),
+        action: Some("invalid_action".to_string()),
+    };
+
+    let result = server.lsp_health_impl(params).await;
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+}
+
+#[tokio::test]
+async fn test_health_typescript_call_hierarchy_limitation() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "typescript".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(false),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: Some("typescript-language-server".to_string()),
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams::default();
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    // Check degraded tools description
+    let ts_health = &val.languages[0];
+    let trace_deg = ts_health
+        .degraded_tools
+        .iter()
+        .find(|t| t.tool == "trace(scope=\"callers\")")
+        .expect("should find trace(scope=\"callers\") degraded tool");
+    assert!(
+        trace_deg
+            .description
+            .contains("TypeScript/JavaScript language servers"),
+        "expected description to mention TypeScript/JavaScript language servers, got: {}",
+        trace_deg.description
+    );
+
+    // Check known limitations
+    assert!(
+        val.known_limitations
+            .iter()
+            .any(|l| l
+                .contains("TypeScript/JavaScript language servers do not support call hierarchy")),
+        "expected known_limitations to mention TS/JS call hierarchy limitation, got: {:?}",
+        val.known_limitations
     );
 }

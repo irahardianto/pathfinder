@@ -15,9 +15,9 @@ pub struct SearchParams {
     /// Glob pattern restricting which files are searched (e.g. `src/**/*.ts`).
     /// Matches against paths relative to the workspace root.
     pub path_glob: String,
-    /// Glob pattern for files to *exclude* from search (e.g. `**/*.test.*`).
-    /// Applied before search — not as a post-filter. Empty string = no exclusion.
-    pub exclude_glob: String,
+    /// Glob patterns for files to *exclude* from search (e.g. `**/*.test.*`).
+    /// Applied before search — not as a post-filter. Empty vector = no exclusion.
+    pub exclude_glob: Vec<String>,
     /// Maximum number of matches to return.
     pub max_results: usize,
     /// Number of matches to skip before returning results (for pagination).
@@ -34,7 +34,7 @@ impl Default for SearchParams {
             query: String::default(),
             is_regex: false,
             path_glob: "**/*".to_owned(),
-            exclude_glob: String::default(),
+            exclude_glob: Vec::new(),
             max_results: 50,
             offset: 0,
             context_lines: 2,
@@ -71,7 +71,10 @@ pub struct SearchMatch {
     /// pipelines (e.g. the `search` handler's Tree-sitter pass)
     /// populate this field before results are returned to the caller.
     pub enclosing_semantic_path: Option<String>,
-    /// SHA-256 content fingerprint of the matched file.
+    /// Short content fingerprint of the matched file (7-char hex, derived from SHA-256).
+    ///
+    /// Use for change detection: if the hash differs from a previous call, the file
+    /// has been modified. Not a full SHA-256 digest — compare as opaque strings only.
     pub version_hash: String,
     /// Whether this match is at a definition position (fn, struct, class, etc.).
     ///

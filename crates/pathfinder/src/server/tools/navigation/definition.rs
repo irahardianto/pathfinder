@@ -546,7 +546,7 @@ impl PathfinderServer {
                     is_regex: true,
                     max_results: 5,
                     path_glob: glob.clone(),
-                    exclude_glob: String::default(),
+                    exclude_glob: Vec::new(),
                     context_lines: 0,
                     offset: 0,
                 })
@@ -601,7 +601,7 @@ impl PathfinderServer {
                 is_regex: true,
                 max_results: 10,
                 path_glob: path_glob.to_owned(),
-                exclude_glob: String::default(),
+                exclude_glob: Vec::new(),
                 context_lines: 0,
                 offset: 0,
             })
@@ -638,7 +638,7 @@ impl PathfinderServer {
                         is_regex: true,
                         max_results: 5,
                         path_glob: m.file.clone(),
-                        exclude_glob: String::default(),
+                        exclude_glob: Vec::new(),
                         context_lines: 0,
                         offset: 0,
                     })
@@ -704,7 +704,7 @@ impl PathfinderServer {
                 max_results: 10,
                 path_glob: "**/*".to_owned(),
                 // Exclude test files and mock implementations to prefer real definitions
-                exclude_glob: "**/{test,tests,mock}*/**".to_owned(),
+                exclude_glob: vec!["**/{test,tests,mock}*/**".to_owned()],
                 offset: 0,
                 context_lines: 0,
             })
@@ -754,7 +754,7 @@ impl PathfinderServer {
                 is_regex: true,
                 max_results: 20,
                 path_glob: "**/*".to_owned(),
-                exclude_glob: "**/{test,tests,mock}*/**".to_owned(),
+                exclude_glob: vec!["**/{test,tests,mock}*/**".to_owned()],
                 offset: 0,
                 context_lines: 0,
             })

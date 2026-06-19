@@ -21,6 +21,8 @@ pub struct SymbolOverviewResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub impact: Option<ImpactSummary>,
     /// Reference locations across the codebase.
+    /// Absent (omitted from JSON) when LSP was unavailable — references are unknown.
+    /// Present as `[]` when LSP confirmed zero references.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub references: Option<Vec<SymbolOverviewReference>>,
     /// Total number of files containing references.
@@ -64,9 +66,13 @@ pub struct SymbolSource {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImpactSummary {
     /// Direct callers.
+    /// Absent (omitted from JSON) when LSP was unavailable — callers are unknown.
+    /// Present as `[]` when LSP confirmed zero callers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incoming: Option<Vec<SymbolOverviewImpactEntry>>,
     /// Direct callees.
+    /// Absent (omitted from JSON) when LSP was unavailable — callees are unknown.
+    /// Present as `[]` when LSP confirmed zero callees.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outgoing: Option<Vec<SymbolOverviewImpactEntry>>,
     /// Whether the impact analysis was degraded.
@@ -198,7 +204,8 @@ pub struct GroupedKnownMatch {
 pub struct SearchResultGroup {
     /// File path relative to workspace root.
     pub file: String,
-    /// SHA-256 hash of the file (shared by all matches in this group).
+    /// Short content fingerprint of the file (7-char hex, derived from SHA-256).
+    /// Shared by all matches in this group.
     pub version_hash: String,
     /// Total number of matches in this group (both full and known).
     ///
@@ -267,8 +274,9 @@ pub struct GetRepoMapMetadata {
     pub coverage_percent: u8,
     /// Map of file paths to their version hashes.
     pub version_hashes: std::collections::HashMap<String, String>,
-    /// Always `true` while visibility filtering is not yet implemented.
-    /// Agents should treat all symbols as public regardless of `visibility` param.
+    /// Absent when visibility filtering is working correctly.
+    /// Present as `true` if the visibility filter could not be applied
+    /// (agents should then treat all symbols as public).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility_degraded: Option<bool>,
     /// `true` when filtering by `changed_since` fails (e.g., git is unavailable).
@@ -290,6 +298,9 @@ pub struct GetRepoMapMetadata {
     /// Wall-clock time in milliseconds that this tool call took to complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Optional hint for the agent (e.g. suggesting to increase `max_tokens` if coverage < 100).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// The overall capabilities of the Pathfinder system.
@@ -544,7 +555,9 @@ pub struct FindCallersCalleesMetadata {
     /// Total files referenced across all incoming and outgoing references.
     pub files_referenced: usize,
     /// Whether the call hierarchy analysis was degraded (LSP unavailable or crashed).
-    /// Always present. When `true`, `incoming` and `outgoing` are `null` (not empty arrays).
+    /// Always present. When `true`, `incoming` and `outgoing` may be `null` (unknown)
+    /// or contain heuristic grep-based results. Check `resolution_strategy` and
+    /// `confidence` on each reference to assess reliability.
     pub degraded: bool,
     /// Machine-readable reason for degradation (e.g., `no_lsp`, `lsp_crash`, `lsp_timeout`).
     /// Absent when `degraded` is `false`.
@@ -574,6 +587,8 @@ pub struct FindCallersCalleesMetadata {
     pub resolution_strategy: Option<String>,
     /// Spec 4.2: Test functions that reference or test this symbol.
     /// Populated when `include_test_coverage=true` was passed.
+    /// Absent (omitted from JSON) when unavailable/not requested.
+    /// Present as `[]` when requested and confirmed to have zero test callers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_callers: Option<Vec<ImpactReference>>,
     /// Spec 4.2: Status of test coverage search.
@@ -594,13 +609,14 @@ pub struct FindCallersCalleesMetadata {
 pub struct GetSemanticPathResult {
     /// The full semantic path (`file::symbol`) of the innermost enclosing symbol.
     ///
-    /// `null` when the line is not inside any named symbol (e.g., it is a module-level
-    /// attribute, blank line, or the file uses an unsupported language).
+    /// Absent (omitted from JSON) when the line is not inside any named symbol
+    /// (e.g., it is a module-level attribute, blank line, or the file uses an
+    /// unsupported language).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_path: Option<String>,
     /// The symbol portion only (without the file prefix).
     ///
-    /// `null` when `semantic_path` is null.
+    /// Absent (omitted from JSON) when `semantic_path` is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
     /// The file portion of the semantic path (same as the `file` parameter).
@@ -727,7 +743,11 @@ pub struct LspHealthResponse {
 pub struct LspLanguageHealth {
     /// Language ID (e.g., "rust", "typescript").
     pub language: String,
-    /// Status: `"ready"`, `"warming_up"`, `"starting"`, or `"unavailable"`.
+    /// Status of the language server process: `"ready"`, `"warming_up"`, `"starting"`, or `"unavailable"`.
+    ///
+    /// Note: `status: "ready"` indicates the LSP process has started and successfully completed the
+    /// initialization handshake (i.e. capabilities are negotiated). It does NOT mean the live probe
+    /// has verified navigation. For live verification, check `navigation_tested: Some(true)`.
     pub status: String,
     /// Time since LSP process started, formatted as a human-readable string (e.g., "45s").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -775,6 +795,10 @@ pub struct LspLanguageHealth {
     /// `true` only when a live `goto_definition` probe request succeeded — meaning the LSP
     /// returned a real location, not just that it advertised the capability in the initialize
     /// handshake. Stronger signal than `navigation_ready` alone.
+    ///
+    /// Note: This is an independent signal from `status: "ready"`. An LSP can be in the `"ready"` status
+    /// (handshake completed) even if a live probe has not yet been executed or has failed (in which case
+    /// `navigation_tested` will be `None` or `Some(false)` respectively).
     ///
     /// Agents should prefer this over `probe_verified` — it has the same meaning but
     /// communicates intent more clearly.
@@ -850,10 +874,13 @@ pub struct FileResult {
     /// Language of the file (e.g., "rust", "typescript", "toml").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Total lines in the file (or lines returned if truncated).
+    /// Total number of lines in the file (before truncation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_lines: Option<u32>,
-    /// SHA-256 hash of the file content.
+    /// Short content fingerprint of the file (7-char hex, derived from SHA-256).
+    ///
+    /// Use for change detection: if the hash differs from a previous call, the file
+    /// has been modified. Not a full SHA-256 digest — compare as opaque strings only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_hash: Option<String>,
     /// Error message if file could not be read (e.g., "file not found", "sandbox denied").
@@ -932,12 +959,26 @@ pub struct ExploreParams {
     #[serde(default = "default_max_tokens_per_file")]
     pub max_tokens_per_file: u32,
     /// Git ref or duration to show only recently modified files (e.g., `HEAD~5`, `3h`, `2024-01-01`).
+    ///
+    /// Defaults to an empty string, which disables the git filter and maps the entire repository.
     #[serde(default)]
     pub changed_since: String,
     /// Only include files with these extensions. Mutually exclusive with `exclude_extensions`.
+    ///
+    /// Format: raw extension string without a leading dot or wildcard (e.g. `"rs"` or `"ts"`,
+    /// NOT `".rs"` or `"*.rs"`).
+    ///
+    /// If both `include_extensions` and `exclude_extensions` are non-empty, the tool returns
+    /// an invalid params error.
     #[serde(default)]
     pub include_extensions: Vec<String>,
     /// Exclude files with these extensions. Mutually exclusive with `include_extensions`.
+    ///
+    /// Format: raw extension string without a leading dot or wildcard (e.g. `"rs"` or `"ts"`,
+    /// NOT `".rs"` or `"*.rs"`).
+    ///
+    /// If both `include_extensions` and `exclude_extensions` are non-empty, the tool returns
+    /// an invalid params error.
     #[serde(default)]
     pub exclude_extensions: Vec<String>,
 }
@@ -955,6 +996,50 @@ pub enum SearchMode {
     Regex,
 }
 
+/// Glob pattern representation that accepts either a single string or an array of strings.
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(untagged)]
+pub enum ExcludeGlob {
+    /// A single glob pattern.
+    Single(String),
+    /// Multiple glob patterns.
+    Multiple(Vec<String>),
+}
+
+impl Default for ExcludeGlob {
+    fn default() -> Self {
+        Self::Single(String::new())
+    }
+}
+
+impl std::fmt::Display for ExcludeGlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Single(s) => write!(f, "{s}"),
+            Self::Multiple(v) => write!(f, "[{}]", v.join(", ")),
+        }
+    }
+}
+
+impl ExcludeGlob {
+    /// Convert the glob pattern(s) to a list of string patterns.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<String> {
+        match self {
+            Self::Single(s) => {
+                if s.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![s.clone()]
+                }
+            }
+            Self::Multiple(v) => v.clone(),
+        }
+    }
+}
+
 /// Parameters for the `search` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
@@ -964,6 +1049,12 @@ pub struct SearchParams {
     #[serde(default)]
     pub mode: SearchMode,
     /// Limit search scope (e.g., `src/**/*.ts`).
+    ///
+    /// Supports brace expansion to search multiple patterns in one call:
+    /// `{src/**/*.ts,tests/**/*.ts}` matches files in both directories.
+    ///
+    /// Brace expansion is handled by the `globset` crate and works out of the
+    /// box — no extra configuration needed.
     #[serde(default = "default_path_glob")]
     pub path_glob: String,
     /// Maximum matches returned. Default: 50.
@@ -981,9 +1072,17 @@ pub struct SearchParams {
     /// Full content and context lines are omitted to save tokens.
     #[serde(default)]
     pub known_files: Vec<String>,
-    /// Glob pattern for files to exclude from search (e.g., `**/*.test.*`).
+    /// Glob patterns for files to exclude from search. Accepts either a single
+    /// string or an array of strings.
+    ///
+    /// Supports brace expansion to exclude multiple patterns in one call:
+    /// `{**/*.test.*,**/*.spec.*}` excludes both test and spec files.
+    /// `{**/*.test.ts,**/*.spec.ts,**/*.e2e.ts}` — three patterns, one string.
+    ///
+    /// Brace expansion is handled by the `globset` crate and works out of the
+    /// box — no extra configuration needed.
     #[serde(default)]
-    pub exclude_glob: String,
+    pub exclude_glob: ExcludeGlob,
     /// Number of matches to skip before returning results (for pagination).
     /// Use with `max_results` to page through large result sets.
     #[serde(default)]
@@ -1020,7 +1119,7 @@ impl Default for SearchParams {
             max_results: default_max_results(),
             context_lines: default_context_lines(),
             known_files: Vec::new(),
-            exclude_glob: String::new(),
+            exclude_glob: ExcludeGlob::default(),
             offset: 0,
             kind: None,
             group_by_file: default_group_by_file(),
@@ -1034,7 +1133,7 @@ impl Default for SearchParams {
 /// Accepts either a single file via `filepath` or multiple files via `paths`.
 /// Exactly one of the two must be provided; the handler validates this at runtime.
 /// File type (source vs config) is auto-detected from the extension.
-#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadParams {
     /// Single file path. Use this for reading one file.
     /// Mutually exclusive with `paths`.
@@ -1054,9 +1153,22 @@ pub struct ReadParams {
     /// Last line to return (1-indexed, inclusive). Single-file mode only.
     #[serde(default)]
     pub end_line: Option<u32>,
-    /// Maximum lines per file (batch mode). Default: 500.
+    /// Maximum lines returned per file (defaults to 500). Applies to batch mode and config/raw files.
     #[serde(default = "default_max_lines")]
     pub max_lines_per_file: u32,
+}
+
+impl Default for ReadParams {
+    fn default() -> Self {
+        Self {
+            filepath: None,
+            paths: None,
+            detail_level: default_detail_level(),
+            start_line: default_start_line(),
+            end_line: None,
+            max_lines_per_file: default_max_lines(),
+        }
+    }
 }
 
 /// Parameters for the `inspect` tool.
@@ -1144,7 +1256,7 @@ pub struct TraceParams {
     /// Reserve `max_depth=4` or `max_depth=5` for large-scale architectural analysis.
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
-    /// Maximum total references to return.
+    /// Maximum total references to return (clamped to 1..=500).
     /// Prevents context overflow on large codebases. Default: 50.
     ///
     /// In `overview` scope, this single parameter controls both the

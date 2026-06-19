@@ -499,6 +499,39 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
 }
 
 impl PathfinderServer {
+    /// Enrich a flat LSP-derived name into a fully-qualified treesitter semantic path.
+    ///
+    /// LSP call-hierarchy returns bare symbol names (e.g. `"handle_request"`), but
+    /// treesitter semantic paths require the qualified dot-chain for nested symbols
+    /// (e.g. `"Server.handle_request"`). This method calls `Surgeon::enclosing_symbol_detail`
+    /// at the given file+line to derive the authoritative qualified chain.
+    ///
+    /// Falls back silently to `file::flat_name` when:
+    /// - Surgeon returns `Ok(None)` (top-level symbol with no enclosing context), OR
+    /// - Surgeon returns an error (parse failure, unsupported language, etc.)
+    ///
+    /// The fallback ensures BFS traversal is never blocked by treesitter failures.
+    pub(crate) async fn enrich_semantic_path(
+        &self,
+        file: &str,
+        line: u32,
+        flat_name: &str,
+    ) -> String {
+        let file_path = std::path::Path::new(file);
+        // LSP lines are 1-indexed; Surgeon's enclosing_symbol_detail also takes 1-indexed.
+        let line_1indexed = usize::try_from(line).unwrap_or(0);
+        match self
+            .surgeon
+            .enclosing_symbol_detail(self.workspace_root.path(), file_path, line_1indexed)
+            .await
+        {
+            Ok(Some(sym)) if !sym.semantic_path.is_empty() => {
+                format!("{}::{}", file, sym.semantic_path)
+            }
+            Ok(_) | Err(_) => format!("{file}::{flat_name}"),
+        }
+    }
+
     /// Spec 2.2 + 2.3: Enrich `did_you_mean` suggestions with:
     /// 1. Separator correction (:: → . within symbol chain)
     /// 2. Cross-file search via `find_symbol` when same-file suggestions empty
