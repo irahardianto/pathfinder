@@ -29,6 +29,36 @@ All Pathfinder tools that take a `semantic_path` require `file_path::symbol_chai
 
 Bare file paths (no `::`) are valid only for whole-file operations like `read(filepath="...")`.
 
+## Response Format
+
+Pathfinder returns responses through two channels. Knowing which to read prevents misinterpretation.
+
+### Text Channel (always present)
+The primary output — skeleton text, source code, formatted results. **Always read this first.**
+
+### Structured Content (metadata)
+Machine-parseable JSON with counts, flags, and status fields. Use for programmatic decisions
+(`coverage_percent`, `degraded`, `truncated`, `dependencies_truncated`, etc.).
+
+### Per-Tool Response Guide
+
+| Tool | Text Channel Contains | Structured Content Contains |
+|------|-----------------------|-----------------------------|
+| `explore` | **Skeleton output** (directory tree / file list / symbols) | Metadata only: tech_stack, coverage_percent, files_scanned, version_hashes |
+| `search` | **Full JSON response** (matches, counts, metadata — all in one) | Not set |
+| `read` | **File content** (source code or raw content) | Metadata: language, symbols, total_lines, version_hash |
+| `inspect` | **Symbol source code** (+ dependency signatures if requested) | Metadata: start_line, end_line, dependencies, degraded status |
+| `locate` | **Definition location** or **semantic path** (human-readable summary) | Full typed response (file, line, column, preview, degraded status) |
+| `trace` | **Formatted caller/callee/reference listing** | Full typed response (incoming, outgoing, references, degraded status) |
+| `health` | **Formatted health status** | Full typed response (status, languages, capabilities) |
+
+> **Key difference for `search`:** The entire typed response is serialized as JSON in the text
+> channel — there is no structured_content. Parse it as JSON directly.
+
+> **Key difference for `explore`:** The actual skeleton lives only in the text channel.
+> `files_scanned: 0` in structured_content for `detail="structure"` is **correct and expected** —
+> structure mode reads directory names only, not source files. The directory tree IS in the text.
+
 ## Workflows
 
 ### Explore (Understand a Codebase)
@@ -130,6 +160,25 @@ Bare file paths (no `::`) are valid only for whole-file operations like `read(fi
 | `max_results` | `50` | Cap results. Applies to all modes including symbol. |
 | `offset` | `0` | Skip N matches for pagination. Use with `max_results` to page through large result sets. |
 | `context_lines` | `2` | Context above/below matches (text/regex modes only) |
+| `filter_mode` | `code_only` | `code_only` returns only code lines; `comments_only` returns only comments; `all` returns everything unfiltered |
+| `group_by_file` | `true` | Groups search results by file. Set to `false` for a flat match list. |
+
+#### Symbol Kind Filter (`kind` parameter)
+
+When using `mode="symbol"`, the optional `kind` parameter filters results by symbol type.
+
+| Canonical Value | Aliases | Matches |
+|---|---|---|
+| `function` | `method`, `fn` | Functions and methods |
+| `class` | — | Classes (also matches structs and interfaces) |
+| `struct` | — | Struct definitions |
+| `interface` | `trait` | Interfaces and traits |
+| `enum` | — | Enum definitions |
+| `constant` | `const`, `static`, `let` | Constants and static variables |
+| `module` | `mod`, `namespace` | Modules and namespaces |
+| `impl` | — | Implementation blocks (Rust) |
+
+Invalid `kind` values return an error listing all accepted values.
 
 **Coverage metadata:**
 - `files_searched` — actual files that were searched
@@ -176,8 +225,17 @@ When `dependencies_truncated: true` in the response, increase `max_dependencies`
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `max_tokens` | `16000` | Default 16000. Handler auto-scales for repos over 20 files: `clamp(file_count × 800, 16000, 48000)` |
+| `max_tokens` | `16000` | Applies to `detail="symbols"` only. Auto-scales for repos over 20 files: `clamp(file_count × 800, 16000, 48000)`. Ignored for structure/files modes. |
 | `depth` | `3` | Directory traversal depth. Use 1-2 for large repos, 5+ for small repos. |
+| `visibility` | `public` | `public` shows only exported/public symbols; `all` includes private/internal symbols. |
+| `max_tokens_per_file` | `2000` | Per-file token cap in symbol output. Limits how much of any single file's symbols are emitted. |
+| `include_extensions` | `[]` | Only include files with these extensions (e.g. `["rs", "toml"]`). Empty = all files. |
+| `exclude_extensions` | `[]` | Exclude files with these extensions (e.g. `["lock", "min.js"]`). Empty = no exclusions. |
+
+**Per-detail token caps (hard limits, cannot be overridden):**
+- `detail="structure"`: max 4,000 tokens (dirs + manifests only)
+- `detail="files"`: max 8,000 tokens (dirs + all filenames)
+- `detail="symbols"`: uses provided `max_tokens` (default 16,000, auto-scales up to 48,000)
 
 Check `max_tokens_used` in the response to see the effective budget applied.
 
@@ -204,7 +262,7 @@ Every response includes `degraded` (bool), `degraded_reason`, and `lsp_readiness
 | `grep_fallback_file_scoped` | File-scoped grep | Good confidence |
 | `grep_fallback_impl_scoped` | Impl-block grep | Good for methods |
 | `grep_fallback_global` | Global grep | Least precise — verify |
-| `unsupported_language_filter_bypassed` | Language unsupported; filter bypassed | Results may include noise |
+| `unsupported_language_filter_bypassed` | Code/comment filter was bypassed (file type not AST-parseable). **Results are complete and reliable** — only the code_only filter didn't apply. Do not treat as untrustworthy. | Accept results; filter noise manually if needed |
 | `unsupported_language` | Language not supported | Use read for raw content |
 | `git_error` | Git operation failed | explore changed_since fell back |
 
@@ -215,9 +273,15 @@ Every response includes `degraded` (bool), `degraded_reason`, and `lsp_readiness
 
 **Critical rule:** When `degraded: true`, **never treat empty results as confirmed-zero.** Re-run after LSP finishes indexing, or check `health`.
 
-**Null vs Empty Array distinction:**
-- `incoming: null` (or `outgoing: null`, `references: null`) — unknown, degraded
-- `incoming: []` (or `outgoing: []`, `references: []`) — LSP confirmed: truly zero
+**Null vs Empty Array — critical distinction for safe refactoring:**
+
+```
+null  = UNKNOWN (degraded — callers may exist but LSP couldn't verify)
+[]    = CONFIRMED ZERO (LSP verified — safe to conclude no callers exist)
+```
+
+Never treat `null` as "no callers" — it means the answer is unknown. Only `[]` (empty array)
+from a non-degraded response is a confirmed zero.
 
 ## Error Recovery
 
@@ -246,6 +310,17 @@ degraded=true, degraded_reason="lsp_warmup_empty_unverified"
 
 ## Common Mistakes
 
+### Misreading explore Response
+
+The `explore` skeleton is in the **text content**, not in `structured_content`.
+The structured_content contains only metadata.
+
+For `detail="structure"`, metadata shows `files_scanned: 0` — **this is correct**.
+Structure mode reads directory names and manifest files only, not source files.
+The actual directory tree IS in the text output.
+
+For all detail modes, always read the text channel for the actual output.
+
 ### Wrong File in Semantic Path
 If `locate(semantic_path="logic.go::CompleteLesson")` returns SYMBOL_NOT_FOUND,
 the symbol might be defined in a different file. The semantic path requires the
@@ -273,6 +348,14 @@ the symbol might be defined in a different file. The semantic path requires the
 | `symbols` | Symbol tree only, no source | Discover available symbols |
 | `full` | Source + nested symbol tree | Deep understanding |
 
+**Additional `read` parameter:**
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `max_lines_per_file` | `500` | Cap on lines returned per file. Applies to single-file and batch reads. |
+
+> **Alias:** The `filepath` parameter also accepts `path` as an alternative name.
+
 ### Converting Grep/Stack Trace Results to Semantic Paths
 
 When you have a file + line from grep, error output, or a stack trace:
@@ -280,6 +363,7 @@ When you have a file + line from grep, error output, or a stack trace:
 1. locate(file="src/auth.ts", line=42)
    → Returns semantic path of the symbol at that line
    → null if line is outside any named symbol
+   (Note: `file` also accepts `path` as an alias)
 
 2. Use the returned semantic_path with any other Pathfinder tool:
    inspect(semantic_path="<returned path>")
