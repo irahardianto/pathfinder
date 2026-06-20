@@ -93,7 +93,7 @@ impl PathfinderServer {
                         tool = "read_with_deep_context",
                         semantic_path = %semantic_path,
                         "read_with_deep_context: call_hierarchy_prepare returned [] and goto_definition \
-                         probe returned no result — LSP likely warming up, waiting 3s and retrying"
+                         probe returned no result — LSP likely warming up, waiting 1s and retrying"
                     );
 
                     // 1s is sufficient — grep fallback handles the case where LSP is still not ready.

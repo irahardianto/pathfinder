@@ -24,7 +24,7 @@ impl PathfinderServer {
     // This function coordinates Tree-sitter (position resolution), LSP (goto_definition),
     // and Ripgrep (degraded fallback). It has multiple outcome paths:
     // 1. Happy path: LSP returns Some(def)
-    // 2. Warmup path: LSP returns None → 3s wait → retry → grep fallback
+    // 2. Warmup path: LSP returns None → 1s wait → retry → grep fallback
     // 3. Degraded path: NoLspAvailable → grep fallback
     // 4. Error path: Other LspError
     // The linear structure makes the orchestration easier to understand.
@@ -212,7 +212,7 @@ impl PathfinderServer {
                     }));
                 }
 
-                // Re-capture duration after the 3s sleep + retry attempt
+                // Re-capture duration after the 1s sleep + retry attempt
                 // so downstream logs reflect the full elapsed time.
                 let duration_ms = start.elapsed().as_millis();
 
