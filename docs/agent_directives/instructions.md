@@ -10,6 +10,19 @@ All symbol-level tools (`inspect`, `locate`, `trace`) require semantic paths in 
 
 Bare file paths (no `::`) are valid only for `read(filepath="...")` and `explore(path="...")`.
 
+## Response Format (Critical)
+
+Pathfinder tools return responses through two channels:
+- **Text content** — the primary output (skeleton, source code, formatted results). Always read this.
+- **Structured content** — metadata only (counts, flags, status). Use for programmatic decisions.
+
+`explore` skeleton is in the **text content** only. `files_scanned: 0` in structured_content for
+`detail="structure"` is expected — structure mode reads directory names, not source files.
+
+`search` puts everything (including results) in the text channel as JSON. No structured_content.
+
+See the skill file for the full per-tool response guide.
+
 ## Pre-Flight Check
 
 Run once per session to confirm Pathfinder is available:
@@ -38,8 +51,14 @@ If tools are listed, Pathfinder is live. If error, fall back to built-in tools (
 
 ## Degraded Mode
 
-When LSP is unavailable, tools fall back to grep/Tree-sitter heuristics. Check the `degraded` field in responses. When `degraded: true`, never treat empty results as confirmed-zero — results are best-effort.
+When LSP is unavailable, tools fall back to grep/Tree-sitter heuristics. Check the `degraded` field.
+When `degraded: true`, never treat empty results as confirmed-zero — results are best-effort.
+
+Critical: `null` and `[]` in trace results are NOT the same:
+- `null` = unknown (degraded — callers may exist)
+- `[]` = LSP confirmed zero callers
 
 ## Detailed Workflows
 
-For step-by-step workflows, error recovery patterns, and advanced usage, see the Pathfinder skill file: `docs/agent_directives/skills/pathfinder/SKILL.md`
+For step-by-step workflows, error recovery patterns, response format details, and advanced usage,
+see the Pathfinder skill file: `docs/agent_directives/skills/pathfinder/SKILL.md`

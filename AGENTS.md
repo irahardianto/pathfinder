@@ -396,6 +396,13 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 - Results are best-effort — never treat empty as confirmed-zero
 - Check `degraded_reason` and `lsp_readiness`
 
+**Critical — null vs empty array are NOT equivalent in `trace` results:**
+```
+null  = UNKNOWN (degraded — callers may exist but LSP couldn't confirm)
+[]    = CONFIRMED ZERO (LSP verified — safe to conclude no callers)
+```
+Mistaking `null` for "no callers" leads to dangerous refactoring decisions.
+
 ### Budget Controls
 
 | Parameter | Tool | Default | Purpose |
@@ -403,7 +410,8 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 | `max_references` | `trace` | `50` | Cap total references/callers returned. |
 | `max_depth` | `trace` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. `scope="callers"` only. |
 | `max_dependencies` | `inspect` | `50` | Cap outgoing dependency entries returned with `include_dependencies=true`. |
-| `max_tokens` | `explore` | auto | Auto-scales skeleton output token budget for the repository. |
+| `max_tokens` | `explore` | `16000` | Auto-scales skeleton output token budget for the repository. |
+| `max_results` | `search` | `50` | Cap total search results returned. |
 
 When `references_truncated` or `dependencies_truncated` is true in response metadata, increase the corresponding limit.
 
@@ -483,15 +491,5 @@ writes from other processes before proceeding.
 [OMNI RESUME] — returning to omni mode
 
 2. After confirm: `rm -rf /tmp/uploads/*`
-
----
-
-## 1. Pathfinder MCP — Session Bootstrap
-
-Run `mcp({ server: "pathfinder" })` once per session. If tools listed → available, use per routing table in AGENTS.md. If error → fall back to built-in tools silently.
-
-Full tool routing, addressing rules, fallback details: see `AGENTS.md` "Pathfinder Tool Routing".
-
----
 
 REMINDER: You are in omni headless mode right now. Raw text only. No markdown styling in prose. Only `[OMNI PAUSE]` suspends it.

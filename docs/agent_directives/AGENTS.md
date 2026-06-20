@@ -15,7 +15,7 @@ Check once per session.
 | Task | Tool | Notes |
 |---|---|---|
 | Project skeleton | `explore` | Three detail levels: `structure` (dirs only), `files` (dirs + filenames), `symbols` (default — full AST). Configurable `depth` (default 3) and `max_tokens`. |
-| Search code | `search` | Three modes: `text` (default), `regex`, `symbol`. AST-filtered (code-only). Returns `enclosing_semantic_path`. Check `coverage_percent`. |
+| Search code | `search` | Three modes: `text` (default), `regex`, `symbol`. `symbol` mode: use `kind` to filter by symbol type (canonical: function/class/struct/interface/enum/constant/module/impl; aliases: method/fn→function, trait→interface, const/static/let→constant, mod/namespace→module). Invalid kind values return INVALID_PARAMS. Use `filter_mode` to control code vs comment filtering (`code_only` default, `all`, `comments_only`). Returns `enclosing_semantic_path`. Check `coverage_percent`. |
 | Read file(s) | `read` | Single file (`filepath`) or batch (`paths`, max 10). Auto-detects source vs config. Source files get AST parsing with `detail_level`. Supports `start_line`/`end_line`. |
 | Read one symbol | `inspect` | Extract symbol source by semantic path. Default: source only (fast). With `include_dependencies=true`: also fetches callee signatures (LSP-powered). |
 | Jump to definition | `locate` | Provide `semantic_path` for definition lookup. LSP with ripgrep fallback. |
@@ -31,10 +31,17 @@ Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::Au
 
 ### Degraded Mode
 
-`locate`, `trace`, `inspect(include_dependencies=true)` use LSP. When `degraded: true`:
+`locate` (definition mode), `trace`, `inspect(include_dependencies=true)` use LSP. When `degraded: true`:
 - Text output starts with: `⚠️ DEGRADED ({reason}) — {tool-specific guidance}`
 - Results are best-effort — never treat empty as confirmed-zero
 - Check `degraded_reason` and `lsp_readiness`
+
+**Critical — null vs empty array are NOT equivalent in `trace` results:**
+```
+null  = UNKNOWN (degraded — callers may exist but LSP couldn't confirm)
+[]    = CONFIRMED ZERO (LSP verified — safe to conclude no callers)
+```
+Mistaking `null` for "no callers" leads to dangerous refactoring decisions.
 
 ### Budget Controls
 
