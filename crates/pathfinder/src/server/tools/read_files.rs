@@ -162,6 +162,16 @@ impl PathfinderServer {
                             tracing::error!(tool = "read_files", error = %e, "spawned task panicked");
                         }
                     }
+                } else {
+                    // Safety valve: JoinSet drained but counter disagrees — break to
+                    // prevent an infinite spin.  This should never happen in practice.
+                    tracing::warn!(
+                        tool = "read_files",
+                        spawned,
+                        "join_next returned None while spawned > 0 — resetting"
+                    );
+                    spawned = 0;
+                    break;
                 }
             }
 
