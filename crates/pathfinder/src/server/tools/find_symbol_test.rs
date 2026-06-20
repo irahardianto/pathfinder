@@ -470,6 +470,30 @@ fn test_kind_matches_filter_interface_class_cross() {
     assert!(!kind_matches_filter("enum", "class"));
 }
 
+#[test]
+fn test_kind_matches_filter_alias_filter_side() {
+    // REGRESSION GUARD: aliases must work on the FILTER side, not just the kind side.
+    // Before the fix, filter="const" would accept the string "const" as valid via is_valid_kind_filter
+    // but kind_matches_filter silently returned false for (kind="constant", filter="const"),
+    // producing 0 results even though the input was accepted as valid.
+
+    // filter="const" must match tree-sitter canonical kind "constant"
+    assert!(kind_matches_filter("constant", "const"));
+    assert!(kind_matches_filter("constant", "static"));
+    assert!(kind_matches_filter("constant", "let"));
+    // alias-to-alias on kind side also works
+    assert!(kind_matches_filter("const", "const"));
+    assert!(kind_matches_filter("static", "let"));
+    // filter="mod" must match tree-sitter canonical kind "module"
+    assert!(kind_matches_filter("module", "mod"));
+    assert!(kind_matches_filter("module", "namespace"));
+    assert!(kind_matches_filter("mod", "namespace"));
+    // Negatives: alias filters must not bleed into unrelated kinds
+    assert!(!kind_matches_filter("function", "const"));
+    assert!(!kind_matches_filter("class", "mod"));
+    assert!(!kind_matches_filter("enum", "static"));
+}
+
 // ── Additional truncate_preview coverage ────────────────────────────
 
 #[test]
@@ -654,6 +678,29 @@ async fn test_find_symbol_impl_validation_errors() {
         panic!("expected error")
     };
     assert_eq!(err2.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+    // Invalid kind filter — must return INVALID_PARAMS listing accepted values
+    let params = SearchToolParams {
+        query: "MyStruct".to_string(),
+        kind: Some("type".to_string()), // "type" is not an accepted kind
+        ..Default::default()
+    };
+    let res = server.find_symbol_impl(params).await;
+    assert!(res.is_err());
+    let Err(err3) = res else {
+        panic!("expected error for invalid kind");
+    };
+    assert_eq!(err3.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err3.message.contains("type"),
+        "error message should echo the invalid kind value, got: {}",
+        err3.message
+    );
+    assert!(
+        err3.message.contains("function") || err3.message.contains("Canonical"),
+        "error message should list accepted values, got: {}",
+        err3.message
+    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -843,4 +890,295 @@ async fn test_find_symbol_impl_scout_error_fallback() {
     let Json(res) = server.find_symbol_impl(params).await.expect("success");
     assert_eq!(res.symbols.len(), 0);
     assert_eq!(res.total_found, 0);
+}
+
+/// Verify that kind alias filters work end-to-end through `find_symbol_impl`.
+///
+/// The alias fix (`kind_matches_filter`) normalises filter-side aliases, e.g.
+/// "const" → "constant" and "trait" → "interface", so that agents aren't
+/// surprised by 0 results when they use the common shorthand.
+///
+/// Previously only `is_valid_kind_filter` accepted the aliases; now
+/// `kind_matches_filter` also handles them symmetrically.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn test_find_symbol_impl_kind_alias_filter_end_to_end() {
+    let ws_dir = tempdir().expect("temp dir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // Two matches:
+    //   match_const.rs  → tree-sitter returns SymbolKind::Constant  (kind string = "constant")
+    //   match_trait.rs  → tree-sitter returns SymbolKind::Interface (kind string = "interface")
+    let mock_scout = MockScout::default();
+    mock_scout.set_result(Ok(SearchResult {
+        matches: vec![
+            SearchMatch {
+                file: "target_dir/match_const.rs".to_owned(),
+                line: 1,
+                column: 0,
+                content: "const MY_CONST: u32 = 42;".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "abc".to_owned(),
+                known: None,
+            },
+            SearchMatch {
+                file: "target_dir/match_trait.rs".to_owned(),
+                line: 1,
+                column: 0,
+                content: "trait MyTrait {}".to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "def".to_owned(),
+                known: None,
+            },
+        ],
+        total_matches: 2,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }));
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+
+    // match_const.rs → SymbolKind::Constant → kind_string = "constant"
+    mock_surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(ExtractedSymbol {
+            name: "MY_CONST".to_owned(),
+            semantic_path: "MY_CONST".to_owned(),
+            kind: pathfinder_treesitter::surgeon::SymbolKind::Constant,
+            byte_range: 0..24,
+            start_line: 0,
+            end_line: 0,
+            name_column: 6,
+            access_level: AccessLevel::Public,
+            children: vec![],
+        })));
+
+    // match_trait.rs → SymbolKind::Interface → kind_string = "interface"
+    mock_surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(ExtractedSymbol {
+            name: "MyTrait".to_owned(),
+            semantic_path: "MyTrait".to_owned(),
+            kind: pathfinder_treesitter::surgeon::SymbolKind::Interface,
+            byte_range: 0..16,
+            start_line: 0,
+            end_line: 0,
+            name_column: 6,
+            access_level: AccessLevel::Public,
+            children: vec![],
+        })));
+
+    let server =
+        PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
+
+    // --- Test 1: filter="const" must match SymbolKind::Constant ---
+    // Before the fix, filter-side alias "const" was accepted by is_valid_kind_filter
+    // but then kind_matches_filter only checked the kind side, so "constant" != "const"
+    // → 0 results. Now the filter side is also normalised → 1 result expected.
+    let params_const = SearchToolParams {
+        query: "MY".to_string(),
+        path_glob: "target_dir/*".to_string(),
+        kind: Some("const".to_string()),
+        ..Default::default()
+    };
+    let Json(res) = server
+        .find_symbol_impl(params_const)
+        .await
+        .expect("const alias should succeed");
+    assert_eq!(
+        res.symbols.len(),
+        1,
+        "filter='const' should match SymbolKind::Constant; got {:#?}",
+        res.symbols
+    );
+    assert!(
+        res.symbols[0].semantic_path.ends_with("::MY_CONST"),
+        "unexpected path: {}",
+        res.symbols[0].semantic_path
+    );
+    assert_eq!(res.symbols[0].kind, "constant");
+
+    // --- Test 2: filter="trait" must match SymbolKind::Interface ---
+    // "trait" is the Rust keyword; tree-sitter maps it to SymbolKind::Interface.
+    // The filter alias must find it.
+    // We need a fresh server+mock for the second call since MockSurgeon results
+    // are consumed sequentially. Reset via a new scout result + surgeon queue.
+    let ws_dir2 = tempdir().expect("temp dir2");
+    let ws2 = WorkspaceRoot::new(ws_dir2.path()).expect("valid root2");
+    let config2 = pathfinder_common::config::PathfinderConfig::default();
+    let sandbox2 = Sandbox::new(ws2.path(), &config2.sandbox);
+
+    let mock_scout2 = MockScout::default();
+    mock_scout2.set_result(Ok(SearchResult {
+        matches: vec![SearchMatch {
+            file: "target_dir/match_trait.rs".to_owned(),
+            line: 1,
+            column: 0,
+            content: "trait MyTrait {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "def".to_owned(),
+            known: None,
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }));
+
+    let mock_surgeon2 = Arc::new(MockSurgeon::new());
+    mock_surgeon2
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(Some(ExtractedSymbol {
+            name: "MyTrait".to_owned(),
+            semantic_path: "MyTrait".to_owned(),
+            kind: pathfinder_treesitter::surgeon::SymbolKind::Interface,
+            byte_range: 0..16,
+            start_line: 0,
+            end_line: 0,
+            name_column: 6,
+            access_level: AccessLevel::Public,
+            children: vec![],
+        })));
+
+    let server2 = PathfinderServer::with_engines(
+        ws2,
+        config2,
+        sandbox2,
+        Arc::new(mock_scout2),
+        mock_surgeon2,
+    );
+
+    let params_trait = SearchToolParams {
+        query: "MyTrait".to_string(),
+        path_glob: "target_dir/*".to_string(),
+        kind: Some("trait".to_string()),
+        ..Default::default()
+    };
+    let Json(res2) = server2
+        .find_symbol_impl(params_trait)
+        .await
+        .expect("trait alias should succeed");
+    assert_eq!(
+        res2.symbols.len(),
+        1,
+        "filter='trait' should match SymbolKind::Interface; got {:#?}",
+        res2.symbols
+    );
+    assert!(
+        res2.symbols[0].semantic_path.ends_with("::MyTrait"),
+        "unexpected path: {}",
+        res2.symbols[0].semantic_path
+    );
+    assert_eq!(res2.symbols[0].kind, "interface");
+}
+
+// ── infer_single_ext_from_glob unit tests ────────────────────────────────────
+
+#[test]
+fn test_infer_single_ext_from_glob_known_single_exts() {
+    assert_eq!(infer_single_ext_from_glob("**/*.rs"), Some("rs"));
+    assert_eq!(infer_single_ext_from_glob("src/**/*.rs"), Some("rs"));
+    assert_eq!(infer_single_ext_from_glob("**/*.ts"), Some("ts"));
+    assert_eq!(infer_single_ext_from_glob("**/*.tsx"), Some("tsx"));
+    assert_eq!(infer_single_ext_from_glob("**/*.js"), Some("js"));
+    assert_eq!(infer_single_ext_from_glob("**/*.jsx"), Some("jsx"));
+    assert_eq!(infer_single_ext_from_glob("**/*.py"), Some("py"));
+    assert_eq!(infer_single_ext_from_glob("**/*.go"), Some("go"));
+    assert_eq!(infer_single_ext_from_glob("**/*.java"), Some("java"));
+    assert_eq!(infer_single_ext_from_glob("**/*.vue"), Some("vue"));
+}
+
+#[test]
+fn test_infer_single_ext_from_glob_no_match() {
+    // Extension-agnostic globs
+    assert_eq!(infer_single_ext_from_glob("**/*"), None);
+    assert_eq!(infer_single_ext_from_glob("src/*"), None);
+    assert_eq!(infer_single_ext_from_glob("target_dir/*"), None);
+    // Unknown extension
+    assert_eq!(infer_single_ext_from_glob("**/*.xyz"), None);
+    assert_eq!(infer_single_ext_from_glob("**/*.toml"), None);
+}
+
+#[test]
+fn test_infer_single_ext_from_glob_multi_ext_brace() {
+    // Brace expansion — must return None (ambiguous)
+    assert_eq!(infer_single_ext_from_glob("**/*.{ts,tsx}"), None);
+    assert_eq!(infer_single_ext_from_glob("**/*.{js,jsx}"), None);
+    assert_eq!(infer_single_ext_from_glob("**/*.{rs,go}"), None);
+}
+
+/// When `path_glob` = "**/*.rs", `find_symbol_impl` must use Rust-specific
+/// definition patterns (fn/struct/enum/trait) NOT a bare \bname\b search.
+///
+/// This test verifies the fix by checking that a Rust file containing the
+/// symbol only as a *call site* (not a definition) is NOT returned — the
+/// language-specific fn/struct patterns require definitional syntax.
+#[tokio::test]
+async fn test_find_symbol_ext_filter_uses_language_specific_patterns() {
+    let ws_dir = tempdir().expect("tempdir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // A Rust file that has `my_func` only as a *call site*, not a definition.
+    let call_site_only = "fn other() { my_func(42); }";
+    std::fs::write(ws_dir.path().join("calls.rs"), call_site_only).unwrap();
+
+    // MockScout: we use RipgrepScout against the tempdir to get real search behaviour.
+    let scout = Arc::new(pathfinder_search::RipgrepScout);
+    let surgeon = Arc::new(MockSurgeon::new());
+    // No surgeon mocks needed — ripgrep should produce zero results (no definition
+    // pattern matches) so enrichment is never called.
+    let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws, config, sandbox, scout, surgeon, lawyer,
+    );
+
+    let params = SearchToolParams {
+        query: "my_func".to_string(),
+        // Explicit extension filter — triggers the infer_single_ext_from_glob path.
+        path_glob: "**/*.rs".to_string(),
+        max_results: 10,
+        ..Default::default()
+    };
+
+    let Json(response) = server
+        .find_symbol_impl(params)
+        .await
+        .expect("find_symbol should not error");
+
+    // Rust definition patterns (fn my_func, struct my_func, etc.) will NOT match
+    // the call site `my_func(42)` — so we expect zero symbols returned.
+    assert_eq!(
+        response.symbols.len(),
+        0,
+        "language-specific Rust patterns must not match call sites; \
+         got unexpected results: {:#?}",
+        response.symbols
+    );
 }

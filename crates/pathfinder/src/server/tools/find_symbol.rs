@@ -111,6 +111,35 @@ struct EnrichedMatch {
     preview: String,
 }
 
+/// Returns `true` if the given kind string is a valid canonical value or accepted alias.
+///
+/// Canonical values: `function`, `class`, `struct`, `interface`, `enum`, `constant`, `module`, `impl`.
+/// Aliases (case-insensitive): `method`/`fn` → function; `trait` → interface;
+/// `const`/`static`/`let` → constant; `mod`/`namespace` → module.
+/// `class` also matches struct and interface.
+/// `unknown` is a valid internal kind but not a useful filter value — excluded intentionally.
+fn is_valid_kind_filter(kind: &str) -> bool {
+    matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "function"
+            | "method"
+            | "fn"
+            | "class"
+            | "struct"
+            | "interface"
+            | "trait"
+            | "enum"
+            | "constant"
+            | "const"
+            | "static"
+            | "let"
+            | "module"
+            | "mod"
+            | "namespace"
+            | "impl"
+    )
+}
+
 impl PathfinderServer {
     /// Core logic for the `find_symbol` tool.
     ///
@@ -152,8 +181,34 @@ impl PathfinderServer {
             ));
         }
 
-        // Check if path_glob already filters by extension
-        let has_ext_filter = params.path_glob.contains("*.rs")
+        // Validate kind filter early — invalid values silently return 0 results otherwise.
+        // Return a descriptive error so agents immediately know what values are accepted.
+        if let Some(ref kind) = params.kind {
+            if !is_valid_kind_filter(kind) {
+                return Err(invalid_params_error(format!(
+                    "Unknown kind filter: \"{kind}\". \
+                     Canonical values: function, class, struct, interface, enum, constant, module, impl. \
+                     Accepted aliases (case-insensitive): method/fn -> function; trait -> interface; \
+                     const/static/let -> constant; mod/namespace -> module. \
+                     class also matches struct and interface."
+                )));
+            }
+        }
+
+        // Check if path_glob already filters by a single known extension.
+        // When it does, use the proper language-specific definition patterns for that
+        // extension instead of the "any" catch-all (which falls back to a bare \bname\b
+        // word boundary search and produces false positives in call sites, imports, etc.).
+        //
+        // Examples:
+        //   "**/*.rs"      → inferred ext "rs" → Rust fn/struct/enum patterns
+        //   "src/**/*.ts"  → inferred ext "ts" → TS function/class/const patterns
+        //   "**/*.go"      → inferred ext "go" → Go func/type patterns
+        //   "**/*"         → no ext, has_ext_filter = false → all languages searched
+        //   "**/*.{ts,tsx}"→ multi-ext brace expansion → "any" fallback (ambiguous)
+        let inferred_single_ext = infer_single_ext_from_glob(&params.path_glob);
+        let has_ext_filter = inferred_single_ext.is_some()
+            || params.path_glob.contains("*.rs")
             || params.path_glob.contains("*.ts")
             || params.path_glob.contains("*.tsx")
             || params.path_glob.contains("*.js")
@@ -162,8 +217,15 @@ impl PathfinderServer {
             || params.path_glob.contains("*.go")
             || params.path_glob.contains("*.java");
 
-        // Build patterns for all supported languages unless filtered
-        let extensions = if has_ext_filter {
+        // Build patterns for all supported languages unless filtered.
+        // When a single extension is detected, run only that extension's patterns
+        // against the user-provided glob (which already scopes the file set).
+        let extensions: Vec<(&str, String)> = if let Some(ext) = inferred_single_ext {
+            // Single extension detected — use language-specific patterns + user glob.
+            vec![(ext, params.path_glob.clone())]
+        } else if has_ext_filter {
+            // Multi-extension or unrecognised glob pattern — fall back to bare word search.
+            // This is less precise but avoids producing zero results for unusual globs.
             vec![("any", params.path_glob.clone())]
         } else {
             vec![
@@ -610,12 +672,24 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
         kind.eq_ignore_ascii_case("interface") || kind.eq_ignore_ascii_case("trait")
     } else if filter.eq_ignore_ascii_case("enum") {
         kind.eq_ignore_ascii_case("enum")
-    } else if filter.eq_ignore_ascii_case("constant") {
+    } else if filter.eq_ignore_ascii_case("constant")
+        || filter.eq_ignore_ascii_case("const")
+        || filter.eq_ignore_ascii_case("static")
+        || filter.eq_ignore_ascii_case("let")
+    {
+        // Canonical kind from tree-sitter is always "constant".
+        // Aliases on the filter side (const/static/let) must also resolve to
+        // the constant category so agents aren't surprised by 0 results.
         kind.eq_ignore_ascii_case("constant")
             || kind.eq_ignore_ascii_case("const")
             || kind.eq_ignore_ascii_case("static")
             || kind.eq_ignore_ascii_case("let")
-    } else if filter.eq_ignore_ascii_case("module") {
+    } else if filter.eq_ignore_ascii_case("module")
+        || filter.eq_ignore_ascii_case("mod")
+        || filter.eq_ignore_ascii_case("namespace")
+    {
+        // Canonical kind from tree-sitter is always "module".
+        // Aliases on the filter side must also resolve correctly.
         kind.eq_ignore_ascii_case("module")
             || kind.eq_ignore_ascii_case("mod")
             || kind.eq_ignore_ascii_case("namespace")
@@ -665,6 +739,65 @@ fn is_workspace_file(path: &Path, workspace_root: &Path, canonical_root: &Path) 
     };
 
     full_path.starts_with(canonical_root)
+}
+
+/// Extract a single canonical extension from a glob pattern string.
+///
+/// Returns `Some(ext)` only when the glob unambiguously targets a single known
+/// source language (e.g. `"**/*.rs"` → `Some("rs")`). Returns `None` for:
+/// - Multi-extension brace expansions: `"**/*.{ts,tsx}"`, `"**/*.{js,jsx}"`
+/// - Extension-agnostic globs:         `"**/*"`, `"src/*"`, `"target_dir/*"`
+/// - Unknown extensions:               `"**/*.xyz"`
+///
+/// This is intentionally conservative: when in doubt, `None` is returned and the
+/// caller falls back to the appropriate strategy (either all-languages search or
+/// the "any" bare-word fallback).
+fn infer_single_ext_from_glob(glob: &str) -> Option<&'static str> {
+    // Brace expansion (multi-ext) — bail immediately.
+    if glob.contains('{') {
+        return None;
+    }
+
+    // Extension markers paired with their canonical names.
+    //
+    // IMPORTANT: order matters — longer extensions must come before their prefixes.
+    // "*.tsx" must appear before "*.ts" because "*.tsx" contains "*.ts" as a substring.
+    // The matching loop stops at the first hit, but we still scan all markers to detect
+    // multi-extension globs. We therefore use an anchored suffix check: a marker only
+    // matches when the next character after it is NOT alphanumeric (i.e., no additional
+    // extension characters follow). This prevents "*.ts" from matching inside "*.tsx".
+    let known: &[(&str, &'static str)] = &[
+        ("*.tsx", "tsx"), // before *.ts
+        ("*.jsx", "jsx"), // before *.js
+        ("*.rs", "rs"),
+        ("*.ts", "ts"),
+        ("*.js", "js"),
+        ("*.py", "py"),
+        ("*.go", "go"),
+        ("*.java", "java"),
+        ("*.vue", "vue"),
+    ];
+
+    let mut matched: Option<&'static str> = None;
+    for (marker, ext) in known {
+        // Anchored check: "*.ts" must not be followed by another alphabetic char
+        // (which would indicate a longer extension like tsx).
+        let found = glob.match_indices(marker).any(|(pos, _)| {
+            let after_pos = pos + marker.len();
+            !glob[after_pos..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+        });
+        if found {
+            if matched.is_some() {
+                // More than one extension detected — ambiguous, bail.
+                return None;
+            }
+            matched = Some(ext);
+        }
+    }
+    matched
 }
 
 #[cfg(test)]
