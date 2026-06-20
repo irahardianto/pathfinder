@@ -67,13 +67,11 @@ impl PathfinderServer {
 
         // Verify the file exists before calling Tree-sitter.
         let abs_path = self.workspace_root.path().join(file);
-        if !abs_path.exists() {
-            let err = pathfinder_common::error::PathfinderError::FileNotFound {
-                path: abs_path.clone(),
-            };
+        if !tokio::fs::try_exists(&abs_path).await.unwrap_or(false) {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound { path: abs_path };
             tracing::warn!(
                 tool = "get_semantic_path",
-                path = %abs_path.display(),
+                path = %file,
                 "file not found"
             );
             return Err(pathfinder_to_error_data(&err));
