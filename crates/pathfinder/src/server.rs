@@ -217,13 +217,20 @@ Alternative: Use `read` for a single file's content. Use `search(mode=\"symbol\"
 
 IMPORTANT: Copy-paste the exact semantic paths from the output into other Pathfinder tools.
 
+Response format: The skeleton (directory tree, file list, or symbol hierarchy) is in the TEXT
+content. Structured content contains only metadata (coverage_percent, tech_stack, version_hashes).
+Always read the text content for the actual output.
+
 Parameter guidance:
 - `detail`: Controls output verbosity.
-  - `\"structure\"` — directory tree + package manager files only (cheapest).
-  - `\"files\"` — directory tree + all filenames (no symbols).
-  - `\"symbols\"` (default) — full AST symbol hierarchy.
+  - `\"structure\"` — directory tree + package manager files only (cheapest). Token cap: 4,000.
+    NOTE: files_scanned=0 in metadata is EXPECTED — structure mode reads directory names only,
+    not source files. The directory tree IS in the text output.
+  - `\"files\"` — directory tree + all filenames (no symbols). Token cap: 8,000.
+  - `\"symbols\"` (default) — full AST symbol hierarchy. Uses provided max_tokens (default 16,000).
 - `depth=3` (default): Increase for deeply-nested monorepos.
-- `max_tokens=16000` (default): Increase for more coverage.
+- `max_tokens=16000` (default for symbols): Auto-scales up to 48,000 for large repos.
+  NOTE: structure and files modes ignore this value — they use their own caps (4,000 / 8,000).
 - `visibility`: `\"public\"` (default) or `\"all\"` (includes private/internal).
 
 Example: `explore(path=\"src/\", detail=\"files\", depth=5)`"
@@ -245,7 +252,12 @@ Parameter guidance:
 - `mode`: Controls search behavior.
   - `\"text\"` (default) — literal text search.
   - `\"regex\"` — regex pattern search.
-  - `\"symbol\"` — resolve bare symbol name to `file::symbol` semantic paths. Use `kind` to filter (e.g., `\"function\"`, `\"class\"`).
+  - `\"symbol\"` — resolve bare symbol name to `file::symbol` semantic paths.
+    Use `kind` to filter by symbol type. Accepted values (case-insensitive):
+    Canonical: function, class, struct, interface, enum, constant, module, impl.
+    Aliases: method/fn → function; trait → interface; const/static/let → constant;
+    mod/namespace → module; class also matches struct and interface.
+    Invalid kind values return an error listing accepted values.
 - `path_glob`: Limit scope (e.g., `\"**/*.rs\"`).
 - `max_results=50` (default): Cap returned matches. Applies to all modes including `symbol`.
 - `known_files`: Suppress full content for files already in context.
@@ -360,6 +372,11 @@ LSP-powered. Response field semantics when `degraded=true`:
 - `incoming`/`outgoing` contain results with `confidence: \"heuristic\"` — grep-based fallback found candidates (may include false positives).
 - `incoming`/`outgoing` are `[]` — LSP confirmed zero callers/callees exist (only when `degraded=false`).
 Never treat `null` as \"no callers\" — it means the answer is unknown. Use `search` as a fallback.
+
+⚠️ CRITICAL — null vs empty array are NOT equivalent:
+  null  = UNKNOWN (degraded — callers may exist but LSP couldn't confirm)
+  []    = CONFIRMED ZERO (LSP verified — safe to conclude no callers)
+Mistaking null for \"no callers\" leads to dangerous refactoring decisions.
 
 Examples:
 - `trace(semantic_path=\"src/auth.ts::AuthService.login\")` — callers/callees

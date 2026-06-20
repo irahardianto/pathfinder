@@ -320,9 +320,24 @@ impl PathfinderServer {
         let duration_ms = start.elapsed().as_millis();
 
         let hint = if result.coverage_percent < 100 {
+            // Estimate tokens needed for full coverage:
+            // if current budget covers C%, full coverage needs roughly budget / (C/100).
+            // Round up to the nearest 4,000 increment for a clean suggestion.
+            let suggested = if result.coverage_percent > 0 {
+                let estimated = (u64::from(max_tokens) * 100) / u64::from(result.coverage_percent);
+                let rounded = estimated.div_ceil(4_000) * 4_000;
+                rounded.min(100_000) as u32
+            } else {
+                max_tokens.saturating_mul(2)
+            };
             Some(format!(
-                "Repository map is incomplete (coverage: {}%). To scan more files, increase max_tokens (currently {}).",
-                result.coverage_percent, max_tokens
+                "Repository map is incomplete (coverage: {}%, {}/{} files). \
+                 To scan more files, increase max_tokens from {} to approximately {}.",
+                result.coverage_percent,
+                result.files_scanned,
+                result.files_in_scope,
+                max_tokens,
+                suggested,
             ))
         } else {
             None

@@ -580,6 +580,8 @@ async fn test_get_repo_map_mutually_exclusive_extensions_error() {
 async fn test_get_repo_map_hint_when_coverage_under_100() {
     let mut low_cov = ok_result();
     low_cov.coverage_percent = 75; // Under 100%
+    low_cov.files_scanned = 3;
+    low_cov.files_in_scope = 4; // 3/4 = 75%
 
     let surgeon = MockSurgeon::default();
     surgeon
@@ -593,7 +595,7 @@ async fn test_get_repo_map_hint_when_coverage_under_100() {
     assert!(result.is_ok(), "should succeed");
     let tool_result = result.unwrap();
 
-    // Check text response contains hint
+    // Check text response contains hint with expected components
     let text = tool_result
         .content
         .first()
@@ -609,6 +611,26 @@ async fn test_get_repo_map_hint_when_coverage_under_100() {
         text.contains("Hint: Repository map is incomplete"),
         "text should contain the hint, got: {text}"
     );
+    assert!(
+        text.contains("3/4"),
+        "hint should include files_scanned/files_in_scope, got: {text}"
+    );
+    assert!(
+        text.contains("approximately"),
+        "hint should include a suggested token count, got: {text}"
+    );
+    // Suggested value must be >= current budget (16000) — regression guard for div_ceil logic
+    assert!(
+        text.contains("16000") || {
+            // extract the suggested number after "approximately"
+            text.split("approximately")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|n| n.trim_end_matches('.').parse::<u64>().ok())
+                .is_some_and(|n| n >= 16_000)
+        },
+        "suggested token count should be >= current budget 16000, got: {text}"
+    );
 
     // Check metadata contains hint
     let meta = tool_result.structured_content.as_ref().unwrap();
@@ -619,5 +641,47 @@ async fn test_get_repo_map_hint_when_coverage_under_100() {
             .contains("Repository map is incomplete"),
         "metadata hint should be set, got: {:?}",
         meta.get("hint")
+    );
+}
+
+/// Coverage=0% exercises the `saturating_mul(2)` fallback in the hint logic.
+/// Must not panic or overflow, and must still emit the hint message.
+#[tokio::test]
+async fn test_get_repo_map_hint_coverage_zero_fallback() {
+    let mut zero_cov = ok_result();
+    zero_cov.coverage_percent = 0;
+    zero_cov.files_scanned = 0;
+    zero_cov.files_in_scope = 10;
+
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(zero_cov));
+    let (server, _dir) = make_server(surgeon);
+
+    let result = server.get_repo_map_impl(default_params()).await;
+    assert!(result.is_ok(), "should succeed even with 0% coverage");
+    let tool_result = result.unwrap();
+
+    let text = tool_result
+        .content
+        .first()
+        .and_then(|c| {
+            if let rmcp::model::RawContent::Text(t) = &c.raw {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    assert!(
+        text.contains("Hint: Repository map is incomplete"),
+        "hint should be present for 0% coverage, got: {text}"
+    );
+    assert!(
+        text.contains("0/10"),
+        "hint should show 0/10 files, got: {text}"
     );
 }
