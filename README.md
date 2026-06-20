@@ -327,16 +327,16 @@ Tree-sitter grammars are compiled directly into the Pathfinder binary — no ext
 |---|---|---|
 | Go | `.go` | Function, interface, struct, and type alias extraction |
 | Java | `.java` | Class, interface, enum, record, and method extraction with inner class hierarchy |
-| TypeScript | `.ts` | Class, function, arrow function, interface, and type extraction |
+| TypeScript | `.ts` | Class, function, arrow function, interface, and type extraction (also handles `.mts`) |
 | TSX | `.tsx` | All TypeScript symbols **plus** JSX element extraction as child symbols |
-| JavaScript | `.js`, `.jsx` | Functions, classes, and JSX elements in `.jsx` files |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | Functions, classes, JSX elements in `.jsx` files, and ES/CommonJS modules (`.mjs`, `.cjs`) |
 | Python | `.py` | Function, class, and method extraction |
 | Rust | `.rs` | Functions, structs, enums, traits; `impl` block methods merged under their parent type |
 | Vue SFC | `.vue` | **Multi-zone**: `<script>` parsed as TypeScript (AST-aware), `<template>` and `<style>` accessible for text search |
 
 #### LSP Support (Optional, Auto-detected)
 
-Pathfinder automatically detects which language servers are available in your workspace by scanning for marker files (`Cargo.toml`, `go.mod`, `tsconfig.json`, etc.). LSP processes start **lazily** on first use and are shut down after an idle timeout.
+Pathfinder automatically detects which language servers are available in your workspace by scanning for marker files (`Cargo.toml`, `go.mod`, `tsconfig.json`, etc.). LSP processes start eagerly in the background (warm start) and are shut down after an idle timeout.
 
 To maximise navigation coverage, install the language server(s) for your project:
 
@@ -344,9 +344,9 @@ To maximise navigation coverage, install the language server(s) for your project
 |---|---|---|---|
 | **Rust** | `rust-analyzer` | `rustup component add rust-analyzer` | `Cargo.toml` at workspace root |
 | **Go** | `gopls` | `go install golang.org/x/tools/gopls@latest` | `go.mod` (scans up to depth 2) |
-| **TypeScript / JavaScript / JSX / TSX / Vue** | `typescript-language-server` | `npm install -g typescript-language-server typescript` | `tsconfig.json` or `package.json` (depth 2) |
+| **TypeScript / JavaScript / Vue** (including `.mjs`, `.cjs`, `.mts`, `.cts`) | `typescript-language-server` | `npm install -g typescript-language-server typescript` | `tsconfig.json` or `package.json` (depth 2) |
 | **Python** | `pyright` | `npm install -g pyright` | `pyproject.toml`, `setup.py`, or `requirements.txt` (depth 2) |
-| **Java** | `jdtls` | [Eclipse JDT Language Server](https://github.com/eclipse-jdtls/eclipse.jdt.ls) | `pom.xml` or `build.gradle` (depth 2) |
+| **Java** | `jdtls` | [Eclipse JDT Language Server](https://github.com/eclipse-jdtls/eclipse.jdt.ls) | `pom.xml`, `build.gradle`, `build.gradle.kts`, `settings.gradle`, or `settings.gradle.kts` (depth 2) |
 
 > **Vue note:** Pathfinder handles Vue SFC parsing internally with Tree-sitter. The `typescript-language-server` validates the `<script>` block — no separate `volar` or `vue-language-server` installation is required.
 
