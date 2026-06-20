@@ -125,7 +125,7 @@ server to provide accurate type information and navigation.
 
 Plugins are detected automatically from the workspace:
 
-1. **Config override**: If `typescript_plugins` is set in `.pathfinder.toml`, use that
+1. **Config override**: If `typescript_plugins` is set in `pathfinder.config.json`, use that
 2. **Auto-detection**: Scan `node_modules/@vue/typescript-plugin` (npm and pnpm)
 3. **Vue file trigger**: Auto-detection only activates when `.vue` files exist in the workspace
 
@@ -178,7 +178,7 @@ Marker files are searched up to depth 2 (workspace root + one level of subdirect
 
 For each detected language, the LSP binary is resolved via `which`:
 
-1. If `command` is set in `.pathfinder.toml` config, use that
+1. If `command` is set in `pathfinder.config.json` config, use that
 2. If `command` is an empty string, fall back to `which` for the default binary
 3. If no binary is found, the language is listed as "missing" with install guidance
 
@@ -187,16 +187,17 @@ For each detected language, the LSP binary is resolved via `which`:
 Python has multiple LSP servers. Pathfinder tries them in order of preference:
 
 1. `pyright-langserver` — Fast, strict type checking (npm: `pyright`)
-2. `pylsp` — Community standard, plugin ecosystem (pip: `python-lsp-server`)
-3. `ruff-lsp` — Extremely fast, growing adoption (pip: `ruff-lsp`)
-4. `jedi-language-server` — Mature, lightweight (pip: `jedi-language-server`)
+2. `basedpyright-langserver` — Community fork with additional features (pip: `basedpyright`)
+3. `pylsp` — Community standard, plugin ecosystem (pip: `python-lsp-server`)
+4. `ruff` — Extremely fast, growing adoption (pip: `ruff`). Run with `ruff server --stdio`.
+5. `jedi-language-server` — Mature, lightweight (pip: `jedi-language-server`)
 
 Note: `pyright` is the CLI tool; `pyright-langserver` is the stdio LSP server.
 Both are installed by `npm install -g pyright`.
 
 ### Config Overrides
 
-Users can override LSP settings in `.pathfinder.toml`:
+Users can override LSP settings in `pathfinder.config.json`:
 
 ```toml
 [lsp.python]
@@ -448,7 +449,7 @@ tree-sitter, health probes, and tests.
 **Architecture diagram (data flow for a new language):**
 
 ```
-                    .pathfinder.toml
+                    pathfinder.config.json
                          |
                          v
  detect_languages() -> DetectionResult { detected, missing }
@@ -549,7 +550,7 @@ if let Some(root) = lang_root {
 ```
 
 Important details:
-- `get_override!` checks `.pathfinder.toml` for `root_override` (monorepo support)
+- `get_override!` checks `pathfinder.config.json` for `root_override` (monorepo support)
 - `get_command_override!` checks for custom `command` in config
 - `has_override` prevents false "missing" reports when user configured an empty command
 - `get_args!` returns config args if set, otherwise falls back to `default_args`
