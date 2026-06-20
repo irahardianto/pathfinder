@@ -461,7 +461,7 @@ impl PathfinderServer {
                         let mut result =
                             rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                                 format!(
-                                    "{}\n{}{}{}\\n[completed in {duration_ms}ms]",
+                                    "{}\n{}{}{}\n[completed in {duration_ms}ms]",
                                     format_degraded_notice(&DegradedReason::LspWarmupGrepFallback),
                                     summary,
                                     references_text,
@@ -571,7 +571,7 @@ impl PathfinderServer {
                         let mut result =
                             rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
                                 format!(
-                                    "{}\n{}{}{}\\n[completed in {duration_ms}ms]",
+                                    "{}\n{}{}{}\n[completed in {duration_ms}ms]",
                                     format_degraded_notice(&degraded_reason),
                                     summary,
                                     references_text,
