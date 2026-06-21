@@ -25,13 +25,12 @@ See the skill file for the full per-tool response guide.
 
 ## Pre-Flight Check
 
-Run once per session to confirm Pathfinder is available:
+Call `health()` once at session start. If it returns results, Pathfinder is available. If `health()` fails or is not listed in available tools, fall back to built-in tools (Read, Grep, Glob).
 
-```
-mcp({ server: "pathfinder" })
-```
+## Critical Gotchas
 
-If tools are listed, Pathfinder is live. If error, fall back to built-in tools (Read, Grep, Glob).
+- `filter_mode="comments_only"` matches both comments AND string literals (non-code content).
+- `kind="class"` is a broad filter matching classes, structs, and interfaces, but NOT enums; `kind="struct"` matches ONLY structs.
 
 ## Tool Selection Quick Guide
 

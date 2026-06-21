@@ -367,31 +367,35 @@ Semantic navigation tools. Workflows and deep details: `docs/agent_directives/sk
 
 ### Pre-Flight
 
-```
-mcp({ server: "pathfinder" })  // Tools listed → available. Error → use built-in.
-```
-
-Check once per session.
+Call `health()` once at session start. If it returns results, Pathfinder is available. If `health()` fails or is not listed in available tools, fall back to built-in tools. Check once per session.
 
 ### Tool Table
 
 | Task | Tool | Notes |
 |---|---|---|
-| Project skeleton | `explore` | Get structural skeleton of the project — directory tree, file listing, or full symbol hierarchy. |
-| Search code | `search` | Search for text patterns, regex, or resolve symbol names across the codebase. |
-| Read one symbol / dependency | `inspect` | Read symbol source code and optionally its callee signatures (dependency context). |
-| Trace call graph / references | `trace` | Trace call hierarchy (callers/callees), find all references, or get a combined symbol overview. |
-| Read file content | `read` | Read raw file contents, format-aware source file content (with line mapping and AST symbols), or batch read multiple files. |
-| Jump to definition / resolve path | `locate` | Jump to a symbol's definition, or convert a file and line number to a semantic path (for stack traces/grep). |
-| Check LSP health | `health` | Check per-language LSP readiness, capabilities, indexing progress, and degraded tools. |
+| Project skeleton | `explore` | Three detail levels: `structure` (dirs only), `files` (dirs + filenames), `symbols` (default — full AST). Configurable `depth` (default 3) and `max_tokens`. |
+| Search code | `search` | Three modes: `text` (default), `regex`, `symbol`. `symbol` mode: use `kind` to filter by symbol type (canonical: function/class/struct/interface/enum/constant/module/impl; aliases: method/fn→function, trait→interface, const/static/let→constant, mod/namespace→module). Invalid kind values return INVALID_PARAMS. Use `filter_mode` to control code vs comment filtering (`code_only` default, `all`, `comments_only`). Returns `enclosing_semantic_path`. Check `coverage_percent`. |
+| Read file(s) | `read` | Single file (`filepath`) or batch (`paths`, max 10). Auto-detects source vs config. Source files get AST parsing with `detail_level`. Supports `start_line`/`end_line`. |
+| Read one symbol | `inspect` | Extract symbol source by semantic path. Default: source only (fast). With `include_dependencies=true`: also fetches callee signatures (LSP-powered). |
+| Jump to definition | `locate` | Provide `semantic_path` for definition lookup. LSP with ripgrep fallback. |
+| Location → semantic path | `locate` | Provide `file` + `line` for semantic path resolution. For stack traces, grep results, error messages. |
+| Find callers and callees | `trace` | `scope="callers"` (default). Callers + callees via LSP call hierarchy. `max_depth` (default 3, clamped 1–5). |
+| Find all references | `trace` | `scope="references"`. All usages including non-call references (field access, imports, type annotations). |
+| Symbol overview | `trace` | `scope="overview"`. Source + callers + callees + references in one call. |
+| LSP status | `health` | Check when navigation returns `degraded: true`. Supports `action="restart"` for stuck LSPs. |
 
 ### Addressing
 
 Semantic paths MUST include file path + `::` + symbol. Example: `src/auth.ts::AuthService.login`
 
+### Gotchas
+
+- `filter_mode="comments_only"` matches comments AND string literals (non-code content).
+- `kind="class"` matches classes, structs, and interfaces, but NOT enums. `kind="struct"` matches ONLY structs.
+
 ### Degraded Mode
 
-`locate` (definition mode), `trace`, `inspect` (with dependencies) use LSP. When `degraded: true`:
+`locate` (definition mode), `trace`, `inspect(include_dependencies=true)` use LSP. When `degraded: true`:
 - Text output starts with: `⚠️ DEGRADED ({reason}) — {tool-specific guidance}`
 - Results are best-effort — never treat empty as confirmed-zero
 - Check `degraded_reason` and `lsp_readiness`
@@ -407,17 +411,18 @@ Mistaking `null` for "no callers" leads to dangerous refactoring decisions.
 
 | Parameter | Tool | Default | Purpose |
 |---|---|---|---|
-| `max_references` | `trace` | `50` | Cap total references/callers returned. |
+| `max_references` | `trace` | `50` | Cap total references. In `overview` scope, controls both callers/callees and references. |
 | `max_depth` | `trace` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. `scope="callers"` only. |
-| `max_dependencies` | `inspect` | `50` | Cap outgoing dependency entries returned with `include_dependencies=true`. |
-| `max_tokens` | `explore` | `16000` | Auto-scales skeleton output token budget for the repository. |
-| `max_results` | `search` | `50` | Cap total search results returned. |
+| `max_dependencies` | `inspect` | `50` | Cap outgoing dependency entries (with `include_dependencies=true`). |
+| `max_tokens` | `explore` | `16000` | Total token budget for skeleton output. Auto-scales based on repo size. |
+| `max_results` | `search` | `50` | Cap search matches. Applies to all modes including `symbol`. |
 
-When `references_truncated` or `dependencies_truncated` is true in response metadata, increase the corresponding limit.
+When `references_truncated` or `dependencies_truncated` is true, increase the corresponding limit.
 
 ### Fallback
 
 If Pathfinder unavailable → use built-in tools (`Read`, `Grep`, `Glob`). Do not block.
+
 
 ---
 
