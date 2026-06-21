@@ -456,7 +456,8 @@ pub enum FilterMode {
     /// Only matches in code (exclude comments and string literals).
     #[default]
     CodeOnly,
-    /// Only matches in comments.
+    /// Matches in comments AND string literals (non-code content).
+    #[serde(alias = "non_code")]
     CommentsOnly,
     /// All matches (no filtering).
     All,

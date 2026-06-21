@@ -129,6 +129,7 @@ fn is_valid_kind_filter(kind: &str) -> bool {
             | "interface"
             | "trait"
             | "enum"
+            | "type"
             | "constant"
             | "const"
             | "static"
@@ -187,10 +188,10 @@ impl PathfinderServer {
             if !is_valid_kind_filter(kind) {
                 return Err(invalid_params_error(format!(
                     "Unknown kind filter: \"{kind}\". \
-                     Canonical values: function, class, struct, interface, enum, constant, module, impl. \
+                     Canonical values: function, class, struct, interface, enum, type, constant, module, impl. \
                      Accepted aliases (case-insensitive): method/fn -> function; trait -> interface; \
                      const/static/let -> constant; mod/namespace -> module. \
-                     class also matches struct and interface."
+                     class also matches struct and interface; type matches class, struct, interface, trait, and enum."
                 )));
             }
         }
@@ -672,6 +673,12 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
         kind.eq_ignore_ascii_case("interface") || kind.eq_ignore_ascii_case("trait")
     } else if filter.eq_ignore_ascii_case("enum") {
         kind.eq_ignore_ascii_case("enum")
+    } else if filter.eq_ignore_ascii_case("type") {
+        kind.eq_ignore_ascii_case("class")
+            || kind.eq_ignore_ascii_case("struct")
+            || kind.eq_ignore_ascii_case("interface")
+            || kind.eq_ignore_ascii_case("trait")
+            || kind.eq_ignore_ascii_case("enum")
     } else if filter.eq_ignore_ascii_case("constant")
         || filter.eq_ignore_ascii_case("const")
         || filter.eq_ignore_ascii_case("static")

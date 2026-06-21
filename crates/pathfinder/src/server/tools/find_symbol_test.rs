@@ -494,6 +494,67 @@ fn test_kind_matches_filter_alias_filter_side() {
     assert!(!kind_matches_filter("enum", "static"));
 }
 
+#[test]
+fn test_kind_matches_filter_type_matches_struct() {
+    assert!(kind_matches_filter("struct", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_matches_enum() {
+    assert!(kind_matches_filter("enum", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_matches_class() {
+    assert!(kind_matches_filter("class", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_matches_interface() {
+    assert!(kind_matches_filter("interface", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_matches_trait() {
+    assert!(kind_matches_filter("trait", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_does_not_match_function() {
+    assert!(!kind_matches_filter("function", "type"));
+    assert!(!kind_matches_filter("method", "type"));
+    assert!(!kind_matches_filter("fn", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_does_not_match_constant() {
+    assert!(!kind_matches_filter("constant", "type"));
+    assert!(!kind_matches_filter("const", "type"));
+    assert!(!kind_matches_filter("static", "type"));
+    assert!(!kind_matches_filter("let", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_does_not_match_impl() {
+    // kind=type is a type-level umbrella — impl blocks are not types.
+    // Guards against accidentally expanding the type arm to include impl.
+    assert!(!kind_matches_filter("impl", "type"));
+}
+
+#[test]
+fn test_kind_matches_filter_type_does_not_match_module() {
+    // Modules are namespaces, not type-level constructs.
+    assert!(!kind_matches_filter("module", "type"));
+    assert!(!kind_matches_filter("mod", "type"));
+    assert!(!kind_matches_filter("namespace", "type"));
+}
+
+#[test]
+fn test_is_valid_kind_filter_type_accepted() {
+    assert!(is_valid_kind_filter("type"));
+    assert!(is_valid_kind_filter("TYPE"));
+}
+
 // ── Additional truncate_preview coverage ────────────────────────────
 
 #[test]
@@ -682,7 +743,7 @@ async fn test_find_symbol_impl_validation_errors() {
     // Invalid kind filter — must return INVALID_PARAMS listing accepted values
     let params = SearchToolParams {
         query: "MyStruct".to_string(),
-        kind: Some("type".to_string()), // "type" is not an accepted kind
+        kind: Some("invalid_kind".to_string()), // "invalid_kind" is not an accepted kind
         ..Default::default()
     };
     let res = server.find_symbol_impl(params).await;
@@ -692,7 +753,7 @@ async fn test_find_symbol_impl_validation_errors() {
     };
     assert_eq!(err3.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     assert!(
-        err3.message.contains("type"),
+        err3.message.contains("invalid_kind"),
         "error message should echo the invalid kind value, got: {}",
         err3.message
     );

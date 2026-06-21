@@ -569,6 +569,18 @@ fn test_filter_mode_serde_roundtrip() {
 }
 
 #[test]
+fn test_filter_mode_non_code_alias() {
+    // "non_code" must deserialize to FilterMode::CommentsOnly
+    let deserialized: FilterMode =
+        serde_json::from_str("\"non_code\"").expect("should deserialize non_code");
+    assert_eq!(deserialized, FilterMode::CommentsOnly);
+
+    // FilterMode::CommentsOnly must still serialize to "comments_only" (backward compatible)
+    let serialized = serde_json::to_string(&FilterMode::CommentsOnly).expect("should serialize");
+    assert_eq!(serialized, "\"comments_only\"");
+}
+
+#[test]
 fn test_visibility_default_is_public() {
     assert_eq!(Visibility::default(), Visibility::Public);
 }

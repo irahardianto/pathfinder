@@ -793,6 +793,7 @@ async fn test_search_group_by_file_parameter() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_search_filter_mode_parameter() {
     let ws_dir = tempfile::tempdir().unwrap();
     let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
@@ -961,6 +962,58 @@ async fn test_search_filter_mode_parameter() {
         .expect("all search should succeed")
         .0;
     assert_eq!(response_all.total_matches, 2);
+
+    // Scenario 4: filter_mode = non_code (passed as deserialized JSON field)
+    surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .node_type_at_position_results
+        .lock()
+        .unwrap()
+        .push(Ok("code".to_string()));
+
+    surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .node_type_at_position_results
+        .lock()
+        .unwrap()
+        .push(Ok("comment".to_string()));
+
+    let json_params = serde_json::json!({
+        "query": "find_me",
+        "mode": "text",
+        "path_glob": "**/*.rs",
+        "max_results": 10,
+        "filter_mode": "non_code"
+    });
+    let params_non_code: SearchParams = serde_json::from_value(json_params).unwrap();
+    let response_non_code = server
+        .search_codebase_impl(params_non_code)
+        .await
+        .expect("non_code search should succeed")
+        .0;
+    assert_eq!(response_non_code.total_matches, 1);
+    assert_eq!(
+        response_non_code.matches[0].content,
+        "// find_me in comment"
+    );
 }
 
 /// Verify the low-coverage hint fires when less than 50% of in-scope files were searched.
