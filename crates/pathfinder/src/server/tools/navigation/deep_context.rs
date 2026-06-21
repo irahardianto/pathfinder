@@ -5,8 +5,8 @@
 //! is configured.
 
 use crate::server::helpers::{
-    format_degraded_notice, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
-    require_symbol_target, serialize_metadata,
+    format_degraded_notice, invalid_params_error, millis_to_u64, parse_semantic_path,
+    pathfinder_to_error_data, require_symbol_target, serialize_metadata,
 };
 use crate::server::types::InspectParams;
 use crate::server::PathfinderServer;
@@ -409,15 +409,20 @@ impl PathfinderServer {
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
+        let semantic_path_str = params
+            .semantic_path
+            .as_deref()
+            .ok_or_else(|| invalid_params_error("`semantic_path` must be provided"))?;
+
         tracing::info!(
             tool = "read_with_deep_context",
-            semantic_path = %params.semantic_path,
+            semantic_path = %semantic_path_str,
             "read_with_deep_context: start"
         );
 
         // Parse and validate the semantic path
-        let semantic_path = parse_semantic_path(&params.semantic_path)?;
-        require_symbol_target(&semantic_path, &params.semantic_path)?;
+        let semantic_path = parse_semantic_path(semantic_path_str)?;
+        require_symbol_target(&semantic_path, semantic_path_str)?;
 
         // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
@@ -448,7 +453,7 @@ impl PathfinderServer {
         // Fetch the symbol scope (Tree-sitter)
         let ts_start = std::time::Instant::now();
         let scope = self
-            .read_symbol_scope_enriched(&semantic_path, &params.semantic_path)
+            .read_symbol_scope_enriched(&semantic_path, semantic_path_str)
             .await?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
@@ -516,7 +521,7 @@ impl PathfinderServer {
         let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
         tracing::info!(
             tool = "read_with_deep_context",
-            semantic_path = %params.semantic_path,
+            semantic_path = %semantic_path_str,
             tree_sitter_ms,
             lsp_ms,
             duration_ms,

@@ -1576,13 +1576,25 @@ fn test_keywords_for_language_javascript_matches_typescript() {
 #[test]
 fn test_candidate_definition_pattern_rust() {
     let pat = super::candidate_definition_pattern("rust", "process_order");
-    // NOTE: The rust branch currently has an unclosed group in its regex
-    // (missing closing paren for the outer non-capturing group).
-    // This test documents the known issue. When the regex is fixed,
-    // update this test to assert is_ok() and test matching behavior.
+    // Bug was: outer (?:...) group was never closed — now fixed.
+    let re = regex::Regex::new(&pat).expect("valid regex: outer group must be closed");
+    assert!(re.is_match("fn process_order("), "bare fn must match");
+    assert!(re.is_match("pub fn process_order("), "pub fn must match");
     assert!(
-        regex::Regex::new(&pat).is_err(),
-        "known bug: rust candidate_definition_pattern has unclosed group"
+        re.is_match("pub async fn process_order("),
+        "pub async fn must match"
+    );
+    assert!(
+        re.is_match("pub(crate) fn process_order("),
+        "pub(crate) fn must match"
+    );
+    assert!(
+        !re.is_match("let process_order ="),
+        "variable binding must NOT match"
+    );
+    assert!(
+        !re.is_match("process_order("),
+        "bare call site must NOT match"
     );
 }
 
@@ -1668,10 +1680,11 @@ fn test_java_resolve_pattern_matches_class() {
 
 #[test]
 fn test_language_to_file_glob_tsx_uses_typescript_branch() {
-    // "tsx" is not a separate branch — it falls through to catch-all
+    // "tsx" now shares the typescript branch — both use the .{ts,tsx} glob.
     let glob = super::language_to_file_glob("tsx");
-    // tsx is not explicitly handled, so it hits the catch-all
-    assert_eq!(glob, "**/*");
+    assert_eq!(glob, "**/*.{ts,tsx}");
+    // Must NOT fall through to catch-all
+    assert_ne!(glob, "**/*");
 }
 
 // ── last_symbol_name tests ─────────────────────────────────────────────
@@ -1698,4 +1711,420 @@ fn test_last_symbol_name_no_symbol_chain() {
         pathfinder_common::types::SemanticPath::parse("src/lib.rs").expect("valid semantic path");
     let name = super::last_symbol_name(&sp);
     assert_eq!(name, None);
+}
+
+// ── PATCH-005 backward-compat: single semantic_path returns GetDefinitionResponse ──
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_single_unchanged() {
+    // Verify that single-path mode (no `locations`) still returns the old
+    // `GetDefinitionResponse` format rather than the new `BatchLocateResult`.
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::{GetDefinitionResponse, LocateParams};
+    use pathfinder_lsp::{DefinitionLocation, MockLawyer};
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            content: "fn login() { }".to_owned(),
+            start_line: 9,
+            end_line: 9,
+            name_column: 0,
+            language: "rust".to_owned(),
+        },
+    ));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    lawyer.push_goto_definition_result(Ok(Some(DefinitionLocation {
+        file: "src/auth.rs".into(),
+        line: 42,
+        column: 5,
+        preview: "pub fn login() -> bool {".into(),
+    })));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = LocateParams {
+        semantic_path: Some("src/auth.rs::login".to_owned()),
+        // locations is absent — must stay in single-path mode
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await.expect("should succeed");
+    // Response must be the legacy GetDefinitionResponse shape, NOT BatchLocateResult
+    let meta: GetDefinitionResponse = serde_json::from_value(
+        result
+            .structured_content
+            .expect("structured_content present"),
+    )
+    .expect("single-path mode must return GetDefinitionResponse, not BatchLocateResult");
+    assert_eq!(meta.file, "src/auth.rs");
+    assert_eq!(meta.line, 42);
+    assert_eq!(meta.column, 5);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_batch_semantic_paths() {
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::{BatchLocateResult, LocateEntry, LocateParams};
+    use pathfinder_lsp::{DefinitionLocation, MockLawyer};
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    // inspect read_symbol_scope_enriched (needs make_scope)
+    surgeon.read_symbol_scope_results.lock().unwrap().extend([
+        Ok(pathfinder_common::types::SymbolScope {
+            content: "fn login() { }".to_owned(),
+            start_line: 9,
+            end_line: 9,
+            name_column: 0,
+            language: "rust".to_owned(),
+        }),
+        Ok(pathfinder_common::types::SymbolScope {
+            content: "fn main() { }".to_owned(),
+            start_line: 1,
+            end_line: 1,
+            name_column: 0,
+            language: "rust".to_owned(),
+        }),
+    ]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    lawyer.push_goto_definition_result(Ok(Some(DefinitionLocation {
+        file: "src/auth.rs".into(),
+        line: 42,
+        column: 5,
+        preview: "pub fn login() -> bool {".into(),
+    })));
+    lawyer.push_goto_definition_result(Ok(Some(DefinitionLocation {
+        file: "src/main.rs".into(),
+        line: 10,
+        column: 1,
+        preview: "fn main() {".into(),
+    })));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = LocateParams {
+        locations: Some(vec![
+            LocateEntry {
+                semantic_path: Some("src/auth.rs::login".to_owned()),
+                file: None,
+                line: None,
+            },
+            LocateEntry {
+                semantic_path: Some("src/main.rs::main".to_owned()),
+                file: None,
+                line: None,
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await.expect("should succeed");
+    let val: BatchLocateResult = serde_json::from_value(
+        result
+            .structured_content
+            .expect("missing structured_content"),
+    )
+    .expect("valid metadata");
+
+    assert_eq!(val.succeeded, 2);
+    assert_eq!(val.failed, 0);
+    assert_eq!(val.results.len(), 2);
+    assert_eq!(val.results[0].status, "ok");
+    assert_eq!(val.results[0].file, Some("src/auth.rs".to_owned()));
+    assert_eq!(val.results[0].line, Some(42));
+    assert_eq!(val.results[1].status, "ok");
+    assert_eq!(val.results[1].file, Some("src/main.rs".to_owned()));
+    assert_eq!(val.results[1].line, Some(10));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_batch_file_line_pairs() {
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::{BatchLocateResult, LocateEntry, LocateParams};
+    use pathfinder_lsp::MockLawyer;
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .extend([Ok(Some("login".to_owned())), Ok(Some("main".to_owned()))]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = LocateParams {
+        locations: Some(vec![
+            LocateEntry {
+                semantic_path: None,
+                file: Some("src/auth.rs".to_owned()),
+                line: Some(9),
+            },
+            LocateEntry {
+                semantic_path: None,
+                file: Some("src/main.rs".to_owned()),
+                line: Some(1),
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await.expect("should succeed");
+    let val: BatchLocateResult = serde_json::from_value(
+        result
+            .structured_content
+            .expect("missing structured_content"),
+    )
+    .expect("valid metadata");
+
+    assert_eq!(val.succeeded, 2);
+    assert_eq!(val.failed, 0);
+    assert_eq!(val.results.len(), 2);
+    assert_eq!(val.results[0].status, "ok");
+    assert_eq!(
+        val.results[0].semantic_path,
+        Some("src/auth.rs::login".to_owned())
+    );
+    assert_eq!(val.results[1].status, "ok");
+    assert_eq!(
+        val.results[1].semantic_path,
+        Some("src/main.rs::main".to_owned())
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_batch_mixed_modes() {
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::{BatchLocateResult, LocateEntry, LocateParams};
+    use pathfinder_lsp::{DefinitionLocation, MockLawyer};
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .extend([Ok(pathfinder_common::types::SymbolScope {
+            content: "fn login() { }".to_owned(),
+            start_line: 9,
+            end_line: 9,
+            name_column: 0,
+            language: "rust".to_owned(),
+        })]);
+    surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .extend([Ok(Some("main".to_owned()))]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    lawyer.push_goto_definition_result(Ok(Some(DefinitionLocation {
+        file: "src/auth.rs".into(),
+        line: 42,
+        column: 5,
+        preview: "pub fn login() -> bool {".into(),
+    })));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = LocateParams {
+        locations: Some(vec![
+            LocateEntry {
+                semantic_path: Some("src/auth.rs::login".to_owned()),
+                file: None,
+                line: None,
+            },
+            LocateEntry {
+                semantic_path: None,
+                file: Some("src/main.rs".to_owned()),
+                line: Some(1),
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await.expect("should succeed");
+    let val: BatchLocateResult = serde_json::from_value(
+        result
+            .structured_content
+            .expect("missing structured_content"),
+    )
+    .expect("valid metadata");
+
+    assert_eq!(val.succeeded, 2);
+    assert_eq!(val.failed, 0);
+    assert_eq!(val.results.len(), 2);
+    assert_eq!(val.results[0].status, "ok");
+    assert_eq!(val.results[0].file, Some("src/auth.rs".to_owned()));
+    assert_eq!(val.results[0].line, Some(42));
+    assert_eq!(val.results[1].status, "ok");
+    assert_eq!(
+        val.results[1].semantic_path,
+        Some("src/main.rs::main".to_owned())
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_batch_partial_failure() {
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::{BatchLocateResult, LocateEntry, LocateParams};
+    use pathfinder_lsp::MockLawyer;
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .extend([Ok(Some("main".to_owned()))]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = LocateParams {
+        locations: Some(vec![
+            LocateEntry {
+                semantic_path: None,
+                file: Some("src/main.rs".to_owned()),
+                line: Some(1),
+            },
+            LocateEntry {
+                semantic_path: None,
+                file: Some("nonexistent.rs".to_owned()),
+                line: Some(5),
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await.expect("should succeed");
+    let val: BatchLocateResult = serde_json::from_value(
+        result
+            .structured_content
+            .expect("missing structured_content"),
+    )
+    .expect("valid metadata");
+
+    assert_eq!(val.succeeded, 1);
+    assert_eq!(val.failed, 1);
+    assert_eq!(val.results.len(), 2);
+    assert_eq!(val.results[0].status, "ok");
+    assert_eq!(
+        val.results[0].semantic_path,
+        Some("src/main.rs::main".to_owned())
+    );
+    assert_eq!(val.results[1].status, "error");
+    assert!(val.results[1].error.is_some());
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_batch_max_10_limit() {
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::{LocateEntry, LocateParams};
+    use pathfinder_lsp::MockLawyer;
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(MockLawyer::default());
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let entries = (1..=11)
+        .map(|i| LocateEntry {
+            semantic_path: None,
+            file: Some(format!("src/file{i}.rs")),
+            line: Some(1),
+        })
+        .collect();
+
+    let params = LocateParams {
+        locations: Some(entries),
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await;
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_batch_mutual_exclusion_both_params_errors() {
+    // Providing both `locations` and single-mode params simultaneously must return INVALID_PARAMS.
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::{LocateEntry, LocateParams};
+    use pathfinder_lsp::MockLawyer;
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(MockLawyer::default());
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = LocateParams {
+        // batch param
+        locations: Some(vec![LocateEntry {
+            semantic_path: Some("src/foo.rs::bar".to_owned()),
+            file: None,
+            line: None,
+        }]),
+        // single-mode param present at the same time → mutual exclusion must fire
+        semantic_path: Some("src/foo.rs::bar".to_owned()),
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        "both locations and single-mode params must return INVALID_PARAMS, got: {:?}",
+        err.message
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn test_locate_batch_empty_returns_error() {
+    use super::test_helpers::make_server_with_lawyer;
+    use crate::server::types::LocateParams;
+    use pathfinder_lsp::MockLawyer;
+    use pathfinder_treesitter::mock::MockSurgeon;
+    use std::sync::Arc;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(MockLawyer::default());
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = LocateParams {
+        locations: Some(vec![]),
+        ..Default::default()
+    };
+
+    let result = server.locate_impl(params).await;
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
 }

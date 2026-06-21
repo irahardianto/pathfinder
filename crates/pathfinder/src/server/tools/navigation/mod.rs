@@ -14,13 +14,18 @@
 //! - `inspect(include_dependencies=true)` — returns the symbol scope only, no dependencies
 
 use crate::server::helpers::{
-    invalid_params_error, parse_semantic_path, pathfinder_to_error_data,
+    invalid_params_error, millis_to_u64, parse_semantic_path, pathfinder_to_error_data,
     treesitter_error_to_error_data,
 };
-use crate::server::types::{HealthParams, LocateParams, TraceParams, TraceScope};
+use crate::server::types::{
+    BatchLocateResult, GetDefinitionResponse, GetSemanticPathResult, HealthParams, LocateParams,
+    LocateResultEntry, TraceParams, TraceScope,
+};
 use crate::server::PathfinderServer;
+use futures::StreamExt as _;
 use pathfinder_common::types::DegradedReason;
 use rmcp::model::{CallToolResult, ErrorData};
+use std::fmt::Write as _;
 
 mod deep_context;
 mod definition;
@@ -368,7 +373,7 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
 fn language_to_file_glob(language: &str) -> &str {
     match language {
         "rust" => "**/*.rs",
-        "typescript" => "**/*.{ts,tsx}",
+        "typescript" | "tsx" => "**/*.{ts,tsx}",
         "javascript" => "**/*.{js,jsx}",
         "python" => "**/*.py",
         "go" => "**/*.go",
@@ -396,7 +401,9 @@ fn java_resolve_pattern(candidate: &str) -> String {
 fn candidate_definition_pattern(language: &str, candidate: &str) -> String {
     let escaped = regex::escape(candidate);
     match language {
-        "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{escaped}\b"),
+        // The outer non-capturing group is intentionally closed at the end so
+        // regex::Regex::new() succeeds and optional pub/async qualifiers are grouped.
+        "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{escaped}\b)"),
         "go" => format!(r"func\s+{escaped}\b"),
         "typescript" | "tsx" | "javascript" | "vue" => {
             format!(
@@ -651,6 +658,207 @@ impl PathfinderServer {
 
     /// Consolidated `locate` handler.
     pub(crate) async fn locate_impl(
+        &self,
+        params: LocateParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        if let Some(ref locations) = params.locations {
+            // Mutual exclusion: batch mode cannot be combined with single-mode params
+            if params.semantic_path.is_some() || params.file.is_some() || params.line.is_some() {
+                return Err(invalid_params_error(
+                    "provide either `locations` (batch) or single-mode params (`semantic_path` / `file`+`line`), not both",
+                ));
+            }
+            self.locate_impl_batch(locations).await
+        } else {
+            self.locate_impl_single(params).await
+        }
+    }
+
+    async fn locate_entry(&self, entry: crate::server::types::LocateEntry) -> LocateResultEntry {
+        let single_params = LocateParams {
+            semantic_path: entry.semantic_path.clone(),
+            file: entry.file.clone(),
+            line: entry.line,
+            locations: None,
+        };
+        let is_semantic_path = entry.semantic_path.is_some();
+        let res = self.locate_impl_single(single_params).await;
+        match res {
+            Ok(call_res) => {
+                let val = call_res
+                    .structured_content
+                    .unwrap_or(serde_json::Value::Null);
+                if is_semantic_path {
+                    match serde_json::from_value::<GetDefinitionResponse>(val) {
+                        Ok(meta) => LocateResultEntry {
+                            input: entry,
+                            status: "ok".to_string(),
+                            file: Some(meta.file),
+                            line: Some(meta.line),
+                            column: Some(meta.column),
+                            semantic_path: None,
+                            preview: Some(meta.preview),
+                            resolution_strategy: meta.resolution_strategy,
+                            error: None,
+                        },
+                        Err(e) => LocateResultEntry {
+                            input: entry,
+                            status: "error".to_string(),
+                            file: None,
+                            line: None,
+                            column: None,
+                            semantic_path: None,
+                            preview: None,
+                            resolution_strategy: None,
+                            error: Some(format!("failed to deserialize metadata: {e}")),
+                        },
+                    }
+                } else {
+                    match serde_json::from_value::<GetSemanticPathResult>(val) {
+                        Ok(meta) => LocateResultEntry {
+                            input: entry,
+                            status: "ok".to_string(),
+                            file: Some(meta.file),
+                            line: Some(meta.line),
+                            column: None,
+                            semantic_path: meta.semantic_path,
+                            preview: None,
+                            resolution_strategy: None,
+                            error: None,
+                        },
+                        Err(e) => LocateResultEntry {
+                            input: entry,
+                            status: "error".to_string(),
+                            file: None,
+                            line: None,
+                            column: None,
+                            semantic_path: None,
+                            preview: None,
+                            resolution_strategy: None,
+                            error: Some(format!("failed to deserialize metadata: {e}")),
+                        },
+                    }
+                }
+            }
+            Err(err) => LocateResultEntry {
+                input: entry,
+                status: "error".to_string(),
+                file: None,
+                line: None,
+                column: None,
+                semantic_path: None,
+                preview: None,
+                resolution_strategy: None,
+                error: Some(err.message.to_string()),
+            },
+        }
+    }
+
+    async fn locate_impl_batch(
+        &self,
+        locations: &[crate::server::types::LocateEntry],
+    ) -> Result<CallToolResult, ErrorData> {
+        if locations.is_empty() {
+            return Err(invalid_params_error("`locations` must not be empty"));
+        }
+        if locations.len() > 10 {
+            return Err(invalid_params_error(
+                "`locations` must contain at most 10 entries",
+            ));
+        }
+
+        let start = std::time::Instant::now();
+        let mut futures = Vec::new();
+        for entry in locations {
+            let server = self.clone();
+            let entry = entry.clone();
+            futures.push(async move { server.locate_entry(entry).await });
+        }
+
+        let results: Vec<LocateResultEntry> =
+            futures::stream::iter(futures).buffered(4).collect().await;
+
+        let mut succeeded = 0;
+        let mut failed = 0;
+        for r in &results {
+            if r.status == "ok" {
+                succeeded += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        let total_duration_ms = millis_to_u64(start.elapsed().as_millis());
+        let response = BatchLocateResult {
+            results,
+            succeeded,
+            failed,
+            total_duration_ms,
+        };
+
+        let mut text_parts = Vec::new();
+        for entry in &response.results {
+            let input_str = if let Some(ref sp) = entry.input.semantic_path {
+                format!("semantic_path \"{sp}\"")
+            } else {
+                format!(
+                    "file \"{}\" line {}",
+                    entry.input.file.as_deref().unwrap_or(""),
+                    entry.input.line.unwrap_or(0)
+                )
+            };
+
+            if entry.status == "ok" {
+                if entry.input.semantic_path.is_some() {
+                    let mut resolved = format!(
+                        "{} -> {}:L{}",
+                        input_str,
+                        entry.file.as_deref().unwrap_or(""),
+                        entry.line.unwrap_or(0)
+                    );
+                    if let Some(col) = entry.column {
+                        let _ = write!(resolved, " col:{col}");
+                    }
+                    if let Some(ref prev) = entry.preview {
+                        if !prev.is_empty() {
+                            let _ = write!(resolved, " — {prev}");
+                        }
+                    }
+                    text_parts.push(resolved);
+                } else {
+                    text_parts.push(format!(
+                        "{} -> {}",
+                        input_str,
+                        entry
+                            .semantic_path
+                            .as_deref()
+                            .unwrap_or("(no enclosing symbol)")
+                    ));
+                }
+            } else {
+                text_parts.push(format!(
+                    "{} -> error: {}",
+                    input_str,
+                    entry.error.as_deref().unwrap_or("unknown error")
+                ));
+            }
+        }
+
+        text_parts.push(format!(
+            "[completed in {}ms, {}/{} locations resolved]",
+            total_duration_ms,
+            succeeded,
+            succeeded + failed
+        ));
+
+        let mut call_result =
+            CallToolResult::success(vec![rmcp::model::Content::text(text_parts.join("\n"))]);
+        call_result.structured_content = crate::server::helpers::serialize_metadata(&response);
+        Ok(call_result)
+    }
+
+    /// Single `locate` implementation helper.
+    pub(crate) async fn locate_impl_single(
         &self,
         params: LocateParams,
     ) -> Result<CallToolResult, ErrorData> {

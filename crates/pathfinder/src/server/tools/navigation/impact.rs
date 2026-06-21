@@ -53,8 +53,8 @@ impl PathfinderServer {
         files_referenced: &mut std::collections::HashSet<String>,
     ) -> Option<Vec<crate::server::types::ImpactReference>> {
         let search_params = crate::server::types::SearchParams {
-            query: symbol_name.to_string(),
-            mode: crate::server::types::SearchMode::Text,
+            query: format!("\\b{}\\b", regex::escape(symbol_name)),
+            mode: crate::server::types::SearchMode::Regex,
             path_glob: "**/*".to_string(),
             max_results: 20,
             context_lines: 0,

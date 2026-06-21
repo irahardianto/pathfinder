@@ -301,6 +301,9 @@ pub struct GetRepoMapMetadata {
     /// Optional hint for the agent (e.g. suggesting to increase `max_tokens` if coverage < 100).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Structured recommendation for `max_tokens` to achieve full coverage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_max_tokens: Option<u32>,
 }
 
 /// The overall capabilities of the Pathfinder system.
@@ -403,7 +406,7 @@ pub struct ReadFileMetadata {
 // ── Navigation Tool Response Types ─────────────────────────────────
 
 /// A dependency signature extracted for `read_with_deep_context`.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeepContextDependency {
     /// Semantic path of the called symbol.
     pub semantic_path: String,
@@ -449,7 +452,9 @@ pub struct ReadWithDeepContextMetadata {
     /// `true` when the `max_dependencies` limit was reached and results were truncated.
     pub dependencies_truncated: bool,
     /// Spec 5.2: How the deep context was resolved.
-    /// One of: `lsp_call_hierarchy`, `grep_file_scoped`, `grep_impl_scoped`, `grep_global`, `grep_broad`, `treesitter_direct`, `treesitter_fallback`.
+    /// One of: `lsp_call_hierarchy`, `treesitter_direct`, `treesitter_fallback`, `grep_fallback`.
+    /// Note: `grep_fallback` corresponds to `GrepFallbackDependencies` reason — the finer-grained
+    /// locate/trace values (`grep_file_scoped`, `grep_impl_scoped`, etc.) are NOT emitted here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution_strategy: Option<String>,
     /// Spec 5.1: Wall-clock duration of the tool call in milliseconds.
@@ -582,7 +587,9 @@ pub struct FindCallersCalleesMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// Spec 5.2: How the call hierarchy was resolved.
-    /// One of: `lsp_call_hierarchy`, `grep_file_scoped`, `grep_impl_scoped`, `grep_global`, `grep_broad`, `treesitter_fallback`.
+    /// One of: `lsp_call_hierarchy`, `grep_file_scoped`, `treesitter_direct`, `treesitter_fallback`.
+    /// Note: `grep_file_scoped` covers all LSP-unavailable grep fallback paths; the finer-grained
+    /// `grep_impl_scoped`/`grep_global`/`grep_broad` values are NOT emitted for this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution_strategy: Option<String>,
     /// Spec 4.2: Test functions that reference or test this symbol.
@@ -832,6 +839,9 @@ pub struct LspLanguageHealth {
     /// with detailed severity and description for each.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub degraded_tools: Vec<DegradedToolInfo>,
+    /// Seconds since last liveness probe for this language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_probe_age_secs: Option<u32>,
 }
 
 /// A single symbol found by `find_symbol`.
@@ -1090,14 +1100,16 @@ pub struct SearchParams {
     /// Optional filter by symbol kind. Only used when `mode` is `symbol`.
     ///
     /// **Canonical values:** `function`, `class`, `struct`, `interface`, `enum`,
-    /// `constant`, `module`, `impl`.
+    /// `constant`, `module`, `impl`, `type`.
     ///
     /// **Accepted aliases (all case-insensitive):**
     /// - `method`, `fn` → treated as `function`
     /// - `trait` → treated as `interface` (Rust traits, Go interfaces)
     /// - `const`, `static`, `let` → treated as `constant`
     /// - `mod`, `namespace` → treated as `module`
-    /// - `class` also matches `struct` and `interface` (broad OOP-style search)
+    /// - `type` matches class, struct, interface, trait, and enum (broadest type-level search).
+    /// - `class` matches class, struct, and interface (broad OOP-style search, but NOT enums).
+    /// - `struct` matches only struct.
     ///
     /// Example: `kind="trait"` finds Rust traits and Go interfaces.
     #[serde(default)]
@@ -1105,7 +1117,7 @@ pub struct SearchParams {
     /// Group matches by file path. Default: true.
     #[serde(default = "default_group_by_file")]
     pub group_by_file: bool,
-    /// Filter results: `all`, `code_only`, or `comments_only`. Default: `code_only`.
+    /// Filter results: `all`, `code_only`, `comments_only`, or `non_code` (matches in comments AND string literals (non-code content)). Default: `code_only`.
     #[serde(default = "default_filter_mode")]
     pub filter_mode: FilterMode,
 }
@@ -1175,7 +1187,11 @@ impl Default for ReadParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct InspectParams {
     /// Semantic path (e.g., `src/auth.ts::AuthService.login`). MUST include file path and '::'.
-    pub semantic_path: String,
+    #[serde(default)]
+    pub semantic_path: Option<String>,
+    /// Multiple semantic paths (max 10) for batch inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_paths: Option<Vec<String>>,
     /// When `true`, also fetch callee signatures (dependency context).
     /// Default: `false` (equivalent to old `read_symbol_scope` behavior).
     #[serde(default)]
@@ -1196,12 +1212,27 @@ pub struct InspectParams {
 impl Default for InspectParams {
     fn default() -> Self {
         Self {
-            semantic_path: String::default(),
+            semantic_path: None,
+            semantic_paths: None,
             include_dependencies: false,
             max_dependencies: default_max_dependencies(),
             include_imports: false,
         }
     }
+}
+
+/// A single entry in a batch locate request.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct LocateEntry {
+    /// Semantic path to resolve (e.g., `src/auth.ts::AuthService.login`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_path: Option<String>,
+    /// File path (e.g., `src/auth.ts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// 1-indexed line number to resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
 }
 
 /// Parameters for the `locate` tool.
@@ -1225,6 +1256,67 @@ pub struct LocateParams {
     /// Provide together with `file` to resolve a location to its semantic path.
     #[serde(default)]
     pub line: Option<u32>,
+    /// Multiple locations (max 10) for batch location/resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<LocateEntry>>,
+}
+
+/// Result entry for a single inspect operation in a batch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct InspectResultEntry {
+    pub semantic_path: String,
+    pub status: String, // "ok" or "error"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<Vec<DeepContextDependency>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response from a batch `inspect` tool call.
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct BatchInspectResult {
+    pub results: Vec<InspectResultEntry>,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub total_duration_ms: u64,
+}
+
+/// Result entry for a single locate operation in a batch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct LocateResultEntry {
+    pub input: LocateEntry, // echo back for correlation
+    pub status: String,     // "ok" or "error"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response from a batch `locate` tool call.
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct BatchLocateResult {
+    pub results: Vec<LocateResultEntry>,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub total_duration_ms: u64,
 }
 
 /// Scope for the `trace` tool.
@@ -1294,6 +1386,9 @@ pub struct HealthParams {
     ///   Returns updated health status after the restart attempt.
     #[serde(default)]
     pub action: Option<String>,
+    /// Optional parameter to force a live liveness probe regardless of cache age.
+    #[serde(default)]
+    pub force_probe: Option<bool>,
 }
 
 // ── Default Value Functions ─────────────────────────────────────────

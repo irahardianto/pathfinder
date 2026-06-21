@@ -36,7 +36,7 @@ async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() 
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -98,7 +98,7 @@ async fn test_read_with_deep_context_lsp_populates_dependencies() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -158,7 +158,7 @@ async fn test_read_with_deep_context_outgoing_error_degrades() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -202,7 +202,7 @@ async fn test_read_with_deep_context_empty_hierarchy_zero_deps() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -239,7 +239,7 @@ async fn test_read_with_deep_context_empty_hierarchy_warmup_degrades() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -283,7 +283,7 @@ async fn test_read_with_deep_context_closes_document_on_success() {
 
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
 
@@ -344,7 +344,7 @@ async fn test_read_with_deep_context_max_dependencies_truncates_results() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         max_dependencies: 2, // cap below the 5 available
         ..Default::default()
     };
@@ -441,7 +441,7 @@ async fn test_read_with_deep_context_grep_fallback_resolves_candidates() {
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -539,7 +539,7 @@ async fn test_attempt_grep_fallback_semantic_path_is_hierarchical() {
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -601,7 +601,7 @@ async fn test_read_with_deep_context_detail_none_falls_back_to_name() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -666,7 +666,7 @@ async fn test_read_with_deep_context_warmup_retry_success() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -738,7 +738,7 @@ async fn test_read_with_deep_context_filters_non_workspace_deps() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -811,7 +811,7 @@ async fn test_read_with_deep_context_deduplicates_deps() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -1182,7 +1182,7 @@ async fn test_read_with_deep_context_include_imports_true() {
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         include_imports: true,
         ..Default::default()
     };
@@ -1239,7 +1239,7 @@ async fn test_read_with_deep_context_lsp_error_grep_fallback_metadata() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -1289,7 +1289,7 @@ async fn test_read_with_deep_context_non_degraded_resolution_strategy() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -1337,7 +1337,7 @@ async fn test_read_with_deep_context_no_lsp_resolution_treesitter_direct() {
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -1420,7 +1420,7 @@ async fn test_grep_fallback_max_dependencies_truncation() {
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         max_dependencies: 2, // cap below available candidates
         ..Default::default()
     };
@@ -1474,7 +1474,7 @@ async fn test_read_with_deep_context_lsp_protocol_error_triggers_grep_fallback()
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -1549,7 +1549,7 @@ async fn test_inspect_dependency_semantic_path_is_hierarchical_when_surgeon_qual
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -1614,7 +1614,7 @@ async fn test_inspect_dependency_semantic_path_falls_back_to_flat_when_surgeon_r
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;
@@ -1679,7 +1679,7 @@ async fn test_inspect_dependency_semantic_path_falls_back_on_surgeon_error() {
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
     let params = InspectParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
+        semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
     let result = server.read_with_deep_context_impl(params).await;

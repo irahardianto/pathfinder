@@ -498,7 +498,8 @@ fn test_search_params_default() {
 #[test]
 fn test_inspect_params_default() {
     let params = InspectParams::default();
-    assert_eq!(params.semantic_path, "");
+    assert_eq!(params.semantic_path, None);
+    assert_eq!(params.semantic_paths, None); // new batch field must also default to None
     assert!(!params.include_dependencies);
     assert_eq!(params.max_dependencies, 50);
     assert!(!params.include_imports);
