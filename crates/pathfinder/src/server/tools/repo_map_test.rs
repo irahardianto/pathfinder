@@ -616,14 +616,14 @@ async fn test_get_repo_map_hint_when_coverage_under_100() {
         "hint should include files_scanned/files_in_scope, got: {text}"
     );
     assert!(
-        text.contains("approximately"),
+        text.contains("at least"),
         "hint should include a suggested token count, got: {text}"
     );
     // Suggested value must be >= current budget (16000) — regression guard for div_ceil logic
     assert!(
         text.contains("16000") || {
-            // extract the suggested number after "approximately"
-            text.split("approximately")
+            // extract the suggested number after "at least"
+            text.split("at least")
                 .nth(1)
                 .and_then(|s| s.split_whitespace().next())
                 .and_then(|n| n.trim_end_matches('.').parse::<u64>().ok())
@@ -683,5 +683,192 @@ async fn test_get_repo_map_hint_coverage_zero_fallback() {
     assert!(
         text.contains("0/10"),
         "hint should show 0/10 files, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_explore_suggested_max_tokens_present_when_truncated() {
+    let mut low_cov = ok_result();
+    low_cov.coverage_percent = 75;
+    low_cov.files_scanned = 3;
+    low_cov.files_in_scope = 4;
+
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(low_cov));
+    let (server, _dir) = make_server(surgeon);
+
+    let result = server.get_repo_map_impl(default_params()).await;
+    assert!(result.is_ok());
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+
+    let suggested = meta
+        .get("suggested_max_tokens")
+        .and_then(serde_json::Value::as_u64);
+    assert!(
+        suggested.is_some(),
+        "suggested_max_tokens should be present when coverage < 100%"
+    );
+}
+
+#[tokio::test]
+async fn test_explore_suggested_max_tokens_none_when_full_coverage() {
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(ok_result()));
+    let (server, _dir) = make_server(surgeon);
+
+    let result = server.get_repo_map_impl(default_params()).await;
+    assert!(result.is_ok());
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+
+    assert!(
+        meta.get("suggested_max_tokens").is_none(),
+        "suggested_max_tokens should be absent when coverage == 100%"
+    );
+}
+
+#[tokio::test]
+async fn test_explore_suggested_max_tokens_rounded_to_4000() {
+    let mut low_cov = ok_result();
+    low_cov.coverage_percent = 75; // 16000 / 0.75 = 21333 -> ceil(21333/4000)*4000 = 24000
+    low_cov.files_scanned = 3;
+    low_cov.files_in_scope = 4;
+
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(low_cov));
+    let (server, _dir) = make_server(surgeon);
+
+    let result = server.get_repo_map_impl(default_params()).await;
+    assert!(result.is_ok());
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+
+    let suggested = meta
+        .get("suggested_max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap();
+    assert_eq!(
+        suggested, 24000,
+        "suggested_max_tokens should round up to nearest 4000"
+    );
+}
+
+#[tokio::test]
+async fn test_explore_suggested_max_tokens_capped_at_100000() {
+    let mut low_cov = ok_result();
+    low_cov.coverage_percent = 5; // 16000 / 0.05 = 320000 -> capped at 100000
+    low_cov.files_scanned = 1;
+    low_cov.files_in_scope = 20;
+
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(low_cov));
+    let (server, _dir) = make_server(surgeon);
+
+    let result = server.get_repo_map_impl(default_params()).await;
+    assert!(result.is_ok());
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+
+    let suggested = meta
+        .get("suggested_max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap();
+    assert_eq!(
+        suggested, 100_000,
+        "suggested_max_tokens should be capped at 100000"
+    );
+}
+
+/// Coverage 0% with default budget: suggested = `saturating_mul(2)` = 32,000.
+/// Verifies the structured metadata field is populated in the zero-coverage fallback path
+/// (the existing hint text test only checked the text output, not the metadata).
+#[tokio::test]
+async fn test_explore_suggested_max_tokens_present_when_coverage_zero() {
+    let mut zero_cov = ok_result();
+    zero_cov.coverage_percent = 0;
+    zero_cov.files_scanned = 0;
+    zero_cov.files_in_scope = 10;
+
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(zero_cov));
+    let (server, _dir) = make_server(surgeon);
+
+    let result = server.get_repo_map_impl(default_params()).await;
+    assert!(result.is_ok());
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+
+    let suggested = meta
+        .get("suggested_max_tokens")
+        .and_then(serde_json::Value::as_u64);
+    assert!(
+        suggested.is_some(),
+        "suggested_max_tokens must be present for 0% coverage"
+    );
+    // default_params uses max_tokens=16,000; saturating_mul(2) = 32,000 (under 100k cap)
+    assert_eq!(
+        suggested.unwrap(),
+        32_000,
+        "suggested should be 2x current budget for 0% coverage"
+    );
+}
+
+/// Regression guard: with `max_tokens=80,000` and 0% coverage, `saturating_mul(2)` = 160,000.
+/// Without the `.min(100_000)` cap that was missing from the else branch, this would exceed
+/// the server's hard upper bound and cause an agent retry loop (server clamps to 100k,
+/// result is still 0%, suggestion is still 160k — infinite cycle).
+#[tokio::test]
+async fn test_explore_suggested_max_tokens_capped_at_100000_for_zero_coverage() {
+    let mut zero_cov = ok_result();
+    zero_cov.coverage_percent = 0;
+    zero_cov.files_scanned = 0;
+    zero_cov.files_in_scope = 50;
+
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(zero_cov));
+    let (server, _dir) = make_server(surgeon);
+
+    // Use a large explicit max_tokens (80,000) so 2x = 160,000 would exceed the 100k cap.
+    // Explicit value != default_max_tokens() so auto-scaling is bypassed.
+    let mut params = default_params();
+    params.max_tokens = 80_000;
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(result.is_ok());
+    let tool_result = result.unwrap();
+    let meta = tool_result.structured_content.as_ref().unwrap();
+
+    let suggested = meta
+        .get("suggested_max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap();
+    assert_eq!(
+        suggested, 100_000,
+        "suggested_max_tokens must be capped at 100,000 even in the 0% coverage fallback"
     );
 }

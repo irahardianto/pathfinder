@@ -147,6 +147,7 @@ impl PathfinderServer {
             lsp_status,
             duration_ms: None,
             hint: None,
+            suggested_max_tokens: None,
         };
         // Produce an actionable message so the agent knows WHY the result is empty
         // and what to do next, rather than seeing a silent empty response.
@@ -319,6 +320,7 @@ impl PathfinderServer {
         let lsp_status = derive_lsp_status(&capability_status);
         let duration_ms = start.elapsed().as_millis();
 
+        let mut suggested_max_tokens = None;
         let hint = if result.coverage_percent < 100 {
             // Estimate tokens needed for full coverage:
             // if current budget covers C%, full coverage needs roughly budget / (C/100).
@@ -328,11 +330,16 @@ impl PathfinderServer {
                 let rounded = estimated.div_ceil(4_000) * 4_000;
                 rounded.min(100_000) as u32
             } else {
-                max_tokens.saturating_mul(2)
+                // Coverage is 0% — we can't estimate precisely, so double the
+                // current budget as a first-step suggestion. Cap at 100,000
+                // so the suggestion is always within the server's accepted range
+                // and agents don't end up in a retry loop with an unreachable value.
+                max_tokens.saturating_mul(2).min(100_000)
             };
+            suggested_max_tokens = Some(suggested);
             Some(format!(
                 "Repository map is incomplete (coverage: {}%, {}/{} files). \
-                 To scan more files, increase max_tokens from {} to approximately {}.",
+                 To scan more files, increase max_tokens from {} to at least {}.",
                 result.coverage_percent,
                 result.files_scanned,
                 result.files_in_scope,
@@ -366,6 +373,7 @@ impl PathfinderServer {
             lsp_status,
             duration_ms: Some(millis_to_u64(duration_ms)),
             hint: hint.clone(),
+            suggested_max_tokens,
         };
 
         let mut text = if degraded {
