@@ -66,6 +66,36 @@ impl PathfinderServer {
                 }
             }
 
+            // Track LSP start time
+            if let Some(uptime_secs) = status.uptime_seconds {
+                let now = std::time::Instant::now();
+                let mut started_at_map = self
+                    .lsp_started_at
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let calculated_start = now
+                    .checked_sub(std::time::Duration::from_secs(uptime_secs))
+                    .unwrap_or(now);
+                if let Some(existing_start) = started_at_map.get(lang) {
+                    let diff = if *existing_start > calculated_start {
+                        *existing_start - calculated_start
+                    } else {
+                        calculated_start - *existing_start
+                    };
+                    if diff.as_secs() > 5 {
+                        started_at_map.insert(lang.clone(), calculated_start);
+                    }
+                } else {
+                    started_at_map.insert(lang.clone(), calculated_start);
+                }
+            } else {
+                let mut started_at_map = self
+                    .lsp_started_at
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                started_at_map.remove(lang);
+            }
+
             // LSP-HEALTH-001: Two-phase readiness model
             // Primary gate: navigation_ready (initialize handshake + definitionProvider)
             // indexing_complete is an ADDITIONAL signal, not a requirement.
@@ -127,195 +157,136 @@ impl PathfinderServer {
                 degraded_tools: compute_degraded_tools(status),
                 indexing_source: status.indexing_source.clone(),
                 indexing_duration_secs: status.indexing_duration_secs,
+                last_probe_age_secs: None,
             });
         }
 
-        // PATCH-006: Probe-based readiness check
-        // For languages that have been running for a while but still show warming_up,
-        // fire a probe to verify actual readiness.
-        //
-        // Also handles the edge case where navigation_ready = Some(false) but the
-        // LSP may actually be functional (e.g., capability detection was inaccurate
-        // during early initialize).
+        // Unified liveness probing, cache evaluation, and force_probe handling
         for lang_health in &mut languages {
-            if lang_health.status == "warming_up" {
-                // Check probe cache first — avoid redundant LSP calls.
-                // Positive entries are cached indefinitely; negative entries
-                // expire after PROBE_NEGATIVE_TTL_SECS (60s) to allow the LSP
-                // to finish starting and be re-probed later.
-                let cache_action = {
-                    let cache = self
-                        .probe_cache
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match cache.get(&lang_health.language) {
-                        Some(entry) if entry.is_valid() && entry.success => {
-                            // Valid positive entry — reuse cached result
-                            ProbeAction::UseCachedReady {
-                                call_hierarchy_verified: entry.call_hierarchy_verified,
-                            }
-                        }
-                        Some(entry) if entry.is_valid() && !entry.success => {
-                            // Valid negative entry — skip probe, LSP still starting
-                            ProbeAction::SkipProbe
-                        }
-                        Some(_) => {
-                            // Expired negative entry — allow re-probe
-                            ProbeAction::Probe
-                        }
-                        None => ProbeAction::Probe,
-                    }
-                };
-
-                match cache_action {
-                    ProbeAction::UseCachedReady {
-                        call_hierarchy_verified,
-                    } => {
-                        "ready".clone_into(&mut lang_health.status);
-                        lang_health.probe_verified = true;
-                        lang_health.navigation_tested = Some(true);
-                        lang_health.call_hierarchy_verified = call_hierarchy_verified;
-                        if overall_status != "ready" {
-                            overall_status = "ready";
-                        }
-                        continue;
-                    }
-                    ProbeAction::SkipProbe => {
-                        continue;
-                    }
-                    ProbeAction::Probe => {}
-                }
-
-                let uptime_secs = parse_uptime_to_seconds(lang_health.uptime.as_deref());
-                if let Some(secs) = uptime_secs {
-                    if secs > 10 {
-                        // LSP has been running for 10+ seconds but still warming_up.
-                        // This likely means progress notifications aren't being emitted.
-                        // Fire a lightweight probe.
-                        let (probe_result, call_hierarchy_verified) =
-                            self.probe_language_readiness(&lang_health.language).await;
-                        if probe_result {
-                            "ready".clone_into(&mut lang_health.status);
-                            lang_health.probe_verified = true;
-                            lang_health.navigation_tested = Some(true);
-                            lang_health.call_hierarchy_verified = call_hierarchy_verified;
-                            // Cache the successful probe result (indefinite TTL)
-                            self.probe_cache
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .insert(
-                                    lang_health.language.clone(),
-                                    crate::server::ProbeCacheEntry::new(
-                                        true,
-                                        call_hierarchy_verified,
-                                    ),
-                                );
-                            // Update overall status
-                            if overall_status != "ready" {
-                                overall_status = "ready";
-                            }
-                        } else {
-                            // Cache negative result with TTL — allows re-probe after
-                            // the LSP finishes starting
-                            self.probe_cache
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .insert(
-                                    lang_health.language.clone(),
-                                    crate::server::ProbeCacheEntry::new(false, false),
-                                );
-                        }
-                    }
-                }
-            }
-        }
-
-        // LIVENESS PROBE for "ready" languages
-        // Verify that languages that were "ready" at initialization are still responsive.
-        // This catches LSPs that become non-responsive after initial readiness
-        // (e.g., stuck indexing, memory pressure, internal deadlock).
-        for lang_health in &mut languages {
-            if lang_health.status != "ready" {
+            if lang_health.status == "unavailable" {
                 continue;
             }
 
-            // Check liveness cache
-            let cache_action = {
+            // Verify if a probe file exists for navigation testing
+            let Some(_) = self.find_probe_file(&lang_health.language) else {
+                continue;
+            };
+
+            let mut should_probe = false;
+            let force_probe = params.force_probe.unwrap_or(false);
+
+            if force_probe {
+                should_probe = true;
+            } else {
                 let cache = self
                     .probe_cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match cache.get(&lang_health.language) {
-                    Some(entry) if entry.is_valid() && entry.success => {
-                        // Positive entry — check if it's time for a re-probe
-                        if entry.age_secs() < LIVENESS_PROBE_INTERVAL_SECS {
-                            ProbeAction::UseCachedReady {
-                                call_hierarchy_verified: entry.call_hierarchy_verified,
+                    Some(entry) => {
+                        let interval = self.get_probe_interval(&lang_health.language);
+                        let threshold = std::cmp::min(30, interval);
+                        if entry.age_secs() < threshold {
+                            if entry.success {
+                                if lang_health.status == "warming_up"
+                                    || lang_health.status == "starting"
+                                {
+                                    lang_health.status = "ready".to_string();
+                                }
+                                lang_health.probe_verified = true;
+                                lang_health.navigation_tested = Some(true);
+                                lang_health.call_hierarchy_verified = entry.call_hierarchy_verified;
+                                if overall_status != "ready" {
+                                    overall_status = "ready";
+                                }
+                            } else {
+                                if lang_health.status == "ready" {
+                                    lang_health.status = "degraded".to_string();
+                                }
+                                lang_health.probe_verified = false;
+                                lang_health.navigation_tested = Some(false);
+                                lang_health.call_hierarchy_verified = false;
                             }
                         } else {
-                            ProbeAction::Probe // Stale — re-probe
+                            should_probe = true;
                         }
                     }
-                    Some(entry) if entry.is_valid() && !entry.success => ProbeAction::SkipProbe,
-                    Some(_) => {
-                        ProbeAction::Probe // Expired
+                    None => {
+                        // No cache entry
+                        if lang_health.status == "ready" {
+                            should_probe = true;
+                        } else {
+                            let uptime_secs =
+                                parse_uptime_to_seconds(lang_health.uptime.as_deref());
+                            if uptime_secs.unwrap_or(0) > 10 {
+                                should_probe = true;
+                            }
+                        }
                     }
-                    None => ProbeAction::Probe, // Never probed (shouldn't happen for "ready")
                 }
-            };
+            }
 
-            match cache_action {
-                ProbeAction::UseCachedReady {
-                    call_hierarchy_verified,
-                } => {
+            if should_probe {
+                let (probe_result, call_hierarchy_verified) =
+                    self.probe_language_readiness(&lang_health.language).await;
+
+                // Cache the result
+                self.probe_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        lang_health.language.clone(),
+                        crate::server::ProbeCacheEntry::new(probe_result, call_hierarchy_verified),
+                    );
+
+                if probe_result {
+                    lang_health.status = "ready".to_string();
                     lang_health.probe_verified = true;
                     lang_health.navigation_tested = Some(true);
                     lang_health.call_hierarchy_verified = call_hierarchy_verified;
+                    if overall_status != "ready" {
+                        overall_status = "ready";
+                    }
+                } else {
+                    if lang_health.status == "ready" {
+                        lang_health.status = "degraded".to_string();
+                    }
+                    lang_health.probe_verified = false;
+                    lang_health.navigation_tested = Some(false);
+                    lang_health.call_hierarchy_verified = false;
+                }
+            }
+        }
+
+        // Final pass: sync all probe details/status flags from the cache to ensure 100% consistency
+        {
+            let cache = self
+                .probe_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for lang_health in &mut languages {
+                // Skip unavailable languages — they have no LSP process, so
+                // stale cache entries must not stamp probe_verified=true.
+                if lang_health.status == "unavailable" {
                     continue;
                 }
-                ProbeAction::SkipProbe => continue,
-                ProbeAction::Probe => {}
-            }
-
-            // Run the same probe as warming_up
-            // Note: find_probe_file returns None if no source file exists.
-            // In this case, we skip the probe and don't downgrade the status.
-            // The language remains "ready" based on capability status alone.
-            let (probe_result, call_hierarchy_verified) =
-                match self.find_probe_file(&lang_health.language) {
-                    Some(_) => self.probe_language_readiness(&lang_health.language).await,
-                    None => {
-                        // No file to probe — skip liveness check, keep status as-is
-                        continue;
+                if let Some(entry) = cache.get(&lang_health.language) {
+                    lang_health.last_probe_age_secs =
+                        Some(u32::try_from(entry.age_secs()).unwrap_or(u32::MAX));
+                    lang_health.probe_verified = entry.success;
+                    lang_health.navigation_tested = Some(entry.success);
+                    lang_health.call_hierarchy_verified = entry.call_hierarchy_verified;
+                    if entry.success {
+                        if lang_health.status == "warming_up" || lang_health.status == "starting" {
+                            lang_health.status = "ready".to_string();
+                        }
+                    } else if lang_health.status == "ready" {
+                        lang_health.status = "degraded".to_string();
                     }
-                };
-
-            if probe_result {
-                // Still alive — cache positive result
-                lang_health.probe_verified = true;
-                lang_health.navigation_tested = Some(true);
-                lang_health.call_hierarchy_verified = call_hierarchy_verified;
-                self.probe_cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        lang_health.language.clone(),
-                        crate::server::ProbeCacheEntry::new(true, call_hierarchy_verified),
-                    );
-            } else {
-                // LSP is dead! Downgrade from "ready" to "degraded"
-                "degraded".clone_into(&mut lang_health.status);
-                lang_health.probe_verified = false;
-                lang_health.navigation_tested = Some(false);
-                lang_health.call_hierarchy_verified = false;
-                // Cache negative result
-                self.probe_cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        lang_health.language.clone(),
-                        crate::server::ProbeCacheEntry::new(false, false),
-                    );
+                } else {
+                    lang_health.last_probe_age_secs = None;
+                    lang_health.probe_verified = false;
+                }
             }
         }
 
@@ -369,6 +340,7 @@ impl PathfinderServer {
                 ],
                 indexing_source: None,
                 indexing_duration_secs: None,
+                last_probe_age_secs: None,
             });
         }
 
@@ -559,10 +531,10 @@ impl PathfinderServer {
             .open_document(self.workspace_root.path(), &file_path, &content)
             .await;
 
-        // Wrap in a 5s budget — for a health probe we only need "does it respond",
+        // Wrap in a 2s budget — for a health probe we only need "does it respond",
         // not real data. This caps worst-case probe time instead of inheriting
         // the production goto_definition timeout (10s).
-        let probe_timeout = std::time::Duration::from_secs(5);
+        let probe_timeout = std::time::Duration::from_secs(2);
 
         let result = tokio::time::timeout(
             probe_timeout,
@@ -574,7 +546,7 @@ impl PathfinderServer {
         let Ok(result) = result else {
             tracing::warn!(
                 language = %language_id,
-                timeout_secs = 5,
+                timeout_secs = 2,
                 "probe: goto_definition timed out — LSP not responsive"
             );
             return (false, false);
@@ -602,7 +574,7 @@ impl PathfinderServer {
                 let Ok(call_hierarchy_result) = call_hierarchy_result else {
                     tracing::warn!(
                         language = %language_id,
-                        timeout_secs = 5,
+                        timeout_secs = 2,
                         "probe: call_hierarchy_prepare timed out — LSP partially responsive"
                     );
                     return (false, false);
@@ -620,6 +592,26 @@ impl PathfinderServer {
         }
 
         (true, call_hierarchy_verified)
+    }
+
+    /// Get dynamic probe interval for a language based on ramp-up schedule.
+    pub(crate) fn get_probe_interval(&self, language: &str) -> u64 {
+        let started_at_map = self
+            .lsp_started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(started_at) = started_at_map.get(language) {
+            let elapsed = started_at.elapsed().as_secs();
+            if elapsed <= 60 {
+                10
+            } else if elapsed <= 300 {
+                30
+            } else {
+                LIVENESS_PROBE_INTERVAL_SECS
+            }
+        } else {
+            LIVENESS_PROBE_INTERVAL_SECS
+        }
     }
 
     /// Find a well-known file in the workspace for probing language readiness.
@@ -769,16 +761,6 @@ pub(super) fn format_uptime(seconds: u64) -> String {
             format!("{hours}h{mins}m")
         }
     }
-}
-
-/// Decision from checking the probe cache for a language.
-pub(super) enum ProbeAction {
-    /// Cached positive result exists — upgrade to "ready" immediately.
-    UseCachedReady { call_hierarchy_verified: bool },
-    /// Cached negative result exists and hasn't expired — skip probing.
-    SkipProbe,
-    /// No cache entry or expired negative — perform a live probe.
-    Probe,
 }
 
 /// Returns structured information about tools that lose LSP support for this language.

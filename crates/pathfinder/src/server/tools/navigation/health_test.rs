@@ -61,6 +61,7 @@ async fn test_lsp_health_shows_push_for_go() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("go".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -108,6 +109,7 @@ async fn test_lsp_health_shows_pull_for_rust() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -214,6 +216,7 @@ async fn test_lsp_health_probe_upgrades_warming_up_to_ready() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -283,6 +286,7 @@ async fn test_lsp_health_probe_keeps_warming_up_when_probe_fails() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -353,6 +357,7 @@ async fn test_lsp_health_no_probe_for_recently_started() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -418,6 +423,7 @@ async fn test_lsp_health_no_probe_for_already_ready() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -770,6 +776,7 @@ async fn test_lsp_health_missing_language_filter_works() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("python".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -819,6 +826,7 @@ async fn test_health_shows_degraded_tools_for_no_diagnostics() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("go".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -910,6 +918,7 @@ async fn test_health_shows_empty_degraded_when_fully_capable() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -958,6 +967,7 @@ async fn test_health_shows_push_latency() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("go".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -1005,6 +1015,7 @@ async fn test_health_shows_pull_latency() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     result.expect("pull-diagnostics language should return successfully");
@@ -1047,6 +1058,7 @@ async fn test_lsp_health_ready_but_still_indexing_shows_confidence_gradient() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("python".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
@@ -1101,6 +1113,7 @@ async fn test_lsp_health_fully_indexed_shows_complete_confidence() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
@@ -1117,17 +1130,25 @@ async fn test_lsp_health_fully_indexed_shows_complete_confidence() {
 // ── Probe cache TTL tests (LSP-HEALTH-001 findings 1+2) ──────────
 
 #[tokio::test]
-async fn test_probe_cache_positive_result_never_expires() {
-    // Positive cache entries should be valid indefinitely
+async fn test_probe_cache_positive_result_is_fresh() {
+    // Positive cache entries should be fresh immediately after creation
     let entry = crate::server::ProbeCacheEntry::new(true, true);
-    assert!(entry.is_valid(), "positive entry should always be valid");
+    assert!(
+        entry.age_secs() < 2,
+        "freshly created positive entry should have age < 2s"
+    );
+    assert!(entry.success, "positive entry should have success=true");
 }
 
 #[tokio::test]
-async fn test_probe_cache_negative_result_is_initially_valid() {
-    // Negative cache entries should be valid immediately after creation
+async fn test_probe_cache_negative_result_is_fresh() {
+    // Negative cache entries should be fresh immediately after creation
     let entry = crate::server::ProbeCacheEntry::new(false, false);
-    assert!(entry.is_valid(), "fresh negative entry should be valid");
+    assert!(
+        entry.age_secs() < 2,
+        "freshly created negative entry should have age < 2s"
+    );
+    assert!(!entry.success, "negative entry should have success=false");
 }
 
 #[tokio::test]
@@ -1175,6 +1196,7 @@ async fn test_probe_negative_cache_skips_reprobe() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
@@ -1232,6 +1254,7 @@ async fn test_probe_cache_positive_upgrades_to_ready() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
@@ -1288,6 +1311,7 @@ async fn test_lsp_health_liveness_probe_downgrades_dead_lsp() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
@@ -1351,6 +1375,7 @@ async fn test_lsp_health_liveness_probe_caches_positive() {
         .lsp_health_impl(crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
+            force_probe: None,
         })
         .await;
     let val1 = unpack_health(result1.expect("should succeed"));
@@ -1369,6 +1394,7 @@ async fn test_lsp_health_liveness_probe_caches_positive() {
         .lsp_health_impl(crate::server::types::HealthParams {
             action: None,
             language: Some("rust".to_string()),
+            force_probe: None,
         })
         .await;
     let val2 = unpack_health(result2.expect("should succeed"));
@@ -1430,6 +1456,7 @@ async fn test_liveness_probe_interval_skips_recent() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
 
     let call_count_before = lawyer.goto_definition_call_count();
@@ -1492,6 +1519,7 @@ async fn test_lsp_health_probe_downgrades_when_call_hierarchy_hangs() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -1702,6 +1730,7 @@ async fn test_lsp_health_probe_timeout_goto_definition() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
@@ -1763,6 +1792,7 @@ async fn test_lsp_health_probe_timeout_call_hierarchy_prepare() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
@@ -1830,6 +1860,7 @@ async fn test_lsp_health_probe_verifies_call_hierarchy() {
     let params = crate::server::types::HealthParams {
         action: None,
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     let call_res = result.expect("should succeed");
@@ -1922,6 +1953,7 @@ async fn test_lsp_health_restart_missing_language() {
     let params = crate::server::types::HealthParams {
         action: Some("restart".to_string()),
         language: None,
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     assert!(result.is_err());
@@ -1939,6 +1971,7 @@ async fn test_lsp_health_restart_successful() {
     let params = crate::server::types::HealthParams {
         action: Some("restart".to_string()),
         language: Some("rust".to_string()),
+        force_probe: None,
     };
     let result = server.lsp_health_impl(params).await;
     assert!(result.is_ok());
@@ -2303,6 +2336,7 @@ async fn test_health_invalid_action_returns_invalid_params() {
     let params = crate::server::types::HealthParams {
         language: Some("rust".to_string()),
         action: Some("invalid_action".to_string()),
+        force_probe: None,
     };
 
     let result = server.lsp_health_impl(params).await;
@@ -2368,5 +2402,815 @@ async fn test_health_typescript_call_hierarchy_limitation() {
                 .contains("TypeScript/JavaScript language servers do not support call hierarchy")),
         "expected known_limitations to mention TS/JS call hierarchy limitation, got: {:?}",
         val.known_limitations
+    );
+}
+
+// ── PATCH-004: Health & Readiness Consistency Tests ─────────────────
+
+#[tokio::test]
+async fn test_health_shows_probe_age() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    // Mock Go LSP status
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(15),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    // Pre-populate probe cache
+    server.probe_cache.lock().unwrap().insert(
+        "go".to_string(),
+        crate::server::ProbeCacheEntry::new(true, true),
+    );
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: None,
+        force_probe: None,
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let go_health = &val.languages[0];
+    assert!(go_health.last_probe_age_secs.is_some());
+    assert_eq!(go_health.last_probe_age_secs.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_health_probe_verified_true_after_successful_navigation() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    // Create a Go file for probing
+    std::fs::write(ws.path().join("main.go"), "package main").unwrap();
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(15),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    lawyer_clone.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+        file: "main.go".to_string(),
+        line: 1,
+        column: 0,
+        preview: "package main".to_string(),
+    })));
+
+    // Ensure we trigger a live probe (no cache entry exists)
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("go".to_string()),
+        force_probe: Some(true),
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let go_health = &val.languages[0];
+    assert!(go_health.probe_verified);
+    assert_eq!(go_health.navigation_tested, Some(true));
+}
+
+#[tokio::test]
+async fn test_health_probe_verified_false_when_only_capability_checked() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+
+    // Remove Rust/Go files created by make_temp_workspace to prevent liveness probe
+    let src_dir = ws_dir.path().join("src");
+    let _ = std::fs::remove_file(src_dir.join("main.rs"));
+    let _ = std::fs::remove_file(src_dir.join("auth.rs"));
+    let _ = std::fs::remove_file(src_dir.join("token.rs"));
+    let _ = std::fs::remove_file(src_dir.join("service.rs"));
+    let _ = std::fs::remove_file(src_dir.join("user.rs"));
+    let _ = std::fs::remove_file(src_dir.join("auth.go"));
+
+    // No probe files in workspace, so no live probe can run
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(15),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: None,
+        force_probe: None,
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let go_health = &val.languages[0];
+    assert!(!go_health.probe_verified);
+    assert_eq!(go_health.navigation_tested, None);
+}
+
+#[tokio::test]
+async fn test_probe_interval_short_after_lsp_start() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    // LSP started 5 seconds ago
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(5),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    // Query health once to initialize started_at tracking
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: None,
+        force_probe: None,
+    };
+    let _ = server.lsp_health_impl(params).await;
+
+    // Check interval
+    let interval = server.get_probe_interval("go");
+    assert_eq!(interval, 10);
+}
+
+#[tokio::test]
+async fn test_probe_interval_medium_after_60s() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    // LSP started 90 seconds ago
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(90),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: None,
+        force_probe: None,
+    };
+    let _ = server.lsp_health_impl(params).await;
+
+    let interval = server.get_probe_interval("go");
+    assert_eq!(interval, 30);
+}
+
+#[tokio::test]
+async fn test_probe_interval_normal_after_300s() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    // LSP started 350 seconds ago
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(350),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: None,
+        force_probe: None,
+    };
+    let _ = server.lsp_health_impl(params).await;
+
+    let interval = server.get_probe_interval("go");
+    assert_eq!(interval, 120);
+}
+
+#[tokio::test]
+async fn test_health_force_probe_triggers_live_check() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    std::fs::write(ws.path().join("main.go"), "package main").unwrap();
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(350),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    lawyer_clone.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+        file: "main.go".to_string(),
+        line: 1,
+        column: 0,
+        preview: "package main".to_string(),
+    })));
+
+    // Pre-populate cache with positive entry (fresh: created 1s ago)
+    server.probe_cache.lock().unwrap().insert(
+        "go".to_string(),
+        crate::server::ProbeCacheEntry::new(true, true),
+    );
+
+    // Call health with force_probe: true -> should probe and increment dynamic count
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("go".to_string()),
+        force_probe: Some(true),
+    };
+    let _ = server.lsp_health_impl(params).await;
+
+    // Verify goto_definition call count was incremented (1 or more)
+    assert!(lawyer_clone.goto_definition_call_count() >= 1);
+}
+
+#[tokio::test]
+async fn test_health_uses_cache_when_fresh() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    std::fs::write(ws.path().join("main.go"), "package main").unwrap();
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(350),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    // Pre-populate cache with positive entry (fresh)
+    server.probe_cache.lock().unwrap().insert(
+        "go".to_string(),
+        crate::server::ProbeCacheEntry::new(true, true),
+    );
+
+    // Call health with force_probe: false -> should use cache and NOT trigger probe
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("go".to_string()),
+        force_probe: Some(false),
+    };
+    let _ = server.lsp_health_impl(params).await;
+
+    assert_eq!(lawyer_clone.goto_definition_call_count(), 0);
+}
+
+#[tokio::test]
+async fn test_health_live_probe_timeout_marks_degraded() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    std::fs::write(ws.path().join("main.go"), "package main").unwrap();
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(350),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    // Mock timeout by returning LspError::ConnectionLost
+    lawyer_clone.set_goto_definition_result(Err(pathfinder_lsp::LspError::ConnectionLost));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("go".to_string()),
+        force_probe: Some(true),
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let go_health = &val.languages[0];
+    assert_eq!(go_health.status, "degraded");
+    assert!(!go_health.probe_verified);
+    assert_eq!(go_health.navigation_tested, Some(false));
+}
+
+/// Regression: stale positive cache entry must NOT stamp `probe_verified=true`
+/// on a language whose LSP has since become unavailable.
+#[tokio::test]
+async fn test_stale_cache_does_not_infect_unavailable_language() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    // LSP is now unavailable (no uptime, no nav_ready)
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: false,
+            reason: "LSP not running".to_string(),
+            navigation_ready: None,
+            indexing_complete: None,
+            uptime_seconds: None,
+            diagnostics_strategy: None,
+            supports_definition: None,
+            supports_call_hierarchy: None,
+            supports_diagnostics: None,
+            supports_formatting: None,
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    // Pre-populate cache with a stale positive entry from when LSP was alive
+    server.probe_cache.lock().unwrap().insert(
+        "go".to_string(),
+        crate::server::ProbeCacheEntry::new(true, true),
+    );
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: None,
+        force_probe: None,
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let go_health = &val.languages[0];
+    assert_eq!(go_health.status, "unavailable");
+    assert!(
+        !go_health.probe_verified,
+        "stale cache must not stamp probe_verified on unavailable language"
+    );
+    assert_eq!(
+        go_health.navigation_tested, None,
+        "unavailable language must not have navigation_tested"
+    );
+    assert_eq!(
+        go_health.last_probe_age_secs, None,
+        "unavailable language must not expose probe age"
+    );
+}
+
+// ── PATCH-004 GAP B1: boundary tests at exactly 60s and 300s ──────────
+
+#[tokio::test]
+async fn test_probe_interval_at_boundary_60s() {
+    // elapsed=60 is INCLUSIVE in the short bucket (<=60 → 10s).
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "ok".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(60),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let _ = server
+        .lsp_health_impl(crate::server::types::HealthParams {
+            action: None,
+            language: None,
+            force_probe: None,
+        })
+        .await;
+
+    // boundary: elapsed <= 60 is inclusive → must remain in 10s bucket
+    let interval = server.get_probe_interval("go");
+    assert_eq!(
+        interval, 10,
+        "elapsed=60 is inclusive (<= 60) → interval must be 10, not 30"
+    );
+}
+
+#[tokio::test]
+async fn test_probe_interval_just_past_60s_boundary() {
+    // elapsed=61 crosses the first boundary → 30s bucket.
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "ok".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(61),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let _ = server
+        .lsp_health_impl(crate::server::types::HealthParams {
+            action: None,
+            language: None,
+            force_probe: None,
+        })
+        .await;
+
+    let interval = server.get_probe_interval("go");
+    assert_eq!(
+        interval, 30,
+        "elapsed=61 crosses first boundary → interval must be 30"
+    );
+}
+
+#[tokio::test]
+async fn test_probe_interval_at_boundary_300s() {
+    // elapsed=300 is INCLUSIVE in the medium bucket (<=300 → 30s).
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "ok".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(300),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let _ = server
+        .lsp_health_impl(crate::server::types::HealthParams {
+            action: None,
+            language: None,
+            force_probe: None,
+        })
+        .await;
+
+    let interval = server.get_probe_interval("go");
+    assert_eq!(
+        interval, 30,
+        "elapsed=300 is inclusive (<= 300) → interval must be 30, not 120"
+    );
+}
+
+#[tokio::test]
+async fn test_probe_interval_just_past_300s_boundary() {
+    // elapsed=301 crosses the second boundary → 120s bucket.
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "ok".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(301),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let _ = server
+        .lsp_health_impl(crate::server::types::HealthParams {
+            action: None,
+            language: None,
+            force_probe: None,
+        })
+        .await;
+
+    let interval = server.get_probe_interval("go");
+    assert_eq!(
+        interval, 120,
+        "elapsed=301 crosses second boundary → interval must be 120"
+    );
+}
+
+// ── PATCH-004 GAP A1: non-zero last_probe_age_secs ────────────────────
+
+#[tokio::test]
+async fn test_health_shows_nonzero_probe_age() {
+    // Insert a cache entry backdated 5s. With uptime=350s → threshold=30 → 5 < 30 (fresh),
+    // so no re-probe fires. The final-pass sync stamps last_probe_age_secs from the entry age.
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "ok".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(350),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    // Backdate entry by 5 seconds using pub(crate) created_at field.
+    let mut aged_entry = crate::server::ProbeCacheEntry::new(true, true);
+    aged_entry.created_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(5))
+        .expect("backdating must succeed");
+    server
+        .probe_cache
+        .lock()
+        .unwrap()
+        .insert("go".to_string(), aged_entry);
+
+    let result = server
+        .lsp_health_impl(crate::server::types::HealthParams {
+            action: None,
+            language: Some("go".to_string()),
+            force_probe: Some(false),
+        })
+        .await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let go_health = &val.languages[0];
+    assert!(
+        go_health.last_probe_age_secs.is_some(),
+        "last_probe_age_secs must be Some"
+    );
+    // Cache was used (age=5s < threshold=30s) → no live probe → call count stays 0.
+    assert_eq!(
+        lawyer_clone.goto_definition_call_count(),
+        0,
+        "fresh-enough cache must suppress re-probe"
+    );
+    // Age must be non-zero (backdated 5s, allow 4s for slow machines).
+    assert!(
+        go_health.last_probe_age_secs.unwrap() >= 4,
+        "last_probe_age_secs must reflect the 5s backdating, got {:?}",
+        go_health.last_probe_age_secs
+    );
+}
+
+// ── PATCH-004 GAP C1/C3: stale cache triggers re-probe without force_probe ─
+
+#[tokio::test]
+async fn test_health_stale_cache_triggers_reprobe_without_force_probe() {
+    // uptime=350s → interval=120 → threshold=min(30,120)=30.
+    // Insert a cache entry backdated 35s > threshold. Even with force_probe=false,
+    // the stale entry must trigger a live re-probe.
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    std::fs::write(ws.path().join("main.go"), "package main").unwrap();
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "go".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "ok".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(350),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    // Backdate entry by 35s (> threshold=30s) using pub(crate) created_at.
+    let mut stale_entry = crate::server::ProbeCacheEntry::new(true, true);
+    stale_entry.created_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(35))
+        .expect("backdating must succeed");
+    server
+        .probe_cache
+        .lock()
+        .unwrap()
+        .insert("go".to_string(), stale_entry);
+
+    // Queue a mock probe response.
+    lawyer_clone.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+        file: "main.go".to_string(),
+        line: 1,
+        column: 0,
+        preview: "package main".to_string(),
+    })));
+
+    // Call WITHOUT force_probe — stale cache must still trigger re-probe.
+    let result = server
+        .lsp_health_impl(crate::server::types::HealthParams {
+            action: None,
+            language: Some("go".to_string()),
+            force_probe: Some(false),
+        })
+        .await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    // Live probe must have fired due to stale cache.
+    assert!(
+        lawyer_clone.goto_definition_call_count() >= 1,
+        "stale cache (age > threshold) must trigger re-probe even without force_probe=true"
+    );
+    assert!(
+        val.languages[0].probe_verified,
+        "probe_verified must be true after live re-probe"
     );
 }

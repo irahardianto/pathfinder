@@ -477,7 +477,7 @@ async fn test_read_symbol_scope_routes_to_surgeon_and_handles_success() {
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.go::Login".to_owned(),
+        semantic_path: Some("src/auth.go::Login".to_owned()),
         ..Default::default()
     };
 
@@ -535,7 +535,7 @@ async fn test_read_symbol_scope_handles_surgeon_error() {
     );
 
     let params = InspectParams {
-        semantic_path: "src/auth.go::Login".to_owned(),
+        semantic_path: Some("src/auth.go::Login".to_owned()),
         ..Default::default()
     };
 
@@ -1104,7 +1104,7 @@ async fn test_thin_outer_handlers() {
 
     // 4. inspect
     let inspect_params = InspectParams {
-        semantic_path: "src/lib.rs::hello".to_string(),
+        semantic_path: Some("src/lib.rs::hello".to_string()),
         ..Default::default()
     };
     let res = server.inspect(Parameters(inspect_params)).await;

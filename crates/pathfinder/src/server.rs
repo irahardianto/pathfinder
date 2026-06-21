@@ -11,25 +11,18 @@
 //!   - Submodules (`search`, `repo_map`, `navigation`, etc.) contain
 //!     the underlying implementations delegated to by these handlers.
 
-/// Duration after which a negative probe cache entry expires.
-/// Allows re-probing an LSP that was still starting when first checked.
-const PROBE_NEGATIVE_TTL_SECS: u64 = 60;
-
-/// A cached probe result with optional expiry for negative entries.
+/// A cached probe result.
 ///
-/// Positive entries (success) are cached indefinitely for liveness re-probe.
-/// Negative entries (failure) expire after `PROBE_NEGATIVE_TTL_SECS` to allow
-/// an LSP that was still starting to be re-probed later.
+/// Positive and negative entries are cached and evaluated based on dynamic
+/// intervals that scale with the LSP process age.
 #[derive(Clone)]
 pub(crate) struct ProbeCacheEntry {
     /// Whether the probe succeeded.
     pub(crate) success: bool,
     /// Whether call hierarchy was verified.
     pub(crate) call_hierarchy_verified: bool,
-    /// When this entry was created. Used to check TTL for negative entries and age for liveness re-probe.
+    /// When this entry was created.
     pub(crate) created_at: std::time::Instant,
-    /// Optional TTL for expiration (negative entries only). Positive entries use age-based re-probe.
-    pub(crate) ttl: Option<std::time::Duration>,
 }
 
 impl ProbeCacheEntry {
@@ -38,26 +31,10 @@ impl ProbeCacheEntry {
             success,
             call_hierarchy_verified,
             created_at: std::time::Instant::now(),
-            ttl: if success {
-                None // Positive entries: use age-based re-probe instead of expiry
-            } else {
-                Some(std::time::Duration::from_secs(PROBE_NEGATIVE_TTL_SECS))
-            },
-        }
-    }
-
-    /// Returns true if this entry is still valid.
-    /// Positive entries never expire (liveness re-probe handles staleness).
-    /// Negative entries expire after `PROBE_NEGATIVE_TTL_SECS`.
-    pub(crate) fn is_valid(&self) -> bool {
-        match self.ttl {
-            Some(ttl) => self.created_at.elapsed() < ttl,
-            None => true, // Positive entries never expire (liveness re-probe handles staleness)
         }
     }
 
     /// How old is this cache entry in seconds?
-    /// Used by liveness probe to determine when to re-probe "ready" languages.
     pub(crate) fn age_secs(&self) -> u64 {
         self.created_at.elapsed().as_secs()
     }
@@ -103,13 +80,14 @@ pub struct PathfinderServer {
     tool_router: ToolRouter<Self>,
     /// Cache of probe results per language to avoid redundant LSP calls.
     ///
-    /// Positive results (true) are cached indefinitely — once a language's LSP
-    /// responds to a probe, it stays "ready" for the session.
-    ///
-    /// Negative results (false) are cached with a TTL of 60s. This prevents
-    /// hammering a still-starting LSP with probes on every `health` call,
-    /// while allowing recovery once the LSP finishes initializing.
+    /// Cache validity is evaluated dynamically based on `get_probe_interval()`,
+    /// which scales with the LSP process age (10s for first 60s, 30s for
+    /// 60-300s, 120s for 300s+). The effective threshold is
+    /// `min(30, probe_interval)` seconds.
     probe_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, ProbeCacheEntry>>>,
+    /// Tracking map of when each LSP was first detected as connected (uptime is Some).
+    /// Used for dynamic probe interval ramp-up schedule.
+    lsp_started_at: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 }
 
 impl PathfinderServer {
@@ -200,6 +178,7 @@ impl PathfinderServer {
             lawyer,
             tool_router: Self::tool_router(),
             probe_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            lsp_started_at: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -302,7 +281,7 @@ Examples:
 
     #[tool(
         name = "inspect",
-        description = "Extract a symbol's source code by semantic path, optionally with its dependency graph.
+        description = r#"Extract a symbol's source code by semantic path (single or batch), optionally with its dependency graph.
 
 Use when: You know the exact symbol and want its source code. Optionally includes signatures of all functions it calls.
 Alternative: Use `read` for full file content.
@@ -310,13 +289,16 @@ Alternative: Use `read` for full file content.
 IMPORTANT: `semantic_path` MUST include file path + '::' (e.g., `src/auth.ts::AuthService.login`).
 
 Parameter guidance:
+- `semantic_path`: Single semantic path.
+- `semantic_paths`: Array of semantic paths (max 10) for batch inspection.
+  Provide either `semantic_path` or `semantic_paths`.
 - `include_dependencies=false` (default): Source code only (fast, Tree-sitter).
 - `include_dependencies=true`: Source + callee signatures (LSP-powered, may take 5–30s on first call).
 - `max_dependencies=50` (default): Cap dependency output.
 
 Examples:
-- `inspect(semantic_path=\"src/auth.ts::AuthService.login\")` — source only
-- `inspect(semantic_path=\"src/auth.ts::AuthService.login\", include_dependencies=true)` — with deps"
+- `inspect(semantic_path="src/auth.ts::AuthService.login")` — source only
+- `inspect(semantic_paths=["src/auth.ts::AuthService.login", "src/auth.ts::AuthService.logout"])` — batch inspect"#
     )]
     async fn inspect(
         &self,
@@ -327,21 +309,21 @@ Examples:
 
     #[tool(
         name = "locate",
-        description = "Jump to a symbol's definition, or resolve a file+line to its semantic path.
+        description = r#"Jump to a symbol's definition, or resolve a file+line to its semantic path (single or batch).
 
 Use when: Navigating to where a symbol is defined, or converting stack trace locations to semantic paths.
 
-Two modes (auto-detected from input):
+Three modes (auto-detected from input):
 1. **Definition lookup**: Provide `semantic_path` → returns definition file, line, column, and code preview.
 2. **Semantic path resolution**: Provide `file` + `line` → returns the `file::symbol` semantic path of the enclosing symbol.
-
-Exactly one mode must be specified.
+3. **Batch locate**: Provide `locations` array containing up to 10 entries (each with either `semantic_path` or `file` + `line`).
 
 LSP-powered with ripgrep fallback. Check `degraded` in response.
 
 Examples:
-- `locate(semantic_path=\"src/auth.ts::AuthService.login\")` — jump to definition
-- `locate(file=\"src/auth.ts\", line=42)` — resolve to semantic path"
+- `locate(semantic_path="src/auth.ts::AuthService.login")` — jump to definition
+- `locate(file="src/auth.ts", line=42)` — resolve to semantic path
+- `locate(locations=[{semantic_path: "src/auth.ts::AuthService.login"}, {file: "src/auth.ts", line: 42}])` — batch locate"#
     )]
     async fn locate(
         &self,
@@ -398,8 +380,9 @@ Use when: Diagnosing why navigation tools returned degraded results, or checking
 
 Pass `language` to check a specific language, or omit to check all.
 Pass `action=\"restart\"` with `language` to force-restart a stuck LSP process.
+Pass `force_probe=true` to force a live liveness check regardless of cache age.
 
-Example: `health(language=\"rust\")`"
+Example: `health(language=\"rust\", force_probe=true)`"
     )]
     async fn health(
         &self,
