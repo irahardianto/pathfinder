@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0](https://github.com/irahardianto/pathfinder/compare/v0.21.1...v0.22.0) - 2026-06-21
+
+### Added
+
+- *(batch)* support batch mode for locate and inspect tools
+- *(health)* implement dynamic liveness probing and readiness check consistency
+- *(explore)* suggest next max_tokens value when repo map is truncated
+- *(search)* add type kind filter and non_code filter mode alias
+
+### Fixed
+
+- *(lsp)* declare callHierarchy and references in initialize capabilities
+- *(treesitter)* strip path qualifiers from Rust impl block names
+
 ## [0.21.1](https://github.com/irahardianto/pathfinder/compare/v0.21.0...v0.21.1) - 2026-06-20
 
 ### Added
