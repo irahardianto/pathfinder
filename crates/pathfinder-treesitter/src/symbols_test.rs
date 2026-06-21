@@ -2560,3 +2560,145 @@ fn test_find_enclosing_symbol_narrowest_match() {
     let sym = result.unwrap();
     assert_eq!(sym.name, "Handle", "narrowest match should be Handle");
 }
+
+/// PATCH-006 Spike A: `impl super::MyStruct` inside a nested module cannot
+/// merge cross-scope (the struct lives in the parent), but the `super::` prefix
+/// MUST be stripped from the impl node's name so lookups work correctly.
+#[test]
+fn test_impl_block_with_super_prefix_strips_name() {
+    fn assert_no_path_prefix(syms: &[ExtractedSymbol], prefix: &str) {
+        for s in syms {
+            assert!(
+                !s.name.contains(prefix),
+                "symbol '{}' should not contain '{}' prefix",
+                s.name,
+                prefix
+            );
+            assert_no_path_prefix(&s.children, prefix);
+        }
+    }
+
+    let source = r"
+struct MyStruct;
+
+mod sub {
+    impl super::MyStruct {
+        fn do_thing(&self) {}
+    }
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    assert_no_path_prefix(&symbols, "super::");
+
+    // The module's child impl node should be named `impl MyStruct`, not
+    // `impl super::MyStruct`
+    let sub_mod = symbols
+        .iter()
+        .find(|s| s.name == "sub")
+        .expect("mod sub must exist");
+    let impl_sym = sub_mod
+        .children
+        .iter()
+        .find(|c| c.name.starts_with("impl "))
+        .expect("impl block must exist inside mod sub");
+    assert!(
+        impl_sym.name.contains("MyStruct"),
+        "impl name should contain bare 'MyStruct'"
+    );
+    assert!(
+        !impl_sym.name.contains("super::"),
+        "impl name '{}' must not contain 'super::'",
+        impl_sym.name
+    );
+}
+
+/// PATCH-006 Spike A: Same-scope `super::` style prefix still merges when
+/// both struct and impl are at the same level (flat file, no modules).
+#[test]
+fn test_impl_block_with_super_prefix_same_scope_merges() {
+    // When the struct and impl are at the same scope level, stripping `super::`
+    // makes the impl name match the struct name, enabling merge.
+    let source = r"
+struct Gadget;
+
+impl super::Gadget {
+    fn activate(&self) {}
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let gadget = symbols
+        .iter()
+        .find(|s| s.name == "Gadget" && s.kind == SymbolKind::Struct)
+        .expect("Gadget struct must exist");
+
+    let method = gadget
+        .children
+        .iter()
+        .find(|c| c.name == "activate")
+        .expect("activate must be merged under Gadget");
+    assert_eq!(method.kind, SymbolKind::Method);
+    assert_eq!(method.semantic_path, "Gadget.activate");
+}
+
+/// PATCH-006 Spike A: `impl crate::MyStruct` must strip the `crate::` prefix.
+#[test]
+fn test_impl_block_with_crate_prefix_merges_correctly() {
+    let source = r"
+struct Config;
+
+impl crate::Config {
+    fn load(&self) -> bool { true }
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let config = symbols
+        .iter()
+        .find(|s| s.name == "Config" && s.kind == SymbolKind::Struct)
+        .expect("Config struct must exist");
+
+    let method = config
+        .children
+        .iter()
+        .find(|c| c.name == "load")
+        .expect("load must be merged under Config");
+    assert_eq!(method.kind, SymbolKind::Method);
+    assert_eq!(method.semantic_path, "Config.load");
+
+    // No symbol should retain `crate::` prefix
+    for s in &symbols {
+        assert!(
+            !s.name.contains("crate::"),
+            "symbol '{}' should not contain 'crate::' prefix",
+            s.name
+        );
+    }
+}
+
+/// PATCH-006 Spike A: `impl self::MyStruct` must strip the `self::` prefix.
+#[test]
+fn test_impl_block_with_self_prefix_merges_correctly() {
+    let source = r"
+struct Handler;
+
+impl self::Handler {
+    fn handle(&self) {}
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let handler = symbols
+        .iter()
+        .find(|s| s.name == "Handler" && s.kind == SymbolKind::Struct)
+        .expect("Handler struct must exist");
+
+    let method = handler
+        .children
+        .iter()
+        .find(|c| c.name == "handle")
+        .expect("handle must be merged under Handler");
+    assert_eq!(method.kind, SymbolKind::Method);
+    assert_eq!(method.semantic_path, "Handler.handle");
+}

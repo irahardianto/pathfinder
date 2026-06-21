@@ -729,6 +729,22 @@ fn make_unique_name(
 }
 
 /// Strip angle-bracket generics and lifetimes from a type name.
+/// Strip Rust path qualifiers from an impl type name.
+///
+/// In Rust, `impl super::MyStruct`, `impl crate::Config`, or
+/// `impl self::Handler` reference types via paths. For symbol merging the bare
+/// type name (final segment) is what matters — `super::`, `crate::`, `self::`,
+/// and multi-segment paths like `std::fmt::Display` are all stripped.
+///
+/// Returns the substring after the last `::`, or the original string if no `::`
+/// is present.
+fn strip_path_prefix(type_name: &str) -> &str {
+    match type_name.rfind("::") {
+        Some(idx) => &type_name[idx + 2..],
+        None => type_name,
+    }
+}
+
 fn strip_generics(type_name: &str) -> &str {
     match type_name.find('<') {
         Some(idx) => type_name[..idx].trim_end(),
@@ -760,7 +776,7 @@ fn extract_impl_block(
     let Ok(type_name) = std::str::from_utf8(type_name_bytes) else {
         return;
     };
-    let type_name = strip_generics(type_name).to_string();
+    let type_name = strip_path_prefix(strip_generics(type_name)).to_string();
 
     let (unique_name, suffix) = make_unique_name(name_counts, type_name);
     let impl_path = if parent_path.is_empty() {
