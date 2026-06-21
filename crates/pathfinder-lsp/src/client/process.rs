@@ -829,6 +829,8 @@ async fn build_initialize_request(
             "capabilities": {
                 "textDocument": {
                     "definition": { "dynamicRegistration": false, "linkSupport": false },
+                    "references": { "dynamicRegistration": true },
+                    "callHierarchy": { "dynamicRegistration": true },
                     "publishDiagnostics": { "relatedInformation": false }
                 },
                 "workspace": { "workspaceFolders": true, "diagnostics": {} },
@@ -2384,6 +2386,48 @@ mod process_tests {
         assert!(
             data_dir.contains(".pathfinder"),
             "data dir '{data_dir}' should be under .pathfinder/"
+        );
+    }
+
+    /// PATCH-006 Spike B: The `initialize` request MUST declare
+    /// `textDocument.callHierarchy` so TypeScript/Vue LSP servers enable
+    /// `callHierarchyProvider` in their response capabilities.
+    /// Without this, `callHierarchy/incomingCalls` and `outgoingCalls`
+    /// requests are rejected by the server.
+    #[tokio::test]
+    async fn test_build_initialize_request_declares_call_hierarchy() {
+        let dir = tempdir().expect("temp dir");
+        let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+            .await
+            .expect("ok");
+
+        let caps = &request["params"]["capabilities"];
+        let call_hierarchy = &caps["textDocument"]["callHierarchy"];
+        assert!(
+            !call_hierarchy.is_null(),
+            "textDocument.callHierarchy must be declared in client capabilities"
+        );
+        assert_eq!(
+            call_hierarchy["dynamicRegistration"].as_bool(),
+            Some(true),
+            "callHierarchy should support dynamic registration"
+        );
+    }
+
+    /// PATCH-006 Spike B: The `initialize` request MUST declare
+    /// `textDocument.references` so LSP servers enable reference finding.
+    #[tokio::test]
+    async fn test_build_initialize_request_declares_references() {
+        let dir = tempdir().expect("temp dir");
+        let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+            .await
+            .expect("ok");
+
+        let caps = &request["params"]["capabilities"];
+        let references = &caps["textDocument"]["references"];
+        assert!(
+            !references.is_null(),
+            "textDocument.references must be declared in client capabilities"
         );
     }
 }
