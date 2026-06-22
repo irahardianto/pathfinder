@@ -9,7 +9,6 @@ use crate::server::types::{
     ReadWithDeepContextMetadata,
 };
 use crate::server::PathfinderServer;
-use futures::StreamExt as _;
 use rmcp::model::{CallToolResult, Content, ErrorData};
 use std::fmt::Write as _;
 
@@ -126,8 +125,14 @@ impl PathfinderServer {
                 });
             }
 
-            let results: Vec<InspectResultEntry> =
-                futures::stream::iter(futures).buffered(4).collect().await;
+            // Process entries sequentially to guarantee deterministic ordering.
+            // Each entry performs heavy I/O (tree-sitter + optional LSP), and
+            // the max batch size is 10, so sequential execution has negligible
+            // latency impact.
+            let mut results = Vec::with_capacity(futures.len());
+            for fut in futures {
+                results.push(fut.await);
+            }
 
             let mut succeeded = 0;
             let mut failed = 0;

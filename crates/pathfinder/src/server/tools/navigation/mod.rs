@@ -22,7 +22,6 @@ use crate::server::types::{
     LocateResultEntry, TraceParams, TraceScope,
 };
 use crate::server::PathfinderServer;
-use futures::StreamExt as _;
 use pathfinder_common::types::DegradedReason;
 use rmcp::model::{CallToolResult, ErrorData};
 use std::fmt::Write as _;
@@ -775,8 +774,13 @@ impl PathfinderServer {
             futures.push(async move { server.locate_entry(entry).await });
         }
 
-        let results: Vec<LocateResultEntry> =
-            futures::stream::iter(futures).buffered(4).collect().await;
+        // Process entries sequentially to guarantee deterministic ordering.
+        // Each entry performs heavy I/O (LSP + tree-sitter), and the max batch
+        // size is 10, so sequential execution has negligible latency impact.
+        let mut results = Vec::with_capacity(futures.len());
+        for fut in futures {
+            results.push(fut.await);
+        }
 
         let mut succeeded = 0;
         let mut failed = 0;
