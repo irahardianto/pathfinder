@@ -2702,3 +2702,156 @@ impl self::Handler {
     assert_eq!(method.kind, SymbolKind::Method);
     assert_eq!(method.semantic_path, "Handler.handle");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PATCH-002: Trait Method Resolution
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// PATCH-002-D1: Rust trait with signature-only method MUST extract the method.
+///
+/// This is the core bug: `trait Scout { fn search(&self); }` produces `function_signature_item`
+/// nodes in tree-sitter-rust, which was NOT in `function_kinds`. The method was invisible.
+#[test]
+fn test_trait_signature_only_method_is_extracted() {
+    let source = r"
+trait Scout {
+    fn search(&self);
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let scout = symbols
+        .iter()
+        .find(|s| s.name == "Scout" && s.kind == SymbolKind::Interface)
+        .expect("trait Scout should exist as Interface");
+
+    assert_eq!(
+        scout.children.len(),
+        1,
+        "Scout trait should have exactly 1 child method, got: {:?}",
+        scout.children.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+
+    let search = &scout.children[0];
+    assert_eq!(
+        search.name, "search",
+        "child method should be named 'search'"
+    );
+    assert_eq!(search.semantic_path, "Scout.search");
+}
+
+/// PATCH-002-D2: Rust trait with default-body method is extracted (regression test).
+///
+/// This already worked because `fn search(&self) { }` with body is a `function_item`,
+/// which was already in `function_kinds`.
+#[test]
+fn test_trait_default_body_method_is_extracted() {
+    let source = r"
+trait Scout {
+    fn search(&self) { /* default body */ }
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let scout = symbols
+        .iter()
+        .find(|s| s.name == "Scout" && s.kind == SymbolKind::Interface)
+        .expect("trait Scout should exist");
+
+    let search = scout
+        .children
+        .iter()
+        .find(|c| c.name == "search")
+        .expect("search method with default body should be extracted");
+    assert_eq!(search.semantic_path, "Scout.search");
+}
+
+/// PATCH-002-D3: Mixed trait (both signature-only and default-body methods) extracts both.
+#[test]
+fn test_trait_mixed_signature_and_default_methods_extracted() {
+    let source = r"
+trait Scout {
+    fn search(&self);
+    fn search_with_default(&self) { }
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let scout = symbols
+        .iter()
+        .find(|s| s.name == "Scout" && s.kind == SymbolKind::Interface)
+        .expect("trait Scout should exist");
+
+    assert_eq!(scout.children.len(), 2, "should have 2 methods");
+
+    let has_signature_only = scout.children.iter().any(|c| c.name == "search");
+    let has_default_body = scout
+        .children
+        .iter()
+        .any(|c| c.name == "search_with_default");
+
+    assert!(
+        has_signature_only,
+        "signature-only 'search' should be extracted"
+    );
+    assert!(
+        has_default_body,
+        "default-body 'search_with_default' should be extracted"
+    );
+}
+
+/// PATCH-002-D4: `resolve_symbol_chain` can resolve `Scout.search` on a signature-only method.
+///
+/// The original bug: `resolve_symbol_chain` would fail at segment 2 (`search`) because
+/// `search` was never extracted into `Scout.children`.
+#[test]
+fn test_resolve_symbol_chain_on_trait_signature_method() {
+    let source = r"
+trait Scout {
+    fn search(&self);
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let chain = SymbolChain::parse("Scout.search").unwrap();
+    let resolved = resolve_symbol_chain(&symbols, &chain);
+
+    assert!(
+        resolved.is_some(),
+        "Scout.search should resolve. Before fix, this was SYMBOL_NOT_FOUND."
+    );
+
+    let method = resolved.unwrap();
+    assert_eq!(method.name, "search");
+    assert_eq!(method.semantic_path, "Scout.search");
+}
+
+/// PATCH-002-D5: Multiple signature-only methods in trait all resolve correctly.
+#[test]
+fn test_trait_multiple_signature_methods_all_resolve() {
+    let source = r"
+trait Repository<K, V> {
+    fn get(&self, key: &K) -> Option<V>;
+    fn put(&mut self, key: K, value: V);
+    fn delete(&mut self, key: &K) -> bool;
+    fn list(&self) -> Vec<(K, V)>;
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let repo = symbols
+        .iter()
+        .find(|s| s.name == "Repository")
+        .expect("Repository trait should exist");
+
+    assert_eq!(repo.children.len(), 4, "should have 4 signature methods");
+
+    for name in &["get", "put", "delete", "list"] {
+        let chain = SymbolChain::parse(&format!("Repository.{name}")).unwrap();
+        let resolved = resolve_symbol_chain(&symbols, &chain);
+        assert!(
+            resolved.is_some(),
+            "Repository.{name} should resolve via symbol chain"
+        );
+    }
+}

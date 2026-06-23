@@ -1418,6 +1418,7 @@ async fn test_outgoing_fallback_happy_path() {
             end_line: 9,
             name_column: 0,
             language: "rust".to_string(),
+            ..Default::default()
         },
     ));
 
@@ -1521,11 +1522,12 @@ async fn test_outgoing_fallback_dedup_by_semantic_path() {
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
         pathfinder_common::types::SymbolScope {
-            content: "fn process(&self) { self.run(); self.run(); self.run(); }".to_string(),
-            start_line: 5,
-            end_line: 5,
+            content: "fn handle(&self) { self.validate(); }".to_string(),
+            start_line: 9,
+            end_line: 9,
             name_column: 0,
             language: "rust".to_string(),
+            ..Default::default()
         },
     ));
 
@@ -1631,6 +1633,7 @@ async fn test_grep_outgoing_fallback_semantic_path_is_hierarchical() {
             end_line: 9,
             name_column: 0,
             language: "rust".to_string(),
+            ..Default::default()
         },
     ));
 
@@ -1751,6 +1754,7 @@ async fn test_outgoing_fallback_definition_file_exclusion() {
             end_line: 10,
             name_column: 0,
             language: "rust".to_string(),
+            ..Default::default()
         },
     ));
 
@@ -2706,12 +2710,21 @@ async fn test_lsp_protocol_error_empty_grep_reports_error_reason() {
 }
 
 // ── P2-7: Hint logic tests ──────────────────────────────────────────────────
+//
+// PATCH-003 changed the hint behavior: when degraded=true AND
+// incoming/outgoing are both None (UNKNOWN), the hint is now populated
+// with an explicit "UNKNOWN, not zero" warning instead of being absent.
+// Tests below reflect the new contract.
 
 #[tokio::test]
-async fn test_hint_absent_when_both_callers_and_callees_empty() {
+async fn test_hint_warns_when_both_callers_and_callees_unknown() {
     // When BFS returns empty for BOTH incoming AND outgoing, the grep fallback
     // fires and always sets degraded=true (to guard against BFS errors vs genuine
-    // zero callers). Therefore hint must be None in this case.
+    // zero callers). PATCH-003 makes the hint surface a warning in this scenario
+    // regardless of whether grep finds heuristic candidates or not:
+    //   - grep finds nothing → "Callers AND callees UNKNOWN"
+    //   - grep finds candidates → "heuristic grep-based candidates"
+    // Both messages tell agents NOT to treat the result as verified.
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon
         .read_symbol_scope_results
@@ -2749,7 +2762,48 @@ async fn test_hint_absent_when_both_callers_and_callees_empty() {
         val.degraded,
         "must be degraded when both BFS results are empty (grep fallback triggered)"
     );
-    assert!(val.hint.is_none(), "hint must be absent when degraded");
+    // PATCH-003: the hint is now populated in the degraded scenario so
+    // prose-reading agents see an explicit warning.
+    let hint = val
+        .hint
+        .as_ref()
+        .expect("hint must be Some(...) in degraded scenario (PATCH-003 change)");
+    // The hint may be either:
+    //   - "Callers AND callees UNKNOWN" (when grep fallback finds nothing)
+    //   - "heuristic grep-based candidates" (when grep fallback finds refs)
+    // Both convey "do not treat as verified" — the test is the same.
+    let is_unknown_warning = hint.contains("UNKNOWN");
+    let is_heuristic_warning = hint.contains("heuristic");
+    assert!(
+        is_unknown_warning || is_heuristic_warning,
+        "hint must warn about UNKNOWN or heuristic results, got: {hint}"
+    );
+    // In THIS test, BFS ran and returned empty, then grep found nothing
+    // (default MockScout returns empty). So the data IS BFS-confirmed empty
+    // and the verified flags must reflect this even though the global
+    // `degraded` flag is true (set as a false-negative safety net).
+    // The degraded flag tells the agent "be careful, the BFS might have
+    // missed something" — but the verified flag tells them "this is what
+    // the BFS actually confirmed".
+    //
+    // This is the corrected semantic: BFS-confirmed empty = Some(true)
+    // (verified), but agents should still look at `degraded` for the
+    // false-negative safety net.
+    assert_eq!(
+        val.incoming_verified,
+        Some(true),
+        "incoming_verified must be Some(true) when BFS confirmed empty (degraded=true \
+         is a separate false-negative safety net, not a verification failure). \
+         Got: degraded={}, incoming={:?}, incoming_verified={:?}",
+        val.degraded,
+        val.incoming,
+        val.incoming_verified
+    );
+    assert_eq!(
+        val.outgoing_verified,
+        Some(true),
+        "outgoing_verified must be Some(true) when BFS confirmed empty"
+    );
 }
 
 #[tokio::test]
@@ -2863,8 +2917,11 @@ async fn test_hint_absent_when_callers_exist() {
 }
 
 #[tokio::test]
-async fn test_hint_absent_when_degraded() {
-    // Degraded path — hint should always be None regardless of empty lists
+async fn test_hint_warns_when_degraded_with_unknown() {
+    // PATCH-003: when the result is degraded AND callers/callees are UNKNOWN
+    // (BFS empty + no grep fallback), the hint is now populated with an
+    // explicit "UNKNOWN, not zero" warning. This is the central PATCH-003
+    // change — previously the hint was None in this exact scenario.
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon
         .read_symbol_scope_results
@@ -2887,9 +2944,14 @@ async fn test_hint_absent_when_degraded() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(val.degraded, "should be degraded (no LSP)");
+    // PATCH-003: hint is now populated in this scenario
+    let hint = val
+        .hint
+        .as_ref()
+        .expect("hint must be Some(...) when degraded with UNKNOWN callers/callees");
     assert!(
-        val.hint.is_none(),
-        "hint must be absent when degraded, even if lists are empty"
+        hint.contains("UNKNOWN"),
+        "hint must warn about UNKNOWN, got: {hint}"
     );
 }
 
@@ -3297,5 +3359,1195 @@ async fn test_bfs_output_semantic_path_falls_back_on_surgeon_error() {
     assert_eq!(
         incoming[0].semantic_path, "src/server.rs::handle_request",
         "surgeon error must cause flat-name fallback, not panic"
+    );
+}
+
+// ── PATCH-002: Trait method expansion via goto_implementation ─────────────
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "Test data setup needs many lines")]
+async fn test_trace_trait_method_expands_to_implementations() {
+    // PATCH-002: When tracing a trait/interface method:
+    // 1. Detect parent_kind = "interface"
+    // 2. Call goto_implementation to find concrete impls
+    // 3. BFS call hierarchy for EACH impl
+    // 4. Merge results, set resolution_strategy = "lsp_call_hierarchy_with_impl_expansion"
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            content: "fn search(&self);".to_string(),
+            start_line: 2,
+            end_line: 2,
+            name_column: 7,
+            language: "rust".to_string(),
+            parent_kind: Some("interface".to_string()),
+            parent_name: Some("Scout".to_string()),
+        },
+    ));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    // Step 1: goto_implementation returns 2 impl locations
+    lawyer.set_goto_implementation_result(Ok(vec![
+        DefinitionLocation {
+            file: "src/mock_scout.rs".into(),
+            line: 10,
+            column: 5,
+            preview: "impl Scout for MockScout".into(),
+        },
+        DefinitionLocation {
+            file: "src/ripgrep_scout.rs".into(),
+            line: 15,
+            column: 5,
+            preview: "impl Scout for RipgrepScout".into(),
+        },
+    ]));
+
+    // Step 2: call_hierarchy_prepare for each impl (2 results)
+    // For MockScout.search
+    let item_mock = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/mock_scout.rs".into(),
+        line: 10,
+        column: 5,
+        data: None,
+    };
+    // For RipgrepScout.search
+    let item_ripgrep = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/ripgrep_scout.rs".into(),
+        line: 15,
+        column: 5,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item_mock.clone()]));
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item_ripgrep.clone()]));
+
+    // Step 3: BFS results for MockScout.search
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "run_mock_tests".into(),
+            kind: "function".into(),
+            detail: Some("fn run_mock_tests()".into()),
+            file: "src/main.rs".into(),
+            line: 42,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![45],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    // Step 4: BFS results for RipgrepScout.search
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "do_search".into(),
+            kind: "function".into(),
+            detail: Some("fn do_search()".into()),
+            file: "src/search_app.rs".into(),
+            line: 100,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![103],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::Scout.search".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Assert: not degraded
+    assert!(!val.degraded, "should not be degraded");
+    assert_eq!(val.degraded_reason, None);
+
+    // Assert: resolution_strategy shows impl expansion
+    assert_eq!(
+        val.resolution_strategy,
+        Some("lsp_call_hierarchy_with_impl_expansion".to_owned()),
+        "resolution_strategy should indicate impl expansion"
+    );
+
+    // Assert: merged incoming from BOTH impls
+    let incoming = val.incoming.as_ref().expect("incoming must be Some");
+    assert_eq!(
+        incoming.len(),
+        2,
+        "should have 2 incoming references from 2 impls"
+    );
+
+    let has_run_mock = incoming
+        .iter()
+        .any(|r| r.semantic_path.contains("run_mock_tests"));
+    let has_do_search = incoming
+        .iter()
+        .any(|r| r.semantic_path.contains("do_search"));
+    assert!(has_run_mock, "should include caller from MockScout impl");
+    assert!(
+        has_do_search,
+        "should include caller from RipgrepScout impl"
+    );
+}
+
+#[tokio::test]
+async fn test_trace_trait_method_no_impls_falls_back() {
+    // PATCH-002: When trait method has no implementations,
+    // fall back to normal flow on the trait method itself.
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            content: "fn search(&self);".to_string(),
+            start_line: 2,
+            end_line: 2,
+            name_column: 7,
+            language: "rust".to_string(),
+            parent_kind: Some("interface".to_string()),
+            parent_name: Some("Scout".to_string()),
+        },
+    ));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    // goto_implementation returns empty (no impls found)
+    lawyer.set_goto_implementation_result(Ok(vec![]));
+
+    // Normal flow should proceed: call_hierarchy_prepare
+    let item = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/auth.rs".into(),
+        line: 3,
+        column: 7,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "caller".into(),
+            kind: "function".into(),
+            detail: Some("fn caller()".into()),
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![25],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::Scout.search".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Falls back to normal lsp_call_hierarchy when no impls
+    assert_eq!(
+        val.resolution_strategy,
+        Some("lsp_call_hierarchy".to_owned()),
+        "should fall back to standard lsp_call_hierarchy when no impls"
+    );
+}
+
+#[tokio::test]
+async fn test_trace_non_trait_method_unchanged() {
+    // PATCH-002: Regular methods (no interface parent) should
+    // behave exactly as before - no goto_implementation call.
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "handle_request".into(),
+            kind: "function".into(),
+            detail: Some("fn handle_request()".into()),
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![25],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Regular method: standard resolution strategy
+    assert_eq!(
+        val.resolution_strategy,
+        Some("lsp_call_hierarchy".to_owned()),
+        "regular method should use lsp_call_hierarchy"
+    );
+
+    // Verify goto_implementation was NOT called for non-trait method
+    assert_eq!(
+        lawyer.goto_implementation_call_count(),
+        0,
+        "goto_implementation should not be called for non-trait methods"
+    );
+}
+
+/// PATCH-002 Fix 1: When trait method expansion succeeds, the `hint` field
+/// must surface a trait-specific message including the impl count and file count.
+#[tokio::test]
+async fn test_trace_trait_method_hint_surfaces_expansion() {
+    use crate::server::types::FindCallersCalleesMetadata;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            content: "fn search(&self);".to_string(),
+            start_line: 2,
+            end_line: 2,
+            name_column: 7,
+            language: "rust".to_string(),
+            parent_kind: Some("interface".to_string()),
+            parent_name: Some("Scout".to_string()),
+        },
+    ));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    // 2 impls in 2 distinct files
+    lawyer.set_goto_implementation_result(Ok(vec![
+        DefinitionLocation {
+            file: "src/mock_scout.rs".into(),
+            line: 10,
+            column: 5,
+            preview: "impl Scout for MockScout".into(),
+        },
+        DefinitionLocation {
+            file: "src/ripgrep_scout.rs".into(),
+            line: 15,
+            column: 5,
+            preview: "impl Scout for RipgrepScout".into(),
+        },
+    ]));
+
+    let item1 = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/mock_scout.rs".into(),
+        line: 10,
+        column: 5,
+        data: None,
+    };
+    let item2 = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/ripgrep_scout.rs".into(),
+        line: 15,
+        column: 5,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item1.clone()]));
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item2.clone()]));
+    // One incoming per impl (non-empty so the regular empty-incoming hint doesn't fire)
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "a".into(),
+            kind: "function".into(),
+            detail: Some("fn a()".into()),
+            file: "src/main.rs".into(),
+            line: 1,
+            column: 1,
+            data: None,
+        },
+        call_sites: vec![2],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "b".into(),
+            kind: "function".into(),
+            detail: Some("fn b()".into()),
+            file: "src/main.rs".into(),
+            line: 3,
+            column: 1,
+            data: None,
+        },
+        call_sites: vec![4],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::Scout.search".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Assert: hint present and mentions impl count + file count + trait
+    let hint = val
+        .hint
+        .expect("hint must be set when impl expansion succeeds");
+    assert!(
+        hint.contains("trait/interface"),
+        "hint must mention trait/interface, got: {hint}"
+    );
+    assert!(
+        hint.contains("2 implementation"),
+        "hint must surface the impl count (2), got: {hint}"
+    );
+    assert!(
+        hint.contains("2 file"),
+        "hint must surface the file count (2), got: {hint}"
+    );
+}
+
+/// PATCH-002 Fix 1: When multiple impls are in the SAME file, the file count
+/// in the hint must reflect unique file count, not impl count.
+#[tokio::test]
+async fn test_trace_trait_method_hint_dedupes_files() {
+    use crate::server::types::FindCallersCalleesMetadata;
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            content: "fn search(&self);".to_string(),
+            start_line: 2,
+            end_line: 2,
+            name_column: 7,
+            language: "rust".to_string(),
+            parent_kind: Some("interface".to_string()),
+            parent_name: Some("Scout".to_string()),
+        },
+    ));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    // 2 impls in 1 file (e.g. two impls of the same trait in one file)
+    lawyer.set_goto_implementation_result(Ok(vec![
+        DefinitionLocation {
+            file: "src/multi_impl.rs".into(),
+            line: 10,
+            column: 5,
+            preview: "impl1".into(),
+        },
+        DefinitionLocation {
+            file: "src/multi_impl.rs".into(),
+            line: 20,
+            column: 5,
+            preview: "impl2".into(),
+        },
+    ]));
+
+    let item1 = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/multi_impl.rs".into(),
+        line: 10,
+        column: 5,
+        data: None,
+    };
+    let item2 = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/multi_impl.rs".into(),
+        line: 20,
+        column: 5,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item1.clone()]));
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item2.clone()]));
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "a".into(),
+            kind: "function".into(),
+            detail: Some("fn a()".into()),
+            file: "src/main.rs".into(),
+            line: 1,
+            column: 1,
+            data: None,
+        },
+        call_sites: vec![2],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "b".into(),
+            kind: "function".into(),
+            detail: Some("fn b()".into()),
+            file: "src/main.rs".into(),
+            line: 3,
+            column: 1,
+            data: None,
+        },
+        call_sites: vec![4],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::Scout.search".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    let hint = val.hint.expect("hint must be set");
+    assert!(
+        hint.contains("2 implementation"),
+        "hint should still mention 2 impls, got: {hint}"
+    );
+    assert!(
+        hint.contains("1 file"),
+        "hint must say 1 file (unique file count), got: {hint}"
+    );
+}
+
+/// PATCH-002 Fix 2: When `goto_implementation` errors out, the result must be
+/// marked degraded and the request must still fall through to normal BFS.
+#[tokio::test]
+async fn test_trace_trait_method_goto_implementation_error_marks_degraded() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            content: "fn search(&self);".to_string(),
+            start_line: 2,
+            end_line: 2,
+            name_column: 7,
+            language: "rust".to_string(),
+            parent_kind: Some("interface".to_string()),
+            parent_name: Some("Scout".to_string()),
+        },
+    ));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    // goto_implementation returns an error (e.g. LSP doesn't support the capability)
+    lawyer.set_goto_implementation_result(Err(pathfinder_lsp::LspError::Protocol(
+        "textDocument/implementation not supported".to_string(),
+    )));
+
+    // Normal flow should still proceed: call_hierarchy_prepare on the trait method
+    let item = CallHierarchyItem {
+        name: "search".into(),
+        kind: "method".into(),
+        detail: Some("fn search(&self)".into()),
+        file: "src/auth.rs".into(),
+        line: 3,
+        column: 7,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "caller".into(),
+            kind: "function".into(),
+            detail: Some("fn caller()".into()),
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![25],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::Scout.search".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Assert: degraded because goto_implementation failed
+    assert!(
+        val.degraded,
+        "result must be marked degraded when goto_implementation errors (got degraded_reason={:?})",
+        val.degraded_reason
+    );
+    assert_eq!(
+        val.degraded_reason,
+        Some(DegradedReason::LspErrorGrepFallback),
+        "degraded_reason must describe the LSP error"
+    );
+    // Assert: NOT marked as impl expansion (resolution_strategy = standard lsp_call_hierarchy)
+    assert_eq!(
+        val.resolution_strategy,
+        Some("lsp_call_hierarchy".to_owned()),
+        "should fall back to standard lsp_call_hierarchy when goto_implementation errors"
+    );
+}
+
+// ── PATCH-003: Degraded Hint Visibility + Verified Flags ─────────────
+//
+// PATCH-003 introduces two complementary safeguards against the
+// "null vs [] is a footgun" refactoring hazard:
+//
+// 1. `hint` is now populated in the degraded+null scenario so prose-reading
+//    agents see an explicit "UNKNOWN, not zero" warning.
+// 2. `incoming_verified` and `outgoing_verified` are machine-readable
+//    per-field flags so structured-field-only consumers can disambiguate.
+//
+// These tests cover the 4 key scenarios:
+//   1. degraded + null incoming/outgoing
+//   2. non-degraded + empty incoming
+//   3. degraded + heuristic incoming (grep fallback produced results)
+//   4. non-degraded + non-empty incoming
+
+/// PATCH-003 DELIVERABLE D Test 1: When `degraded=true` AND `incoming=null`
+/// (LSP unavailable, callers UNKNOWN), the response MUST:
+///
+/// 1. Populate `hint` with an explicit "UNKNOWN, not zero" warning that
+///    prevents agents from coalescing `null` to `[]` silently.
+/// 2. Set `incoming_verified = Some(false)` and `outgoing_verified = Some(false)`
+///    so structured consumers can detect the unverified state.
+#[tokio::test]
+async fn test_trace_degraded_null_incoming_has_hint_and_unverified() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    // NoOpLawyer → NoLsp → grep fallback with no Scout matches → incoming=None, outgoing=None.
+    // Construct the server manually because `make_server_with_lawyer` requires Arc<MockLawyer>.
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 2,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Sanity: degraded + null + null
+    assert!(val.degraded, "must be degraded when LSP is unavailable");
+    assert!(
+        val.incoming.is_none(),
+        "incoming must be None (UNKNOWN) when degraded with no fallback matches"
+    );
+    assert!(
+        val.outgoing.is_none(),
+        "outgoing must be None (UNKNOWN) when degraded with no fallback matches"
+    );
+
+    // PATCH-003 DELIVERABLE A: hint must be populated in the catastrophic
+    // degraded+null scenario. This is the central fix — previously hint
+    // was None in this exact scenario.
+    let hint = val.hint.as_ref().expect(
+        "hint must be Some(...) in the degraded+null scenario (was the catastrophic footgun)",
+    );
+    assert!(
+        hint.contains("UNKNOWN"),
+        "hint must contain 'UNKNOWN' to clearly distinguish from verified zero, got: {hint}"
+    );
+    assert!(
+        hint.to_lowercase().contains("null") || hint.contains("Do NOT"),
+        "hint must explicitly warn against treating null as zero, got: {hint}"
+    );
+
+    // PATCH-003 DELIVERABLE B: machine-readable verified flags
+    assert_eq!(
+        val.incoming_verified,
+        Some(false),
+        "incoming_verified must be Some(false) when callers are UNKNOWN"
+    );
+    assert_eq!(
+        val.outgoing_verified,
+        Some(false),
+        "outgoing_verified must be Some(false) when callees are UNKNOWN"
+    );
+
+    // Verify the fields actually serialize (don't get stripped by skip_serializing_if)
+    let json = serde_json::to_value(&val).expect("serialize");
+    assert_eq!(
+        json["incoming_verified"],
+        serde_json::json!(false),
+        "incoming_verified must be present in JSON output (no skip_serializing_if regression)"
+    );
+    assert_eq!(
+        json["outgoing_verified"],
+        serde_json::json!(false),
+        "outgoing_verified must be present in JSON output (no skip_serializing_if regression)"
+    );
+}
+
+/// PATCH-003 DELIVERABLE D Test 2: When `degraded=false` AND `incoming=Some([])`
+/// (LSP confirmed zero callers), the response MUST:
+///
+/// 1. Populate `hint` with the existing "confirmed zero" message (regression
+///    check — make sure PATCH-003 didn't break the non-degraded path).
+/// 2. Set `incoming_verified = Some(true)`.
+#[tokio::test]
+async fn test_trace_non_degraded_empty_incoming_has_hint_and_verified() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    // LSP returns a valid call hierarchy item
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    // Incoming is empty (zero callers)
+    lawyer.push_incoming_call_result(Ok(vec![]));
+    // Outgoing has a callee — this prevents the "both empty" grep-fallback
+    // branch (line ~793) from firing and flipping degraded=true.
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: Some("fn validate_token() -> bool".into()),
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Sanity: NOT degraded, empty incoming, non-empty outgoing
+    assert!(
+        !val.degraded,
+        "must NOT be degraded when LSP confirmed zero"
+    );
+    let incoming = val
+        .incoming
+        .as_ref()
+        .expect("incoming must be Some when not degraded");
+    assert!(
+        incoming.is_empty(),
+        "incoming must be Some([]) — confirmed zero callers"
+    );
+    let outgoing = val
+        .outgoing
+        .as_ref()
+        .expect("outgoing must be Some when not degraded");
+    assert_eq!(outgoing.len(), 1, "outgoing has the one callee");
+
+    // PATCH-003 regression check: existing "confirmed zero" hint must still fire.
+    let hint = val
+        .hint
+        .as_ref()
+        .expect("hint must be Some(...) for confirmed-zero incoming (existing P2-7 behavior)");
+    assert!(
+        hint.contains("confirmed zero"),
+        "hint must contain 'confirmed zero' for non-degraded + empty incoming, got: {hint}"
+    );
+
+    // PATCH-003 DELIVERABLE B: machine-readable verified flag
+    assert_eq!(
+        val.incoming_verified,
+        Some(true),
+        "incoming_verified must be Some(true) when LSP confirmed zero callers"
+    );
+    assert_eq!(
+        val.outgoing_verified,
+        Some(true),
+        "outgoing_verified must be Some(true) when LSP confirmed outgoing callees"
+    );
+}
+
+/// PATCH-003 DELIVERABLE D Test 3: When `degraded=true` AND `incoming=Some(vec)`
+/// (LSP unavailable, but grep fallback found heuristic candidates), the
+/// response MUST:
+///
+/// 1. Set `incoming_verified = Some(false)` because the results are heuristic,
+///    NOT LSP-verified (may include false positives).
+/// 2. Populate `hint` with a warning that the results are heuristic OR that
+///    the other direction is UNKNOWN, so agents see a warning even if they
+///    ignore `incoming_verified`.
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "Test data setup needs many lines")]
+async fn test_trace_degraded_heuristic_incoming_is_unverified() {
+    use pathfinder_search::{SearchMatch, SearchResult};
+
+    /// Build a single-match `SearchResult` for a file+line+content.
+    fn single_match(file: &str, line: u32, content: &str) -> SearchResult {
+        SearchResult {
+            matches: vec![SearchMatch {
+                file: file.to_owned(),
+                line: u64::from(line),
+                column: 1,
+                content: content.to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:test".to_owned(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
+        }
+    }
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
+        pathfinder_common::types::SymbolScope {
+            // Body has a function call → `validate_token` is extracted as an
+            // outgoing call candidate by `grep_outgoing_fallback`.
+            content: "fn login() -> bool { validate_token() }".to_owned(),
+            start_line: 9,
+            end_line: 9,
+            name_column: 0,
+            language: "rust".to_owned(),
+            ..Default::default()
+        },
+    ));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // Files that grep fallback will search
+    let src = ws_dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("auth.rs"),
+        "fn login() -> bool { validate_token() }",
+    )
+    .unwrap();
+    std::fs::write(src.join("caller.rs"), "fn handle_request() { login(); }").unwrap();
+    std::fs::write(src.join("token.rs"), "fn validate_token() -> bool { true }").unwrap();
+
+    // Queue two MockScout results so BOTH the incoming grep call AND the
+    // outgoing grep call (for `validate_token`) return a heuristic match.
+    // When BOTH directions return Some(vec), the new hint logic emits the
+    // "heuristic grep-based candidates" warning.
+    let scout = Arc::new(MockScout::default());
+    scout.set_results(vec![
+        Ok(single_match(
+            "src/caller.rs",
+            1,
+            "fn handle_request() { login(); }",
+        )),
+        Ok(single_match(
+            "src/token.rs",
+            1,
+            "fn validate_token() -> bool { true }",
+        )),
+    ]);
+
+    // NoOpLawyer → NoLsp → triggers grep fallback path
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        scout,
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 2,
+        ..Default::default()
+    };
+
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Sanity: degraded=true, incoming=Some(heuristic refs), outgoing=Some(heuristic refs)
+    assert!(val.degraded, "must be degraded when LSP is unavailable");
+    assert_eq!(
+        val.degraded_reason,
+        Some(DegradedReason::NoLspGrepFallback),
+        "degraded_reason must indicate grep fallback was used"
+    );
+    let incoming = val
+        .incoming
+        .as_ref()
+        .expect("incoming must be Some(vec) when grep fallback found results");
+    assert_eq!(incoming.len(), 1, "expected 1 heuristic incoming match");
+    assert_eq!(incoming[0].file, "src/caller.rs");
+    let outgoing = val
+        .outgoing
+        .as_ref()
+        .expect("outgoing must be Some(vec) when grep outgoing fallback found candidates");
+    assert_eq!(outgoing.len(), 1, "expected 1 heuristic outgoing match");
+    assert_eq!(outgoing[0].file, "src/token.rs");
+
+    // PATCH-003 DELIVERABLE B: heuristic results are NOT verified (BOTH directions)
+    assert_eq!(
+        val.incoming_verified,
+        Some(false),
+        "incoming_verified must be Some(false) when results are heuristic grep candidates"
+    );
+    assert_eq!(
+        val.outgoing_verified,
+        Some(false),
+        "outgoing_verified must be Some(false) when results are heuristic grep candidates"
+    );
+
+    // PATCH-003 DELIVERABLE A: hint must warn about heuristic nature
+    let hint = val
+        .hint
+        .as_ref()
+        .expect("hint must be Some(...) in the degraded+heuristic scenario");
+    assert!(
+        hint.contains("heuristic"),
+        "hint must mention 'heuristic' to warn about false positives, got: {hint}"
+    );
+}
+
+/// PATCH-003 DELIVERABLE D Test 4: When `degraded=false` AND `incoming=Some(vec)`
+/// (LSP returned real callers), the response MUST:
+///
+/// 1. Set `incoming_verified = Some(true)` because the results are LSP-confirmed.
+/// 2. NOT populate `hint` (non-degraded + non-empty = no warning needed).
+#[tokio::test]
+async fn test_trace_non_degraded_with_results_is_verified() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    let lawyer = Arc::new(MockLawyer::default());
+
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+
+    // LSP returns a confirmed caller
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "handle_request".into(),
+            kind: "function".into(),
+            detail: Some("fn handle_request()".into()),
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![25],
+    }]));
+    // Outgoing has a callee
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: Some("fn validate_token() -> bool".into()),
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Sanity: NOT degraded, has results
+    assert!(
+        !val.degraded,
+        "must NOT be degraded when LSP returned results"
+    );
+    let incoming = val
+        .incoming
+        .as_ref()
+        .expect("incoming must be Some when LSP returned callers");
+    assert_eq!(incoming.len(), 1, "expected 1 LSP-confirmed caller");
+    let outgoing = val
+        .outgoing
+        .as_ref()
+        .expect("outgoing must be Some when LSP returned callees");
+    assert_eq!(outgoing.len(), 1, "expected 1 LSP-confirmed callee");
+
+    // PATCH-003 DELIVERABLE B: LSP-confirmed results ARE verified
+    assert_eq!(
+        val.incoming_verified,
+        Some(true),
+        "incoming_verified must be Some(true) when LSP returned real callers"
+    );
+    assert_eq!(
+        val.outgoing_verified,
+        Some(true),
+        "outgoing_verified must be Some(true) when LSP returned real callees"
+    );
+
+    // Non-degraded + non-empty = no hint needed
+    assert!(
+        val.hint.is_none(),
+        "hint must be None when not degraded and results are non-empty \
+         (no warning needed; got: {:?})",
+        val.hint
+    );
+}
+
+// ── PATCH-003 Edge Case: BFS-confirmed empty with grep replacement ────────
+//
+// This regression test covers a subtle case: when the LSP BFS returns empty
+// for BOTH incoming and outgoing, the "both empty" branch fires, and grep
+// fallback finds heuristic matches. In this scenario:
+//   - `incoming` and `outgoing` are REPLACED by grep results
+//   - `degraded` is true (LspWarmupGrepFallback)
+//   - `lsp_bfs_ran` was true (BFS ran) but is RESET to false because the
+//     data was overwritten by heuristic grep
+//   - Therefore `incoming_verified` and `outgoing_verified` MUST be Some(false)
+//
+// If `lsp_bfs_ran` were not reset on grep replacement, the verified flag
+// would incorrectly be Some(true) for heuristic data — defeating the entire
+// purpose of PATCH-003.
+
+/// PATCH-003 edge case: When BFS returns empty + grep fallback finds heuristic
+/// matches that REPLACE the BFS data, the verified flag must be Some(false).
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "Test data setup needs many lines")]
+async fn test_trace_bfs_empty_grep_replacement_is_unverified() {
+    use pathfinder_search::{SearchMatch, SearchResult};
+
+    fn single_match(file: &str, line: u32, content: &str) -> SearchResult {
+        SearchResult {
+            matches: vec![SearchMatch {
+                file: file.to_owned(),
+                line: u64::from(line),
+                column: 1,
+                content: content.to_owned(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:test".to_owned(),
+                known: Some(false),
+            }],
+            total_matches: 1,
+            truncated: false,
+            files_searched: 0,
+            files_in_scope: 0,
+            binary_skipped: 0,
+            gitignored_skipped: 0,
+            other_skipped: 0,
+        }
+    }
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    // Files that grep fallback will search
+    let src = ws_dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("auth.rs"), "fn login() -> bool { true }").unwrap();
+    std::fs::write(src.join("caller.rs"), "fn handle_request() { login(); }").unwrap();
+
+    // MockScout returns a heuristic match for "login" — this REPLACES the
+    // empty BFS result with a heuristic candidate.
+    let scout = Arc::new(MockScout::default());
+    scout.set_results(vec![Ok(single_match(
+        "src/caller.rs",
+        1,
+        "fn handle_request() { login(); }",
+    ))]);
+
+    // BFS will run (LSP returns items) but return empty for BOTH directions
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_incoming_call_result(Ok(vec![]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    // Sanity: degraded=true, incoming=Some(grep heuristic)
+    assert!(
+        val.degraded,
+        "must be degraded when BFS empty triggers grep fallback"
+    );
+    let incoming = val
+        .incoming
+        .as_ref()
+        .expect("incoming must be Some(vec) — grep replaced BFS empty result");
+    assert_eq!(
+        incoming.len(),
+        1,
+        "incoming should have 1 heuristic match from grep fallback"
+    );
+    assert_eq!(incoming[0].file, "src/caller.rs");
+
+    // CRITICAL: incoming_verified must be Some(false) because the data is
+    // heuristic grep results, NOT BFS-confirmed. This is the regression
+    // test for the case where BFS ran, returned empty, and grep OVERWROTE
+    // the empty result with heuristic matches.
+    assert_eq!(
+        val.incoming_verified,
+        Some(false),
+        "incoming_verified must be Some(false) when grep REPLACED BFS empty result with \
+         heuristic matches. Got: degraded={}, incoming={:?}, incoming_verified={:?}",
+        val.degraded,
+        val.incoming,
+        val.incoming_verified
     );
 }

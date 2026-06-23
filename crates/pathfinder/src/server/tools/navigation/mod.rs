@@ -541,7 +541,7 @@ impl PathfinderServer {
     /// Spec 2.2 + 2.3: Enrich `did_you_mean` suggestions with:
     /// 1. Separator correction (:: → . within symbol chain)
     /// 2. Cross-file search via `find_symbol` when same-file suggestions empty
-    async fn enrich_did_you_mean(
+    pub(crate) async fn enrich_did_you_mean(
         &self,
         semantic_path_str: &str,
         original_suggestions: Vec<String>,
@@ -563,8 +563,22 @@ impl PathfinderServer {
             }
         }
 
-        // Spec 2.3: Cross-file search when same-file suggestions empty
-        if suggestions.is_empty() {
+        // Spec 2.3: PATCH-002-C: Cross-file search
+        // Trigger cross-file search if:
+        //   a) Same-file suggestions are completely empty
+        //   b) Same-file suggestions contain ONLY the parent symbol (no '.' in the
+        //      symbol portion, i.e. the part after '::'), which usually means the
+        //      trait/interface itself matched but not its methods.
+        //      In this case, impl methods in other files might be the real target.
+        let only_parent_matches = !suggestions.is_empty()
+            && suggestions.iter().all(|s| {
+                // Extract symbol portion (after '::'); a parent-only match has no '.'
+                s.split_once("::")
+                    .is_some_and(|(_, sym)| !sym.contains('.'))
+            });
+        let needs_cross_file = suggestions.is_empty() || only_parent_matches;
+
+        if needs_cross_file {
             if let Ok(semantic_path) = parse_semantic_path(semantic_path_str) {
                 if let Some(chain) = &semantic_path.symbol_chain {
                     if let Some(base_name) = chain.segments.last() {
@@ -572,12 +586,14 @@ impl PathfinderServer {
                         let find_params = crate::server::types::SearchParams {
                             query: base_name.name.clone(),
                             mode: crate::server::types::SearchMode::Symbol,
-                            kind: None,
+                            // PATCH-002-C: filter to function kind to narrow cross-file results
+                            // (avoids matching unrelated structs/enums named "search")
+                            kind: Some("function".to_string()),
                             path_glob: "**/*".to_owned(),
-                            max_results: 3,
+                            max_results: 20,
                             ..Default::default()
                         };
-                        match self.find_symbol_impl(find_params).await {
+                        match self.find_symbol_impl_inner(find_params).await {
                             Ok(response) => {
                                 for symbol in response.0.symbols {
                                     if !suggestions.contains(&symbol.semantic_path) {

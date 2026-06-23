@@ -1103,6 +1103,170 @@ async fn test_enrich_did_you_mean_all_cases() {
     assert!(enriched_err.is_empty());
 }
 
+/// PATCH-002-C: When same-file suggestions contain ONLY the parent symbol
+/// (e.g. "Scout") and not the requested method (e.g. "Scout.search"),
+/// the cross-file search should run to find impl methods in other files.
+#[tokio::test]
+async fn test_enrich_did_you_mean_cross_file_when_only_parent_match() {
+    use super::test_helpers::make_temp_workspace;
+    use pathfinder_common::config::PathfinderConfig;
+    use pathfinder_common::sandbox::Sandbox;
+    use pathfinder_common::types::WorkspaceRoot;
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+
+    let mock_surgeon = std::sync::Arc::new(MockSurgeon::new());
+    let mock_lawyer = std::sync::Arc::new(pathfinder_lsp::MockLawyer::default());
+    let mock_scout = std::sync::Arc::new(MockScout::default());
+
+    // find_symbol_impl runs many parallel searches (one per language pattern).
+    // Mock ALL of them to return the same result so the cross-file search succeeds.
+    let cross_file_result = Ok(pathfinder_search::SearchResult {
+        matches: vec![pathfinder_search::SearchMatch {
+            file: "src/other.rs".to_owned(),
+            line: 5,
+            column: 1,
+            content: "fn search() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            version_hash: "hash".to_owned(),
+            is_definition: Some(true),
+            known: Some(true),
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 5,
+        files_in_scope: 5,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    });
+    mock_scout.set_results(vec![cross_file_result; 100]);
+
+    // encloser symbol detail should return None (matches will be classified by file path)
+    for _ in 0..20 {
+        mock_surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+    }
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server_with_scout = super::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        mock_scout,
+        mock_surgeon.clone(),
+        mock_lawyer.clone(),
+    );
+
+    // PATCH-002-C scenario: same-file suggestions contain ONLY "Scout" (the trait)
+    // but NOT "Scout.search". Cross-file search should fire because the suggestion
+    // doesn't contain a '.' (so it's the parent trait, not a qualified method).
+    let original_suggestions = vec!["src/scout.rs::Scout".to_string()];
+    let enriched = server_with_scout
+        .enrich_did_you_mean("src/scout.rs::Scout.search", original_suggestions)
+        .await;
+
+    // Assert: cross-file search results are included even though same-file has a suggestion
+    // The cross-file search should have fired because same-file has only parent (no '.').
+    assert!(
+        enriched.len() > 1,
+        "cross-file search should fire when same-file has only parent suggestion. Got: {enriched:?}"
+    );
+
+    // The original parent suggestion should still be there
+    assert!(
+        enriched.contains(&"src/scout.rs::Scout".to_string()),
+        "original parent suggestion should be preserved. Got: {enriched:?}"
+    );
+}
+
+/// PATCH-002-C: When same-file suggestions already contain the requested
+/// qualified method (e.g. "Scout.search"), cross-file search should NOT run
+/// (no point — we have a good local match already).
+#[tokio::test]
+async fn test_enrich_did_you_mean_no_cross_file_when_qualified_match_exists() {
+    use super::test_helpers::make_temp_workspace;
+    use pathfinder_common::config::PathfinderConfig;
+    use pathfinder_common::sandbox::Sandbox;
+    use pathfinder_common::types::WorkspaceRoot;
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+
+    let mock_surgeon = std::sync::Arc::new(MockSurgeon::new());
+    let mock_lawyer = std::sync::Arc::new(pathfinder_lsp::MockLawyer::default());
+    let mock_scout = std::sync::Arc::new(MockScout::default());
+
+    // This mock should NOT be consumed if cross-file search is skipped
+    mock_scout.set_result(Ok(pathfinder_search::SearchResult {
+        matches: vec![pathfinder_search::SearchMatch {
+            file: "src/some_impl.rs".to_owned(),
+            line: 1,
+            column: 1,
+            content: "fn search() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: Some("MockScout.search".to_owned()),
+            version_hash: "hash".to_owned(),
+            is_definition: Some(true),
+            known: Some(true),
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }));
+
+    for _ in 0..100 {
+        mock_surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+    }
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server_with_scout = super::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        mock_scout.clone(),
+        mock_surgeon.clone(),
+        mock_lawyer.clone(),
+    );
+
+    // Same-file suggestions already contain the qualified method
+    let original_suggestions = vec!["src/scout.rs::Scout.search".to_string()];
+    let enriched = server_with_scout
+        .enrich_did_you_mean("src/scout.rs::Scout.search", original_suggestions)
+        .await;
+
+    // The mock_scout should NOT have been consumed (cross-file skipped)
+    // because we already had a qualified same-file match.
+    // Verify by checking that we only have the original suggestion (no impl search results).
+    let has_impl_result = enriched
+        .iter()
+        .any(|s| s.contains("MockScout") || s.contains("some_impl.rs"));
+
+    assert!(
+        !has_impl_result,
+        "should NOT run cross-file search when same-file has qualified match. Got: {enriched:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_read_symbol_scope_enriched_all_cases() {
     use super::test_helpers::{make_scope, make_server_with_lawyer};
@@ -1734,6 +1898,7 @@ async fn test_locate_single_unchanged() {
             end_line: 9,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         },
     ));
 
@@ -1784,6 +1949,7 @@ async fn test_locate_batch_semantic_paths() {
             end_line: 9,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         }),
         Ok(pathfinder_common::types::SymbolScope {
             content: "fn main() { }".to_owned(),
@@ -1791,6 +1957,7 @@ async fn test_locate_batch_semantic_paths() {
             end_line: 1,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         }),
     ]);
 
@@ -1923,6 +2090,7 @@ async fn test_locate_batch_mixed_modes() {
             end_line: 9,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         })]);
     surgeon
         .enclosing_symbol_results

@@ -612,133 +612,315 @@ impl PathfinderServer {
         let mut engines = vec!["tree-sitter"];
         let mut files_referenced = std::collections::HashSet::new();
         let mut max_depth_reached = 0;
+        // PATCH-003: set to `true` in the LSP BFS success path (line ~790).
+        // Used to compute `incoming_verified` / `outgoing_verified` accurately
+        // so BFS-confirmed empty results are not misclassified as unverified
+        // when the "both empty" grep fallback fires and finds nothing.
+        let mut lsp_bfs_ran = false;
 
-        let lsp_result = self
-            .lawyer
-            .call_hierarchy_prepare(
-                self.workspace_root.path(),
-                &semantic_path.file_path,
-                u32::try_from(scope.start_line + 1).unwrap_or(1),
-                // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
-                // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
-                u32::try_from(scope.name_column + 1).unwrap_or(1),
-            )
-            .await;
+        // PATCH-002: Trait Method Resolution
+        // If the symbol is a method inside a trait/interface (parent_kind = "interface"),
+        // call goto_implementation first to find all concrete impls, then BFS each impl's call hierarchy.
+        let is_trait_method = scope.parent_kind.as_deref() == Some("interface");
+        let mut used_impl_expansion = false;
+        // PATCH-002: Track impl count + unique file count for the trait-expansion hint
+        // (Fix 1: hint must surface N impls across M files when expansion is used)
+        let mut trait_impl_count: usize = 0;
+        let mut trait_impl_file_count: usize = 0;
+        // PATCH-002 Fix 2: Track if goto_implementation itself failed so the
+        // normal flow's success path doesn't override the degraded flag.
+        let mut trait_method_degraded: Option<DegradedReason> = None;
 
-        match lsp_result {
-            Ok(items) if !items.is_empty() => {
-                engines.push("lsp");
-                degraded = false;
-                degraded_reason = None;
+        if is_trait_method {
+            match self
+                .lawyer
+                .goto_implementation(
+                    self.workspace_root.path(),
+                    &semantic_path.file_path,
+                    u32::try_from(scope.start_line + 1).unwrap_or(1),
+                    u32::try_from(scope.name_column + 1).unwrap_or(1),
+                )
+                .await
+            {
+                Ok(impl_locations) if !impl_locations.is_empty() => {
+                    engines.push("lsp");
+                    degraded = false;
+                    degraded_reason = None;
+                    used_impl_expansion = true;
+                    trait_impl_count = impl_locations.len();
+                    trait_impl_file_count = impl_locations
+                        .iter()
+                        .map(|l| l.file.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .len();
 
-                let initial_item = &items[0];
-                files_referenced.insert(initial_item.file.clone());
+                    let mut all_incoming = Vec::new();
+                    let mut all_outgoing = Vec::new();
 
-                // --- INCOMING BFS ---
-                let (incoming_refs, depth_in) = self
-                    .bfs_call_hierarchy(
-                        initial_item,
-                        CallDirection::Incoming,
-                        max_depth,
-                        &mut files_referenced,
-                        project_only,
-                        &mut remaining_incoming,
-                    )
-                    .await;
-                incoming = Some(incoming_refs);
-                max_depth_reached = std::cmp::max(max_depth_reached, depth_in);
+                    for impl_loc in &impl_locations {
+                        files_referenced.insert(impl_loc.file.clone());
 
-                // --- OUTGOING BFS ---
-                let (outgoing_refs, depth_out) = self
-                    .bfs_call_hierarchy(
-                        initial_item,
-                        CallDirection::Outgoing,
-                        max_depth,
-                        &mut files_referenced,
-                        project_only,
-                        &mut remaining_outgoing,
-                    )
-                    .await;
-                outgoing = Some(outgoing_refs);
-                max_depth_reached = std::cmp::max(max_depth_reached, depth_out);
+                        match self
+                            .lawyer
+                            .call_hierarchy_prepare(
+                                self.workspace_root.path(),
+                                std::path::Path::new(&impl_loc.file),
+                                impl_loc.line,
+                                impl_loc.column,
+                            )
+                            .await
+                        {
+                            Ok(items) if !items.is_empty() => {
+                                let item = &items[0];
+                                files_referenced.insert(item.file.clone());
 
-                // Check for false negatives when BFS call hierarchy traversal returns 0 callers/callees
-                if incoming.as_ref().is_none_or(Vec::is_empty)
-                    && outgoing.as_ref().is_none_or(Vec::is_empty)
-                {
-                    let (grep_in, grep_out) = self
-                        .run_grep_fallbacks(
-                            &symbol_name,
-                            &semantic_path.file_path,
-                            &scope.content,
-                            &scope.language,
-                            remaining_outgoing,
-                            project_only,
-                            &mut files_referenced,
-                        )
-                        .await;
+                                let (incoming_refs, depth_in) = self
+                                    .bfs_call_hierarchy(
+                                        item,
+                                        CallDirection::Incoming,
+                                        max_depth,
+                                        &mut files_referenced,
+                                        project_only,
+                                        &mut remaining_incoming,
+                                    )
+                                    .await;
+                                all_incoming.extend(incoming_refs);
+                                max_depth_reached = std::cmp::max(max_depth_reached, depth_in);
 
-                    degraded = true;
-                    degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-                    if grep_in.is_some() {
-                        incoming = grep_in;
+                                let (outgoing_refs, depth_out) = self
+                                    .bfs_call_hierarchy(
+                                        item,
+                                        CallDirection::Outgoing,
+                                        max_depth,
+                                        &mut files_referenced,
+                                        project_only,
+                                        &mut remaining_outgoing,
+                                    )
+                                    .await;
+                                all_outgoing.extend(outgoing_refs);
+                                max_depth_reached = std::cmp::max(max_depth_reached, depth_out);
+                            }
+                            _ => {}
+                        }
                     }
-                    if grep_out.is_some() {
-                        outgoing = grep_out;
-                    }
+
+                    // Dedup by semantic_path to avoid duplicates across multiple impls
+                    all_incoming.sort_by(|a, b| a.semantic_path.cmp(&b.semantic_path));
+                    all_incoming.dedup_by(|a, b| a.semantic_path == b.semantic_path);
+                    all_outgoing.sort_by(|a, b| a.semantic_path.cmp(&b.semantic_path));
+                    all_outgoing.dedup_by(|a, b| a.semantic_path == b.semantic_path);
+
+                    incoming = Some(all_incoming);
+                    outgoing = Some(all_outgoing);
+                    // PATCH-003: BFS ran for each impl and produced the
+                    // merged results. Mark as BFS-verified so the
+                    // incoming_verified / outgoing_verified flags reflect
+                    // this even if `degraded` were ever flipped to true
+                    // later (e.g., by trait_method_degraded override).
+                    lsp_bfs_ran = true;
+                }
+                Ok(_) => {
+                    // PATCH-002 §B.5: goto_implementation returned no implementations.
+                    // Trace this and fall through to normal BFS so the agent still gets
+                    // a result (the LSP may simply not know about any concrete impl).
+                    tracing::debug!(
+                        tool = "find_callers_callees",
+                        semantic_path = %semantic_path,
+                        parent = ?scope.parent_name,
+                        "no implementations found for trait method, falling back to normal BFS"
+                    );
+                }
+                Err(e) => {
+                    // PATCH-002 §B.5: goto_implementation itself failed (e.g. server doesn't
+                    // support textDocument/implementation, or transient LSP error).
+                    // Mark the result as degraded so the agent knows the trace is incomplete
+                    // and still fall through to normal BFS on the trait method itself.
+                    tracing::warn!(
+                        tool = "find_callers_callees",
+                        semantic_path = %semantic_path,
+                        error = %e,
+                        "goto_implementation failed for trait method, falling back to normal BFS"
+                    );
+                    // Store the reason in a separate flag; we'll OR it with the final
+                    // degraded state to avoid being clobbered by the normal flow's success.
+                    trait_method_degraded = Some(DegradedReason::LspErrorGrepFallback);
                 }
             }
-            Ok(_) => {
-                // LSP responded with empty items — but this is ambiguous:
-                //   - Genuine "zero callers": LSP is warm and the symbol truly has no references.
-                //   - LSP warmup: LSP hasn't finished indexing and returned [] for everything.
-                //
-                // Probe goto_definition at the same position. A warm LSP can resolve a symbol
-                // to its definition; a cold LSP returns None even for well-known symbols.
-                // If the probe returns Ok(Some(_)) the LSP is warm → confirmed zero callers.
-                // If the probe returns Ok(None) or Err, we degrade rather than lying to the agent.
-                let probe = self
-                    .lawyer
-                    .goto_definition(
-                        self.workspace_root.path(),
-                        &semantic_path.file_path,
-                        u32::try_from(scope.start_line + 1).unwrap_or(1),
-                        u32::try_from(scope.name_column + 1).unwrap_or(1),
-                    )
-                    .await;
+        }
 
-                if matches!(probe, Ok(Some(_))) {
-                    // LSP is warm — definition resolved. But let's check for false negatives (indexing incomplete, etc.)
-                    // by running grep fallback.
-                    let (grep_in, grep_out) = self
-                        .run_grep_fallbacks(
-                            &symbol_name,
-                            &semantic_path.file_path,
-                            &scope.content,
-                            &scope.language,
-                            remaining_outgoing,
-                            project_only,
+        // Normal flow (skipped only if used_impl_expansion is true)
+        if !used_impl_expansion {
+            let lsp_result = self
+                .lawyer
+                .call_hierarchy_prepare(
+                    self.workspace_root.path(),
+                    &semantic_path.file_path,
+                    u32::try_from(scope.start_line + 1).unwrap_or(1),
+                    // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
+                    // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
+                    u32::try_from(scope.name_column + 1).unwrap_or(1),
+                )
+                .await;
+
+            match lsp_result {
+                Ok(items) if !items.is_empty() => {
+                    engines.push("lsp");
+                    degraded = false;
+                    degraded_reason = None;
+
+                    let initial_item = &items[0];
+                    files_referenced.insert(initial_item.file.clone());
+
+                    // --- INCOMING BFS ---
+                    let (incoming_refs, depth_in) = self
+                        .bfs_call_hierarchy(
+                            initial_item,
+                            CallDirection::Incoming,
+                            max_depth,
                             &mut files_referenced,
+                            project_only,
+                            &mut remaining_incoming,
+                        )
+                        .await;
+                    incoming = Some(incoming_refs);
+                    max_depth_reached = std::cmp::max(max_depth_reached, depth_in);
+
+                    // --- OUTGOING BFS ---
+                    let (outgoing_refs, depth_out) = self
+                        .bfs_call_hierarchy(
+                            initial_item,
+                            CallDirection::Outgoing,
+                            max_depth,
+                            &mut files_referenced,
+                            project_only,
+                            &mut remaining_outgoing,
+                        )
+                        .await;
+                    outgoing = Some(outgoing_refs);
+                    max_depth_reached = std::cmp::max(max_depth_reached, depth_out);
+                    // PATCH-003: track that the BFS actually produced the current
+                    // incoming/outgoing values. Used downstream to compute
+                    // incoming_verified / outgoing_verified accurately. Without
+                    // this flag, the "BFS-confirmed empty + grep fallback no
+                    // matches" case would be misclassified as unverified even
+                    // though the LSP did confirm the empty state.
+                    lsp_bfs_ran = true;
+
+                    // Check for false negatives when BFS call hierarchy traversal returns 0 callers/callees
+                    if incoming.as_ref().is_none_or(Vec::is_empty)
+                        && outgoing.as_ref().is_none_or(Vec::is_empty)
+                    {
+                        let (grep_in, grep_out) = self
+                            .run_grep_fallbacks(
+                                &symbol_name,
+                                &semantic_path.file_path,
+                                &scope.content,
+                                &scope.language,
+                                remaining_outgoing,
+                                project_only,
+                                &mut files_referenced,
+                            )
+                            .await;
+
+                        degraded = true;
+                        degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                        if grep_in.is_some() {
+                            // PATCH-003: BFS data was replaced by heuristic
+                            // grep results. The flag must reflect this so
+                            // `incoming_verified` correctly returns false.
+                            lsp_bfs_ran = false;
+                            incoming = grep_in;
+                        }
+                        if grep_out.is_some() {
+                            lsp_bfs_ran = false;
+                            outgoing = grep_out;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // LSP responded with empty items — but this is ambiguous:
+                    //   - Genuine "zero callers": LSP is warm and the symbol truly has no references.
+                    //   - LSP warmup: LSP hasn't finished indexing and returned [] for everything.
+                    //
+                    // Probe goto_definition at the same position. A warm LSP can resolve a symbol
+                    // to its definition; a cold LSP returns None even for well-known symbols.
+                    // If the probe returns Ok(Some(_)) the LSP is warm → confirmed zero callers.
+                    // If the probe returns Ok(None) or Err, we degrade rather than lying to the agent.
+                    let probe = self
+                        .lawyer
+                        .goto_definition(
+                            self.workspace_root.path(),
+                            &semantic_path.file_path,
+                            u32::try_from(scope.start_line + 1).unwrap_or(1),
+                            u32::try_from(scope.name_column + 1).unwrap_or(1),
                         )
                         .await;
 
-                    engines.push("lsp");
-                    degraded = true;
-                    degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-                    incoming = grep_in.or(Some(Vec::new()));
-                    outgoing = grep_out.or(Some(Vec::new()));
-                } else {
-                    // LSP likely still warming up — empty call hierarchy is not reliable.
-                    // Degrade so agents know to verify before acting on "zero references".
+                    if matches!(probe, Ok(Some(_))) {
+                        // LSP is warm — definition resolved. But let's check for false negatives (indexing incomplete, etc.)
+                        // by running grep fallback.
+                        let (grep_in, grep_out) = self
+                            .run_grep_fallbacks(
+                                &symbol_name,
+                                &semantic_path.file_path,
+                                &scope.content,
+                                &scope.language,
+                                remaining_outgoing,
+                                project_only,
+                                &mut files_referenced,
+                            )
+                            .await;
+
+                        engines.push("lsp");
+                        degraded = true;
+                        degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                        incoming = grep_in.or(Some(Vec::new()));
+                        outgoing = grep_out.or(Some(Vec::new()));
+                    } else {
+                        // LSP likely still warming up — empty call hierarchy is not reliable.
+                        // Degrade so agents know to verify before acting on "zero references".
+                        tracing::info!(
+                            tool = "find_callers_callees",
+                            symbol = %semantic_path,
+                            "find_callers_callees: call_hierarchy_prepare returned [] but goto_definition \
+                             probe returned no result — LSP likely warming up, attempting grep-based reference fallback"
+                        );
+                        engines.push("lsp");
+                        degraded = true;
+                        degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
+
+                        let (grep_in, grep_out) = self
+                            .run_grep_fallbacks(
+                                &symbol_name,
+                                &semantic_path.file_path,
+                                &scope.content,
+                                &scope.language,
+                                remaining_outgoing,
+                                project_only,
+                                &mut files_referenced,
+                            )
+                            .await;
+
+                        Self::process_grep_fallback_results(
+                            grep_in,
+                            grep_out,
+                            &mut incoming,
+                            &mut outgoing,
+                            &mut degraded_reason,
+                            Some(DegradedReason::LspWarmupGrepFallback),
+                            " during LSP warmup",
+                        );
+                    }
+                }
+                Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
+                    // Degraded mode — LSP not available. Use grep-based reference search
+                    // as a heuristic fallback. Results may over-count (string references)
+                    // or under-count (indirect calls), but give the agent a starting point.
                     tracing::info!(
                         tool = "find_callers_callees",
                         symbol = %semantic_path,
-                        "find_callers_callees: call_hierarchy_prepare returned [] but goto_definition \
-                         probe returned no result — LSP likely warming up, attempting grep-based reference fallback"
+                        "find_callers_callees: no LSP — attempting grep-based reference fallback"
                     );
-                    engines.push("lsp");
-                    degraded = true;
-                    degraded_reason = Some(DegradedReason::LspWarmupEmptyUnverified);
 
                     let (grep_in, grep_out) = self
                         .run_grep_fallbacks(
@@ -758,113 +940,81 @@ impl PathfinderServer {
                         &mut incoming,
                         &mut outgoing,
                         &mut degraded_reason,
-                        Some(DegradedReason::LspWarmupGrepFallback),
-                        " during LSP warmup",
+                        Some(DegradedReason::NoLspGrepFallback),
+                        "",
                     );
                 }
-            }
-            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
-                // Degraded mode — LSP not available. Use grep-based reference search
-                // as a heuristic fallback. Results may over-count (string references)
-                // or under-count (indirect calls), but give the agent a starting point.
-                tracing::info!(
-                    tool = "find_callers_callees",
-                    symbol = %semantic_path,
-                    "find_callers_callees: no LSP — attempting grep-based reference fallback"
-                );
+                Err(LspError::Timeout { .. }) => {
+                    // LSP timed out — attempt grep-based reference fallback.
+                    // Set reason unconditionally: timeout is always the cause, whether or not
+                    // grep succeeds. Without this, empty grep results would fall through to the
+                    // initial NoLsp reason, misleading agents into thinking no LSP exists.
+                    degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
 
-                let (grep_in, grep_out) = self
-                    .run_grep_fallbacks(
-                        &symbol_name,
-                        &semantic_path.file_path,
-                        &scope.content,
-                        &scope.language,
-                        remaining_outgoing,
-                        project_only,
-                        &mut files_referenced,
-                    )
-                    .await;
+                    tracing::info!(
+                        tool = "find_callers_callees",
+                        symbol = %semantic_path,
+                        "find_callers_callees: LSP timed out — attempting grep-based reference fallback"
+                    );
 
-                Self::process_grep_fallback_results(
-                    grep_in,
-                    grep_out,
-                    &mut incoming,
-                    &mut outgoing,
-                    &mut degraded_reason,
-                    Some(DegradedReason::NoLspGrepFallback),
-                    "",
-                );
-            }
-            Err(LspError::Timeout { .. }) => {
-                // LSP timed out — attempt grep-based reference fallback.
-                // Set reason unconditionally: timeout is always the cause, whether or not
-                // grep succeeds. Without this, empty grep results would fall through to the
-                // initial NoLsp reason, misleading agents into thinking no LSP exists.
-                degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
+                    let (grep_in, grep_out) = self
+                        .run_grep_fallbacks(
+                            &symbol_name,
+                            &semantic_path.file_path,
+                            &scope.content,
+                            &scope.language,
+                            remaining_outgoing,
+                            project_only,
+                            &mut files_referenced,
+                        )
+                        .await;
 
-                tracing::info!(
-                    tool = "find_callers_callees",
-                    symbol = %semantic_path,
-                    "find_callers_callees: LSP timed out — attempting grep-based reference fallback"
-                );
+                    Self::process_grep_fallback_results(
+                        grep_in,
+                        grep_out,
+                        &mut incoming,
+                        &mut outgoing,
+                        &mut degraded_reason,
+                        None,
+                        " after timeout",
+                    );
+                }
+                Err(e) => {
+                    // LSP returned an unexpected error — not "no LSP" but an operational failure.
+                    // Set reason unconditionally: LspErrorGrepFallback describes the cause whether
+                    // or not grep finds anything. NoLsp would be misleading — the LSP exists but
+                    // failed, which is a different agent guidance scenario (retry vs. install).
+                    degraded = true;
+                    degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
 
-                let (grep_in, grep_out) = self
-                    .run_grep_fallbacks(
-                        &symbol_name,
-                        &semantic_path.file_path,
-                        &scope.content,
-                        &scope.language,
-                        remaining_outgoing,
-                        project_only,
-                        &mut files_referenced,
-                    )
-                    .await;
+                    tracing::warn!(
+                        tool = "find_callers_callees",
+                        error = %e,
+                        "call_hierarchy_prepare failed"
+                    );
 
-                Self::process_grep_fallback_results(
-                    grep_in,
-                    grep_out,
-                    &mut incoming,
-                    &mut outgoing,
-                    &mut degraded_reason,
-                    None,
-                    " after timeout",
-                );
-            }
-            Err(e) => {
-                // LSP returned an unexpected error — not "no LSP" but an operational failure.
-                // Set reason unconditionally: LspErrorGrepFallback describes the cause whether
-                // or not grep finds anything. NoLsp would be misleading — the LSP exists but
-                // failed, which is a different agent guidance scenario (retry vs. install).
-                degraded = true;
-                degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
+                    let (grep_in, grep_out) = self
+                        .run_grep_fallbacks(
+                            &symbol_name,
+                            &semantic_path.file_path,
+                            &scope.content,
+                            &scope.language,
+                            remaining_outgoing,
+                            project_only,
+                            &mut files_referenced,
+                        )
+                        .await;
 
-                tracing::warn!(
-                    tool = "find_callers_callees",
-                    error = %e,
-                    "call_hierarchy_prepare failed"
-                );
-
-                let (grep_in, grep_out) = self
-                    .run_grep_fallbacks(
-                        &symbol_name,
-                        &semantic_path.file_path,
-                        &scope.content,
-                        &scope.language,
-                        remaining_outgoing,
-                        project_only,
-                        &mut files_referenced,
-                    )
-                    .await;
-
-                Self::process_grep_fallback_results(
-                    grep_in,
-                    grep_out,
-                    &mut incoming,
-                    &mut outgoing,
-                    &mut degraded_reason,
-                    None,
-                    " after LSP error",
-                );
+                    Self::process_grep_fallback_results(
+                        grep_in,
+                        grep_out,
+                        &mut incoming,
+                        &mut outgoing,
+                        &mut degraded_reason,
+                        None,
+                        " after LSP error",
+                    );
+                }
             }
         }
 
@@ -874,6 +1024,15 @@ impl PathfinderServer {
 
         let inc_count = incoming.as_ref().map_or(0, Vec::len);
         let out_count = outgoing.as_ref().map_or(0, Vec::len);
+        // PATCH-002 Fix 2: If goto_implementation errored, the normal flow's success
+        // path may have reset `degraded` to false. Re-apply the trait-method error
+        // to ensure the agent sees a partial result warning.
+        let degraded_reason = if let Some(trait_reason) = trait_method_degraded {
+            Some(trait_reason)
+        } else {
+            degraded_reason
+        };
+        let degraded = degraded || trait_method_degraded.is_some();
         let degraded_reason_cloned = degraded_reason;
         let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
 
@@ -912,7 +1071,12 @@ impl PathfinderServer {
         let max_refs_usize = usize::try_from(max_references).unwrap_or(usize::MAX);
         let references_truncated = max_references > 0 && total_returned >= max_refs_usize;
 
-        let resolution_strategy = if !degraded && engines.contains(&"lsp") {
+        let resolution_strategy = if used_impl_expansion {
+            Some("lsp_call_hierarchy_with_impl_expansion".to_owned())
+        } else if engines.contains(&"lsp") {
+            // PATCH-002 Fix 2: When degraded is true due ONLY to a trait method error
+            // (goto_implementation failed) but the normal LSP call_hierarchy flow still ran,
+            // we used LSP for the actual results. Don't claim "grep_file_scoped".
             Some("lsp_call_hierarchy".to_owned())
         } else if degraded {
             // Check which grep fallback was used based on degraded_reason
@@ -936,11 +1100,57 @@ impl PathfinderServer {
         // Non-degraded + empty incoming = LSP confirmed zero callers, which could be
         // an entry point, unused code, or dynamic dispatch that LSP can't trace.
         //
+        // PATCH-002 §B.4: Also hint when impl expansion was used, so the agent knows
+        // the results cover callers of all concrete impls (not just the trait method).
+        //
+        // PATCH-003 DELIVERABLE A: When degraded+null, surface an explicit
+        // "UNKNOWN, not zero" warning in `hint` so agents that ignore the
+        // per-field verified flags still see a clear message. This closes
+        // the "null ?? []" footgun for prose-reading consumers.
+        //
         // NOTE: The "both incoming AND outgoing empty" case is always degraded because
         // the grep fallback at lines 570-615 sets `degraded=true` when both BFS results
         // are empty (to guard against false negatives from LSP errors during traversal).
         // Therefore we only hint on "incoming empty, outgoing non-empty" here.
-        let hint = if !degraded && incoming.as_ref().is_some_and(Vec::is_empty) {
+        let symbol_name_for_hint = symbol_name.clone();
+        let unknown_search_hint = if symbol_name_for_hint.is_empty() {
+            "Use search(query='<symbol>') to find usages manually.".to_owned()
+        } else {
+            format!("Use search(query=\"{symbol_name_for_hint}\") to find usages manually.")
+        };
+        let hint = if used_impl_expansion {
+            Some(format!(
+                "Symbol is a trait/interface method. Results include callers of all \
+                 implementations found via goto_implementation. \
+                 {trait_impl_count} implementation(s) found across {trait_impl_file_count} file(s)."
+            ))
+        } else if degraded && incoming.is_none() && outgoing.is_none() {
+            // Catastrophic footgun: both fields UNKNOWN. Spell it out.
+            Some(format!(
+                "Callers AND callees are UNKNOWN — LSP unavailable and no heuristic \
+                 fallback matched. Do NOT treat null as zero callers/callees. \
+                 {unknown_search_hint}"
+            ))
+        } else if degraded && incoming.is_none() {
+            Some(format!(
+                "Callers UNKNOWN — LSP unavailable or warming up. \
+                 Do NOT treat null as zero callers. \
+                 {unknown_search_hint}"
+            ))
+        } else if degraded && outgoing.is_none() {
+            Some(format!(
+                "Callees UNKNOWN — LSP unavailable or warming up. \
+                 Do NOT treat null as zero callees. \
+                 {unknown_search_hint}"
+            ))
+        } else if degraded {
+            // Heuristic results — degraded but we have candidate refs.
+            Some(format!(
+                "Results are heuristic grep-based candidates (LSP unavailable). \
+                 Each reference may be a false positive (dynamic dispatch, \
+                 same-name symbols). {unknown_search_hint}"
+            ))
+        } else if !degraded && incoming.as_ref().is_some_and(Vec::is_empty) {
             Some(
                 "LSP confirmed zero incoming callers. This symbol may be an entry point, \
                  unused, or only called via dynamic dispatch/reflection."
@@ -950,9 +1160,44 @@ impl PathfinderServer {
             None
         };
 
+        // PATCH-003 DELIVERABLE B: Per-field verification flags.
+        //
+        // Semantics:
+        // - `Some(true)`  = list is verified by the LSP (BFS returned data).
+        //                    `incoming`/`outgoing` will be `Some(vec)`.
+        // - `Some(false)` = list is UNKNOWN or heuristic. Either:
+        //                    a) `incoming`/`outgoing` is `None` (LSP down, no
+        //                       heuristic fallback matched), OR
+        //                    b) the data is heuristic grep results that may
+        //                       include false positives (degraded=true AND
+        //                       BFS didn't run for this field).
+        // - `None`        = field not applicable for this scope.
+        //
+        // The match below encodes the (incoming, degraded, lsp_bfs_ran) -> verified mapping:
+        //   (Some(_), false, _) | (Some(_), true, true) -> Some(true)   — LSP/BFS verified
+        //   (Some(_), true, false) | (None, true, _)      -> Some(false)  — heuristic or UNKNOWN
+        //   (None, false, _)                              -> None         — not applicable
+        //
+        // `lsp_bfs_ran` is set in the BFS success path (line ~790) so we can
+        // distinguish "BFS ran and confirmed empty" from "grep fallback
+        // produced candidates" — both leave the field as `Some(vec)` but only
+        // the first is LSP-verified.
+        let incoming_verified = match (&incoming, degraded, lsp_bfs_ran) {
+            (Some(_), false, _) | (Some(_), true, true) => Some(true),
+            (Some(_), true, false) | (None, true, _) => Some(false),
+            (None, false, _) => None,
+        };
+        let outgoing_verified = match (&outgoing, degraded, lsp_bfs_ran) {
+            (Some(_), false, _) | (Some(_), true, true) => Some(true),
+            (Some(_), true, false) | (None, true, _) => Some(false),
+            (None, false, _) => None,
+        };
+
         let metadata = crate::server::types::FindCallersCalleesMetadata {
             incoming,
             outgoing,
+            incoming_verified,
+            outgoing_verified,
             depth_reached: max_depth_reached,
             files_referenced: files_referenced.len(),
             degraded,

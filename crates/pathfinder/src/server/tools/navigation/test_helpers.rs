@@ -65,5 +65,6 @@ pub(super) fn make_scope() -> SymbolScope {
         end_line: 9,
         name_column: 0,
         language: "rust".to_owned(),
+        ..Default::default()
     }
 }

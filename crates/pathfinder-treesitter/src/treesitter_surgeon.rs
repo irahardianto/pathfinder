@@ -1,7 +1,7 @@
 use crate::cache::AstCache;
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
-use crate::surgeon::{ExtractedSymbol, Surgeon};
+use crate::surgeon::{ExtractedSymbol, Surgeon, SymbolKind};
 use crate::symbols::{
     did_you_mean, extract_symbols_from_multizone, extract_symbols_from_tree, find_enclosing_symbol,
     find_enclosing_symbol_ref, resolve_symbol_chain,
@@ -9,6 +9,27 @@ use crate::symbols::{
 use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::Path;
 use tracing::instrument;
+
+/// Convert a `SymbolKind` to its string representation for `parent_kind`.
+///
+/// Matches the vocabulary used in `find_symbol.rs::symbol_kind_to_filter_string`.
+fn symbol_kind_to_parent_kind(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Test | SymbolKind::Function | SymbolKind::Method => "function",
+        SymbolKind::Class => "class",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Constant => "constant",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Module => "module",
+        SymbolKind::Zone => "zone",
+        SymbolKind::Component => "component",
+        SymbolKind::HtmlElement => "element",
+        SymbolKind::CssSelector => "selector",
+        SymbolKind::CssAtRule => "at-rule",
+    }
+}
 
 /// The concrete implementation of the `Surgeon` trait powered by tree-sitter.
 #[derive(Debug)]
@@ -111,6 +132,21 @@ impl Surgeon for TreeSitterSurgeon {
                 did_you_mean: did_you_mean(&symbols, chain, 3),
             })?;
 
+        let (parent_kind, parent_name) = if chain.segments.len() > 1 {
+            let parent_chain = pathfinder_common::types::SymbolChain {
+                segments: chain.segments[..chain.segments.len() - 1].to_vec(),
+            };
+            resolve_symbol_chain(&symbols, &parent_chain).map(|parent| {
+                (
+                    Some(symbol_kind_to_parent_kind(parent.kind).to_string()),
+                    Some(parent.name.clone()),
+                )
+            })
+        } else {
+            None
+        }
+        .unzip();
+
         let symbol_bytes =
             source
                 .get(symbol.byte_range.clone())
@@ -133,6 +169,8 @@ impl Surgeon for TreeSitterSurgeon {
             end_line: symbol.end_line,
             name_column: symbol.name_column,
             language: language_str.to_string(),
+            parent_kind: parent_kind.flatten(),
+            parent_name: parent_name.flatten(),
         })
     }
 
