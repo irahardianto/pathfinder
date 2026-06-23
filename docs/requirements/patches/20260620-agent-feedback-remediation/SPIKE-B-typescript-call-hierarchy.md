@@ -44,9 +44,18 @@ Added both capabilities with `dynamicRegistration: true`:
 }
 ```
 
-`dynamicRegistration: true` allows LSP servers that support it to enable these
-capabilities via `client/registerCapability` after initialization, which is the
-pattern used by `typescript-language-server`.
+The `callHierarchy` and `references` objects in the client capabilities
+signal to `typescript-language-server` that the client supports these
+features. TS LS checks for `textDocument?.callHierarchy` during the
+`initialize` handshake and statically sets `callHierarchyProvider: true`
+in the initialize result (requires TypeScript 3.8.0+). This is a static
+capability check, NOT dynamic registration — the `dynamicRegistration:
+true` sub-field is harmless but not what triggers enablement. Any value
+(even `{}`) for the `callHierarchy` object would satisfy TS LS's check.
+
+> NOTE: As of v0.22.0, no end-to-end test proves TS call hierarchy
+> works with a real `typescript-language-server` binary. PATCH-005
+> (v2 remediation) adds this test.
 
 ## Tests Added
 

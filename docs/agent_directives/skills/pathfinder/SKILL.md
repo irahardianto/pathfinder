@@ -23,7 +23,7 @@ Check once per session. Re-check only if a tool call fails with a connection err
 | Read a full source file | `read(filepath="...")` (use `detail_level="source_only"` for minimal tokens) |
 | Batch read multiple files | `read(paths=["..."])` (max 10 files per call) |
 | Find a function by name/pattern | `search(query="...")` → `inspect` |
-| Resolve a symbol name to its file | `search(mode="symbol", query="...")` |
+| Resolve a symbol name to its file | `search(mode="symbol", query="...")` — returns `did_you_mean` suggestions on no exact match |
 | Get full symbol overview | `trace(scope="overview")` (source + callers + callees + refs) |
 | See all callers of a function | `trace(scope="callers")` |
 | See all callees of a function | `inspect(include_dependencies=true)` (preferred — source + callee signatures) or `trace(scope="callers")` (returns both callers AND callees) |
@@ -43,6 +43,18 @@ Check once per session. Re-check only if a tool call fails with a connection err
 > - `[]` = CONFIRMED ZERO (LSP verified — safe to conclude no callers/callees/references exist)
 >
 > Never treat `null` as "no callers" or "no references" — it means the answer is unknown. Only `[]` (empty array) from a non-degraded response is a confirmed zero.
+>
+> **Use the machine-readable verified flags** (`incoming_verified`, `outgoing_verified` on `find_callers_callees` results) to disambiguate without parsing hint prose:
+>
+> | `incoming_verified` | `incoming` | Meaning | Action |
+> |---|---|---|---|
+> | `true` | `[]` | LSP confirmed zero callers | Safe to refactor — but consider dynamic dispatch |
+> | `true` | `[vec]` | LSP-confirmed callers (verified) | Trust the list |
+> | `false` | `null` | Callers UNKNOWN (LSP down, no heuristic match) | **Do NOT** treat as zero — `search` to verify |
+> | `false` | `[vec]` | Heuristic grep candidates (LSP unavailable) | Treat as candidate set, may include false positives |
+> | absent | — | Field not applicable for this scope | Skip |
+>
+> Same matrix applies to `outgoing_verified` / `outgoing` for callees. The `hint` field provides the same warning in prose form for agents that read text rather than structured fields.
 
 ## Token Budget Controls
 
@@ -103,12 +115,15 @@ Bare file paths (no `::`) are valid only for whole-file operations like `read(fi
 If `trace()` or `inspect()` returns `SYMBOL_NOT_FOUND`, check the `hint` field.
 It often contains a "Did you mean: X?" suggestion with the correct path.
 
+**`search(mode="symbol")` also has did-you-mean:** When a symbol search finds no exact matches,
+the response includes `did_you_mean: ["suggestions..."]` and a `hint` field guiding you to check them.
+
 Common cause: Rust impl blocks may use qualified names (e.g., `super::Type.method`) that differ from what search/locate returns.
 
 Recovery workflow:
 1. Try the semantic path from search/locate
 2. On `SYMBOL_NOT_FOUND`, use the "did you mean" suggestion
-3. If no suggestion, use `search(mode="symbol")` to find the correct `file::symbol` format
+3. If `search(mode="symbol")` returns empty symbols, check its `did_you_mean` field for alternative paths
 
 ### `kind=struct` Doesn't Match Enums
 
@@ -237,7 +252,7 @@ Pathfinder returns responses through two channels. Knowing which to read prevent
 
 | Tool | Text Channel Contains | Structured Content Contains |
 |---|---|---|
-| `explore` | **Skeleton output** (directory tree / file list / symbols) | Metadata: tech_stack, coverage_percent, files_scanned, version_hashes; also `suggested_max_tokens` (u32, only when coverage < 100%) and `hint` (string, only when truncated) |
+| `explore` | **Skeleton output** (directory tree / file list / symbols) | Metadata: tech_stack, coverage_percent, files_scanned, version_hashes, `mode` (string: "structure" | "files" | "symbols"), `dirs_scanned` (usize, structure mode only); also `suggested_max_tokens` (u32, only when coverage < 100%) and `hint` (string, only when truncated) |
 | `search` | **Full JSON response** (matches, counts, metadata — all in one) | Not set |
 | `read` | **File content** (source code or raw content) | Metadata: language, symbols, total_lines, version_hash |
 | `inspect` | **Symbol source code** (+ dependency signatures if requested). Batch mode: per-symbol entries with status ok/error. Footer: `[completed in Xms, Y/Z symbols inspected]` | Single: start_line, end_line, dependencies, degraded status, `resolution_strategy` (`lsp_call_hierarchy`, `treesitter_direct`, `treesitter_fallback`, `grep_fallback`). Batch: `BatchInspectResult` (results[], succeeded, failed, total_duration_ms). Error entry shape: `{semantic_path, status: "error", error}` — source/start_line/end_line/language/dependencies are absent on error. `include_dependencies` applies to ALL symbols when used in batch mode. |
@@ -247,7 +262,7 @@ Pathfinder returns responses through two channels. Knowing which to read prevent
 
 > **Key difference for `search`:** The entire typed response is serialized as JSON in the text channel — there is no structured_content. Parse it as JSON directly.
 
-> **Key difference for `explore`:** The actual skeleton lives only in the text channel. `files_scanned: 0` in structured_content for `detail="structure"` is **correct and expected** — structure mode reads directory names only, not source files. The directory tree IS in the text.
+> **Key difference for `explore`:** The actual skeleton lives only in the text channel. For `detail="structure"`, metadata shows `files_scanned: 0` — **this is correct**. Check the `mode` field (`"structure"`) and `dirs_scanned` field (directory count) to confirm the call succeeded. Structure mode reads directory names only, not source files. The actual directory tree IS in the text output.
 
 > **Batch vs single:** Use batch mode (`semantic_paths` / `locations`) when reading 3 or more symbols/locations in a single task — it saves LLM round-trips and returns all results ordered. Use single mode for one-off lookups. Both modes share all parameters (`include_dependencies`, `detail_level`, etc.) except the addressing field.
 

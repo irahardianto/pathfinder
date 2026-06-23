@@ -38,7 +38,7 @@ Call `health()` once at session start. If it returns results, Pathfinder is avai
 |---|---|
 | Understand project structure | `explore` |
 | Find text/patterns in code | `search` (mode: text/regex) |
-| Find a symbol by name | `search` (mode: symbol) |
+| Find a symbol by name | `search` (mode: symbol) — returns `did_you_mean` suggestions when no exact match |
 | Read a file | `read` |
 | Read a symbol's source code | `inspect` |
 | Jump to a definition | `locate` (with semantic_path) |
