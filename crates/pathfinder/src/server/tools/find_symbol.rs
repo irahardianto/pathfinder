@@ -155,7 +155,7 @@ impl PathfinderServer {
     /// 2. Sorted by relevance (exact match > prefix match > contains match)
     /// 3. Filtered by optional `kind` parameter
     /// 4. Limited to `max_results` entries
-    pub(crate) async fn find_symbol_impl(
+    pub(crate) async fn find_symbol_impl_inner(
         &self,
         params: SearchToolParams,
     ) -> Result<Json<FindSymbolResponse>, ErrorData> {
@@ -167,7 +167,7 @@ impl PathfinderServer {
             kind = ?params.kind,
             path_glob = %params.path_glob,
             max_results = params.max_results,
-            "find_symbol: start"
+            "find_symbol_inner: start"
         );
 
         if params.query.trim().is_empty() {
@@ -552,7 +552,106 @@ impl PathfinderServer {
             total_found: u32::try_from(total_found).unwrap_or(u32::MAX),
             search_strategy,
             duration_ms: Some(u64::try_from(duration_ms).unwrap_or(u64::MAX)),
+            did_you_mean: None,
+            hint: None,
         }))
+    }
+
+    /// Resolve a bare symbol name to its `file::symbol` semantic path(s).
+    ///
+    /// This is the public entry point that wraps `find_symbol_impl_inner`
+    /// with did-you-mean suggestions when no exact matches are found.
+    ///
+    /// Performance: Uses parallel execution for both searches and Tree-sitter enrichments.
+    ///
+    /// Results are:
+    /// 1. Deduplicated by semantic path
+    /// 2. Sorted by relevance (exact match > prefix match > contains match)
+    /// 3. Filtered by optional `kind` parameter
+    /// 4. Limited to `max_results` entries
+    /// 5. When empty, includes `did_you_mean` suggestions if similar symbols exist
+    pub(crate) async fn find_symbol_impl(
+        &self,
+        params: SearchToolParams,
+    ) -> Result<Json<FindSymbolResponse>, ErrorData> {
+        let start = std::time::Instant::now();
+        let query = params.query.clone();
+        let path_glob = params.path_glob.clone();
+
+        let Json(result) = self.find_symbol_impl_inner(params).await?;
+
+        if result.symbols.is_empty() && !query.is_empty() {
+            let suggestions = self.compute_symbol_did_you_mean(&query, &path_glob).await;
+
+            if !suggestions.is_empty() {
+                return Ok(Json(FindSymbolResponse {
+                    symbols: vec![],
+                    total_found: 0,
+                    search_strategy: result.search_strategy,
+                    duration_ms: Some(crate::server::helpers::millis_to_u64(
+                        start.elapsed().as_millis(),
+                    )),
+                    did_you_mean: Some(suggestions),
+                    hint: Some(
+                        "No exact symbol match found. Check did_you_mean for suggested alternative paths."
+                            .to_string(),
+                    ),
+                }));
+            }
+        }
+
+        Ok(Json(result))
+    }
+
+    /// Compute did-you-mean suggestions for a failed symbol search.
+    /// Uses text search to find definitions and usages containing the query,
+    /// then extracts symbol names from those matches.
+    async fn compute_symbol_did_you_mean(&self, query: &str, path_glob: &str) -> Vec<String> {
+        let search_params = crate::server::types::SearchParams {
+            query: query.to_string(),
+            mode: crate::server::types::SearchMode::Text,
+            path_glob: path_glob.to_string(),
+            max_results: 50,
+            ..Default::default()
+        };
+
+        let Ok(Json(response)) = self.search_codebase_impl(search_params).await else {
+            return vec![];
+        };
+
+        let mut suggestions: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for m in response.matches {
+            if !m.content.is_empty() {
+                let is_likely_definition = m.is_definition == Some(true)
+                    || DEFINITION_KEYWORDS
+                        .iter()
+                        .any(|kw| m.content.contains(&format!("{kw} ")));
+
+                if is_likely_definition {
+                    let name = extract_name_from_line(&m.content);
+                    if !name.is_empty() && !name.contains(char::is_whitespace) {
+                        let semantic_path = format!("{}::{}", m.file, name);
+                        if seen.insert(semantic_path.clone()) {
+                            suggestions.push(semantic_path);
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref path) = m.enclosing_semantic_path {
+                if !path.is_empty() {
+                    let semantic_path = format!("{}::{}", m.file, path);
+                    if seen.insert(semantic_path.clone()) {
+                        suggestions.push(semantic_path);
+                    }
+                }
+            }
+        }
+
+        suggestions.truncate(5);
+        suggestions
     }
 }
 

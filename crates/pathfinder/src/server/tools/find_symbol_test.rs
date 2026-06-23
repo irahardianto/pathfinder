@@ -1239,7 +1239,264 @@ async fn test_find_symbol_ext_filter_uses_language_specific_patterns() {
         response.symbols.len(),
         0,
         "language-specific Rust patterns must not match call sites; \
-         got unexpected results: {:#?}",
+          got unexpected results: {:#?}",
         response.symbols
+    );
+}
+
+// ── PATCH-006: find_symbol did_you_mean tests ─────────────────────────
+
+#[tokio::test]
+async fn test_find_symbol_exact_match_no_did_you_mean() {
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+
+    let ws_dir = tempdir().expect("tempdir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_scout = Arc::new(MockScout::default());
+    mock_scout.set_result(Ok(pathfinder_search::SearchResult {
+        matches: vec![pathfinder_search::SearchMatch {
+            file: "src/lib.rs".to_owned(),
+            line: 1,
+            column: 1,
+            content: "fn my_function() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            version_hash: "hash".to_owned(),
+            is_definition: None,
+            known: None,
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }));
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+    for _ in 0..100 {
+        mock_surgeon
+            .enclosing_symbol_detail_results
+            .lock()
+            .unwrap()
+            .push(Ok(None));
+    }
+
+    let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        mock_scout,
+        mock_surgeon,
+        lawyer,
+    );
+
+    let params = SearchToolParams {
+        query: "my_function".to_string(),
+        ..Default::default()
+    };
+
+    let Json(response) = server
+        .find_symbol_impl(params)
+        .await
+        .expect("find_symbol should not error");
+
+    assert!(!response.symbols.is_empty(), "expected non-empty symbols");
+    assert!(
+        response.did_you_mean.is_none(),
+        "did_you_mean should be None when symbols found, got: {:?}",
+        response.did_you_mean
+    );
+    assert!(
+        response.hint.is_none(),
+        "hint should be None when symbols found"
+    );
+}
+
+#[tokio::test]
+async fn test_find_symbol_no_match_no_suggestions() {
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+
+    let ws_dir = tempdir().expect("tempdir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_scout = Arc::new(MockScout::default());
+
+    let empty_result = Ok(pathfinder_search::SearchResult {
+        matches: vec![],
+        total_matches: 0,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    });
+
+    mock_scout.set_results(vec![empty_result.clone(), empty_result]);
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        mock_scout,
+        mock_surgeon,
+        lawyer,
+    );
+
+    let params = SearchToolParams {
+        query: "xyz123_nonexistent_symbol".to_string(),
+        ..Default::default()
+    };
+
+    let Json(response) = server
+        .find_symbol_impl(params)
+        .await
+        .expect("find_symbol should not error");
+
+    assert_eq!(response.symbols.len(), 0, "expected empty symbols");
+    assert!(
+        response.did_you_mean.is_none(),
+        "did_you_mean should be None when no suggestions available, got: {:?}",
+        response.did_you_mean
+    );
+    assert!(
+        response.hint.is_none(),
+        "hint should be None when no suggestions available"
+    );
+}
+
+#[tokio::test]
+async fn test_find_symbol_inner_does_not_call_did_you_mean() {
+    use pathfinder_search::MockScout;
+    use pathfinder_treesitter::mock::MockSurgeon;
+
+    let ws_dir = tempdir().expect("tempdir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let mock_scout = Arc::new(MockScout::default());
+
+    let empty_result = Ok(pathfinder_search::SearchResult {
+        matches: vec![],
+        total_matches: 0,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    });
+
+    mock_scout.set_result(empty_result);
+
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        mock_scout,
+        mock_surgeon,
+        lawyer,
+    );
+
+    let params = SearchToolParams {
+        query: "nonexistent".to_string(),
+        ..Default::default()
+    };
+
+    let Json(response) = server
+        .find_symbol_impl_inner(params)
+        .await
+        .expect("find_symbol_impl_inner should not error");
+
+    assert_eq!(response.symbols.len(), 0);
+    assert!(response.did_you_mean.is_none());
+    assert!(response.hint.is_none());
+}
+
+#[tokio::test]
+async fn test_find_symbol_with_did_you_mean_suggestions() {
+    let ws_dir = tempdir().expect("tempdir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let src_dir = ws_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("create src dir");
+
+    let service_content = r#"
+fn scout_service() {
+    println!("service");
+}
+
+fn mock_scout() {
+    println!("mock");
+}
+"#;
+    std::fs::write(src_dir.join("service.rs"), service_content).expect("create service.rs");
+
+    let scout = Arc::new(pathfinder_search::RipgrepScout);
+    let surgeon = Arc::new(pathfinder_treesitter::mock::MockSurgeon::new());
+    let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws, config, sandbox, scout, surgeon, lawyer,
+    );
+
+    let params = SearchToolParams {
+        query: "scout".to_string(),
+        path_glob: "**/*.rs".to_string(),
+        ..Default::default()
+    };
+
+    let Json(response) = server
+        .find_symbol_impl(params)
+        .await
+        .expect("find_symbol should not error");
+
+    assert_eq!(
+        response.symbols.len(),
+        0,
+        "expected empty symbols because word-boundary patterns won't match 'scout_service'"
+    );
+
+    assert!(
+        response.did_you_mean.is_some(),
+        "did_you_mean should be Some, got None"
+    );
+
+    let suggestions = response.did_you_mean.unwrap();
+    assert!(!suggestions.is_empty(), "expected at least one suggestion");
+
+    let has_scout_service = suggestions.iter().any(|s| s.contains("scout_service"));
+    let has_mock_scout = suggestions.iter().any(|s| s.contains("mock_scout"));
+
+    assert!(
+        has_scout_service || has_mock_scout,
+        "suggestions should contain scout_service or mock_scout, got: {suggestions:?}"
+    );
+
+    assert!(
+        response.hint.is_some(),
+        "hint should be Some when did_you_mean is present"
+    );
+    assert!(
+        response.hint.unwrap().contains("did_you_mean"),
+        "hint should mention did_you_mean"
     );
 }

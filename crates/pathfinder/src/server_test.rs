@@ -30,6 +30,7 @@ async fn test_get_repo_map_success() {
             files_in_scope: 1,
             coverage_percent: 100,
             version_hashes: std::collections::HashMap::default(),
+            dirs_scanned: None,
         }));
 
     let server = PathfinderServer::with_engines(
@@ -94,6 +95,7 @@ async fn test_get_repo_map_visibility_not_degraded() {
             files_in_scope: 0,
             coverage_percent: 100,
             version_hashes: std::collections::HashMap::default(),
+            dirs_scanned: None,
         }));
 
     let server = PathfinderServer::with_engines(
@@ -461,6 +463,7 @@ async fn test_read_symbol_scope_routes_to_surgeon_and_handles_success() {
         end_line: 7,
         name_column: 0,
         language: "go".to_owned(),
+        ..Default::default()
     };
     mock_surgeon
         .read_symbol_scope_results
@@ -946,6 +949,7 @@ async fn test_with_engines_uses_no_op_lawyer() {
             end_line: 0,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         }));
 
     let server = PathfinderServer::with_engines(
@@ -1068,6 +1072,7 @@ async fn test_thin_outer_handlers() {
             files_in_scope: 1,
             coverage_percent: 100,
             version_hashes: std::collections::HashMap::default(),
+            dirs_scanned: None,
         }));
 
     let server = PathfinderServer::with_engines(

@@ -197,14 +197,18 @@ Alternative: Use `read` for a single file's content. Use `search(mode=\"symbol\"
 IMPORTANT: Copy-paste the exact semantic paths from the output into other Pathfinder tools.
 
 Response format: The skeleton (directory tree, file list, or symbol hierarchy) is in the TEXT
-content. Structured content contains only metadata (coverage_percent, tech_stack, version_hashes).
-Always read the text content for the actual output.
+content. Structured content contains only metadata (coverage_percent, tech_stack, version_hashes,
+mode, dirs_scanned). Always read the text content for the actual output.
+
+Metadata fields:
+- `mode`: Indicates which detail mode was used: \"structure\", \"files\", or \"symbols\".
+- `dirs_scanned`: Number of directories scanned (only present for `detail=\"structure\"`).
+- `files_scanned`: Number of source files scanned (always 0 for structure mode).
+  Check `mode` and `dirs_scanned` to confirm structure-mode calls succeeded.
 
 Parameter guidance:
 - `detail`: Controls output verbosity.
   - `\"structure\"` — directory tree + package manager files only (cheapest). Token cap: 4,000.
-    NOTE: files_scanned=0 in metadata is EXPECTED — structure mode reads directory names only,
-    not source files. The directory tree IS in the text output.
   - `\"files\"` — directory tree + all filenames (no symbols). Token cap: 8,000.
   - `\"symbols\"` (default) — full AST symbol hierarchy. Uses provided max_tokens (default 16,000).
 - `depth=3` (default): Increase for deeply-nested monorepos.

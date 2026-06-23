@@ -29,6 +29,7 @@ async fn test_read_symbol_scope_includes_version_hash_in_text() {
         end_line: 1,
         name_column: 0,
         language: "rust".to_owned(),
+        ..Default::default()
     };
     mock_surgeon
         .read_symbol_scope_results
@@ -88,6 +89,7 @@ async fn test_inspect_impl_routing() {
         end_line: 1,
         name_column: 0,
         language: "rust".to_owned(),
+        ..Default::default()
     };
     mock_surgeon
         .read_symbol_scope_results
@@ -275,6 +277,7 @@ async fn test_inspect_impl_invalid_max_dependencies() {
         end_line: 1,
         name_column: 0,
         language: "rust".to_owned(),
+        ..Default::default()
     };
     mock_surgeon
         .read_symbol_scope_results
@@ -353,6 +356,7 @@ async fn test_inspect_single_unchanged() {
             end_line: 1,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         }));
 
     let server = crate::server::PathfinderServer::with_all_engines(
@@ -416,6 +420,7 @@ async fn test_inspect_batch_with_dependencies() {
                 end_line: 1,
                 name_column: 0,
                 language: "rust".to_owned(),
+                ..Default::default()
             }),
             Ok(pathfinder_common::types::SymbolScope {
                 content: "fn foo() {}".to_owned(), // 2nd call for grep fallback
@@ -423,6 +428,7 @@ async fn test_inspect_batch_with_dependencies() {
                 end_line: 1,
                 name_column: 0,
                 language: "rust".to_owned(),
+                ..Default::default()
             }),
             Ok(pathfinder_common::types::SymbolScope {
                 content: "fn bar() {}".to_owned(),
@@ -430,6 +436,7 @@ async fn test_inspect_batch_with_dependencies() {
                 end_line: 1,
                 name_column: 0,
                 language: "rust".to_owned(),
+                ..Default::default()
             }),
             Ok(pathfinder_common::types::SymbolScope {
                 content: "fn bar() {}".to_owned(), // 2nd call for grep fallback
@@ -437,6 +444,7 @@ async fn test_inspect_batch_with_dependencies() {
                 end_line: 1,
                 name_column: 0,
                 language: "rust".to_owned(),
+                ..Default::default()
             }),
         ]);
 
@@ -503,6 +511,7 @@ async fn test_inspect_batch_multiple_symbols() {
                 end_line: 1,
                 name_column: 0,
                 language: "rust".to_owned(),
+                ..Default::default()
             }),
             Ok(pathfinder_common::types::SymbolScope {
                 content: "fn bar() {}".to_owned(),
@@ -510,6 +519,7 @@ async fn test_inspect_batch_multiple_symbols() {
                 end_line: 1,
                 name_column: 0,
                 language: "rust".to_owned(),
+                ..Default::default()
             }),
         ]);
 
@@ -568,6 +578,7 @@ async fn test_inspect_batch_partial_failure() {
             end_line: 1,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         })]);
 
     let server = crate::server::PathfinderServer::with_all_engines(
