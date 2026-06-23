@@ -470,6 +470,7 @@ async fn test_generate_skeleton_with_filters() {
             coverage_percent: 100,
             version_hashes: std::collections::HashMap::default(),
             tech_stack: vec![],
+            dirs_scanned: None,
         }));
 
     // 1. changed_files filter
@@ -506,6 +507,7 @@ async fn test_generate_skeleton_with_filters() {
             coverage_percent: 100,
             version_hashes: std::collections::HashMap::default(),
             tech_stack: vec![],
+            dirs_scanned: None,
         }));
     // 2. include_extensions filter
     surgeon
@@ -1272,6 +1274,14 @@ async fn test_skeleton_detail_structure_no_symbols() {
         result.files_scanned, 0,
         "structure mode should not scan source files"
     );
+
+    // dirs_scanned should be Some(1) for the src/ directory
+    assert_eq!(
+        result.dirs_scanned,
+        Some(1),
+        "structure mode should count directories: got {:?}",
+        result.dirs_scanned
+    );
 }
 
 /// Files mode: output contains file paths but NO symbol keywords.
@@ -1313,6 +1323,12 @@ async fn test_skeleton_detail_files_no_symbols() {
         result.files_scanned > 0,
         "files mode should count scanned files"
     );
+
+    // dirs_scanned should be None for files mode
+    assert_eq!(
+        result.dirs_scanned, None,
+        "files mode should not set dirs_scanned"
+    );
 }
 
 /// Symbols mode: output contains symbol keywords (regression test).
@@ -1342,6 +1358,12 @@ async fn test_skeleton_detail_symbols_has_symbols() {
         result.skeleton.contains("File: "),
         "symbols mode must use 'File: ' header format: got {:?}",
         result.skeleton
+    );
+
+    // dirs_scanned should be None for symbols mode
+    assert_eq!(
+        result.dirs_scanned, None,
+        "symbols mode should not set dirs_scanned"
     );
 }
 
@@ -1454,6 +1476,13 @@ async fn test_skeleton_detail_structure_empty_dir() {
     // Empty dir has no subdirs, no manifests
     assert_eq!(result.files_in_scope, 0, "empty dir has 0 manifest files");
     assert!(result.tech_stack.is_empty(), "empty dir has no tech stack");
+
+    // dirs_scanned should be Some(0) for empty directory (we counted but found none)
+    assert_eq!(
+        result.dirs_scanned,
+        Some(0),
+        "empty directory should have dirs_scanned = Some(0)"
+    );
 }
 
 /// Structure mode at depth=1 sees immediate subdirs and root manifests,
@@ -1491,6 +1520,13 @@ async fn test_skeleton_detail_structure_depth_1() {
         result.tech_stack.is_empty(),
         "depth=1 should have empty tech_stack when source files are in subdirs: got {:?}",
         result.tech_stack
+    );
+
+    // depth=1 should still count src/ directory
+    assert_eq!(
+        result.dirs_scanned,
+        Some(1),
+        "depth=1 should still count immediate subdirectories"
     );
 }
 

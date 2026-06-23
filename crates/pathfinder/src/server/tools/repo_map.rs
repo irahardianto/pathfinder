@@ -121,11 +121,19 @@ impl PathfinderServer {
     async fn empty_changes_response(
         &self,
         changed_since_ref: &str,
+        detail: &Detail,
     ) -> Result<CallToolResult, ErrorData> {
         let capability_status = self.lawyer.capability_status().await;
         let lsp_status = derive_lsp_status(&capability_status);
+        let mode = match detail {
+            Detail::Structure => Some("structure".to_string()),
+            Detail::Files => Some("files".to_string()),
+            Detail::Symbols => Some("symbols".to_string()),
+        };
         let metadata = crate::server::types::GetRepoMapMetadata {
             tech_stack: vec![],
+            mode,
+            dirs_scanned: None,
             files_scanned: 0,
             files_truncated: 0,
             truncated_paths: vec![],
@@ -208,7 +216,9 @@ impl PathfinderServer {
             {
                 Ok(files) => {
                     if files.is_empty() {
-                        return self.empty_changes_response(&params.changed_since).await;
+                        return self
+                            .empty_changes_response(&params.changed_since, &params.detail)
+                            .await;
                     }
                     changed_files = Some(files);
                 }
@@ -350,8 +360,16 @@ impl PathfinderServer {
             None
         };
 
+        let mode = match params.detail {
+            Detail::Structure => Some("structure".to_string()),
+            Detail::Files => Some("files".to_string()),
+            Detail::Symbols => Some("symbols".to_string()),
+        };
+
         let metadata = crate::server::types::GetRepoMapMetadata {
             tech_stack: result.tech_stack,
+            mode,
+            dirs_scanned: result.dirs_scanned,
             files_scanned: result.files_scanned,
             files_truncated: result.files_truncated,
             truncated_paths: result.truncated_paths,

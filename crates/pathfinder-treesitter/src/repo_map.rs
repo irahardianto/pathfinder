@@ -136,6 +136,8 @@ pub struct RepoMapResult {
     pub coverage_percent: u8,
     /// Mapping of version identifiers to their corresponding hashes.
     pub version_hashes: HashMap<String, String>,
+    /// Number of directories scanned (Structure mode only).
+    pub dirs_scanned: Option<usize>,
 }
 
 /// Estimate the number of tokens for the given text.
@@ -669,6 +671,7 @@ fn generate_structure_skeleton(
         files_in_scope: manifests.len(),
         coverage_percent: 100,
         version_hashes: HashMap::default(),
+        dirs_scanned: Some(dirs.len()),
     })
 }
 
@@ -752,6 +755,7 @@ async fn generate_files_skeleton(
         files_in_scope,
         coverage_percent: 100,
         version_hashes,
+        dirs_scanned: None,
     })
 }
 
@@ -969,6 +973,7 @@ async fn generate_symbols_skeleton(
         files_in_scope,
         coverage_percent,
         version_hashes,
+        dirs_scanned: None,
     })
 }
 

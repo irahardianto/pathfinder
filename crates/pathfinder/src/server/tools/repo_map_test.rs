@@ -50,6 +50,7 @@ fn ok_result() -> RepoMapResult {
         files_in_scope: 3,
         coverage_percent: 100,
         version_hashes: HashMap::new(),
+        dirs_scanned: None,
     }
 }
 
@@ -871,4 +872,136 @@ async fn test_explore_suggested_max_tokens_capped_at_100000_for_zero_coverage() 
         suggested, 100_000,
         "suggested_max_tokens must be capped at 100,000 even in the 0% coverage fallback"
     );
+}
+
+// ── PATCH-004: mode and dirs_scanned fields ─────────────────────────────
+
+fn structure_mode_result() -> RepoMapResult {
+    RepoMapResult {
+        skeleton: "src/\nCargo.toml".to_owned(),
+        tech_stack: vec!["rust".to_owned()],
+        files_scanned: 0,
+        files_truncated: 0,
+        truncated_paths: vec![],
+        files_in_scope: 1,
+        coverage_percent: 100,
+        version_hashes: HashMap::new(),
+        dirs_scanned: Some(1),
+    }
+}
+
+#[tokio::test]
+async fn test_explore_structure_mode_has_mode_and_dirs_scanned() {
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(structure_mode_result()));
+    let (server, _dir) = make_server(surgeon);
+
+    let mut params = default_params();
+    params.detail = Detail::Structure;
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(result.is_ok(), "should succeed: {result:?}");
+    let tool_result = result.unwrap();
+    let meta: crate::server::types::GetRepoMapMetadata =
+        serde_json::from_value(tool_result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(meta.mode, Some("structure".to_string()));
+    assert_eq!(meta.dirs_scanned, Some(1));
+    assert_eq!(meta.files_scanned, 0);
+}
+
+#[tokio::test]
+async fn test_explore_files_mode_has_mode_no_dirs_scanned() {
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(ok_result()));
+    let (server, _dir) = make_server(surgeon);
+
+    let mut params = default_params();
+    params.detail = Detail::Files;
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(result.is_ok(), "should succeed: {result:?}");
+    let tool_result = result.unwrap();
+    let meta: crate::server::types::GetRepoMapMetadata =
+        serde_json::from_value(tool_result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(meta.mode, Some("files".to_string()));
+    assert_eq!(meta.dirs_scanned, None);
+    assert!(meta.files_scanned > 0);
+}
+
+#[tokio::test]
+async fn test_explore_symbols_mode_has_mode_no_dirs_scanned() {
+    let surgeon = MockSurgeon::default();
+    surgeon
+        .generate_skeleton_results
+        .lock()
+        .unwrap()
+        .push(Ok(ok_result()));
+    let (server, _dir) = make_server(surgeon);
+
+    let params = default_params();
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(result.is_ok(), "should succeed: {result:?}");
+    let tool_result = result.unwrap();
+    let meta: crate::server::types::GetRepoMapMetadata =
+        serde_json::from_value(tool_result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(meta.mode, Some("symbols".to_string()));
+    assert_eq!(meta.dirs_scanned, None);
+}
+
+#[tokio::test]
+async fn test_changed_since_empty_includes_mode_field() {
+    let ws_dir = tempdir().expect("tempdir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("workspace");
+
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(ws_dir.path())
+        .status()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "init"])
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "t@t.t")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "t@t.t")
+        .current_dir(ws_dir.path())
+        .status()
+        .expect("git commit");
+
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(MockScout::default()),
+        Arc::new(MockSurgeon::default()),
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let mut params = default_params();
+    params.detail = Detail::Structure;
+    params.changed_since = "HEAD".to_owned();
+
+    let result = server.get_repo_map_impl(params).await;
+    assert!(result.is_ok());
+    let tool_result = result.unwrap();
+    let meta: crate::server::types::GetRepoMapMetadata =
+        serde_json::from_value(tool_result.structured_content.unwrap()).unwrap();
+
+    assert_eq!(meta.mode, Some("structure".to_string()));
+    assert_eq!(meta.dirs_scanned, None);
+    assert_eq!(meta.files_scanned, 0);
 }
