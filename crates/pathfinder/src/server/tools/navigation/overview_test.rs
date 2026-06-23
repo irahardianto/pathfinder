@@ -819,6 +819,7 @@ async fn test_symbol_overview_line_count_and_source_inclusion() {
             end_line: 12,
             name_column: 0,
             language: "rust".to_owned(),
+            ..Default::default()
         }),
         Ok(make_scope()),
         Ok(make_scope()),

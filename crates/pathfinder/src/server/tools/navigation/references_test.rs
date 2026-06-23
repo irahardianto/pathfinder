@@ -1315,6 +1315,7 @@ async fn test_find_all_references_grep_filters_non_source_files() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines, reason = "Test data setup needs many lines")]
 async fn test_find_all_references_grep_fallback_unsupported_ext_uses_line_number() {
     // GAP 6 + BUG 1 test:
     // For unsupported extensions (.vue, .mjs, .cjs, .pyi):
@@ -1336,6 +1337,7 @@ async fn test_find_all_references_grep_fallback_unsupported_ext_uses_line_number
         end_line: 4,
         name_column: 20, // column of 'u' in useAuth
         language: "vue".to_owned(),
+        ..Default::default()
     };
     surgeon
         .read_symbol_scope_results
