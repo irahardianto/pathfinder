@@ -329,7 +329,7 @@ impl fmt::Display for VersionHash {
 }
 
 /// The exact source code and metadata for an AST symbol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SymbolScope {
     /// The source code snippet of the symbol block.
     pub content: String,
@@ -346,6 +346,21 @@ pub struct SymbolScope {
     pub name_column: usize,
     /// The language of the file.
     pub language: String,
+    /// The parent symbol's kind (e.g., "interface", "class", "struct", "module").
+    ///
+    /// Used to detect trait/interface methods so we can call `goto_implementation`
+    /// during trace to expand to all concrete implementations.
+    ///
+    /// `None` for top-level symbols.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub parent_kind: Option<String>,
+    /// The parent symbol's name (e.g., the trait/interface name).
+    ///
+    /// `None` for top-level symbols.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub parent_name: Option<String>,
 }
 
 /// The workspace root path. All file operations are relative to this.
