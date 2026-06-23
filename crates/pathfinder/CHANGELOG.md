@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0](https://github.com/irahardianto/pathfinder/compare/v0.22.0...v0.23.0) - 2026-06-23
+
+### Added
+
+- *(find_symbol)* add did_you_mean suggestions on empty symbol search (PATCH-006)
+- *(explore)* add mode and dirs_scanned metadata to structure mode (PATCH-004)
+- *(trace)* surface machine-readable degraded hint and verification flags (PATCH-003)
+- *(trace)* resolve trait method callers through all implementations (PATCH-002)
+- *(health)* reconcile navigation_verified with LSP status semantics (PATCH-001)
+
+### Fixed
+
+- *(pathfinder)* replace buffered(4) with sequential batch processing in locate and inspect
+- *(pathfinder)* fix batch locate race condition by using synchronous path existence check
+- *(health)* replace stale TS call hierarchy limitation messages (PATCH-005)
+- *(lsp)* fix partial move in TS call hierarchy integration test
+- *(lsp)* correct CallHierarchyCall field access in integration test; bump memmap2 to 0.9.11
+
 ## [0.22.0](https://github.com/irahardianto/pathfinder/compare/v0.21.1...v0.22.0) - 2026-06-21
 
 ### Added

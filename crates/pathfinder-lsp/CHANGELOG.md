@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.7](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.12.6...pathfinder-mcp-lsp-v0.12.7) - 2026-06-23
+
+### Fixed
+
+- *(lsp)* fix partial move in TS call hierarchy integration test
+- *(lsp)* correct CallHierarchyCall field access in integration test; bump memmap2 to 0.9.11
+- *(health)* replace stale TS call hierarchy limitation messages (PATCH-005)
+
 ## [0.12.6](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.12.5...pathfinder-mcp-lsp-v0.12.6) - 2026-06-21
 
 ### Fixed
