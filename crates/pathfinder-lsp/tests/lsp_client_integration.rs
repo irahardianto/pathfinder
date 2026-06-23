@@ -560,7 +560,7 @@ export function baz(): string {
             .await;
 
         match hierarchy {
-            Ok(items) if !items.is_empty() => {
+            Ok(ref items) if !items.is_empty() => {
                 eprintln!("call_hierarchy_prepare returned {} items", items.len());
                 for (i, item) in items.iter().enumerate() {
                     eprintln!("  [{}] name={}, file={:?}", i, item.name, item.file);
