@@ -147,6 +147,7 @@ impl PathfinderServer {
                 supports_definition: status.supports_definition,
                 indexing_status,
                 navigation_ready: status.navigation_ready,
+                navigation_verified: None,
                 probe_verified: false,
                 navigation_tested: None,
                 call_hierarchy_verified: false,
@@ -154,7 +155,7 @@ impl PathfinderServer {
                 server_name: status.server_name.clone(),
                 registrations_received: status.registrations_received,
                 indexing_progress_percent: status.indexing_progress_percent,
-                degraded_tools: compute_degraded_tools(status),
+                degraded_tools: vec![],
                 indexing_source: status.indexing_source.clone(),
                 indexing_duration_secs: status.indexing_duration_secs,
                 last_probe_age_secs: None,
@@ -194,6 +195,7 @@ impl PathfinderServer {
                                     lang_health.status = "ready".to_string();
                                 }
                                 lang_health.probe_verified = true;
+                                lang_health.navigation_verified = Some(true);
                                 lang_health.navigation_tested = Some(true);
                                 lang_health.call_hierarchy_verified = entry.call_hierarchy_verified;
                                 if overall_status != "ready" {
@@ -204,6 +206,7 @@ impl PathfinderServer {
                                     lang_health.status = "degraded".to_string();
                                 }
                                 lang_health.probe_verified = false;
+                                lang_health.navigation_verified = Some(false);
                                 lang_health.navigation_tested = Some(false);
                                 lang_health.call_hierarchy_verified = false;
                             }
@@ -242,6 +245,7 @@ impl PathfinderServer {
                 if probe_result {
                     lang_health.status = "ready".to_string();
                     lang_health.probe_verified = true;
+                    lang_health.navigation_verified = Some(true);
                     lang_health.navigation_tested = Some(true);
                     lang_health.call_hierarchy_verified = call_hierarchy_verified;
                     if overall_status != "ready" {
@@ -252,6 +256,7 @@ impl PathfinderServer {
                         lang_health.status = "degraded".to_string();
                     }
                     lang_health.probe_verified = false;
+                    lang_health.navigation_verified = Some(false);
                     lang_health.navigation_tested = Some(false);
                     lang_health.call_hierarchy_verified = false;
                 }
@@ -274,6 +279,7 @@ impl PathfinderServer {
                     lang_health.last_probe_age_secs =
                         Some(u32::try_from(entry.age_secs()).unwrap_or(u32::MAX));
                     lang_health.probe_verified = entry.success;
+                    lang_health.navigation_verified = Some(entry.success);
                     lang_health.navigation_tested = Some(entry.success);
                     lang_health.call_hierarchy_verified = entry.call_hierarchy_verified;
                     if entry.success {
@@ -290,9 +296,42 @@ impl PathfinderServer {
             }
         }
 
-        // Downgrade overall status if all ready languages are now degraded
-        if !languages.iter().any(|l| l.status == "ready") && overall_status == "ready" {
+        // PATCH-001: Consistency pass - reconcile status with navigation_verified
+        for lang_health in &mut languages {
+            match (lang_health.navigation_verified, lang_health.status.as_str()) {
+                (Some(true), "degraded") => {
+                    lang_health.status = "ready".to_string();
+                }
+                (Some(false), "ready") => {
+                    lang_health.status = "degraded".to_string();
+                }
+                _ => {}
+            }
+        }
+
+        // Recompute overall_status AFTER consistency pass
+        // Consistency pass can upgrade "degraded" → "ready" or downgrade "ready" → "degraded"
+        let has_ready = languages.iter().any(|l| l.status == "ready");
+        let has_degraded = languages.iter().any(|l| l.status == "degraded");
+
+        if has_ready {
+            // Any ready language → overall is ready (highest priority)
+            overall_status = "ready";
+        } else if has_degraded && overall_status != "warming_up" && overall_status != "starting" {
+            // No ready languages, but some degraded → overall is degraded
+            // (unless warming_up/starting is still more accurate for this session)
             overall_status = "degraded";
+        }
+
+        // PATCH-001: Recompute degraded_tools after probe loop using navigation_verified
+        for lang_health in &mut languages {
+            lang_health.degraded_tools = compute_degraded_tools_from_health(
+                lang_health.navigation_verified,
+                lang_health.navigation_ready,
+                lang_health.supports_definition,
+                lang_health.supports_call_hierarchy,
+                lang_health.server_name.as_ref(),
+            );
         }
 
         // PATCH-008: Add missing languages (markers found but no LSP binary)
@@ -316,6 +355,7 @@ impl PathfinderServer {
                 supports_definition: None,
                 indexing_status: None,
                 navigation_ready: None,
+                navigation_verified: None,
                 probe_verified: false,
                 navigation_tested: None,
                 call_hierarchy_verified: false,
@@ -375,7 +415,9 @@ impl PathfinderServer {
 
                 if is_ts_js {
                     known_limitations.push(format!(
-                        "{}: TypeScript/JavaScript language servers do not support call hierarchy. trace uses grep fallback (less accurate)",
+                        "{}: Call hierarchy not available for this TypeScript/JavaScript LSP session. \
+                        This may indicate TypeScript < 3.8.0 or capability negotiation failure. \
+                        trace uses grep fallback (less accurate).",
                         lang_health.language
                     ));
                 } else {
@@ -763,22 +805,54 @@ pub(super) fn format_uptime(seconds: u64) -> String {
     }
 }
 
-/// Returns structured information about tools that lose LSP support for this language.
+/// Recompute `degraded_tools` based on post-probe health state.
 ///
-/// Each entry includes the tool name, severity level, and description of the fallback behavior.
-pub(super) fn compute_degraded_tools(
-    status: &pathfinder_lsp::types::LspLanguageStatus,
+/// Keys off `navigation_verified` (live probe result) rather than just
+/// `navigation_ready` (capability advertisement).
+#[allow(clippy::too_many_lines)]
+pub(super) fn compute_degraded_tools_from_health(
+    navigation_verified: Option<bool>,
+    navigation_ready: Option<bool>,
+    supports_definition: Option<bool>,
+    supports_call_hierarchy: Option<bool>,
+    server_name: Option<&String>,
 ) -> Vec<crate::server::types::DegradedToolInfo> {
     let mut degraded = Vec::new();
 
-    // When the LSP is still warming up (navigation_ready is not yet confirmed true),
-    // all LSP-backed tools should be flagged as degraded — even if capability flags
-    // are not yet known (None). This closes the gap where warming_up status incorrectly
-    // showed an empty degraded_tools list, misleading agents into thinking tools worked.
-    let warming_up = status.navigation_ready != Some(true);
+    let navigation_broken = navigation_verified == Some(false);
+    let probe_not_run = navigation_verified.is_none();
+    let warming_up = navigation_ready != Some(true);
 
-    if warming_up {
-        // LSP is starting or indexing — all navigation tools operate in degraded mode.
+    if navigation_broken {
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "locate".to_owned(),
+            severity: "degraded".to_owned(),
+            description: "LSP navigation probe failed. Uses grep heuristic. Retry or restart LSP."
+                .to_owned(),
+        });
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "trace".to_owned(),
+            severity: "degraded".to_owned(),
+            description: "LSP navigation probe failed. Uses grep fallback. Retry or restart LSP."
+                .to_owned(),
+        });
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "inspect".to_owned(),
+            severity: "degraded".to_owned(),
+            description: "LSP navigation probe failed. Returns source only. Retry or restart LSP."
+                .to_owned(),
+        });
+        degraded.push(crate::server::types::DegradedToolInfo {
+            tool: "trace(scope=\"references\")".to_owned(),
+            severity: "degraded".to_owned(),
+            description:
+                "LSP navigation probe failed. References may be incomplete. Retry or restart LSP."
+                    .to_owned(),
+        });
+        return degraded;
+    }
+
+    if probe_not_run && warming_up {
         degraded.push(crate::server::types::DegradedToolInfo {
             tool: "locate".to_owned(),
             severity: "warming_up".to_owned(),
@@ -807,8 +881,7 @@ pub(super) fn compute_degraded_tools(
         return degraded;
     }
 
-    // LSP is ready — only flag tools where specific capabilities are explicitly absent.
-    if status.supports_definition != Some(true) {
+    if supports_definition != Some(true) {
         degraded.push(crate::server::types::DegradedToolInfo {
             tool: "locate".to_owned(),
             severity: "grep_fallback".to_owned(),
@@ -818,8 +891,13 @@ pub(super) fn compute_degraded_tools(
         });
     }
 
-    if status.supports_call_hierarchy != Some(true) {
-        let is_ts_js = status.server_name.as_ref().is_some_and(|n| {
+    if supports_call_hierarchy != Some(true) {
+        // This check fires when supports_call_hierarchy is not Some(true),
+        // meaning either: (a) TypeScript < 3.8.0, (b) capability negotiation
+        // failed, or (c) LSP server doesn't implement callHierarchyProvider.
+        // After SPIKE-B, typescript-language-server with TS 3.8.0+ SHOULD
+        // set supports_call_hierarchy=Some(true), making this check NOT fire.
+        let is_ts_js = server_name.is_some_and(|n| {
             let lower = n.to_lowercase();
             lower.contains("typescript")
                 || lower.contains("tsserver")
@@ -828,7 +906,7 @@ pub(super) fn compute_degraded_tools(
         });
 
         let trace_desc = if is_ts_js {
-            "TypeScript/JavaScript language servers do not support call hierarchy. trace uses grep fallback (less accurate)."
+            "Call hierarchy not negotiated for this TS/JS LSP session (requires TypeScript 3.8.0+). trace uses grep fallback (less accurate)."
                 .to_owned()
         } else {
             "Uses text search instead of call hierarchy. May over/under-count references."
@@ -836,7 +914,7 @@ pub(super) fn compute_degraded_tools(
         };
 
         let inspect_desc = if is_ts_js {
-            "TypeScript/JavaScript language servers do not support call hierarchy. inspect returns source only, no dependency signatures."
+            "Call hierarchy not negotiated for this TS/JS LSP session (requires TypeScript 3.8.0+). inspect returns source only, no dependency signatures."
                 .to_owned()
         } else {
             "Returns source only, no dependency signatures. Use search as alternative.".to_owned()

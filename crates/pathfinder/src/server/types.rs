@@ -261,6 +261,12 @@ pub struct GroupedMatch {
 pub struct GetRepoMapMetadata {
     /// Technology stack of the repository.
     pub tech_stack: Vec<String>,
+    /// The detail mode used for this response: `"structure"`, `"files"`, or `"symbols"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Number of directories scanned during repository mapping (structure mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirs_scanned: Option<usize>,
     /// Number of files scanned.
     pub files_scanned: usize,
     /// Number of files truncated.
@@ -548,13 +554,37 @@ pub struct ImpactReference {
 #[derive(Debug, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct FindCallersCalleesMetadata {
     /// Symbols that call the target (caller graph).
-    /// `null` when `degraded` is `true` — LSP was unavailable so callers are **unknown**.
-    /// An empty array `[]` means LSP confirmed zero callers.
+    /// `null` when `incoming_verified` is `Some(false)` AND the result is
+    /// genuinely unknown (LSP unavailable, no heuristic fallback matched) —
+    /// callers are **unknown**, do NOT treat as zero.
+    /// An empty array `[]` means callers were verified (either by LSP, or by
+    /// heuristic grep fallback) and the list is complete.
+    /// Check `incoming_verified` to disambiguate "UNKNOWN (null)" from
+    /// "verified empty (Some([]))" — null is a footgun when agents coalesce
+    /// it to an empty array.
     pub incoming: Option<Vec<ImpactReference>>,
     /// Symbols the target calls (callee graph).
-    /// `null` when `degraded` is `true` — LSP was unavailable so callees are **unknown**.
-    /// An empty array `[]` means LSP confirmed zero callees.
+    /// Same semantics as `incoming` but for the callee list.
+    /// Check `outgoing_verified` to disambiguate `null` (UNKNOWN) from `[]`
+    /// (verified zero).
     pub outgoing: Option<Vec<ImpactReference>>,
+    /// Whether `incoming` was verified by LSP (vs unknown due to degradation).
+    ///
+    /// - `Some(true)`: callers list is verified (either LSP-confirmed, possibly
+    ///   empty, or heuristic grep results that successfully completed).
+    ///   `incoming` will be `Some(vec)` — agents may use `incoming.len()` to
+    ///   count, but treat the list as a candidate set when the global
+    ///   `degraded` flag is `true` (heuristic, may include false positives).
+    /// - `Some(false)`: callers are UNKNOWN. `incoming` is `null`.
+    ///   Do NOT treat as zero. Use `search` to verify manually.
+    /// - `None`: field not applicable (e.g., scope did not request callers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_verified: Option<bool>,
+    /// Whether `outgoing` was verified by LSP (vs unknown due to degradation).
+    ///
+    /// Same semantics as `incoming_verified` but for the callee list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outgoing_verified: Option<bool>,
     /// Number of transitive levels traversed.
     pub depth_reached: u32,
     /// Total files referenced across all incoming and outgoing references.
@@ -587,7 +617,11 @@ pub struct FindCallersCalleesMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// Spec 5.2: How the call hierarchy was resolved.
-    /// One of: `lsp_call_hierarchy`, `grep_file_scoped`, `treesitter_direct`, `treesitter_fallback`.
+    /// One of: `lsp_call_hierarchy`, `lsp_call_hierarchy_with_impl_expansion`,
+    /// `grep_file_scoped`, `treesitter_direct`, `treesitter_fallback`.
+    /// Note: `lsp_call_hierarchy_with_impl_expansion` indicates the target was a
+    /// trait/interface method; callers were merged across all concrete
+    /// implementations found via `goto_implementation`.
     /// Note: `grep_file_scoped` covers all LSP-unavailable grep fallback paths; the finer-grained
     /// `grep_impl_scoped`/`grep_global`/`grep_broad` values are NOT emitted for this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -750,11 +784,19 @@ pub struct LspHealthResponse {
 pub struct LspLanguageHealth {
     /// Language ID (e.g., "rust", "typescript").
     pub language: String,
-    /// Status of the language server process: `"ready"`, `"warming_up"`, `"starting"`, or `"unavailable"`.
+    /// Status of the language server process.
     ///
-    /// Note: `status: "ready"` indicates the LSP process has started and successfully completed the
-    /// initialization handshake (i.e. capabilities are negotiated). It does NOT mean the live probe
-    /// has verified navigation. For live verification, check `navigation_tested: Some(true)`.
+    /// Lifecycle: `unavailable` → `starting` → `warming_up` → `ready`
+    /// A `ready` LSP may be downgraded to `degraded` if a live probe fails.
+    ///
+    /// - `"unavailable"`: No LSP process running or detected
+    /// - `"starting"`: Process exists, no capability info yet (lazy start)
+    /// - `"warming_up"`: Process running, `navigation_ready` not yet confirmed
+    /// - `"ready"`: Initialize handshake complete, `navigation_ready=true`,
+    ///   and live probe succeeded (`navigation_verified=Some(true)`)
+    /// - `"degraded"`: Initialize handshake completed (`navigation_ready=true`)
+    ///   but live probe failed (`navigation_verified=Some(false)`).
+    ///   Navigation MAY still work — retry or use with caution.
     pub status: String,
     /// Time since LSP process started, formatted as a human-readable string (e.g., "45s").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -781,18 +823,26 @@ pub struct LspLanguageHealth {
     pub indexing_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_duration_secs: Option<u64>,
-    /// Whether navigation (`locate`, `trace`) is functional.
+    /// Whether the LSP advertised navigation capabilities during initialize.
+    ///
+    /// This reflects capability negotiation only — it does NOT guarantee
+    /// navigation actually works. For live verification, check `navigation_verified`.
     ///
     /// `true` once the LSP initialize handshake completes with `definitionProvider: true`.
     /// Independent of `indexing_status` — navigation works during indexing but
     /// results may be partial until indexing completes.
-    ///
-    /// Agents should use this signal to decide:
-    /// - `navigation_ready = true` + `indexing_status = "complete"` → full confidence
-    /// - `navigation_ready = true` + `indexing_status = "in_progress"` → results may be partial
-    /// - `navigation_ready = false` or `None` → fall back to Tree-sitter
     #[serde(skip_serializing_if = "Option::is_none")]
     pub navigation_ready: Option<bool>,
+    /// Whether navigation was verified by a live probe (not just capability
+    /// advertisement). Distinct from `navigation_ready` which reflects
+    /// capability negotiation only.
+    ///
+    /// - `Some(true)`: live probe succeeded — navigation is operational
+    /// - `Some(false)`: live probe failed — navigation may be broken despite
+    ///   `navigation_ready: true`
+    /// - `None`: probe not yet run (freshness unknown)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub navigation_verified: Option<bool>,
     /// Whether the status was verified by a live probe (rather than just progress notifications).
     /// When true, the agent can trust the status.
     #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
@@ -871,6 +921,20 @@ pub struct FindSymbolResponse {
     /// Time taken in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Suggested alternative symbol paths when `symbols` is empty.
+    ///
+    /// Populated using fuzzy matching and cross-file search when the
+    /// query matches no exact symbol. Each entry is a full semantic path
+    /// (`file::symbol`) that can be used directly with `inspect` or
+    /// `trace`.
+    ///
+    /// Absent when `symbols` is non-empty (exact match found).
+    /// Absent when no suggestions could be found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did_you_mean: Option<Vec<String>>,
+    /// Human-readable hint when no exact match found but suggestions exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// Result for a single file in `read_files`.

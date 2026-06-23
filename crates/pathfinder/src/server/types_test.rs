@@ -59,6 +59,10 @@ fn test_read_params_max_lines_per_file_schema_documents_truncation() {
 /// contract from the tool description field. The doc comment on the struct field
 /// IS included in the schemars-generated schema (via `JsonSchema` derive) and
 /// available as `structured_content`, so it must be correct and complete.
+///
+/// PATCH-003: The doc now references `incoming_verified` (the machine-readable
+/// per-field uncertainty flag) instead of the global `degraded` boolean, so the
+/// assertion accepts either term.
 #[test]
 fn test_find_callers_callees_metadata_incoming_schema_documents_null_vs_empty() {
     let schema = schemars::schema_for!(FindCallersCalleesMetadata);
@@ -80,10 +84,14 @@ fn test_find_callers_callees_metadata_incoming_schema_documents_null_vs_empty() 
          (unknown/degraded).\nGot: {description:?}"
     );
 
+    // PATCH-003: the doc may now reference `incoming_verified` (the
+    // machine-readable per-field uncertainty flag) instead of the global
+    // `degraded` boolean. Accept either reference — both convey when null
+    // is returned.
     assert!(
-        description.contains("degraded"),
-        "`incoming` schema description must reference the `degraded` field to explain \
-         when null is returned.\nGot: {description:?}"
+        description.contains("degraded") || description.contains("incoming_verified"),
+        "`incoming` schema description must reference either `degraded` or \
+         `incoming_verified` to explain when null is returned.\nGot: {description:?}"
     );
 }
 
@@ -235,6 +243,103 @@ fn test_visibility_degraded_doc_matches_code() {
 //
 // These verify that the JSON serialization of None vs Some(vec![])
 // matches what the doc comments promise agents will see.
+
+// ── PATCH-003: incoming_verified / outgoing_verified schema tests ────────
+
+/// `FindCallersCalleesMetadata.incoming_verified` must appear in the schema
+/// (so MCP clients can discover it) and the doc must mention the
+/// `incoming_verified` field to explain the per-field uncertainty flag.
+#[test]
+fn test_find_callers_callees_incoming_verified_schema_documents_per_field_flag() {
+    let schema = schemars::schema_for!(FindCallersCalleesMetadata);
+    let schema_json = serde_json::to_value(&schema).expect("schema to JSON");
+
+    assert!(
+        schema_json["properties"]["incoming_verified"].is_object(),
+        "`incoming_verified` must appear in the generated schema as a property"
+    );
+    let description = schema_json["properties"]["incoming_verified"]["description"]
+        .as_str()
+        .expect("`incoming_verified` must have a `description` field");
+
+    assert!(
+        description.contains("UNKNOWN") || description.contains("Do NOT"),
+        "`incoming_verified` doc must warn against treating null as zero, got: {description}"
+    );
+    assert!(
+        description.contains("Some(false)")
+            && description.contains("Some(true)")
+            && description.contains("None"),
+        "`incoming_verified` doc must document the three Option<bool> states \
+         (Some(true) / Some(false) / None), got: {description}"
+    );
+}
+
+/// `FindCallersCalleesMetadata.outgoing_verified` must also be documented.
+#[test]
+fn test_find_callers_callees_outgoing_verified_schema_documents_per_field_flag() {
+    let schema = schemars::schema_for!(FindCallersCalleesMetadata);
+    let schema_json = serde_json::to_value(&schema).expect("schema to JSON");
+
+    assert!(
+        schema_json["properties"]["outgoing_verified"].is_object(),
+        "`outgoing_verified` must appear in the generated schema as a property"
+    );
+}
+
+/// `incoming_verified: None` must be ABSENT from JSON serialization
+/// (`skip_serializing_if`). This is important so the field is opt-in
+/// for future extensibility.
+#[test]
+fn test_find_callers_callees_incoming_verified_serialization_omits_none() {
+    let meta = FindCallersCalleesMetadata {
+        incoming: None,
+        outgoing: None,
+        incoming_verified: None,
+        outgoing_verified: None,
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&meta).expect("serialize");
+    let obj = json.as_object().expect("object");
+    assert!(
+        !obj.contains_key("incoming_verified"),
+        "`incoming_verified: None` must be ABSENT from JSON, but it was present: {json}"
+    );
+    assert!(
+        !obj.contains_key("outgoing_verified"),
+        "`outgoing_verified: None` must be ABSENT from JSON, but it was present: {json}"
+    );
+}
+
+/// `incoming_verified: Some(true)` and `Some(false)` must BOTH appear in JSON
+/// (no `skip_serializing_if` for Some values). Agents must be able to read
+/// both states.
+#[test]
+fn test_find_callers_callees_incoming_verified_serialization_includes_some() {
+    let meta_true = FindCallersCalleesMetadata {
+        incoming_verified: Some(true),
+        ..Default::default()
+    };
+    let json_true = serde_json::to_value(&meta_true).expect("serialize");
+    assert_eq!(
+        json_true["incoming_verified"],
+        serde_json::json!(true),
+        "`incoming_verified: Some(true)` must serialize as JSON `true`"
+    );
+
+    let meta_false = FindCallersCalleesMetadata {
+        incoming_verified: Some(false),
+        ..Default::default()
+    };
+    let json_false = serde_json::to_value(&meta_false).expect("serialize");
+    assert_eq!(
+        json_false["incoming_verified"],
+        serde_json::json!(false),
+        "`incoming_verified: Some(false)` must serialize as JSON `false`"
+    );
+}
+
+// ── PATCH-003: existing P2-7 serialization tests ────────────────────────
 
 /// `FindCallersCalleesMetadata.incoming` serializes as JSON `null` when `None`
 /// (no `skip_serializing_if`), and as `[]` when `Some(vec![])`.

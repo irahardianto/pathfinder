@@ -306,6 +306,20 @@ async fn test_lsp_health_probe_keeps_warming_up_when_probe_fails() {
         Some(false),
         "navigation_tested must be Some(false) when liveness probe fails (LSP non-responsive)"
     );
+    assert_eq!(
+        rust_health.navigation_verified,
+        Some(false),
+        "navigation_verified must be Some(false) when liveness probe fails"
+    );
+    assert_eq!(
+        rust_health.navigation_ready,
+        Some(true),
+        "navigation_ready should remain true (capability advertisement, not operational)"
+    );
+    assert!(
+        !rust_health.degraded_tools.is_empty(),
+        "degraded_tools must not be empty when status is degraded"
+    );
 }
 
 #[tokio::test]
@@ -1915,30 +1929,29 @@ fn test_format_uptime_units() {
 
 #[test]
 fn test_compute_degraded_tools_conditions() {
-    let mut status = pathfinder_lsp::types::LspLanguageStatus {
-        validation: true,
-        reason: "LSP connected".to_string(),
-        navigation_ready: Some(true),
-        indexing_complete: Some(true),
-        uptime_seconds: Some(60),
-        diagnostics_strategy: Some("pull".to_string()),
-        supports_definition: Some(false),
-        supports_call_hierarchy: Some(true),
-        supports_diagnostics: Some(true),
-        supports_formatting: Some(true),
-        server_name: None,
-        indexing_source: None,
-        indexing_duration_secs: None,
-        indexing_progress_percent: None,
-        registrations_received: None,
-    };
-    let degraded = compute_degraded_tools(&status);
+    let navigation_verified = Some(true);
+    let navigation_ready = Some(true);
+    let supports_definition = Some(false);
+    let supports_call_hierarchy = Some(true);
+    let server_name: Option<&String> = None;
+
+    let degraded = compute_degraded_tools_from_health(
+        navigation_verified,
+        navigation_ready,
+        supports_definition,
+        supports_call_hierarchy,
+        server_name,
+    );
     assert_eq!(degraded.len(), 1);
     assert_eq!(degraded[0].tool, "locate");
 
-    status.supports_definition = Some(true);
-    status.supports_call_hierarchy = Some(false);
-    let degraded2 = compute_degraded_tools(&status);
+    let degraded2 = compute_degraded_tools_from_health(
+        Some(true),
+        Some(true),
+        Some(true),
+        Some(false),
+        Some(&"typescript-language-server".to_string()),
+    );
     assert_eq!(degraded2.len(), 2);
     assert_eq!(degraded2[0].tool, "trace(scope=\"callers\")");
     assert_eq!(degraded2[1].tool, "inspect(include_dependencies=true)");
@@ -2347,8 +2360,14 @@ async fn test_health_invalid_action_returns_invalid_params() {
     );
 }
 
+/// Verifies that when TS LS does NOT negotiate call hierarchy
+/// (e.g., TypeScript < 3.8.0 or capability negotiation failure),
+/// the health response correctly reports the limitation.
+///
+/// After SPIKE-B, TS LS with TS 3.8.0+ SHOULD negotiate call hierarchy.
+/// This test covers the fallback case when it doesn't.
 #[tokio::test]
-async fn test_health_typescript_call_hierarchy_limitation() {
+async fn test_health_typescript_call_hierarchy_unavailable_when_not_negotiated() {
     let surgeon = Arc::new(MockSurgeon::default());
     let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
     let lawyer_clone = lawyer.clone();
@@ -2379,7 +2398,7 @@ async fn test_health_typescript_call_hierarchy_limitation() {
     let result = server.lsp_health_impl(params).await;
     let val = unpack_health(result.expect("should succeed"));
 
-    // Check degraded tools description
+    // Check degraded tools description - uses updated conditional language
     let ts_health = &val.languages[0];
     let trace_deg = ts_health
         .degraded_tools
@@ -2387,20 +2406,358 @@ async fn test_health_typescript_call_hierarchy_limitation() {
         .find(|t| t.tool == "trace(scope=\"callers\")")
         .expect("should find trace(scope=\"callers\") degraded tool");
     assert!(
-        trace_deg
-            .description
-            .contains("TypeScript/JavaScript language servers"),
-        "expected description to mention TypeScript/JavaScript language servers, got: {}",
+        trace_deg.description.contains("not negotiated"),
+        "expected description to mention 'not negotiated', got: {}",
+        trace_deg.description
+    );
+    assert!(
+        trace_deg.description.contains("TypeScript 3.8.0+"),
+        "expected description to mention 'TypeScript 3.8.0+', got: {}",
+        trace_deg.description
+    );
+    assert!(
+        !trace_deg.description.contains("do not support"),
+        "description should NOT say 'do not support', got: {}",
         trace_deg.description
     );
 
-    // Check known limitations
+    // Check known limitations - uses updated conditional language
+    let limitation_msg = val
+        .known_limitations
+        .iter()
+        .find(|l| l.contains("Call hierarchy"))
+        .expect("expected known_limitations to mention TS/JS call hierarchy limitation");
     assert!(
+        limitation_msg.contains("not available"),
+        "expected limitation to say 'not available', got: {limitation_msg}"
+    );
+    assert!(
+        limitation_msg.contains("3.8.0"),
+        "expected limitation to mention version '3.8.0', got: {limitation_msg}"
+    );
+    assert!(
+        !limitation_msg.contains("do not support"),
+        "limitation should NOT say 'do not support', got: {limitation_msg}"
+    );
+}
+
+/// Verifies that when TS LS DOES negotiate call hierarchy
+/// (TypeScript 3.8.0+ with SPIKE-B capability declaration),
+/// the health response does NOT report any TS-specific limitation.
+#[tokio::test]
+async fn test_health_typescript_call_hierarchy_available_no_limitation() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "typescript".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: Some("typescript-language-server".to_string()),
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams::default();
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let ts_health = &val.languages[0];
+    assert_eq!(ts_health.supports_call_hierarchy, Some(true));
+
+    // Assert NO TS-specific limitation message in known_limitations
+    // (messages about TypeScript < 3.8.0 should NOT appear when call hierarchy is available)
+    assert!(
+        val.known_limitations.iter().all(|l| {
+            !l.contains("TypeScript")
+                && !l.contains("not available for this")
+                && !l.contains("not negotiated")
+        }),
+        "expected no TS-specific call hierarchy limitation when supports_call_hierarchy=true, got: {:?}",
         val.known_limitations
+    );
+
+    // Assert degraded_tools does NOT contain TS-specific call hierarchy message
+    assert!(
+        ts_health
+            .degraded_tools
             .iter()
-            .any(|l| l
-                .contains("TypeScript/JavaScript language servers do not support call hierarchy")),
-        "expected known_limitations to mention TS/JS call hierarchy limitation, got: {:?}",
+            .all(|d| !d.description.contains("TypeScript")
+                && !d.description.contains("not negotiated")),
+        "expected no TS-specific degraded_tools when supports_call_hierarchy=true, got: {:?}",
+        ts_health.degraded_tools
+    );
+
+    // Assert trace/inspect are NOT degraded when call hierarchy is available
+    assert!(
+        !ts_health
+            .degraded_tools
+            .iter()
+            .any(|t| t.tool == "trace(scope=\"callers\")"),
+        "trace should NOT be degraded when supports_call_hierarchy=true"
+    );
+    assert!(
+        !ts_health
+            .degraded_tools
+            .iter()
+            .any(|t| t.tool == "inspect(include_dependencies=true)"),
+        "inspect should NOT be degraded when supports_call_hierarchy=true"
+    );
+}
+
+/// Verifies asymmetry: when TS LS reports `supports_call_hierarchy=None`
+/// (capability status unknown, not yet negotiated), `degraded_tools` SHOULD
+/// show TS-specific "not negotiated" messages (defensive, != Some(true)),
+/// but `known_limitations` should NOT (guarded by == Some(false)).
+///
+/// This documents the intentional asymmetry between the two guards.
+#[tokio::test]
+async fn test_health_typescript_call_hierarchy_none_shows_degraded_but_no_limitation() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "typescript".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: None, // KEY: None, not Some(false)
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: Some("typescript-language-server".to_string()),
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams::default();
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let ts_health = &val.languages[0];
+    assert_eq!(ts_health.supports_call_hierarchy, None);
+
+    // degraded_tools SHOULD show TS-specific message (uses != Some(true))
+    let trace_deg = ts_health
+        .degraded_tools
+        .iter()
+        .find(|t| t.tool == "trace(scope=\"callers\")");
+    assert!(
+        trace_deg.is_some(),
+        "trace should be degraded when supports_call_hierarchy=None"
+    );
+    assert!(
+        trace_deg.unwrap().description.contains("not negotiated"),
+        "degraded_tools should use TS-specific 'not negotiated' message, got: {}",
+        trace_deg.unwrap().description
+    );
+
+    // known_limitations should NOT show TS-specific message (uses == Some(false))
+    let has_ts_limitation = val
+        .known_limitations
+        .iter()
+        .any(|l| l.contains("TypeScript") || l.contains("call hierarchy"));
+    assert!(
+        !has_ts_limitation,
+        "known_limitations should NOT have TS message when supports_call_hierarchy=None, got: {:?}",
+        val.known_limitations
+    );
+}
+
+/// Verifies that vtsls (alternative TS language server) also triggers
+/// TS-specific messages when call hierarchy is unavailable.
+#[tokio::test]
+async fn test_health_vtsls_call_hierarchy_unavailable_uses_ts_message() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "typescript".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(false),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: Some("vtsls".to_string()), // KEY: vtsls, not typescript-language-server
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams::default();
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let ts_health = &val.languages[0];
+    let trace_deg = ts_health
+        .degraded_tools
+        .iter()
+        .find(|t| t.tool == "trace(scope=\"callers\")")
+        .expect("should find trace degraded tool");
+
+    assert!(
+        trace_deg.description.contains("not negotiated"),
+        "vtsls should trigger TS-specific message, got: {}",
+        trace_deg.description
+    );
+
+    // Also verify known_limitations has TS-specific message
+    let limitation = val
+        .known_limitations
+        .iter()
+        .find(|l| l.contains("not available"));
+    assert!(
+        limitation.is_some(),
+        "vtsls should trigger TS-specific known_limitation"
+    );
+}
+
+/// Verifies that tsserver also triggers TS-specific messages.
+#[tokio::test]
+async fn test_health_tsserver_call_hierarchy_unavailable_uses_ts_message() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "typescript".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(false),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: Some("tsserver".to_string()), // KEY: tsserver
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams::default();
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let ts_health = &val.languages[0];
+    let trace_deg = ts_health
+        .degraded_tools
+        .iter()
+        .find(|t| t.tool == "trace(scope=\"callers\")")
+        .expect("should find trace degraded tool");
+
+    assert!(
+        trace_deg.description.contains("not negotiated"),
+        "tsserver should trigger TS-specific message, got: {}",
+        trace_deg.description
+    );
+}
+
+/// Verifies that when `server_name` is None but language is "typescript",
+/// the `is_ts_js` check returns false (since `.is_some_and()` short-circuits
+/// to false when `server_name` is None), resulting in generic messages instead
+/// of TS-specific ones. This is correct behavior: don't make TS-specific
+/// claims if we can't verify the server is actually a TS LS.
+#[tokio::test]
+async fn test_health_typescript_no_server_name_gets_generic_message() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let lawyer_clone = lawyer.clone();
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    lawyer_clone.set_capability_status(std::collections::HashMap::from([(
+        "typescript".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(30),
+            diagnostics_strategy: Some("push".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(false),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(false),
+            server_name: None, // KEY: None, not even "unknown"
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    let params = crate::server::types::HealthParams::default();
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let ts_health = &val.languages[0];
+    let trace_deg = ts_health
+        .degraded_tools
+        .iter()
+        .find(|t| t.tool == "trace(scope=\"callers\")")
+        .expect("should find trace degraded tool");
+
+    // Should get GENERIC message, NOT TS-specific
+    assert!(
+        !trace_deg.description.contains("not negotiated"),
+        "server_name=None should get generic message, not TS-specific, got: {}",
+        trace_deg.description
+    );
+    assert!(
+        trace_deg
+            .description
+            .contains("text search instead of call hierarchy"),
+        "should get generic 'text search' message, got: {}",
+        trace_deg.description
+    );
+
+    // known_limitations should also be generic
+    let limitation = val
+        .known_limitations
+        .iter()
+        .find(|l| l.contains("call hierarchy not supported"));
+    assert!(
+        limitation.is_some(),
+        "server_name=None should get generic known_limitation, got: {:?}",
         val.known_limitations
     );
 }
@@ -3212,5 +3569,292 @@ async fn test_health_stale_cache_triggers_reprobe_without_force_probe() {
     assert!(
         val.languages[0].probe_verified,
         "probe_verified must be true after live re-probe"
+    );
+}
+
+// ── PATCH-001: Health Status Semantic Reconciliation Tests ──────────
+
+#[tokio::test]
+async fn test_health_degraded_status_has_navigation_verified_false() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(ws_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    lawyer.set_capability_status(std::collections::HashMap::from([(
+        "rust".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(120),
+            diagnostics_strategy: Some("pull".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(true),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    lawyer.set_goto_definition_result(Err(pathfinder_lsp::LspError::Timeout {
+        operation: "goto_definition".to_string(),
+        timeout_ms: 10000,
+    }));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("rust".to_string()),
+        force_probe: None,
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    assert_eq!(val.status, "degraded");
+    let rust_health = &val.languages[0];
+    assert_eq!(rust_health.status, "degraded");
+    assert_eq!(rust_health.navigation_verified, Some(false));
+    assert_eq!(rust_health.navigation_ready, Some(true));
+    assert!(
+        !rust_health.degraded_tools.is_empty(),
+        "degraded_tools must be non-empty when status=degraded"
+    );
+    assert!(
+        rust_health
+            .degraded_tools
+            .iter()
+            .any(|t| t.tool == "locate" && t.severity == "degraded"),
+        "locate should be marked degraded with 'degraded' severity"
+    );
+    assert!(
+        rust_health
+            .degraded_tools
+            .iter()
+            .any(|t| t.tool == "trace" && t.severity == "degraded"),
+        "trace should be marked degraded with 'degraded' severity"
+    );
+    assert!(
+        rust_health
+            .degraded_tools
+            .iter()
+            .any(|t| t.tool == "inspect" && t.severity == "degraded"),
+        "inspect should be marked degraded with 'degraded' severity"
+    );
+}
+
+#[tokio::test]
+async fn test_health_ready_status_has_navigation_verified_true() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(ws_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    lawyer.set_capability_status(std::collections::HashMap::from([(
+        "rust".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(120),
+            diagnostics_strategy: Some("pull".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(true),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+        file: "src/main.rs".to_string(),
+        line: 1,
+        column: 0,
+        preview: "fn main()".to_string(),
+    })));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("rust".to_string()),
+        force_probe: None,
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    assert_eq!(val.status, "ready");
+    let rust_health = &val.languages[0];
+    assert_eq!(rust_health.status, "ready");
+    assert_eq!(rust_health.navigation_verified, Some(true));
+    assert!(
+        rust_health.degraded_tools.is_empty(),
+        "degraded_tools must be empty when all capabilities present and probe verified"
+    );
+}
+
+#[tokio::test]
+async fn test_health_degraded_tools_recomputed_after_probe() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(ws_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    lawyer.set_capability_status(std::collections::HashMap::from([(
+        "rust".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(120),
+            diagnostics_strategy: Some("pull".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(true),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    lawyer.set_goto_definition_result(Err(pathfinder_lsp::LspError::ConnectionLost));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("rust".to_string()),
+        force_probe: Some(true),
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let rust_health = &val.languages[0];
+    assert_eq!(rust_health.status, "degraded");
+    assert_eq!(rust_health.navigation_verified, Some(false));
+    assert!(
+        !rust_health.degraded_tools.is_empty(),
+        "Regression: degraded_tools was frozen at pre-probe empty state"
+    );
+    assert!(
+        rust_health.degraded_tools.len() >= 3,
+        "degraded_tools should list locate, trace, inspect as degraded"
+    );
+}
+
+#[tokio::test]
+async fn test_health_status_never_ready_with_navigation_verified_false() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(ws_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    lawyer.set_capability_status(std::collections::HashMap::from([(
+        "rust".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(120),
+            diagnostics_strategy: Some("pull".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(true),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    lawyer.set_goto_definition_result(Err(pathfinder_lsp::LspError::Timeout {
+        operation: "goto_definition".to_string(),
+        timeout_ms: 10000,
+    }));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("rust".to_string()),
+        force_probe: Some(true),
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let rust_health = &val.languages[0];
+    assert!(
+        !(rust_health.status == "ready" && rust_health.navigation_verified == Some(false)),
+        "Invariant violation: status=ready implies navigation_verified=Some(true)"
+    );
+}
+
+#[tokio::test]
+async fn test_health_status_never_degraded_with_navigation_verified_true() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+    std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
+    std::fs::write(ws_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    lawyer.set_capability_status(std::collections::HashMap::from([(
+        "rust".to_string(),
+        pathfinder_lsp::types::LspLanguageStatus {
+            validation: true,
+            reason: "LSP connected".to_string(),
+            navigation_ready: Some(true),
+            indexing_complete: Some(true),
+            uptime_seconds: Some(120),
+            diagnostics_strategy: Some("pull".to_string()),
+            supports_definition: Some(true),
+            supports_call_hierarchy: Some(true),
+            supports_diagnostics: Some(true),
+            supports_formatting: Some(true),
+            server_name: None,
+            indexing_source: None,
+            indexing_duration_secs: None,
+            indexing_progress_percent: None,
+            registrations_received: None,
+        },
+    )]));
+
+    lawyer.set_goto_definition_result(Ok(Some(pathfinder_lsp::types::DefinitionLocation {
+        file: "src/main.rs".to_string(),
+        line: 1,
+        column: 0,
+        preview: "fn main()".to_string(),
+    })));
+
+    let params = crate::server::types::HealthParams {
+        action: None,
+        language: Some("rust".to_string()),
+        force_probe: Some(true),
+    };
+    let result = server.lsp_health_impl(params).await;
+    let val = unpack_health(result.expect("should succeed"));
+
+    let rust_health = &val.languages[0];
+    assert!(
+        !(rust_health.status == "degraded" && rust_health.navigation_verified == Some(true)),
+        "Invariant violation: status=degraded implies navigation_verified=Some(false)"
     );
 }
