@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.11.3...pathfinder-mcp-treesitter-v0.12.0) - 2026-06-23
+
+### Added
+
+- *(explore)* add mode and dirs_scanned metadata to structure mode (PATCH-004)
+- *(trace)* resolve trait method callers through all implementations (PATCH-002)
+
 ## [0.11.3](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-treesitter-v0.11.2...pathfinder-mcp-treesitter-v0.11.3) - 2026-06-21
 
 ### Fixed
