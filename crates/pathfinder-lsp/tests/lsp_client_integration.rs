@@ -602,13 +602,13 @@ export function baz(): string {
                         for (i, caller) in callers.iter().enumerate() {
                             eprintln!(
                                 "  [{}] from_name={:?}, from_file={:?}",
-                                i, caller.from_name, caller.from_file
+                                i, caller.item.name, caller.item.file
                             );
                         }
 
                         // foo() calls bar(), and baz() calls foo()
                         // So foo should definitely be an incoming caller of bar
-                        let has_foo = callers.iter().any(|c| c.from_name == "foo");
+                        let has_foo = callers.iter().any(|c| c.item.name == "foo");
                         if has_foo {
                             eprintln!("✓ Found 'foo' as caller of 'bar' — call hierarchy working correctly!");
                         } else {
@@ -616,7 +616,7 @@ export function baz(): string {
                                 "⚠ Did not find 'foo' as caller. Callers found: {:?}",
                                 callers
                                     .iter()
-                                    .map(|c| c.from_name.as_deref())
+                                    .map(|c| c.item.name.as_str())
                                     .collect::<Vec<_>>()
                             );
                         }
