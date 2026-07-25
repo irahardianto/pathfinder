@@ -153,7 +153,7 @@ impl<'a> SymbolExtractionContext<'a> {
             end_line: child.end_position().row,
             name_column,
             access_level,
-            children: Vec::new(),
+            children: Vec::default(),
         };
 
         if matches!(
@@ -221,7 +221,7 @@ impl<'a> SymbolExtractionContext<'a> {
         let (unique_name, suffix) = make_unique_name(&mut self.name_counts, name);
         let module_path = self.build_path(&unique_name, &suffix);
 
-        let mut children = Vec::new();
+        let mut children = Vec::default();
 
         // Extract body contents as children scoped under `module_path`
         if let Some(body) = child.child_by_field_name("body") {
@@ -828,7 +828,7 @@ fn extract_impl_block(
                 end_line: item.end_position().row,
                 name_column: method_name_column,
                 access_level: crate::surgeon::AccessLevel::Public,
-                children: Vec::new(),
+                children: Vec::default(),
             });
         }
     }
@@ -907,9 +907,9 @@ pub fn resolve_symbol_chain<'a>(
 
 fn merge_rust_impl_blocks_recursive(syms: &mut Vec<ExtractedSymbol>) {
     let mut extracted_methods: std::collections::HashMap<String, Vec<ExtractedSymbol>> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::default();
     let mut impl_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::default();
 
     // 1. Remove all Impl blocks and extract their children
     syms.retain_mut(|s| {
@@ -1011,12 +1011,12 @@ pub fn did_you_mean(
     }
 
     if chain.segments.is_empty() {
-        return Vec::new();
+        return Vec::default();
     }
 
     let target = chain.to_string();
 
-    let mut all_paths: Vec<&str> = Vec::new();
+    let mut all_paths: Vec<&str> = Vec::default();
     collect_paths(symbols, &mut all_paths);
 
     // Phase 1: short-circuit on exact match — avoids O(n) Levenshtein scan
@@ -1138,7 +1138,7 @@ fn push_zone_symbol(
 pub fn extract_symbols_from_multizone(
     multi: &crate::vue_zones::MultiZoneTree,
 ) -> Vec<ExtractedSymbol> {
-    let mut output: Vec<ExtractedSymbol> = Vec::new();
+    let mut output: Vec<ExtractedSymbol> = Vec::default();
 
     // ── Script zone (top-level, backward-compatible) ──────────────────────────
     if let Some(ref tree) = multi.script_tree {
@@ -1178,8 +1178,9 @@ pub fn extract_symbols_from_multizone(
 /// template only. Nested HTML elements are not promoted.
 #[must_use]
 pub fn extract_template_symbols(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<ExtractedSymbol> {
-    let mut symbols: Vec<ExtractedSymbol> = Vec::new();
-    let mut tag_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut symbols: Vec<ExtractedSymbol> = Vec::default();
+    let mut tag_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::default();
 
     walk_html_elements_flat(
         tree.root_node(),

@@ -67,8 +67,11 @@ pub struct CacheEntry {
 /// multi-zone trees don't pollute the single-zone eviction budget.
 #[derive(Debug)]
 pub struct MultiZoneEntry {
+    /// The parsed Vue multi-zone tree structure.
     pub multi: Arc<MultiZoneTree>,
+    /// The SHA-256 fingerprint hash of the cached file content.
     pub content_hash: VersionHash,
+    /// Last modified time of the file when cached.
     pub mtime: SystemTime,
 }
 
@@ -144,8 +147,8 @@ impl AstCache {
         Self {
             entries: Mutex::new(LruCache::new(cap)),
             vue_entries: Mutex::new(LruCache::new(cap)),
-            in_flight: Mutex::new(HashMap::new()),
-            vue_in_flight: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::default()),
+            vue_in_flight: Mutex::new(HashMap::default()),
         }
     }
 

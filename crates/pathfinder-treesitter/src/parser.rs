@@ -12,6 +12,10 @@ thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
 }
 
+/// A thread-safe, pool-backed parser wrapper for tree-sitter operations.
+///
+/// Uses thread-local parser instances to minimize initialization overhead and
+/// enable thread-safe parsing across multiple concurrent threads.
 #[derive(Debug, Default)]
 pub struct AstParser;
 

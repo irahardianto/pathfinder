@@ -12,7 +12,7 @@ impl Surgeon for DummySurgeon {
         _semantic_path: &SemanticPath,
     ) -> Result<SymbolScope, SurgeonError> {
         Err(SurgeonError::SymbolNotFound {
-            path: String::new(),
+            path: String::default(),
             did_you_mean: vec![],
         })
     }

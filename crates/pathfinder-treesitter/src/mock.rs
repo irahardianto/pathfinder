@@ -6,6 +6,9 @@ use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+type SourceFileResult = Result<(String, String, Vec<ExtractedSymbol>), SurgeonError>;
+type GenerateSkeletonCallArgs = (PathBuf, PathBuf, crate::repo_map::SkeletonConfig<'static>);
+
 /// A mock implementation of the [`Surgeon`] trait for unit testing.
 ///
 /// Records method calls and returns pre-configured results.
@@ -24,10 +27,8 @@ pub struct MockSurgeon {
     // ── Result queues ────────────────────────────────────────────────────────
     /// Pre-configured return values for reading symbol scopes.
     pub read_symbol_scope_results: Mutex<Vec<Result<SymbolScope, SurgeonError>>>,
-    #[allow(clippy::type_complexity)]
     /// Pre-configured return values for reading source files.
-    pub read_source_file_results:
-        Mutex<Vec<Result<(String, String, Vec<ExtractedSymbol>), SurgeonError>>>,
+    pub read_source_file_results: Mutex<Vec<SourceFileResult>>,
     /// Pre-configured return values for extracting symbols.
     pub extract_symbols_results: Mutex<Vec<Result<Vec<ExtractedSymbol>, SurgeonError>>>,
     /// Pre-configured return values for finding enclosing symbols.
@@ -52,9 +53,7 @@ pub struct MockSurgeon {
     /// Recorded `(workspace_root, file_path, line)` for each `enclosing_symbol_detail` call.
     pub enclosing_symbol_detail_calls: Mutex<Vec<(PathBuf, PathBuf, usize)>>,
     /// Recorded arguments for each `generate_skeleton` call.
-    #[allow(clippy::type_complexity)]
-    pub generate_skeleton_calls:
-        Mutex<Vec<(PathBuf, PathBuf, crate::repo_map::SkeletonConfig<'static>)>>,
+    pub generate_skeleton_calls: Mutex<Vec<GenerateSkeletonCallArgs>>,
     /// Recorded `(workspace_root, file_path, line, column)` for each `node_type_at_position` call.
     pub node_type_at_position_calls: Mutex<Vec<(PathBuf, PathBuf, usize, usize)>>,
 }

@@ -313,7 +313,7 @@ fn render_truncated_file_skeleton(symbols: &[ExtractedSymbol]) -> String {
                 .filter(|c| c.kind == SymbolKind::Constant)
                 .count();
 
-            let mut omitted = Vec::new();
+            let mut omitted = Vec::default();
             if method_count > 0 {
                 omitted.push(format!("{method_count} methods"));
             }
@@ -384,7 +384,7 @@ fn detect_languages_shallow(
     builder.hidden(true);
 
     let walker = builder.build();
-    let mut detected: Vec<crate::language::SupportedLanguage> = Vec::new();
+    let mut detected: Vec<crate::language::SupportedLanguage> = Vec::default();
 
     for entry in walker.flatten() {
         if entry.path().is_dir() {
@@ -400,9 +400,12 @@ fn detect_languages_shallow(
     detected
 }
 
+/// An entry representing a discovered file in the workspace directory.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
+    /// Absolute path of the file on the local filesystem.
     pub abs_path: PathBuf,
+    /// Relative path of the file to the workspace root.
     pub rel_path: PathBuf,
 }
 
@@ -464,7 +467,7 @@ pub async fn generate_skeleton_text(
 
     let walker = builder.build();
 
-    let mut file_entries: Vec<FileEntry> = Vec::new();
+    let mut file_entries: Vec<FileEntry> = Vec::default();
     let mut tech_stack: Vec<crate::language::SupportedLanguage> = Vec::default();
 
     for result in walker {
@@ -593,8 +596,8 @@ fn generate_structure_skeleton(
     workspace_root: &Path,
     config: &SkeletonConfig<'_>,
 ) -> Result<RepoMapResult, SurgeonError> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut manifests: Vec<PathBuf> = Vec::new();
+    let mut dirs: Vec<PathBuf> = Vec::default();
+    let mut manifests: Vec<PathBuf> = Vec::default();
     let mut tech_stack: Vec<crate::language::SupportedLanguage> = Vec::default();
 
     for result in walker {
@@ -626,7 +629,7 @@ fn generate_structure_skeleton(
     dirs.sort();
     manifests.sort();
 
-    let mut skeleton_out = String::new();
+    let mut skeleton_out = String::default();
     let mut current_tokens: u32 = 0;
 
     // Render directories
@@ -725,11 +728,11 @@ async fn generate_files_skeleton(
     }
 
     // Render file listing (sequential — deterministic order from sorted entries)
-    let mut skeleton_out = String::new();
+    let mut skeleton_out = String::default();
     let mut current_tokens: u32 = 0;
     let mut files_rendered: usize = 0;
     let mut files_truncated: usize = 0;
-    let mut truncated_paths: Vec<String> = Vec::new();
+    let mut truncated_paths: Vec<String> = Vec::default();
 
     for (_abs_path, rel_path) in &entries {
         let line = format!("{}\n", rel_path.display());
@@ -885,10 +888,10 @@ async fn generate_symbols_skeleton(
         .collect()
         .await;
 
-    let mut processed: Vec<ProcessedFile> = Vec::new();
+    let mut processed: Vec<ProcessedFile> = Vec::default();
     let mut files_with_symbols = 0;
     let mut version_hashes = HashMap::default();
-    let mut per_file_truncated_paths: Vec<String> = Vec::new();
+    let mut per_file_truncated_paths: Vec<String> = Vec::default();
 
     for output in process_results {
         if let Some((path, hash)) = output.version_entry {
@@ -913,7 +916,7 @@ async fn generate_symbols_skeleton(
     let mut current_tokens: u32 = 0;
     let mut files_rendered: usize = 0;
     let mut files_truncated: usize = 0;
-    let mut truncated_paths: Vec<String> = Vec::new();
+    let mut truncated_paths: Vec<String> = Vec::default();
 
     for pf in &processed {
         // Estimate the header cost before the budget gate so the gate accurately

@@ -13,6 +13,7 @@ pub enum SurgeonError {
     /// The requested symbol could not be found via the semantic path.
     #[error("symbol not found: {path}")]
     SymbolNotFound {
+        /// The semantic path of the requested symbol.
         path: String,
         /// Alternative symbols with similar names (Levenshtein distance).
         did_you_mean: Vec<String>,
@@ -33,7 +34,9 @@ pub enum SurgeonError {
     /// A parsing error occurred.
     #[error("parse error in {path}: {reason}")]
     ParseError {
+        /// The file path that failed to parse.
         path: std::path::PathBuf,
+        /// The detailed error message or reason for the failure.
         reason: String,
     },
 

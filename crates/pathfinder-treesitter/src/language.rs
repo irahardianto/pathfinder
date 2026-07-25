@@ -43,6 +43,63 @@ pub enum SupportedLanguage {
     Java,
 }
 
+static GO_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
+    function_kinds: &["function_declaration"],
+    class_kinds: &["type_spec", "type_alias"],
+    method_kinds: &["method_declaration", "method_spec", "method_elem"],
+    impl_kinds: &[],
+    constant_kinds: &["const_declaration", "var_declaration"],
+    module_kinds: &[],
+};
+
+static TS_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
+    function_kinds: &["function_declaration", "generator_function_declaration"],
+    class_kinds: &[
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "abstract_class_declaration",
+        "type_alias_declaration",
+    ],
+    method_kinds: &["method_definition"],
+    impl_kinds: &[],
+    constant_kinds: &["lexical_declaration", "variable_declaration"],
+    module_kinds: &["internal_module"],
+};
+
+static PYTHON_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
+    function_kinds: &["function_definition", "decorated_definition"],
+    class_kinds: &["class_definition"],
+    method_kinds: &[],
+    impl_kinds: &[],
+    constant_kinds: &[],
+    module_kinds: &[],
+};
+
+static RUST_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
+    function_kinds: &["function_item", "function_signature_item"],
+    class_kinds: &["struct_item", "enum_item", "trait_item", "type_item"],
+    method_kinds: &[],
+    impl_kinds: &["impl_item"],
+    constant_kinds: &["const_item", "static_item"],
+    module_kinds: &["mod_item"],
+};
+
+static JAVA_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
+    function_kinds: &["method_declaration", "constructor_declaration"],
+    class_kinds: &[
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "annotation_type_declaration",
+        "record_declaration",
+    ],
+    method_kinds: &[],
+    impl_kinds: &[],
+    constant_kinds: &[],
+    module_kinds: &[],
+};
+
 impl SupportedLanguage {
     /// Attempt to map a file extension to a `SupportedLanguage`.
     #[must_use]
@@ -93,67 +150,11 @@ impl SupportedLanguage {
     #[must_use]
     pub const fn node_types(&self) -> &'static LanguageNodeTypes {
         match self {
-            Self::Go => &LanguageNodeTypes {
-                function_kinds: &["function_declaration"],
-                class_kinds: &["type_spec", "type_alias"],
-                method_kinds: &["method_declaration", "method_spec", "method_elem"],
-                impl_kinds: &[],
-                constant_kinds: &["const_declaration", "var_declaration"],
-                module_kinds: &[],
-            },
-            Self::TypeScript | Self::Tsx | Self::JavaScript | Self::Vue => &LanguageNodeTypes {
-                function_kinds: &["function_declaration", "generator_function_declaration"],
-                class_kinds: &[
-                    "class_declaration",
-                    "interface_declaration",
-                    "enum_declaration",
-                    "abstract_class_declaration",
-                    "type_alias_declaration",
-                ],
-                method_kinds: &["method_definition"],
-                impl_kinds: &[],
-                constant_kinds: &["lexical_declaration", "variable_declaration"],
-                module_kinds: &["internal_module"],
-            },
-            Self::Python => &LanguageNodeTypes {
-                function_kinds: &["function_definition", "decorated_definition"],
-                class_kinds: &["class_definition"],
-                method_kinds: &[], // Python treats methods as functions inside classes
-                impl_kinds: &[],
-                constant_kinds: &[],
-                module_kinds: &[],
-            },
-            Self::Rust => &LanguageNodeTypes {
-                function_kinds: &["function_item", "function_signature_item"],
-                class_kinds: &["struct_item", "enum_item", "trait_item", "type_item"],
-                method_kinds: &[],
-                // `impl_item` nodes contain associated functions — handled separately
-                // so that methods are grouped under the implementing type's name.
-                impl_kinds: &["impl_item"],
-                constant_kinds: &["const_item", "static_item"],
-                module_kinds: &["mod_item"],
-            },
-            Self::Java => &LanguageNodeTypes {
-                // Instance methods, static methods, and constructors
-                function_kinds: &["method_declaration", "constructor_declaration"],
-                class_kinds: &[
-                    "class_declaration",
-                    "interface_declaration",
-                    "enum_declaration",
-                    "annotation_type_declaration",
-                    "record_declaration",
-                ],
-                // Java methods are functions inside classes (like Python) — no separate method_kinds
-                method_kinds: &[],
-                // Java has no impl blocks
-                impl_kinds: &[],
-                // Excluded: `field_declaration` covers ALL fields (private, protected, public),
-                // which is too noisy. Only actual constants would qualify but filtering
-                // `static final` requires value inspection beyond node kind.
-                constant_kinds: &[],
-                // Java packages are directory-based, not AST nodes
-                module_kinds: &[],
-            },
+            Self::Go => &GO_NODE_TYPES,
+            Self::TypeScript | Self::Tsx | Self::JavaScript | Self::Vue => &TS_NODE_TYPES,
+            Self::Python => &PYTHON_NODE_TYPES,
+            Self::Rust => &RUST_NODE_TYPES,
+            Self::Java => &JAVA_NODE_TYPES,
         }
     }
 
