@@ -32,3 +32,4 @@ opencode.jsonc
 opencode.json
 *.html
 
+.agentwork/
