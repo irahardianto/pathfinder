@@ -80,6 +80,7 @@ pub struct LspLanguageStatus {
     ///   combined with `navigation_ready=false`. See [`IndexingCompletionSource::TimeoutFallback`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_source: Option<String>,
+    /// Duration in seconds spent indexing, if tracked and reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_duration_secs: Option<u64>,
     /// Indexing progress percentage (0-100) if the LSP reports it via workDoneProgress.

@@ -8,7 +8,7 @@ use crate::client::background::{
     MAX_BACKOFF_SECS,
 };
 use crate::client::detect::{detect_languages, language_id_for_extension, LanguageLsp};
-use crate::client::process::{spawn_and_initialize, LspTransport};
+use crate::client::process::{spawn_and_initialize, LspTransport, SpawnParams};
 use crate::client::protocol::RequestDispatcher;
 use crate::client::{
     InFlightGuard, LanguageState, ProcessEntry, ProcessLifecycle, UnavailableState,
@@ -32,6 +32,16 @@ pub(crate) fn indexing_timeout_for_language(lang: &str) -> Duration {
         _ => Duration::from_secs(30),
     }
 }
+
+/// Watchers set up for tracking LSP indexing progress and completion.
+pub(crate) type IndexingWatchers = (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<parking_lot::Mutex<Option<IndexingCompletionSource>>>,
+    Arc<parking_lot::Mutex<Option<u64>>>,
+    Arc<parking_lot::Mutex<Option<u8>>>,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+);
 
 impl super::LspClient {
     /// Create a new `LspClient` for the given workspace root.
@@ -86,6 +96,10 @@ impl super::LspClient {
         Ok(client)
     }
 
+    /// Warm starts all registered LSP language servers in parallel.
+    ///
+    /// This triggers background spawning and handshakes for every configured
+    /// language server descriptor, ensuring they are active before any operations.
     pub fn warm_start(&self) {
         let all: Vec<String> = self
             .descriptors
@@ -95,6 +109,10 @@ impl super::LspClient {
         self.warm_start_for_languages_and_track(&all);
     }
 
+    /// Warm starts a specific list of LSP language servers in parallel and tracks
+    /// their initializations.
+    ///
+    /// Only triggers background start tasks for language IDs that are known and configured.
     pub fn warm_start_for_languages_and_track(&self, language_ids: &[String]) {
         let known: std::collections::HashSet<&str> = self
             .descriptors
@@ -164,6 +182,11 @@ impl super::LspClient {
         });
     }
 
+    /// Warm starts a specific list of LSP language servers in parallel and returns
+    /// their tokio `JoinHandle`s.
+    ///
+    /// This is used internally and externally to kick off background spawn tasks
+    /// and track them.
     pub fn warm_start_for_languages(
         &self,
         language_ids: &[String],
@@ -212,6 +235,10 @@ impl super::LspClient {
         handles
     }
 
+    /// Touches the idle timeout tracking of an active language server.
+    ///
+    /// Refreshes the last used timestamp of the process to keep it alive
+    /// when file operations or other activity occur on that language.
     pub fn touch_language(&self, language_id: &str) {
         if let Some(mut entry) = self.processes.get_mut(language_id) {
             if let ProcessEntry::Running(state) = entry.value_mut() {
@@ -224,6 +251,10 @@ impl super::LspClient {
         }
     }
 
+    /// Gracefully shuts down all active LSP processes and terminates background tasks.
+    ///
+    /// Sends a shutdown signal to all running language servers and signals the
+    /// internal tokio supervisors to stop.
     pub fn shutdown(&self) {
         // L-6: Log if shutdown was already called to aid debugging.
         if self
@@ -234,6 +265,8 @@ impl super::LspClient {
             return;
         }
         tracing::info!("LspClient: shutdown requested");
+        // ALLOW: RS-E1015 / clippy::unit_arg: The channel message type is unit `()`, so passing `()` is intentional and required here.
+        #[allow(clippy::unit_arg)]
         let _ = self.shutdown_tx.send(());
     }
 
@@ -450,19 +483,11 @@ impl super::LspClient {
         }
     }
 
-    #[allow(clippy::type_complexity)]
     fn setup_indexing_watchers(
         language_id: &str,
         notif_rx: tokio::sync::broadcast::Receiver<serde_json::Value>,
         spawned_at: Instant,
-    ) -> (
-        Arc<std::sync::atomic::AtomicBool>,
-        Arc<parking_lot::Mutex<Option<IndexingCompletionSource>>>,
-        Arc<parking_lot::Mutex<Option<u64>>>,
-        Arc<parking_lot::Mutex<Option<u8>>>,
-        tokio::task::JoinHandle<()>,
-        tokio::task::JoinHandle<()>,
-    ) {
+    ) -> IndexingWatchers {
         let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let indexing_completion_source = Arc::new(parking_lot::Mutex::new(None));
         let indexing_duration_secs = Arc::new(parking_lot::Mutex::new(None));
@@ -583,18 +608,18 @@ impl super::LspClient {
             .dispatcher
             .subscribe_server_requests_for_language(&language_id);
 
-        let spawn_result = spawn_and_initialize(
-            self.spawner.as_ref(),
-            &descriptor.command,
-            &descriptor.args,
-            &descriptor.root,
-            &language_id,
-            Arc::clone(&self.dispatcher),
-            descriptor.init_timeout_secs,
+        let spawn_result = spawn_and_initialize(SpawnParams {
+            spawner: self.spawner.as_ref(),
+            command: &descriptor.command,
+            args: &descriptor.args,
+            project_root: &descriptor.root,
+            language_id: &language_id,
+            dispatcher: Arc::clone(&self.dispatcher),
+            init_timeout_secs: descriptor.init_timeout_secs,
             isolate_target_dir,
             plugins,
             init_options,
-        )
+        })
         .await;
 
         let (process, reader_handle) = match spawn_result {

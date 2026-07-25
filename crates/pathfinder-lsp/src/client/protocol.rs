@@ -45,14 +45,20 @@ pub(crate) struct RequestDispatcher {
     server_request_channels: DashMap<String, broadcast::Sender<Value>>,
 }
 
-impl RequestDispatcher {
-    pub(crate) fn new() -> Self {
+impl Default for RequestDispatcher {
+    fn default() -> Self {
         Self {
             pending: DashMap::new(),
             next_id: AtomicU64::new(1),
             notification_channels: DashMap::new(),
             server_request_channels: DashMap::new(),
         }
+    }
+}
+
+impl RequestDispatcher {
+    pub(crate) fn new() -> Self {
+        Self::default()
     }
 
     /// Allocate a unique request id and register a oneshot receiver.

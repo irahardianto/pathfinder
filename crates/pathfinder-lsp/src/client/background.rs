@@ -276,173 +276,195 @@ pub(crate) fn collect_idle_languages(processes: &DashMap<String, ProcessEntry>) 
         .collect()
 }
 
-#[allow(clippy::too_many_lines)]
+async fn shutdown_all_processes(
+    processes: &DashMap<String, ProcessEntry>,
+    dispatcher: &RequestDispatcher,
+) {
+    let keys: Vec<String> = processes.iter().map(|e| e.key().clone()).collect();
+    for lang in keys {
+        if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
+            tracing::debug!(language = %lang, "LSP: shutting down process");
+            // C-3: Send shutdown request BEFORE aborting reader.
+            // If reader is aborted first, nobody reads the shutdown response,
+            // causing the 2s timeout to always fire. With 5 languages,
+            // shutdown takes minimum 10 seconds.
+            // H-4: Wrap transport.shutdown() in timeout to prevent blocking
+            // if child lock is contended (supervisor zombie reaping).
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                state.transport.shutdown(dispatcher, &lang),
+            )
+            .await;
+            state.reader_handle.abort();
+            state.abort_watchers();
+            // BUG-4 fix: reader is aborted so it won't call cancel_for_language.
+            // We must cancel pending requests for this language explicitly.
+            dispatcher.cancel_for_language(&lang);
+            if let Some(ref lifecycle) = state.lifecycle {
+                let _ = lifecycle.child.lock().await.wait().await;
+            }
+        }
+    }
+}
+
+async fn reap_dead_processes(
+    processes: &DashMap<String, ProcessEntry>,
+    dispatcher: &RequestDispatcher,
+    doc_versions: &DashMap<String, (String, std::sync::atomic::AtomicI32)>,
+) {
+    let dead_languages: Vec<String> = processes
+        .iter()
+        .filter_map(|entry| {
+            if let ProcessEntry::Running(state) = entry.value() {
+                if state.transport.is_alive() {
+                    None
+                } else {
+                    Some(entry.key().clone())
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for lang in dead_languages {
+        if let Some((key, entry)) = processes.remove(&lang) {
+            if let ProcessEntry::Running(state) = entry {
+                if state.transport.is_alive() {
+                    // Race: process is now alive. Restore the entry.
+                    processes.insert(key, ProcessEntry::Running(state));
+                } else {
+                    tracing::error!(
+                        language = %lang,
+                        "LSP: zombie reap — process died outside reader task, \
+                         removing entry so recovery can proceed"
+                    );
+                    state.reader_handle.abort();
+                    state.abort_watchers();
+                    // Zombie reap: reader may or may not have called cancel_for_language.
+                    // Call it again to ensure pending requests are unblocked.
+                    dispatcher.cancel_for_language(&lang);
+                    if let Some(ref lifecycle) = state.lifecycle {
+                        let _ = lifecycle.child.lock().await.wait().await;
+                    }
+                    // Clear stale doc_versions for this language from the dead instance.
+                    let mut cleared = 0;
+                    doc_versions.retain(|_uri, (l, _)| {
+                        if l == &lang {
+                            cleared += 1;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    if cleared > 0 {
+                        tracing::debug!(
+                            language = %lang,
+                            cleared,
+                            "LSP: cleared stale doc_versions for language after zombie reap"
+                        );
+                    }
+                    // M-9: Insert Unavailable for backoff protection. Without this,
+                    // ensure_process would immediately retry and could create a tight
+                    // spawn-exit loop if the child keeps dying.
+                    processes.insert(
+                        key,
+                        ProcessEntry::Unavailable(super::UnavailableState {
+                            unavailable_since: std::time::Instant::now(),
+                            backoff_attempt: 1,
+                        }),
+                    );
+                }
+            } else {
+                // Race: entry is now Unavailable instead of Running. Restore it.
+                processes.insert(key, entry);
+            }
+        }
+    }
+}
+
+async fn reap_idle_processes(
+    processes: &DashMap<String, ProcessEntry>,
+    dispatcher: &RequestDispatcher,
+    doc_versions: &DashMap<String, (String, std::sync::atomic::AtomicI32)>,
+) {
+    use std::sync::atomic::Ordering;
+    let candidates = collect_idle_languages(processes);
+
+    for lang in candidates {
+        // Atomically check in_flight and remove if still idle.
+        let removed = processes.remove_if(&lang, |_, v| {
+            if let ProcessEntry::Running(state) = v {
+                state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
+                    && state.transport.in_flight().load(Ordering::Acquire) == 0
+            } else {
+                false
+            }
+        });
+
+        if let Some((_lang, ProcessEntry::Running(state))) = removed {
+            tracing::info!(
+                language = %lang,
+                restarts = state.restart_count,
+                "LSP: idle timeout — terminating"
+            );
+            // C-3: Send shutdown BEFORE aborting reader so response can be read.
+            // H-4: Wrap in timeout to prevent blocking.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                state.transport.shutdown(dispatcher, &lang),
+            )
+            .await;
+            state.reader_handle.abort();
+            state.abort_watchers();
+            // Idle timeout: reader is aborted, so call cancel_for_language explicitly.
+            dispatcher.cancel_for_language(&lang);
+            if let Some(ref lifecycle) = state.lifecycle {
+                let _ = lifecycle.child.lock().await.wait().await;
+            }
+            // Clear stale doc_versions for this language from the idle-killed instance.
+            let mut cleared = 0;
+            doc_versions.retain(|_uri, (l, _)| {
+                if l == &lang {
+                    cleared += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            if cleared > 0 {
+                tracing::debug!(
+                    language = %lang,
+                    cleared,
+                    "LSP: cleared stale doc_versions for language after idle timeout"
+                );
+            }
+        } else {
+            tracing::debug!(
+                language = %lang,
+                "LSP: idle timeout skipped — in_flight request arrived or entry removed"
+            );
+        }
+    }
+}
+
 pub async fn idle_timeout_task(
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
     doc_versions: Arc<DashMap<String, (String, std::sync::atomic::AtomicI32)>>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
-    use std::sync::atomic::Ordering;
-
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
                 tracing::info!("LSP: shutdown signal received, terminating all processes");
-                let keys: Vec<String> = processes.iter().map(|e| e.key().clone()).collect();
-                for lang in keys {
-                    if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
-                        tracing::debug!(language = %lang, "LSP: shutting down process");
-                        // C-3: Send shutdown request BEFORE aborting reader.
-                        // If reader is aborted first, nobody reads the shutdown response,
-                        // causing the 2s timeout to always fire. With 5 languages,
-                        // shutdown takes minimum 10 seconds.
-                        // H-4: Wrap transport.shutdown() in timeout to prevent blocking
-                        // if child lock is contended (supervisor zombie reaping).
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            state.transport.shutdown(&dispatcher, &lang),
-                        ).await;
-                        state.reader_handle.abort();
-                        state.abort_watchers();
-                        // BUG-4 fix: reader is aborted so it won't call cancel_for_language.
-                        // We must cancel pending requests for this language explicitly.
-                        dispatcher.cancel_for_language(&lang);
-                        if let Some(ref lifecycle) = state.lifecycle {
-                            let _ = lifecycle.child.lock().await.wait().await;
-                        }
-                    }
-                }
+                shutdown_all_processes(&processes, &dispatcher).await;
                 tracing::info!("LSP: all processes terminated");
                 break;
             }
             () = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
-                let dead_languages: Vec<String> = processes
-                    .iter()
-                    .filter_map(|entry| {
-                        if let ProcessEntry::Running(state) = entry.value() {
-                            if state.transport.is_alive() {
-                                None
-                            } else {
-                                Some(entry.key().clone())
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                for lang in dead_languages {
-                    if let Some((key, entry)) = processes.remove(&lang) {
-                        if let ProcessEntry::Running(state) = entry {
-                            if state.transport.is_alive() {
-                                // Race: process is now alive. Restore the entry.
-                                processes.insert(key, ProcessEntry::Running(state));
-                            } else {
-                                tracing::error!(
-                                    language = %lang,
-                                    "LSP: zombie reap — process died outside reader task, \
-                                     removing entry so recovery can proceed"
-                                );
-                                state.reader_handle.abort();
-                                state.abort_watchers();
-                                // Zombie reap: reader may or may not have called cancel_for_language.
-                                // Call it again to ensure pending requests are unblocked.
-                                dispatcher.cancel_for_language(&lang);
-                                if let Some(ref lifecycle) = state.lifecycle {
-                                    let _ = lifecycle.child.lock().await.wait().await;
-                                }
-                                // Clear stale doc_versions for this language from the dead instance.
-                                let mut cleared = 0;
-                                doc_versions.retain(|_uri, (l, _)| {
-                                    if l == &lang {
-                                        cleared += 1;
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                });
-                                if cleared > 0 {
-                                    tracing::debug!(
-                                        language = %lang,
-                                        cleared,
-                                        "LSP: cleared stale doc_versions for language after zombie reap"
-                                    );
-                                }
-                                // M-9: Insert Unavailable for backoff protection. Without this,
-                                // ensure_process would immediately retry and could create a tight
-                                // spawn-exit loop if the child keeps dying.
-                                processes.insert(
-                                    key,
-                                    ProcessEntry::Unavailable(super::UnavailableState {
-                                        unavailable_since: std::time::Instant::now(),
-                                        backoff_attempt: 1,
-                                    }),
-                                );
-                            }
-                        } else {
-                            // Race: entry is now Unavailable instead of Running. Restore it.
-                            processes.insert(key, entry);
-                        }
-                    }
-                }
-
-                let candidates = collect_idle_languages(&processes);
-
-                for lang in candidates {
-                    // Atomically check in_flight and remove if still idle.
-                    let removed = processes.remove_if(&lang, |_, v| {
-                        if let ProcessEntry::Running(state) = v {
-                            state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
-                                && state.transport.in_flight().load(Ordering::Acquire) == 0
-                        } else {
-                            false
-                        }
-                    });
-
-                    if let Some((_lang, ProcessEntry::Running(state))) = removed {
-                        tracing::info!(
-                            language = %lang,
-                            restarts = state.restart_count,
-                            "LSP: idle timeout — terminating"
-                        );
-                        // C-3: Send shutdown BEFORE aborting reader so response can be read.
-                        // H-4: Wrap in timeout to prevent blocking.
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            state.transport.shutdown(&dispatcher, &lang),
-                        ).await;
-                        state.reader_handle.abort();
-                        state.abort_watchers();
-                        // Idle timeout: reader is aborted, so call cancel_for_language explicitly.
-                        dispatcher.cancel_for_language(&lang);
-                        if let Some(ref lifecycle) = state.lifecycle {
-                            let _ = lifecycle.child.lock().await.wait().await;
-                        }
-                        // Clear stale doc_versions for this language from the idle-killed instance.
-                        let mut cleared = 0;
-                        doc_versions.retain(|_uri, (l, _)| {
-                            if l == &lang {
-                                cleared += 1;
-                                false
-                            } else {
-                                true
-                            }
-                        });
-                        if cleared > 0 {
-                            tracing::debug!(
-                                language = %lang,
-                                cleared,
-                                "LSP: cleared stale doc_versions for language after idle timeout"
-                            );
-                        }
-                    } else {
-                        tracing::debug!(
-                            language = %lang,
-                            "LSP: idle timeout skipped — in_flight request arrived or entry removed"
-                        );
-                    }
-                }
+                reap_dead_processes(&processes, &dispatcher, &doc_versions).await;
+                reap_idle_processes(&processes, &dispatcher, &doc_versions).await;
             }
         }
     }

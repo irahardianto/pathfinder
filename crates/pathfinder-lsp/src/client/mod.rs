@@ -93,6 +93,13 @@ pub(crate) enum ProcessEntry {
     Unavailable(UnavailableState),
 }
 
+/// Validation status parameters mapped directly from LSP state and capabilities.
+///
+/// # Rationale for Struct Excessive Booleans
+/// This is an internal parameter object aggregating multiple independent, orthogonal
+/// boolean flags from live process states, capabilities, and indexing status.
+/// Using individual fields makes constructing and accessing these flags highly explicit
+/// and readable, avoiding convoluted state enums.
 #[derive(Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)]
 struct ValidationStatusInput<'a> {

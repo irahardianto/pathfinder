@@ -277,30 +277,39 @@ const INIT_TIMEOUT_SECS: u64 = 120;
 /// block to set `prctl(PR_SET_PDEATHSIG, SIGKILL)` via a `pre_exec` hook.
 /// This is safe: `prctl` is async-signal-safe, and the call has no Rust
 /// memory-safety implications (no raw pointers, no aliased state).
-#[allow(clippy::too_many_arguments)]
+/// Parameters for spawning and initializing an LSP process.
+pub(super) struct SpawnParams<'a> {
+    pub(super) spawner: &'a dyn ProcessSpawner,
+    pub(super) command: &'a str,
+    pub(super) args: &'a [String],
+    pub(super) project_root: &'a Path,
+    pub(super) language_id: &'a str,
+    pub(super) dispatcher: Arc<RequestDispatcher>,
+    pub(super) init_timeout_secs: Option<u64>,
+    pub(super) isolate_target_dir: bool,
+    pub(super) plugins: Vec<String>,
+    pub(super) init_options: serde_json::Value,
+}
+
 #[allow(unsafe_code)]
 pub(super) async fn spawn_and_initialize(
-    spawner: &dyn ProcessSpawner,
-    command: &str,
-    args: &[String],
-    project_root: &Path,
-    language_id: &str,
-    dispatcher: Arc<RequestDispatcher>,
-    init_timeout_secs: Option<u64>,
-    isolate_target_dir: bool,
-    plugins: Vec<String>,
-    init_options: serde_json::Value,
+    params: SpawnParams<'_>,
 ) -> Result<(ManagedProcess, tokio::task::JoinHandle<()>), LspError> {
     // M-3: Re-validate Python venv path at spawn time. The venv may have been
     // created or deleted since detection. Re-detect and update init_options.
-    let init_options = if language_id == "python" {
-        revalidate_python_init_options(init_options, project_root)
+    let init_options = if params.language_id == "python" {
+        revalidate_python_init_options(params.init_options, params.project_root)
     } else {
-        init_options
+        params.init_options
     };
 
-    let (child, stdin, stdout, jdtls_lock) =
-        spawner.spawn(command, args, project_root, language_id, isolate_target_dir)?;
+    let (child, stdin, stdout, jdtls_lock) = params.spawner.spawn(
+        params.command,
+        params.args,
+        params.project_root,
+        params.language_id,
+        params.isolate_target_dir,
+    )?;
     let mut writer = tokio::io::BufWriter::new(stdin);
 
     // Start the reader task BEFORE writing the initialize request.
@@ -311,17 +320,22 @@ pub(super) async fn spawn_and_initialize(
     // would never be filled, causing a deadlock.
     //
     // LSP-INIT-002: Pass language_id to enable per-language isolation.
-    let reader_handle = start_reader_task(stdout, Arc::clone(&dispatcher), language_id.to_owned());
+    let reader_handle = start_reader_task(
+        stdout,
+        Arc::clone(&params.dispatcher),
+        params.language_id.to_owned(),
+    );
 
-    let (id, rx) = dispatcher.register(language_id);
-    let init_request = build_initialize_request(id, project_root, &plugins, init_options).await?;
+    let (id, rx) = params.dispatcher.register(params.language_id);
+    let init_request =
+        build_initialize_request(id, params.project_root, &params.plugins, init_options).await?;
     write_message(&mut writer, &init_request).await?;
 
-    let timeout_secs = init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
+    let timeout_secs = params.init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
     let response = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
         .await
         .map_err(|_| {
-            dispatcher.remove(id);
+            params.dispatcher.remove(id);
             LspError::Timeout {
                 operation: "initialize".to_owned(),
                 timeout_ms: timeout_secs * 1000,
@@ -334,7 +348,7 @@ pub(super) async fn spawn_and_initialize(
     write_message(&mut writer, &initialized_notif).await?;
 
     tracing::info!(
-        language = language_id,
+        language = params.language_id,
         definition_provider = capabilities.definition_provider,
         diagnostics_strategy = %capabilities.diagnostics_strategy.as_str(),
         formatting_provider = capabilities.formatting_provider,

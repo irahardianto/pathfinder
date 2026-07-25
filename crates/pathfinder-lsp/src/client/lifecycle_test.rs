@@ -2358,31 +2358,65 @@ fn make_multi_lang_entry(fake: Arc<crate::client::fake_transport::FakeTransport>
     }))
 }
 
-#[allow(clippy::too_many_lines)]
+fn create_mock_lang_lsp(language_id: &str, command: &str) -> LanguageLsp {
+    LanguageLsp {
+        language_id: language_id.to_owned(),
+        command: command.to_owned(),
+        args: vec![],
+        root: std::env::temp_dir(),
+        init_timeout_secs: None,
+        auto_plugins: vec![],
+        init_options: serde_json::Value::Null,
+    }
+}
+
+fn setup_fake_transport(
+    lang: &str,
+    method: &str,
+    response: serde_json::Value,
+    dispatcher: &Arc<RequestDispatcher>,
+) -> Arc<crate::client::fake_transport::FakeTransport> {
+    use crate::client::fake_transport::FakeTransport;
+    let mut transport = FakeTransport::new();
+    transport.set_language_id(lang);
+    let fake = Arc::new(transport);
+    fake.set_dispatcher(Arc::clone(dispatcher));
+    fake.set_response(method, response);
+    fake
+}
+
+async fn assert_client_request(client: &super::super::LspClient, lang: &str, expected_uri: &str) {
+    let result = client
+        .request(
+            lang,
+            "textDocument/definition",
+            json!({}),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(result.is_ok(), "{lang} request should succeed: {result:?}");
+    assert_eq!(
+        result.unwrap()["uri"],
+        expected_uri,
+        "{lang} request should return correct response"
+    );
+}
+
 #[tokio::test]
 async fn test_multi_language_requests_route_to_correct_transport() {
-    use crate::client::fake_transport::FakeTransport;
-
-    let mut rust_transport = FakeTransport::new();
-    rust_transport.set_language_id("rust");
-    let rust_fake = Arc::new(rust_transport);
-
-    let mut go_transport = FakeTransport::new();
-    go_transport.set_language_id("go");
-    let go_fake = Arc::new(go_transport);
-
     let dispatcher = Arc::new(RequestDispatcher::new());
 
-    rust_fake.set_dispatcher(Arc::clone(&dispatcher));
-    go_fake.set_dispatcher(Arc::clone(&dispatcher));
-
-    rust_fake.set_response(
+    let rust_fake = setup_fake_transport(
+        "rust",
         "textDocument/definition",
         json!({ "result": { "uri": "file:///rust-result.rs" } }),
+        &dispatcher,
     );
-    go_fake.set_response(
+    let go_fake = setup_fake_transport(
+        "go",
         "textDocument/definition",
         json!({ "result": { "uri": "file:///go-result.go" } }),
+        &dispatcher,
     );
 
     let processes = DashMap::new();
@@ -2393,24 +2427,8 @@ async fn test_multi_language_requests_route_to_correct_transport() {
     processes.insert("go".to_owned(), make_multi_lang_entry(Arc::clone(&go_fake)));
 
     let descriptors = vec![
-        LanguageLsp {
-            language_id: "rust".to_owned(),
-            command: "rust-analyzer".to_owned(),
-            args: vec![],
-            root: std::env::temp_dir(),
-            init_timeout_secs: None,
-            auto_plugins: vec![],
-            init_options: serde_json::Value::Null,
-        },
-        LanguageLsp {
-            language_id: "go".to_owned(),
-            command: "gopls".to_owned(),
-            args: vec![],
-            root: std::env::temp_dir(),
-            init_timeout_secs: None,
-            auto_plugins: vec![],
-            init_options: serde_json::Value::Null,
-        },
+        create_mock_lang_lsp("rust", "rust-analyzer"),
+        create_mock_lang_lsp("go", "gopls"),
     ];
 
     let (shutdown_tx, _) = broadcast::channel(1);
@@ -2429,41 +2447,8 @@ async fn test_multi_language_requests_route_to_correct_transport() {
         ),
     };
 
-    let rust_result = client
-        .request(
-            "rust",
-            "textDocument/definition",
-            json!({}),
-            Duration::from_secs(5),
-        )
-        .await;
-    assert!(
-        rust_result.is_ok(),
-        "rust request should succeed: {rust_result:?}"
-    );
-    assert_eq!(
-        rust_result.unwrap()["uri"],
-        "file:///rust-result.rs",
-        "rust request should return rust transport's response"
-    );
-
-    let go_result = client
-        .request(
-            "go",
-            "textDocument/definition",
-            json!({}),
-            Duration::from_secs(5),
-        )
-        .await;
-    assert!(
-        go_result.is_ok(),
-        "go request should succeed: {go_result:?}"
-    );
-    assert_eq!(
-        go_result.unwrap()["uri"],
-        "file:///go-result.go",
-        "go request should return go transport's response"
-    );
+    assert_client_request(&client, "rust", "file:///rust-result.rs").await;
+    assert_client_request(&client, "go", "file:///go-result.go").await;
 
     assert_eq!(
         rust_fake.request_count(),

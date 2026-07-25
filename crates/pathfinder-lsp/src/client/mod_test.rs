@@ -3,39 +3,97 @@ use crate::types::IndexingCompletionSource;
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn validation_status_from_parts(
-    command: &str,
-    language_id: &str,
-    running: bool,
-    diagnostics_strategy: DiagnosticsStrategy,
-    supports_definition: bool,
-    supports_call_hierarchy: bool,
-    supports_formatting: bool,
-    indexing_complete: bool,
-    uptime_seconds: u64,
-    server_name: Option<&str>,
-    indexing_source: Option<&str>,
-    indexing_duration_secs: Option<u64>,
-    indexing_progress_pct: Option<u8>,
-    registrations_received: u32,
-) -> crate::types::LspLanguageStatus {
-    super::validation_status_from_parts(super::ValidationStatusInput {
-        command,
-        language_id,
-        running,
-        diagnostics_strategy,
-        supports_definition,
-        supports_call_hierarchy,
-        supports_formatting,
-        indexing_complete,
-        uptime_seconds,
-        server_name,
-        indexing_source,
-        indexing_duration_secs,
-        indexing_progress_pct,
-        registrations_received,
-    })
+#[allow(dead_code)]
+struct TestStatusBuilder<'a> {
+    input: super::ValidationStatusInput<'a>,
+}
+
+#[allow(dead_code)]
+impl<'a> TestStatusBuilder<'a> {
+    fn new(command: &'a str, language_id: &'a str) -> Self {
+        Self {
+            input: super::ValidationStatusInput {
+                command,
+                language_id,
+                running: false,
+                diagnostics_strategy: DiagnosticsStrategy::None,
+                supports_definition: false,
+                supports_call_hierarchy: false,
+                supports_formatting: false,
+                indexing_complete: false,
+                uptime_seconds: 0,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_pct: None,
+                registrations_received: 0,
+            },
+        }
+    }
+
+    fn running(mut self, running: bool) -> Self {
+        self.input.running = running;
+        self
+    }
+
+    fn diagnostics_strategy(mut self, diagnostics_strategy: DiagnosticsStrategy) -> Self {
+        self.input.diagnostics_strategy = diagnostics_strategy;
+        self
+    }
+
+    fn supports_definition(mut self, supports_definition: bool) -> Self {
+        self.input.supports_definition = supports_definition;
+        self
+    }
+
+    fn supports_call_hierarchy(mut self, supports_call_hierarchy: bool) -> Self {
+        self.input.supports_call_hierarchy = supports_call_hierarchy;
+        self
+    }
+
+    fn supports_formatting(mut self, supports_formatting: bool) -> Self {
+        self.input.supports_formatting = supports_formatting;
+        self
+    }
+
+    fn indexing_complete(mut self, indexing_complete: bool) -> Self {
+        self.input.indexing_complete = indexing_complete;
+        self
+    }
+
+    fn uptime_seconds(mut self, uptime_seconds: u64) -> Self {
+        self.input.uptime_seconds = uptime_seconds;
+        self
+    }
+
+    fn server_name(mut self, server_name: Option<&'a str>) -> Self {
+        self.input.server_name = server_name;
+        self
+    }
+
+    fn indexing_source(mut self, indexing_source: Option<&'a str>) -> Self {
+        self.input.indexing_source = indexing_source;
+        self
+    }
+
+    fn indexing_duration_secs(mut self, indexing_duration_secs: Option<u64>) -> Self {
+        self.input.indexing_duration_secs = indexing_duration_secs;
+        self
+    }
+
+    fn indexing_progress_pct(mut self, indexing_progress_pct: Option<u8>) -> Self {
+        self.input.indexing_progress_pct = indexing_progress_pct;
+        self
+    }
+
+    fn registrations_received(mut self, registrations_received: u32) -> Self {
+        self.input.registrations_received = registrations_received;
+        self
+    }
+
+    fn build(self) -> crate::types::LspLanguageStatus {
+        super::validation_status_from_parts(self.input)
+    }
 }
 
 // ── ProcessEntry::to_validation_status tests ──────────────────
@@ -58,22 +116,13 @@ fn test_process_entry_running_with_diagnostics_status() {
     // ProcessEntry::to_validation_status so we can test without a
     // live ManagedProcess (which requires a real OS child handle).
     // Future agents: add more variants here as capabilities grow.
-    let status = validation_status_from_parts(
-        "rust-analyzer",
-        "rust",
-        true,
-        DiagnosticsStrategy::Pull,
-        true,  // supports_definition
-        true,  // supports_call_hierarchy
-        false, // supports_formatting
-        false, // indexing_complete
-        10,    // uptime_seconds
-        None,  // server_name
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("rust-analyzer", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .uptime_seconds(10)
+        .build();
     assert!(
         status.validation,
         "DiagnosticsStrategy::Pull must yield validation=true"
@@ -88,22 +137,14 @@ fn test_process_entry_running_with_diagnostics_status() {
 
 #[test]
 fn test_process_entry_running_with_diagnostics_indexing_complete() {
-    let status = validation_status_from_parts(
-        "rust-analyzer",
-        "rust",
-        true,
-        DiagnosticsStrategy::Pull,
-        true,  // supports_definition
-        true,  // supports_call_hierarchy
-        false, // supports_formatting
-        true,  // indexing_complete
-        42,    // uptime_seconds
-        None,  // server_name
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("rust-analyzer", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .indexing_complete(true)
+        .uptime_seconds(42)
+        .build();
     assert!(status.validation);
     assert_eq!(status.indexing_complete, Some(true));
     assert_eq!(status.uptime_seconds, Some(42));
@@ -112,22 +153,13 @@ fn test_process_entry_running_with_diagnostics_indexing_complete() {
 #[test]
 fn test_process_entry_running_without_diagnostics_status() {
     // LSP connected but does not support textDocument/diagnostic.
-    let status = validation_status_from_parts(
-        "gopls",
-        "go",
-        true,
-        DiagnosticsStrategy::None,
-        true,
-        true,
-        false,
-        true,
-        5,
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("gopls", "go")
+        .running(true)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .indexing_complete(true)
+        .uptime_seconds(5)
+        .build();
     assert!(
         !status.validation,
         "diagnostic_provider=false must yield validation=false"
@@ -144,22 +176,12 @@ fn test_process_entry_running_without_diagnostics_status() {
 #[test]
 fn test_process_entry_running_uptime_is_non_none() {
     // Uptime should always be Some for a running process (even if 0 seconds).
-    let status = validation_status_from_parts(
-        "pyright",
-        "python",
-        true,
-        DiagnosticsStrategy::Pull,
-        true,
-        true,
-        false,
-        false,
-        0,
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("pyright", "python")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .build();
     assert!(status.uptime_seconds.is_some());
     assert!(status.indexing_complete.is_some());
 }
@@ -171,22 +193,12 @@ fn test_navigation_ready_true_when_supports_definition_and_running() {
     // Pyright scenario: LSP running, supports_definition=true,
     // but diagnostics_strategy=None AND indexing_complete=false.
     // Navigation should still be "ready" because initialize handshake completed.
-    let status = validation_status_from_parts(
-        "pyright",
-        "python",
-        true, // running
-        DiagnosticsStrategy::None,
-        true,  // supports_definition
-        true,  // supports_call_hierarchy
-        false, // supports_formatting
-        false, // indexing_complete (still indexing)
-        5,     // uptime_seconds
-        None,  // server_name
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("pyright", "python")
+        .running(true)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .uptime_seconds(5)
+        .build();
     // Navigation ready regardless of diagnostics and indexing status
     assert_eq!(status.navigation_ready, Some(true));
     // But validation is false because no diagnostics
@@ -198,22 +210,12 @@ fn test_navigation_ready_true_when_supports_definition_and_running() {
 #[test]
 fn test_navigation_ready_false_when_supports_definition_false() {
     // Edge case: LSP running but doesn't support definition at all
-    let status = validation_status_from_parts(
-        "weird-lsp",
-        "rust",
-        true, // running
-        DiagnosticsStrategy::Pull,
-        false, // supports_definition = false
-        false, // supports_call_hierarchy
-        false, // supports_formatting
-        true,  // indexing_complete
-        10,    // uptime_seconds
-        None,  // server_name
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("weird-lsp", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .indexing_complete(true)
+        .uptime_seconds(10)
+        .build();
     // Navigation not ready because LSP doesn't have definitionProvider capability
     assert_eq!(status.navigation_ready, Some(false));
     // But validation is true because pull diagnostics available
@@ -223,22 +225,10 @@ fn test_navigation_ready_false_when_supports_definition_false() {
 #[test]
 fn test_navigation_ready_none_when_not_running() {
     // When LSP is not running (crashed, failed to start), navigation_ready is None
-    let status = validation_status_from_parts(
-        "gopls",
-        "go",
-        false,                     // NOT running
-        DiagnosticsStrategy::None, // irrelevant when !running
-        true,                      // irrelevant when !running
-        true,                      // irrelevant when !running
-        false,                     // irrelevant when !running
-        false,                     // irrelevant when !running
-        0,                         // irrelevant when !running
-        None,                      // server_name
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("gopls", "go")
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .build();
     assert_eq!(status.navigation_ready, None);
     assert_eq!(status.indexing_complete, None);
     assert!(!status.validation);
@@ -249,22 +239,10 @@ fn test_navigation_ready_none_during_grace_period_without_definition() {
     // jdtls scenario: LSP just started (2s), dynamic registration hasn't
     // arrived yet so supports_definition=false. Should return None
     // (indeterminate) instead of Some(false) to avoid premature warming_up.
-    let status = validation_status_from_parts(
-        "jdtls",
-        "java",
-        true,
-        DiagnosticsStrategy::None,
-        false, // no definition yet — dynamic registration in flight
-        false,
-        false,
-        false,
-        2, // under 15s Java grace period — indeterminate
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("jdtls", "java")
+        .running(true)
+        .uptime_seconds(2)
+        .build();
     assert_eq!(
         status.navigation_ready, None,
         "java under 15s with no definition should be indeterminate, not false"
@@ -274,22 +252,10 @@ fn test_navigation_ready_none_during_grace_period_without_definition() {
 #[test]
 fn test_navigation_ready_false_after_grace_period() {
     // After 15s (Java grace period), if definition is still not supported, it's conclusive.
-    let status = validation_status_from_parts(
-        "jdtls",
-        "java",
-        true,
-        DiagnosticsStrategy::None,
-        false, // still no definition after grace period
-        false,
-        false,
-        false,
-        15, // at 15s — Java grace period over
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("jdtls", "java")
+        .running(true)
+        .uptime_seconds(15)
+        .build();
     assert_eq!(
         status.navigation_ready,
         Some(false),
@@ -301,22 +267,13 @@ fn test_navigation_ready_false_after_grace_period() {
 fn test_navigation_ready_true_during_grace_period_with_definition() {
     // If supports_definition is true (even early), return Some(true).
     // Grace period only applies when definition is false.
-    let status = validation_status_from_parts(
-        "gopls",
-        "go",
-        true,
-        DiagnosticsStrategy::Push,
-        true, // definition available
-        true,
-        false,
-        false,
-        1, // uptime 1s
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("gopls", "go")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Push)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .uptime_seconds(1)
+        .build();
     assert_eq!(
         status.navigation_ready,
         Some(true),
@@ -537,22 +494,15 @@ async fn test_touch_language_no_process_is_noop() {
 
 #[test]
 fn test_validation_status_not_running() {
-    let status = validation_status_from_parts(
-        "rust-analyzer",
-        "rust",
-        false, // not running
-        DiagnosticsStrategy::Pull,
-        true,
-        true,
-        true,
-        true,
-        100,
-        Some("rust-analyzer"),
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("rust-analyzer", "rust")
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .supports_formatting(true)
+        .indexing_complete(true)
+        .uptime_seconds(100)
+        .server_name(Some("rust-analyzer"))
+        .build();
 
     assert!(!status.validation);
     assert!(status.reason.contains("failed to start"));
@@ -569,22 +519,16 @@ fn test_validation_status_not_running() {
 
 #[test]
 fn test_validation_status_running_with_pull_diagnostics() {
-    let status = validation_status_from_parts(
-        "rust-analyzer",
-        "rust",
-        true, // running
-        DiagnosticsStrategy::Pull,
-        true,
-        true,
-        true,
-        true,
-        100,
-        Some("rust-analyzer"),
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("rust-analyzer", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .supports_formatting(true)
+        .indexing_complete(true)
+        .uptime_seconds(100)
+        .server_name(Some("rust-analyzer"))
+        .build();
 
     assert!(status.validation);
     assert!(status.reason.contains("pull diagnostics"));
@@ -601,22 +545,13 @@ fn test_validation_status_running_with_pull_diagnostics() {
 
 #[test]
 fn test_validation_status_running_with_push_diagnostics() {
-    let status = validation_status_from_parts(
-        "gopls",
-        "go",
-        true,
-        DiagnosticsStrategy::Push,
-        true,
-        false,
-        false,
-        false,
-        50,
-        Some("gopls"),
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("gopls", "go")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Push)
+        .supports_definition(true)
+        .uptime_seconds(50)
+        .server_name(Some("gopls"))
+        .build();
 
     assert!(status.validation);
     assert!(status.reason.contains("push diagnostics"));
@@ -632,22 +567,12 @@ fn test_validation_status_running_with_push_diagnostics() {
 
 #[test]
 fn test_validation_status_running_with_no_diagnostics() {
-    let status = validation_status_from_parts(
-        "some-lsp",
-        "rust",
-        true,
-        DiagnosticsStrategy::None,
-        true,
-        false,
-        false,
-        true,
-        200,
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("some-lsp", "rust")
+        .running(true)
+        .supports_definition(true)
+        .indexing_complete(true)
+        .uptime_seconds(200)
+        .build();
 
     assert!(!status.validation);
     assert!(status.reason.contains("does not support diagnostics"));
@@ -664,22 +589,14 @@ fn test_validation_status_running_with_no_diagnostics() {
 
 #[test]
 fn test_validation_status_navigation_ready_false_when_no_definition() {
-    let status = validation_status_from_parts(
-        "lsp",
-        "rust",
-        true,
-        DiagnosticsStrategy::Pull,
-        false, // no definition support
-        true,
-        true,
-        true,
-        10,
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("lsp", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_call_hierarchy(true)
+        .supports_formatting(true)
+        .indexing_complete(true)
+        .uptime_seconds(10)
+        .build();
 
     assert!(status.validation);
     assert_eq!(status.navigation_ready, Some(false));
@@ -688,44 +605,29 @@ fn test_validation_status_navigation_ready_false_when_no_definition() {
 
 #[test]
 fn test_validation_status_includes_server_name() {
-    let status = validation_status_from_parts(
-        "command",
-        "rust",
-        true,
-        DiagnosticsStrategy::Pull,
-        true,
-        true,
-        true,
-        true,
-        0,
-        Some("custom-lsp-server"),
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("command", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .supports_formatting(true)
+        .indexing_complete(true)
+        .server_name(Some("custom-lsp-server"))
+        .build();
 
     assert_eq!(status.server_name, Some("custom-lsp-server".to_owned()));
 }
 
 #[test]
 fn test_validation_status_no_server_name() {
-    let status = validation_status_from_parts(
-        "command",
-        "rust",
-        true,
-        DiagnosticsStrategy::Pull,
-        true,
-        true,
-        true,
-        true,
-        0,
-        None, // no server name
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("command", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_definition(true)
+        .supports_call_hierarchy(true)
+        .supports_formatting(true)
+        .indexing_complete(true)
+        .build();
 
     assert!(status.server_name.is_none());
 }
@@ -989,22 +891,11 @@ async fn test_g_1_ensure_process_records_spawn_call_through_di_chain() {
 fn test_grace_period_zero_for_static_servers() {
     // rust-analyzer at 0s with supports_definition=false → Some(false) (NOT None)
     // Static servers have 0s grace period — false is immediately conclusive.
-    let status = validation_status_from_parts(
-        "rust-analyzer",
-        "rust",
-        true,
-        DiagnosticsStrategy::Pull,
-        false, // no definition
-        true,
-        false,
-        false,
-        0, // uptime 0s — but 0s grace means no indeterminate window
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("rust-analyzer", "rust")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Pull)
+        .supports_call_hierarchy(true)
+        .build();
     assert_eq!(
         status.navigation_ready,
         Some(false),
@@ -1014,22 +905,10 @@ fn test_grace_period_zero_for_static_servers() {
 
 #[test]
 fn test_grace_period_java_14s_still_indeterminate() {
-    let status = validation_status_from_parts(
-        "jdtls",
-        "java",
-        true,
-        DiagnosticsStrategy::None,
-        false,
-        false,
-        false,
-        false,
-        14, // under 15s Java grace period
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("jdtls", "java")
+        .running(true)
+        .uptime_seconds(14)
+        .build();
     assert_eq!(
         status.navigation_ready, None,
         "java at 14s with no definition should be indeterminate"
@@ -1038,22 +917,10 @@ fn test_grace_period_java_14s_still_indeterminate() {
 
 #[test]
 fn test_grace_period_java_15s_conclusive() {
-    let status = validation_status_from_parts(
-        "jdtls",
-        "java",
-        true,
-        DiagnosticsStrategy::None,
-        false,
-        false,
-        false,
-        false,
-        15, // at 15s Java grace boundary
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("jdtls", "java")
+        .running(true)
+        .uptime_seconds(15)
+        .build();
     assert_eq!(
         status.navigation_ready,
         Some(false),
@@ -1063,22 +930,11 @@ fn test_grace_period_java_15s_conclusive() {
 
 #[test]
 fn test_grace_period_typescript_4s_indeterminate() {
-    let status = validation_status_from_parts(
-        "typescript-language-server",
-        "typescript",
-        true,
-        DiagnosticsStrategy::Push,
-        false,
-        false,
-        false,
-        false,
-        4, // under 5s TS grace period
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("typescript-language-server", "typescript")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Push)
+        .uptime_seconds(4)
+        .build();
     assert_eq!(
         status.navigation_ready, None,
         "typescript at 4s with no definition should be indeterminate"
@@ -1088,22 +944,10 @@ fn test_grace_period_typescript_4s_indeterminate() {
 #[test]
 fn test_grace_period_go_0s_conclusive() {
     // gopls statically advertises — 0s grace period.
-    let status = validation_status_from_parts(
-        "gopls",
-        "go",
-        true,
-        DiagnosticsStrategy::Push,
-        false,
-        false,
-        false,
-        false,
-        0,
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
+    let status = TestStatusBuilder::new("gopls", "go")
+        .running(true)
+        .diagnostics_strategy(DiagnosticsStrategy::Push)
+        .build();
     assert_eq!(
         status.navigation_ready,
         Some(false),

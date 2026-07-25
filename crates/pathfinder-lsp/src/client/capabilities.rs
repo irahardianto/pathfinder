@@ -44,8 +44,15 @@ impl DiagnosticsStrategy {
 
 /// The subset of LSP server capabilities that Pathfinder uses.
 ///
-/// All four boolean fields represent on/off server capabilities that drive
+/// All boolean fields represent on/off server capabilities that drive
 /// binary degradation decisions in the tool handlers.
+///
+/// # Rationale for Struct Excessive Booleans
+/// This struct maps directly to JSON-RPC capabilities returned by various LSP servers
+/// and is serialized/deserialized to match the integration boundaries. To preserve
+/// clean serialization compatibility with external data formats without custom serde
+/// attributes or manual bit-mapping, we represent each orthogonal capability as an
+/// individual boolean field.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DetectedCapabilities {

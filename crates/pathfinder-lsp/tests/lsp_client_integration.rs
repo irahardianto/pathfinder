@@ -227,21 +227,11 @@ mod python_integration {
         which::which("pyright").is_ok()
     }
 
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn test_python_lsp_full_pipeline() {
-        if !pyright_available() {
-            eprintln!("Skipping Python integration test: pyright not installed");
-            return;
-        }
+    async fn setup_python_project(dir: &Path) -> Result<(), std::io::Error> {
+        let pyproject = dir.join("pyproject.toml");
+        fs::write(&pyproject, "[tool.poetry]\nname = \"test\"\n").await?;
 
-        let dir = tempfile::tempdir().expect("temp dir");
-        let pyproject = dir.path().join("pyproject.toml");
-        fs::write(&pyproject, "[tool.poetry]\nname = \"test\"\n")
-            .await
-            .expect("write pyproject");
-
-        let main_py = dir.path().join("main.py");
+        let main_py = dir.join("main.py");
         fs::write(
             &main_py,
             r#"
@@ -256,8 +246,82 @@ if __name__ == "__main__":
     main()
 "#,
         )
-        .await
-        .expect("write main.py");
+        .await?;
+        Ok(())
+    }
+
+    async fn verify_python_goto_definition(client: &LspClient, root_dir: &Path) {
+        let result = client
+            .goto_definition(
+                root_dir,
+                Path::new("main.py"),
+                7,  // line of `message = greet("world")`
+                17, // column of `g` in `greet`
+            )
+            .await;
+
+        match result {
+            Ok(Some(def)) => {
+                assert!(
+                    def.file.contains("main.py"),
+                    "definition should be in main.py, got: {}",
+                    def.file
+                );
+                assert!(
+                    def.line >= 1 && def.line <= 6,
+                    "definition line should be near def greet, got: {}",
+                    def.line
+                );
+            }
+            Ok(None) => {
+                eprintln!("Python goto_definition returned None (possibly still warming up)");
+            }
+            Err(e) => {
+                panic!("Python goto_definition failed: {e}");
+            }
+        }
+    }
+
+    async fn verify_python_call_hierarchy(client: &LspClient, root_dir: &Path) {
+        let hierarchy = client
+            .call_hierarchy_prepare(
+                root_dir,
+                Path::new("main.py"),
+                2, // line of `def greet`
+                5, // column of `g` in `greet`
+            )
+            .await;
+
+        match hierarchy {
+            Ok(items) if !items.is_empty() => {
+                assert_eq!(
+                    items[0].name, "greet",
+                    "should find greet in call hierarchy"
+                );
+            }
+            Ok(_) => {
+                eprintln!("Python call_hierarchy_prepare returned empty items");
+            }
+            Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {
+                // Acceptable: pyright may not support call hierarchy
+            }
+            Err(e) => {
+                panic!("Unexpected call hierarchy error: {e}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_python_lsp_full_pipeline() {
+        if !pyright_available() {
+            eprintln!("Skipping Python integration test: pyright not installed");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        setup_python_project(dir.path())
+            .await
+            .expect("setup python");
 
         let config = pathfinder_common::config::PathfinderConfig::default();
         let client = LspClient::new(dir.path(), Arc::new(config))
@@ -294,64 +358,8 @@ if __name__ == "__main__":
             return;
         }
 
-        // Test goto_definition: jump to `greet` from the call site
-        let result = client
-            .goto_definition(
-                dir.path(),
-                Path::new("main.py"),
-                7,  // line of `message = greet("world")`
-                17, // column of `g` in `greet`
-            )
-            .await;
-
-        match result {
-            Ok(Some(def)) => {
-                assert!(
-                    def.file.contains("main.py"),
-                    "definition should be in main.py, got: {}",
-                    def.file
-                );
-                assert!(
-                    def.line >= 1 && def.line <= 6,
-                    "definition line should be near def greet, got: {}",
-                    def.line
-                );
-            }
-            Ok(None) => {
-                eprintln!("Python goto_definition returned None (possibly still warming up)");
-            }
-            Err(e) => {
-                panic!("Python goto_definition failed: {e}");
-            }
-        }
-
-        // Test call_hierarchy_prepare on the `greet` function
-        let hierarchy = client
-            .call_hierarchy_prepare(
-                dir.path(),
-                Path::new("main.py"),
-                2, // line of `def greet`
-                5, // column of `g` in `greet`
-            )
-            .await;
-
-        match hierarchy {
-            Ok(items) if !items.is_empty() => {
-                assert_eq!(
-                    items[0].name, "greet",
-                    "should find greet in call hierarchy"
-                );
-            }
-            Ok(_) => {
-                eprintln!("Python call_hierarchy_prepare returned empty items");
-            }
-            Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {
-                // Acceptable: pyright may not support call hierarchy
-            }
-            Err(e) => {
-                panic!("Unexpected call hierarchy error: {e}");
-            }
-        }
+        verify_python_goto_definition(&client, dir.path()).await;
+        verify_python_call_hierarchy(&client, dir.path()).await;
 
         client.shutdown();
     }
@@ -381,19 +389,8 @@ mod typescript_integration {
         which::which("typescript-language-server").is_ok()
     }
 
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn test_typescript_lsp_call_hierarchy_e2e() {
-        if !typescript_ls_available() {
-            eprintln!(
-                "Skipping TypeScript integration test: typescript-language-server not installed"
-            );
-            return;
-        }
-
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        let package_json = dir.path().join("package.json");
+    async fn setup_typescript_project(dir: &Path) -> Result<(), std::io::Error> {
+        let package_json = dir.join("package.json");
         fs::write(
             &package_json,
             r#"{
@@ -405,10 +402,9 @@ mod typescript_integration {
 }
 "#,
         )
-        .await
-        .expect("write package.json");
+        .await?;
 
-        let tsconfig = dir.path().join("tsconfig.json");
+        let tsconfig = dir.join("tsconfig.json");
         fs::write(
             &tsconfig,
             r#"{
@@ -423,10 +419,9 @@ mod typescript_integration {
 }
 "#,
         )
-        .await
-        .expect("write tsconfig.json");
+        .await?;
 
-        let main_ts = dir.path().join("main.ts");
+        let main_ts = dir.join("main.ts");
         fs::write(
             &main_ts,
             r#"export function bar(): string {
@@ -442,8 +437,143 @@ export function baz(): string {
 }
 "#,
         )
-        .await
-        .expect("write main.ts");
+        .await?;
+
+        Ok(())
+    }
+
+    async fn verify_typescript_goto_definition(client: &LspClient, root_dir: &Path) {
+        let result = client
+            .goto_definition(
+                root_dir,
+                Path::new("main.ts"),
+                6,  // line of `return bar();`
+                12, // column of `b` in `bar`
+            )
+            .await;
+
+        match result {
+            Ok(Some(def)) => {
+                eprintln!("goto_definition returned: {:?}", def);
+                assert!(
+                    def.file.contains("main.ts"),
+                    "definition should be in main.ts, got: {}",
+                    def.file
+                );
+            }
+            Ok(None) => {
+                eprintln!("TypeScript goto_definition returned None (possibly still warming up)");
+            }
+            Err(e) => {
+                panic!("TypeScript goto_definition failed: {e}");
+            }
+        }
+    }
+
+    async fn verify_typescript_call_hierarchy_incoming(
+        client: &LspClient,
+        root_dir: &Path,
+        items: &[pathfinder_lsp::types::CallHierarchyItem],
+    ) {
+        if let Some(bar_item) = items.iter().find(|i| i.name == "bar") {
+            eprintln!("Calling call_hierarchy_incoming on 'bar'...");
+            let incoming = client.call_hierarchy_incoming(root_dir, bar_item).await;
+
+            match incoming {
+                Ok(callers) if !callers.is_empty() => {
+                    eprintln!(
+                        "call_hierarchy_incoming returned {} callers:",
+                        callers.len()
+                    );
+                    for (i, caller) in callers.iter().enumerate() {
+                        eprintln!(
+                            "  [{}] from_name={:?}, from_file={:?}",
+                            i, caller.item.name, caller.item.file
+                        );
+                    }
+
+                    let has_foo = callers.iter().any(|c| c.item.name == "foo");
+                    if has_foo {
+                        eprintln!(
+                            "✓ Found 'foo' as caller of 'bar' — call hierarchy working correctly!"
+                        );
+                    } else {
+                        eprintln!(
+                            "⚠ Did not find 'foo' as caller. Callers found: {:?}",
+                            callers
+                                .iter()
+                                .map(|c| c.item.name.as_str())
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+                Ok(_) => {
+                    eprintln!(
+                        "call_hierarchy_incoming returned empty list (possibly still warming up)"
+                    );
+                }
+                Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {
+                    eprintln!("call_hierarchy_incoming returned UnsupportedCapability");
+                }
+                Err(e) => {
+                    eprintln!("call_hierarchy_incoming failed (non-critical in E2E gate): {e}");
+                }
+            }
+        } else {
+            eprintln!("Could not find 'bar' in prepare results, skipping incoming test");
+        }
+    }
+
+    async fn verify_typescript_call_hierarchy(client: &LspClient, root_dir: &Path) {
+        let hierarchy = client
+            .call_hierarchy_prepare(
+                root_dir,
+                Path::new("main.ts"),
+                1,  // line of `export function bar()`
+                17, // column of `b` in `bar`
+            )
+            .await;
+
+        match hierarchy {
+            Ok(ref items) if !items.is_empty() => {
+                eprintln!("call_hierarchy_prepare returned {} items", items.len());
+                for (i, item) in items.iter().enumerate() {
+                    eprintln!("  [{}] name={}, file={:?}", i, item.name, item.file);
+                }
+
+                let has_bar = items.iter().any(|i| i.name == "bar");
+                assert!(has_bar, "call hierarchy should contain 'bar'");
+
+                verify_typescript_call_hierarchy_incoming(client, root_dir, items).await;
+            }
+            Ok(_) => {
+                eprintln!("TypeScript call_hierarchy_prepare returned empty items");
+            }
+            Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {
+                eprintln!("call_hierarchy_prepare returned UnsupportedCapability");
+                eprintln!(
+                    "  This may indicate: TypeScript < 3.8.0, or capability negotiation failed"
+                );
+            }
+            Err(e) => {
+                panic!("Unexpected call hierarchy error: {e}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_typescript_lsp_call_hierarchy_e2e() {
+        if !typescript_ls_available() {
+            eprintln!(
+                "Skipping TypeScript integration test: typescript-language-server not installed"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        setup_typescript_project(dir.path())
+            .await
+            .expect("setup ts project");
 
         let config = pathfinder_common::config::PathfinderConfig::default();
         let client = LspClient::new(dir.path(), Arc::new(config))
@@ -495,10 +625,6 @@ export function baz(): string {
                 ts_status.navigation_ready
             );
 
-            // SPIKE-B + PATCH-005 Validation:
-            // After SPIKE-B declares callHierarchy capability, TS LS with
-            // TypeScript 3.8.0+ SHOULD set supports_call_hierarchy = Some(true).
-            // If this is Some(false) or None, the capability negotiation failed.
             match ts_status.supports_call_hierarchy {
                 Some(true) => {
                     eprintln!("✓ supports_call_hierarchy = true — SPIKE-B working correctly");
@@ -519,122 +645,8 @@ export function baz(): string {
             return;
         }
 
-        // Test goto_definition: jump to `bar` from the call site inside `foo`
-        // foo calls bar on line 6 (1-indexed in LSP, but text line 6 = return bar())
-        // Column is where "bar" starts after "return "
-        let result = client
-            .goto_definition(
-                dir.path(),
-                Path::new("main.ts"),
-                6,  // line of `return bar();`
-                12, // column of `b` in `bar`
-            )
-            .await;
-
-        match result {
-            Ok(Some(def)) => {
-                eprintln!("goto_definition returned: {:?}", def);
-                assert!(
-                    def.file.contains("main.ts"),
-                    "definition should be in main.ts, got: {}",
-                    def.file
-                );
-            }
-            Ok(None) => {
-                eprintln!("TypeScript goto_definition returned None (possibly still warming up)");
-            }
-            Err(e) => {
-                panic!("TypeScript goto_definition failed: {e}");
-            }
-        }
-
-        // Test call_hierarchy_prepare on the `bar` function
-        // bar() is defined on line 1
-        let hierarchy = client
-            .call_hierarchy_prepare(
-                dir.path(),
-                Path::new("main.ts"),
-                1,  // line of `export function bar()`
-                17, // column of `b` in `bar`
-            )
-            .await;
-
-        match hierarchy {
-            Ok(ref items) if !items.is_empty() => {
-                eprintln!("call_hierarchy_prepare returned {} items", items.len());
-                for (i, item) in items.iter().enumerate() {
-                    eprintln!("  [{}] name={}, file={:?}", i, item.name, item.file);
-                }
-
-                // bar should be in the call hierarchy items since that's what we queried
-                let has_bar = items.iter().any(|i| i.name == "bar");
-                assert!(has_bar, "call hierarchy should contain 'bar'");
-            }
-            Ok(_) => {
-                eprintln!("TypeScript call_hierarchy_prepare returned empty items");
-            }
-            Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {
-                // This would indicate SPIKE-B is NOT working for this TS LS session
-                eprintln!("call_hierarchy_prepare returned UnsupportedCapability");
-                eprintln!(
-                    "  This may indicate: TypeScript < 3.8.0, or capability negotiation failed"
-                );
-            }
-            Err(e) => {
-                panic!("Unexpected call hierarchy error: {e}");
-            }
-        }
-
-        // Test call_hierarchy_incoming to prove the FULL pipeline works
-        // call_hierarchy_prepare only proves the capability is advertised;
-        // incoming proves actual call resolution works with real TS LS.
-        if let Ok(items) = &hierarchy {
-            if let Some(bar_item) = items.iter().find(|i| i.name == "bar") {
-                eprintln!("Calling call_hierarchy_incoming on 'bar'...");
-                let incoming = client.call_hierarchy_incoming(dir.path(), bar_item).await;
-
-                match incoming {
-                    Ok(callers) if !callers.is_empty() => {
-                        eprintln!(
-                            "call_hierarchy_incoming returned {} callers:",
-                            callers.len()
-                        );
-                        for (i, caller) in callers.iter().enumerate() {
-                            eprintln!(
-                                "  [{}] from_name={:?}, from_file={:?}",
-                                i, caller.item.name, caller.item.file
-                            );
-                        }
-
-                        // foo() calls bar(), and baz() calls foo()
-                        // So foo should definitely be an incoming caller of bar
-                        let has_foo = callers.iter().any(|c| c.item.name == "foo");
-                        if has_foo {
-                            eprintln!("✓ Found 'foo' as caller of 'bar' — call hierarchy working correctly!");
-                        } else {
-                            eprintln!(
-                                "⚠ Did not find 'foo' as caller. Callers found: {:?}",
-                                callers
-                                    .iter()
-                                    .map(|c| c.item.name.as_str())
-                                    .collect::<Vec<_>>()
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        eprintln!("call_hierarchy_incoming returned empty list (possibly still warming up)");
-                    }
-                    Err(pathfinder_lsp::LspError::UnsupportedCapability { .. }) => {
-                        eprintln!("call_hierarchy_incoming returned UnsupportedCapability");
-                    }
-                    Err(e) => {
-                        eprintln!("call_hierarchy_incoming failed (non-critical in E2E gate): {e}");
-                    }
-                }
-            } else {
-                eprintln!("Could not find 'bar' in prepare results, skipping incoming test");
-            }
-        }
+        verify_typescript_goto_definition(&client, dir.path()).await;
+        verify_typescript_call_hierarchy(&client, dir.path()).await;
 
         client.shutdown();
     }

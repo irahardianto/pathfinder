@@ -40,8 +40,8 @@ pub(crate) struct FakeTransport {
     response_delay: parking_lot::Mutex<Option<Duration>>,
 }
 
-impl FakeTransport {
-    pub fn new() -> Self {
+impl Default for FakeTransport {
+    fn default() -> Self {
         Self {
             responses: Arc::new(Mutex::new(HashMap::new())),
             notifications_sent: Arc::new(Mutex::new(Vec::new())),
@@ -55,6 +55,12 @@ impl FakeTransport {
             request_count: Arc::new(AtomicU32::new(0)),
             response_delay: parking_lot::Mutex::new(None),
         }
+    }
+}
+
+impl FakeTransport {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub(super) fn set_dispatcher(&self, dispatcher: Arc<RequestDispatcher>) {

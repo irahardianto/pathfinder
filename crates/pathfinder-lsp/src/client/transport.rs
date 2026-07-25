@@ -51,12 +51,13 @@ where
             break;
         }
 
-        let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
-        if parts.len() == 2 && parts[0].trim_end().eq_ignore_ascii_case("content-length") {
-            let value = parts[1].trim();
-            content_length = Some(value.parse::<usize>().map_err(|_| {
-                LspError::Protocol(format!("invalid Content-Length value: {value}"))
-            })?);
+        if let Some((key, val)) = trimmed.split_once(':') {
+            if key.trim_end().eq_ignore_ascii_case("content-length") {
+                let value = val.trim();
+                content_length = Some(value.parse::<usize>().map_err(|_| {
+                    LspError::Protocol(format!("invalid Content-Length value: {value}"))
+                })?);
+            }
         }
         // Ignore other headers (Content-Type etc.)
     }

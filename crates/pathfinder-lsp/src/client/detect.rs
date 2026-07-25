@@ -24,6 +24,12 @@
 
 use std::path::Path;
 
+const ENV_CONDA_PREFIX: &str = "CONDA_PREFIX";
+const ENV_VIRTUAL_ENV: &str = "VIRTUAL_ENV";
+const ENV_JAVA_HOME: &str = "JAVA_HOME";
+const ENV_HOME: &str = "HOME";
+const ENV_USERPROFILE: &str = "USERPROFILE";
+
 /// Result of language detection.
 ///
 /// Contains both languages that were fully detected (marker + binary found) and
@@ -352,7 +358,7 @@ pub(crate) fn detect_venv(workspace_root: &std::path::Path) -> Option<std::path:
     }
 
     // Conda: $CONDA_PREFIX/bin/python or $CONDA_PREFIX/python.exe or $CONDA_PREFIX/Scripts/python.exe
-    if let Ok(conda_prefix) = std::env::var("CONDA_PREFIX") {
+    if let Ok(conda_prefix) = std::env::var(ENV_CONDA_PREFIX) {
         let prefix_path = std::path::PathBuf::from(&conda_prefix);
         let paths = [
             prefix_path.join("bin").join("python"),
@@ -368,7 +374,7 @@ pub(crate) fn detect_venv(workspace_root: &std::path::Path) -> Option<std::path:
     }
 
     // $VIRTUAL_ENV: already-activated venv in the shell that launched Pathfinder
-    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+    if let Ok(venv) = std::env::var(ENV_VIRTUAL_ENV) {
         let venv_path = std::path::PathBuf::from(&venv);
         let paths = [
             venv_path.join("bin").join("python"),
@@ -404,15 +410,15 @@ pub(crate) fn detect_python_init_options(workspace_root: &std::path::Path) -> se
 /// Helper to detect JDK home directory based on env vars and project files (.sdkmanrc, .java-version).
 fn detect_jdk_home(root: &std::path::Path) -> Option<String> {
     // 1. Check if JAVA_HOME is already in env and not empty
-    if let Ok(home) = std::env::var("JAVA_HOME") {
+    if let Ok(home) = std::env::var(ENV_JAVA_HOME) {
         if !home.is_empty() {
             return Some(home);
         }
     }
 
-    let home_str = std::env::var("HOME")
+    let home_str = std::env::var(ENV_HOME)
         .ok()
-        .or_else(|| std::env::var("USERPROFILE").ok())?;
+        .or_else(|| std::env::var(ENV_USERPROFILE).ok())?;
     let home_dir = std::path::PathBuf::from(home_str);
 
     // Helper to check and verify if a path exists and contains a bin/java or bin/javac
@@ -777,8 +783,7 @@ async fn detect_typescript_plugins(
     let has_vue = workspace_has_vue_files(project_root).await
         || (project_root != workspace_root && workspace_has_vue_files(workspace_root).await);
     if has_vue {
-        let plugin = detect_ts_plugin(project_root, "@vue/typescript-plugin").await;
-        let plugin = match plugin {
+        let plugin = match detect_ts_plugin(project_root, "@vue/typescript-plugin").await {
             Some(p) => Some(p),
             None => detect_ts_plugin(workspace_root, "@vue/typescript-plugin").await,
         };
@@ -792,63 +797,47 @@ async fn detect_typescript_plugins(
 }
 
 // ---------------------------------------------------------------------------
-// Main detection entry point
-// ---------------------------------------------------------------------------
+// Helper macros to get settings from config
+macro_rules! get_override {
+    ($config:expr, $workspace_root:expr, $lang:expr) => {
+        $config
+            .lsp
+            .get($lang)
+            .and_then(|c| c.root_override.as_ref())
+            .map(|r| $workspace_root.join(r))
+    };
+}
 
-/// Detect available language servers for the given workspace root and configuration.
-#[allow(clippy::missing_errors_doc)]
-// The function is structured as one block per language (Rust, Go, TS, Python, Java).
-// Each block is short but the five-language repetition pushes the total just
-// over the 100-line clippy default. Suppressing to keep the pattern intact.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Five-language repetition block; each block is short but cumulative length exceeds threshold. Pattern is clean per-language — extraction would add indirection without clarity."
-)]
-pub async fn detect_languages(
+macro_rules! get_command_override {
+    ($config:expr, $lang:expr) => {
+        $config
+            .lsp
+            .get($lang)
+            .map(|c| c.command.clone())
+            .filter(|c| !c.is_empty())
+    };
+}
+
+macro_rules! get_args {
+    ($config:expr, $lang:expr, $default:expr) => {
+        $config
+            .lsp
+            .get($lang)
+            .filter(|c| !c.args.is_empty())
+            .map(|c| c.args.clone())
+            .unwrap_or_else(|| $default)
+    };
+}
+
+async fn detect_rust(
     workspace_root: &Path,
     config: &pathfinder_common::config::PathfinderConfig,
-) -> std::io::Result<DetectionResult> {
-    let mut detected = Vec::new();
-    let mut missing = Vec::new();
-
-    // Helper macro to get the root_override path if configured
-    macro_rules! get_override {
-        ($lang:expr) => {
-            config
-                .lsp
-                .get($lang)
-                .and_then(|c| c.root_override.as_ref())
-                .map(|r| workspace_root.join(r))
-        };
-    }
-
-    // Helper macro to get a command override from config (skips `which` lookup).
-    macro_rules! get_command_override {
-        ($lang:expr) => {
-            config
-                .lsp
-                .get($lang)
-                .map(|c| c.command.clone())
-                .filter(|c| !c.is_empty())
-        };
-    }
-
-    // Get args from config (non-empty overrides language defaults; enables test mock flags).
-    macro_rules! get_args {
-        ($lang:expr, $default:expr) => {
-            config
-                .lsp
-                .get($lang)
-                .filter(|c| !c.args.is_empty())
-                .map(|c| c.args.clone())
-                .unwrap_or_else(|| $default)
-        };
-    }
-
-    // Rust
+    detected: &mut Vec<LanguageLsp>,
+    missing: &mut Vec<MissingLanguage>,
+) {
     if let Some(rust_plugin) = crate::plugin::plugin_for_language("rust") {
-        let (rust_root, rust_marker) = if get_override!("rust").is_some() {
-            (get_override!("rust"), None)
+        let (rust_root, rust_marker) = if get_override!(config, workspace_root, "rust").is_some() {
+            (get_override!(config, workspace_root, "rust"), None)
         } else {
             let mut found = None;
             for marker in rust_plugin.marker_files() {
@@ -871,8 +860,8 @@ pub async fn detect_languages(
             }
         };
         if let Some(root) = rust_root {
-            let has_override = get_command_override!("rust").is_some();
-            let cmd = get_command_override!("rust").or_else(|| {
+            let has_override = get_command_override!(config, "rust").is_some();
+            let cmd = get_command_override!(config, "rust").or_else(|| {
                 let mut resolved = None;
                 for candidate in rust_plugin.lsp_candidates() {
                     if let Some(resolved_cmd) = resolve_command(candidate.binary, "rust") {
@@ -902,7 +891,7 @@ pub async fn detect_languages(
                         detected.push(LanguageLsp {
                             language_id: "rust".to_owned(),
                             command,
-                            args: get_args!("rust", vec![]),
+                            args: get_args!(config, "rust", vec![]),
                             root,
                             init_timeout_secs: None,
                             auto_plugins: vec![],
@@ -914,7 +903,7 @@ pub async fn detect_languages(
                     detected.push(LanguageLsp {
                         language_id: "rust".to_owned(),
                         command,
-                        args: get_args!("rust", vec![]),
+                        args: get_args!(config, "rust", vec![]),
                         root,
                         init_timeout_secs: None,
                         auto_plugins: vec![],
@@ -937,11 +926,17 @@ pub async fn detect_languages(
     } else {
         tracing::error!("rust plugin not found in registry — skipping detection");
     }
+}
 
-    // Go
+async fn detect_go(
+    workspace_root: &Path,
+    config: &pathfinder_common::config::PathfinderConfig,
+    detected: &mut Vec<LanguageLsp>,
+    missing: &mut Vec<MissingLanguage>,
+) {
     if let Some(go_plugin) = crate::plugin::plugin_for_language("go") {
-        let (go_root, go_marker) = if get_override!("go").is_some() {
-            (get_override!("go"), None)
+        let (go_root, go_marker) = if get_override!(config, workspace_root, "go").is_some() {
+            (get_override!(config, workspace_root, "go"), None)
         } else {
             let mut found = None;
             for marker in go_plugin.marker_files() {
@@ -964,8 +959,8 @@ pub async fn detect_languages(
             }
         };
         if let Some(root) = go_root {
-            let has_override = get_command_override!("go").is_some();
-            let cmd = get_command_override!("go").or_else(|| {
+            let has_override = get_command_override!(config, "go").is_some();
+            let cmd = get_command_override!(config, "go").or_else(|| {
                 let mut resolved = None;
                 for candidate in go_plugin.lsp_candidates() {
                     if let Some(resolved_cmd) = resolve_command(candidate.binary, "go") {
@@ -995,7 +990,7 @@ pub async fn detect_languages(
                         detected.push(LanguageLsp {
                             language_id: "go".to_owned(),
                             command,
-                            args: get_args!("go", vec![]),
+                            args: get_args!(config, "go", vec![]),
                             root,
                             init_timeout_secs: None,
                             auto_plugins: vec![],
@@ -1007,7 +1002,7 @@ pub async fn detect_languages(
                     detected.push(LanguageLsp {
                         language_id: "go".to_owned(),
                         command,
-                        args: get_args!("go", vec![]),
+                        args: get_args!(config, "go", vec![]),
                         root,
                         init_timeout_secs: None,
                         auto_plugins: vec![],
@@ -1030,11 +1025,19 @@ pub async fn detect_languages(
     } else {
         tracing::error!("go plugin not found in registry — skipping detection");
     }
+}
 
-    // TypeScript / JavaScript
+#[allow(clippy::too_many_lines)]
+async fn detect_typescript(
+    workspace_root: &Path,
+    config: &pathfinder_common::config::PathfinderConfig,
+    detected: &mut Vec<LanguageLsp>,
+    missing: &mut Vec<MissingLanguage>,
+) {
     if let Some(ts_plugin) = crate::plugin::plugin_for_language("typescript") {
-        let (ts_root, ts_marker) = if get_override!("typescript").is_some() {
-            (get_override!("typescript"), None)
+        let (ts_root, ts_marker) = if get_override!(config, workspace_root, "typescript").is_some()
+        {
+            (get_override!(config, workspace_root, "typescript"), None)
         } else {
             let mut found = None;
             for marker in ts_plugin.marker_files() {
@@ -1065,8 +1068,8 @@ pub async fn detect_languages(
             }
         };
         if let Some(root) = ts_root {
-            let has_override = get_command_override!("typescript").is_some();
-            let cmd = get_command_override!("typescript").or_else(|| {
+            let has_override = get_command_override!(config, "typescript").is_some();
+            let cmd = get_command_override!(config, "typescript").or_else(|| {
                 let mut resolved = None;
                 for candidate in ts_plugin.lsp_candidates() {
                     if let Some(resolved_cmd) = resolve_command(candidate.binary, "typescript") {
@@ -1098,6 +1101,7 @@ pub async fn detect_languages(
                             language_id: "typescript".to_owned(),
                             command,
                             args: get_args!(
+                                config,
                                 "typescript",
                                 ts_plugin.lsp_candidates()[0]
                                     .default_args
@@ -1117,6 +1121,7 @@ pub async fn detect_languages(
                         language_id: "typescript".to_owned(),
                         command,
                         args: get_args!(
+                            config,
                             "typescript",
                             ts_plugin.lsp_candidates()[0]
                                 .default_args
@@ -1148,11 +1153,18 @@ pub async fn detect_languages(
     } else {
         tracing::error!("typescript plugin not found in registry — skipping detection");
     }
+}
 
-    // Python
+#[allow(clippy::too_many_lines)]
+async fn detect_python(
+    workspace_root: &Path,
+    config: &pathfinder_common::config::PathfinderConfig,
+    detected: &mut Vec<LanguageLsp>,
+    missing: &mut Vec<MissingLanguage>,
+) {
     if let Some(py_plugin) = crate::plugin::plugin_for_language("python") {
-        let (py_root, py_marker) = if get_override!("python").is_some() {
-            (get_override!("python"), None)
+        let (py_root, py_marker) = if get_override!(config, workspace_root, "python").is_some() {
+            (get_override!(config, workspace_root, "python"), None)
         } else {
             let mut found = None;
             for marker in py_plugin.marker_files() {
@@ -1175,27 +1187,27 @@ pub async fn detect_languages(
             }
         };
         if let Some(root) = py_root {
-            let has_override = get_command_override!("python").is_some();
-            let maybe_command_and_args = if let Some(cmd_override) = get_command_override!("python")
-            {
-                Some((cmd_override, vec!["--stdio".to_owned()]))
-            } else {
-                let mut resolved = None;
-                for candidate in py_plugin.lsp_candidates() {
-                    if let Some(resolved_cmd) = resolve_command(candidate.binary, "python") {
-                        resolved = Some((
-                            resolved_cmd,
-                            candidate
-                                .default_args
-                                .iter()
-                                .map(ToString::to_string)
-                                .collect(),
-                        ));
-                        break;
+            let has_override = get_command_override!(config, "python").is_some();
+            let maybe_command_and_args =
+                if let Some(cmd_override) = get_command_override!(config, "python") {
+                    Some((cmd_override, vec!["--stdio".to_owned()]))
+                } else {
+                    let mut resolved = None;
+                    for candidate in py_plugin.lsp_candidates() {
+                        if let Some(resolved_cmd) = resolve_command(candidate.binary, "python") {
+                            resolved = Some((
+                                resolved_cmd,
+                                candidate
+                                    .default_args
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect(),
+                            ));
+                            break;
+                        }
                     }
-                }
-                resolved
-            };
+                    resolved
+                };
 
             if let Some((command, default_args)) = maybe_command_and_args {
                 let maybe_marker_path = py_marker
@@ -1230,7 +1242,7 @@ pub async fn detect_languages(
                     detected.push(LanguageLsp {
                         language_id: "python".to_owned(),
                         command,
-                        args: get_args!("python", default_args),
+                        args: get_args!(config, "python", default_args),
                         root,
                         init_timeout_secs: None,
                         auto_plugins: vec![],
@@ -1255,11 +1267,17 @@ pub async fn detect_languages(
     } else {
         tracing::error!("python plugin not found in registry — skipping detection");
     }
+}
 
-    // Java
+async fn detect_java(
+    workspace_root: &Path,
+    config: &pathfinder_common::config::PathfinderConfig,
+    detected: &mut Vec<LanguageLsp>,
+    missing: &mut Vec<MissingLanguage>,
+) {
     if let Some(java_plugin) = crate::plugin::plugin_for_language("java") {
-        let (java_root, java_marker) = if get_override!("java").is_some() {
-            (get_override!("java"), None)
+        let (java_root, java_marker) = if get_override!(config, workspace_root, "java").is_some() {
+            (get_override!(config, workspace_root, "java"), None)
         } else {
             let mut found = None;
             for marker in java_plugin.marker_files() {
@@ -1282,8 +1300,8 @@ pub async fn detect_languages(
             }
         };
         if let Some(root) = java_root {
-            let has_override = get_command_override!("java").is_some();
-            let cmd = get_command_override!("java").or_else(|| {
+            let has_override = get_command_override!(config, "java").is_some();
+            let cmd = get_command_override!(config, "java").or_else(|| {
                 let mut resolved = None;
                 for candidate in java_plugin.lsp_candidates() {
                     if let Some(resolved_cmd) = resolve_command(candidate.binary, "java") {
@@ -1325,7 +1343,7 @@ pub async fn detect_languages(
                     detected.push(LanguageLsp {
                         language_id: "java".to_owned(),
                         command,
-                        args: get_args!("java", vec![]),
+                        args: get_args!(config, "java", vec![]),
                         root,
                         init_timeout_secs: Some(180),
                         auto_plugins: vec![],
@@ -1348,6 +1366,25 @@ pub async fn detect_languages(
     } else {
         tracing::error!("java plugin not found in registry — skipping detection");
     }
+}
+
+// Main detection entry point
+// ---------------------------------------------------------------------------
+
+/// Detect available language servers for the given workspace root and configuration.
+#[allow(clippy::missing_errors_doc)]
+pub async fn detect_languages(
+    workspace_root: &Path,
+    config: &pathfinder_common::config::PathfinderConfig,
+) -> std::io::Result<DetectionResult> {
+    let mut detected = Vec::new();
+    let mut missing = Vec::new();
+
+    detect_rust(workspace_root, config, &mut detected, &mut missing).await;
+    detect_go(workspace_root, config, &mut detected, &mut missing).await;
+    detect_typescript(workspace_root, config, &mut detected, &mut missing).await;
+    detect_python(workspace_root, config, &mut detected, &mut missing).await;
+    detect_java(workspace_root, config, &mut detected, &mut missing).await;
 
     let mut filtered_detected = Vec::new();
     for lsp in detected {
