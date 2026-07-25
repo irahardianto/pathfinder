@@ -284,7 +284,7 @@ impl PathfinderError {
             } => {
                 serde_json::json!({ "path": path, "workspace_root": workspace_root })
             }
-            _ => serde_json::Value::Object(serde_json::Map::new()),
+            _ => serde_json::Value::Object(serde_json::Map::default()),
         }
     }
 }

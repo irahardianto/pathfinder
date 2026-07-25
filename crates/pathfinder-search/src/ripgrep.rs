@@ -172,37 +172,8 @@ struct MatchCollector<'a> {
     last_seen_line: u64,
 }
 
-impl<'a> MatchCollector<'a> {
-    #[allow(clippy::similar_names, clippy::too_many_arguments)]
-    fn new(
-        relative_path: Rc<str>,
-        matches: &'a mut Vec<SearchMatch>,
-        total_count: &'a mut usize,
-        max_results: usize,
-        offset: usize,
-        skipped_count: &'a mut usize,
-        context_lines: usize,
-        matcher: &'a grep_regex::RegexMatcher,
-    ) -> Self {
-        Self {
-            relative_path,
-            version_hash: String::default(), // filled lazily after search
-            context_before_buf: VecDeque::default(),
-            matches,
-            total_count,
-            max_results,
-            offset,
-            skipped_count,
-            truncated: false,
-            context_lines,
-            pending_after_context: 0,
-            after_context_buf: Vec::default(),
-            matcher,
-            last_seen_line: 0,
-        }
-    }
-
-    /// Backfill the version hash into all collected matches for this file.
+impl MatchCollector<'_> {
+    /// Get the number of matches currently collected.
     fn current_match_count(&self) -> usize {
         self.matches.len()
     }
@@ -342,6 +313,76 @@ impl Sink for MatchCollector<'_> {
 
 // ── Scout implementation ─────────────────────────────────────────────
 
+/// The result of `walk_files` containing collected files and skip counts.
+struct WalkFilesResult {
+    /// List of file absolute paths and their relative path strings.
+    files: Vec<(PathBuf, String)>,
+    /// Number of files skipped due to matching binary extensions.
+    binary_skipped: usize,
+    /// Number of files skipped due to being ignored by gitignore rules.
+    gitignored_skipped: usize,
+}
+
+/// Walker-level directory pruning callback.
+///
+/// Prevents `WalkBuilder` from descending into directories listed in
+/// `ALWAYS_EXCLUDED_DIR_NAMES`. This is the performance-critical filter:
+/// by returning `false` for a directory entry, the walker skips the
+/// entire subtree (no syscalls for its children).
+fn prune_excluded_dirs(entry: &ignore::DirEntry) -> bool {
+    if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        if let Some(name) = entry.file_name().to_str() {
+            if ALWAYS_EXCLUDED_DIR_NAMES.contains(&name) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Build globsets for include and exclude patterns.
+fn build_globsets(
+    glob: &str,
+    exclude_glob: &[String],
+) -> Result<(globset::GlobSet, Option<globset::GlobSet>), SearchError> {
+    // Build a globset for the user's path_glob (include) pattern.
+    let glob_matcher = globset::GlobBuilder::new(glob)
+        .literal_separator(false)
+        .build()
+        .and_then(|g| globset::GlobSet::builder().add(g).build())
+        .map_err(|e| SearchError::InvalidPattern(format!("invalid path_glob: {e}")))?;
+
+    // Build a globset for the exclude_glob patterns (optional).
+    let exclude_matcher =
+        if exclude_glob.is_empty() {
+            None
+        } else {
+            let mut builder = globset::GlobSetBuilder::new();
+            let mut has_patterns = false;
+            for pattern in exclude_glob {
+                if !pattern.is_empty() {
+                    let g = globset::GlobBuilder::new(pattern)
+                        .literal_separator(false)
+                        .build()
+                        .map_err(|e| {
+                            SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
+                        })?;
+                    builder.add(g);
+                    has_patterns = true;
+                }
+            }
+            if has_patterns {
+                Some(builder.build().map_err(|e| {
+                    SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
+                })?)
+            } else {
+                None
+            }
+        };
+
+    Ok((glob_matcher, exclude_matcher))
+}
+
 /// Production search engine backed by the `grep-*` crate family.
 ///
 /// Walks the workspace with [`ignore::WalkBuilder`] (glob + `.gitignore`-aware),
@@ -437,67 +478,12 @@ impl RipgrepScout {
     /// Applies `path_glob` (include filter) and `exclude_glob` (exclude filter)
     /// before searching — so excluded files are never read at all.
     ///
-    /// Returns `(files, binary_skipped, gitignored_skipped)` — tuples of `(absolute_path, relative_path_string)`
-    /// plus the count of files skipped because they matched known binary extensions, and the count of
-    /// gitignored files that matched the glob but were excluded by gitignore.
-    #[allow(clippy::type_complexity, clippy::too_many_lines)]
+    /// Returns `WalkFilesResult` containing the list of files to search, and the counts of
+    /// skipped files (binary and gitignored).
     #[tracing::instrument(skip_all)]
-    fn walk_files(
-        params: &SearchParams,
-    ) -> Result<(Vec<(PathBuf, String)>, usize, usize), SearchError> {
+    fn walk_files(params: &SearchParams) -> Result<WalkFilesResult, SearchError> {
         let glob = &params.path_glob;
-        let exclude_glob = &params.exclude_glob;
-
-        // Build a globset for the user's path_glob (include) pattern.
-        let glob_matcher = globset::GlobBuilder::new(glob)
-            .literal_separator(false)
-            .build()
-            .and_then(|g| globset::GlobSet::builder().add(g).build())
-            .map_err(|e| SearchError::InvalidPattern(format!("invalid path_glob: {e}")))?;
-
-        // Build a globset for the exclude_glob patterns (optional).
-        let exclude_matcher = if exclude_glob.is_empty() {
-            None
-        } else {
-            let mut builder = globset::GlobSetBuilder::new();
-            let mut has_patterns = false;
-            for pattern in exclude_glob {
-                if !pattern.is_empty() {
-                    let g = globset::GlobBuilder::new(pattern)
-                        .literal_separator(false)
-                        .build()
-                        .map_err(|e| {
-                            SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
-                        })?;
-                    builder.add(g);
-                    has_patterns = true;
-                }
-            }
-            if has_patterns {
-                Some(builder.build().map_err(|e| {
-                    SearchError::InvalidPattern(format!("invalid exclude_glob: {e}"))
-                })?)
-            } else {
-                None
-            }
-        };
-
-        // Walker-level directory pruning callback.
-        //
-        // Prevents `WalkBuilder` from descending into directories listed in
-        // `ALWAYS_EXCLUDED_DIR_NAMES`. This is the performance-critical filter:
-        // by returning `false` for a directory entry, the walker skips the
-        // entire subtree (no syscalls for its children).
-        fn prune_excluded_dirs(entry: &ignore::DirEntry) -> bool {
-            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                if let Some(name) = entry.file_name().to_str() {
-                    if ALWAYS_EXCLUDED_DIR_NAMES.contains(&name) {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
+        let (glob_matcher, exclude_matcher) = build_globsets(glob, &params.exclude_glob)?;
 
         let mut walker_builder = WalkBuilder::new(&params.workspace_root);
         walker_builder
@@ -584,7 +570,11 @@ impl RipgrepScout {
         // files.len() filters them out in the second walk), this difference represents
         // exactly the non-binary files excluded by gitignore.
         let gitignored_skipped = total_files_without_gitignore.saturating_sub(files.len());
-        Ok((files, binary_skipped, gitignored_skipped))
+        Ok(WalkFilesResult {
+            files,
+            binary_skipped,
+            gitignored_skipped,
+        })
     }
 }
 
@@ -604,7 +594,10 @@ impl Scout for RipgrepScout {
             );
 
             let matcher = RipgrepScout::build_matcher(params)?;
-            let (files, binary_skipped, gitignored_skipped) = Self::walk_files(params)?;
+            let walk_result = Self::walk_files(params)?;
+            let files = walk_result.files;
+            let binary_skipped = walk_result.binary_skipped;
+            let gitignored_skipped = walk_result.gitignored_skipped;
             let files_in_scope = files.len();
 
             let mut match_buf: Vec<SearchMatch> =
@@ -634,16 +627,22 @@ impl Scout for RipgrepScout {
                 };
                 let mut tee = TeeHasher::new(BufReader::new(file));
 
-                let mut sink = MatchCollector::new(
-                    Rc::from(relative.as_str()),
-                    &mut match_buf,
-                    &mut total_count,
-                    params.max_results,
-                    params.offset,
-                    &mut skipped_count,
-                    params.context_lines,
-                    &matcher,
-                );
+                let mut sink = MatchCollector {
+                    relative_path: Rc::from(relative.as_str()),
+                    version_hash: String::default(),
+                    context_before_buf: VecDeque::default(),
+                    matches: &mut match_buf,
+                    total_count: &mut total_count,
+                    max_results: params.max_results,
+                    offset: params.offset,
+                    skipped_count: &mut skipped_count,
+                    truncated: false,
+                    context_lines: params.context_lines,
+                    pending_after_context: 0,
+                    after_context_buf: Vec::default(),
+                    matcher: &matcher,
+                    last_seen_line: 0,
+                };
 
                 if let Err(e) = searcher.search_reader(&matcher, &mut tee, &mut sink) {
                     tracing::warn!(file = %relative, error = %e, "Scout: failed to search file; skipping");

@@ -37,7 +37,7 @@ pub struct PathfinderConfig {
 impl Default for PathfinderConfig {
     fn default() -> Self {
         Self {
-            lsp: HashMap::new(),
+            lsp: HashMap::default(),
             sandbox: SandboxConfig::default(),
             search: SearchConfig::default(),
             repo_map: RepoMapConfig::default(),

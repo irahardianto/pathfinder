@@ -160,7 +160,7 @@ impl Sandbox {
             .iter()
             .map(|allowed| {
                 if allowed.ends_with('/') {
-                    String::new()
+                    String::default()
                 } else {
                     format!("{allowed}/")
                 }
@@ -366,7 +366,7 @@ impl Sandbox {
                     // so that "secret" does not deny "src/secretariat/utils.rs"
                     let basename = std::path::Path::new(path_str)
                         .file_name()
-                        .map_or(path_str, |f| f.to_str().unwrap_or(path_str));
+                        .map_or_else(|| path_str, |f| f.to_str().unwrap_or(path_str));
                     if basename == pattern || path_str == pattern.as_str() {
                         return true;
                     }

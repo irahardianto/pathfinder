@@ -96,7 +96,7 @@ pub async fn get_changed_files_since<R: GitRunner>(
         })??;
 
     let stdout = String::from_utf8_lossy(&raw);
-    let mut files = HashSet::new();
+    let mut files = HashSet::default();
     for line in stdout.lines() {
         if !line.is_empty() {
             files.insert(PathBuf::from(line));
