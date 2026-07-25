@@ -91,6 +91,32 @@ pub struct PathfinderServer {
 }
 
 impl PathfinderServer {
+    async fn init_lsp_client(
+        workspace_root: &WorkspaceRoot,
+        config: &PathfinderConfig,
+    ) -> Arc<dyn Lawyer> {
+        match LspClient::new(workspace_root.path(), Arc::new(config.clone())).await {
+            Ok(client) => {
+                // Kick off background initialization so LSP processes are
+                // already loading while the agent issues its first non-LSP
+                // tool calls (explore, search, etc.).
+                client.warm_start();
+                tracing::info!(
+                    workspace = %workspace_root.path().display(),
+                    "LspClient initialised (warm start in progress)"
+                );
+                Arc::new(client)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "LSP Zero-Config detection failed — degraded mode (NoOpLawyer)"
+                );
+                Arc::new(NoOpLawyer)
+            }
+        }
+    }
+
     /// Create a new Pathfinder server backed by the real Ripgrep scout, Tree-sitter
     /// surgeon, and `LspClient` for LSP operations.
     ///
@@ -104,28 +130,7 @@ impl PathfinderServer {
     #[must_use]
     pub async fn new(workspace_root: WorkspaceRoot, config: PathfinderConfig) -> Self {
         let sandbox = Sandbox::new(workspace_root.path(), &config.sandbox);
-
-        let lawyer: Arc<dyn Lawyer> =
-            match LspClient::new(workspace_root.path(), Arc::new(config.clone())).await {
-                Ok(client) => {
-                    // Kick off background initialization so LSP processes are
-                    // already loading while the agent issues its first non-LSP
-                    // tool calls (explore, search, etc.).
-                    client.warm_start();
-                    tracing::info!(
-                        workspace = %workspace_root.path().display(),
-                        "LspClient initialised (warm start in progress)"
-                    );
-                    Arc::new(client)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "LSP Zero-Config detection failed — degraded mode (NoOpLawyer)"
-                    );
-                    Arc::new(NoOpLawyer)
-                }
-            };
+        let lawyer = Self::init_lsp_client(&workspace_root, &config).await;
 
         Self::with_all_engines(
             workspace_root,

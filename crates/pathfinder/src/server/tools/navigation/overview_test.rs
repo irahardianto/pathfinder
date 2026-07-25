@@ -899,18 +899,18 @@ fn test_resolve_degraded_reason_scenarios() {
 
 #[test]
 fn test_render_overview_text_format() {
-    let text = PathfinderServer::render_overview_text(
-        "src/auth.rs::login",
-        10,
-        12,
-        "fn login() {}",
-        None,
-        None,
-        0,
-        false,
-        None,
-        123,
-    );
+    let text = PathfinderServer::render_overview_text(&RenderOverviewParams {
+        semantic_path: "src/auth.rs::login",
+        start_line: 10,
+        end_line: 12,
+        scope_content: "fn login() {}",
+        impact: None,
+        references: None,
+        files_referenced: 0,
+        degraded: false,
+        degraded_reason: None,
+        duration_ms: 123,
+    });
 
     assert!(text.contains("SYMBOL: src/auth.rs::login (3 lines)"));
     assert!(text.contains("CALLERS: unavailable"));

@@ -518,13 +518,10 @@ impl PathfinderServer {
                 &params.query,
                 &extract_symbol_name_from_path(&b.semantic_path),
             );
-            match score_b.cmp(&score_a) {
-                std::cmp::Ordering::Equal => match a.file.cmp(&b.file) {
-                    std::cmp::Ordering::Equal => a.line.cmp(&b.line),
-                    other => other,
-                },
-                other => other,
-            }
+            score_b
+                .cmp(&score_a)
+                .then_with(|| a.file.cmp(&b.file))
+                .then_with(|| a.line.cmp(&b.line))
         });
 
         // Limit results

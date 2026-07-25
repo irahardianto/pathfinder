@@ -792,8 +792,65 @@ async fn test_search_group_by_file_parameter() {
     assert_eq!(response_flat.total_matches, 1);
 }
 
+async fn run_filter_test_scenario(
+    server: &PathfinderServer,
+    surgeon: &Arc<MockSurgeon>,
+    filter_mode: FilterMode,
+    expected_matches: usize,
+    expected_content: &str,
+) {
+    surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .node_type_at_position_results
+        .lock()
+        .unwrap()
+        .push(Ok("code".to_string()));
+
+    surgeon
+        .enclosing_symbol_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+    surgeon
+        .node_type_at_position_results
+        .lock()
+        .unwrap()
+        .push(Ok("comment".to_string()));
+
+    let params = SearchParams {
+        query: "find_me".to_owned(),
+        mode: SearchMode::Text,
+        path_glob: "**/*.rs".to_owned(),
+        max_results: 10,
+        filter_mode,
+        ..Default::default()
+    };
+    let response = server
+        .search_codebase_impl(params)
+        .await
+        .expect("search should succeed")
+        .0;
+    assert_eq!(response.total_matches, expected_matches);
+    if expected_matches == 1 {
+        assert_eq!(response.matches[0].content, expected_content);
+    }
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_search_filter_mode_parameter() {
     let ws_dir = tempfile::tempdir().unwrap();
     let ws = WorkspaceRoot::new(ws_dir.path()).unwrap();
@@ -814,188 +871,29 @@ async fn test_search_filter_mode_parameter() {
         PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon.clone(), lawyer);
 
     // Scenario 1: filter_mode = FilterMode::CommentsOnly
-    // Ripgrep will find 2 matches.
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("code".to_string()));
-
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("comment".to_string()));
-
-    let params_comments = SearchParams {
-        query: "find_me".to_owned(),
-        mode: SearchMode::Text,
-        path_glob: "**/*.rs".to_owned(),
-        max_results: 10,
-        filter_mode: FilterMode::CommentsOnly,
-        ..Default::default()
-    };
-    let response_comments = server
-        .search_codebase_impl(params_comments)
-        .await
-        .expect("comments search should succeed")
-        .0;
-    assert_eq!(response_comments.total_matches, 1);
-    assert_eq!(
-        response_comments.matches[0].content,
-        "// find_me in comment"
-    );
+    run_filter_test_scenario(
+        &server,
+        &surgeon,
+        FilterMode::CommentsOnly,
+        1,
+        "// find_me in comment",
+    )
+    .await;
 
     // Scenario 2: filter_mode = FilterMode::CodeOnly
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("code".to_string()));
-
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("comment".to_string()));
-
-    let params_code = SearchParams {
-        query: "find_me".to_owned(),
-        mode: SearchMode::Text,
-        path_glob: "**/*.rs".to_owned(),
-        max_results: 10,
-        filter_mode: FilterMode::CodeOnly,
-        ..Default::default()
-    };
-    let response_code = server
-        .search_codebase_impl(params_code)
-        .await
-        .expect("code search should succeed")
-        .0;
-    assert_eq!(response_code.total_matches, 1);
-    assert_eq!(response_code.matches[0].content, "fn find_me() {}");
+    run_filter_test_scenario(
+        &server,
+        &surgeon,
+        FilterMode::CodeOnly,
+        1,
+        "fn find_me() {}",
+    )
+    .await;
 
     // Scenario 3: filter_mode = FilterMode::All
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("code".to_string()));
-
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("comment".to_string()));
-
-    let params_all = SearchParams {
-        query: "find_me".to_owned(),
-        mode: SearchMode::Text,
-        path_glob: "**/*.rs".to_owned(),
-        max_results: 10,
-        filter_mode: FilterMode::All,
-        ..Default::default()
-    };
-    let response_all = server
-        .search_codebase_impl(params_all)
-        .await
-        .expect("all search should succeed")
-        .0;
-    assert_eq!(response_all.total_matches, 2);
+    run_filter_test_scenario(&server, &surgeon, FilterMode::All, 2, "").await;
 
     // Scenario 4: filter_mode = non_code (passed as deserialized JSON field)
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("code".to_string()));
-
-    surgeon
-        .enclosing_symbol_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .enclosing_symbol_detail_results
-        .lock()
-        .unwrap()
-        .push(Ok(None));
-    surgeon
-        .node_type_at_position_results
-        .lock()
-        .unwrap()
-        .push(Ok("comment".to_string()));
-
     let json_params = serde_json::json!({
         "query": "find_me",
         "mode": "text",
@@ -1004,16 +902,14 @@ async fn test_search_filter_mode_parameter() {
         "filter_mode": "non_code"
     });
     let params_non_code: SearchParams = serde_json::from_value(json_params).unwrap();
-    let response_non_code = server
-        .search_codebase_impl(params_non_code)
-        .await
-        .expect("non_code search should succeed")
-        .0;
-    assert_eq!(response_non_code.total_matches, 1);
-    assert_eq!(
-        response_non_code.matches[0].content,
-        "// find_me in comment"
-    );
+    run_filter_test_scenario(
+        &server,
+        &surgeon,
+        params_non_code.filter_mode,
+        1,
+        "// find_me in comment",
+    )
+    .await;
 }
 
 /// Verify the low-coverage hint fires when less than 50% of in-scope files were searched.

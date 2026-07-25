@@ -550,10 +550,7 @@ impl PathfinderServer {
 
         // Spec 2.2: Separator confusion correction
         // If multiple '::' used, suggest the '.' variant
-        let parts: Vec<&str> = semantic_path_str.splitn(2, "::").collect();
-        if parts.len() == 2 {
-            let file_part = parts[0];
-            let symbol_part = parts[1];
+        if let Some((file_part, symbol_part)) = semantic_path_str.split_once("::") {
             if symbol_part.contains("::") {
                 let corrected_symbol = symbol_part.replace("::", ".");
                 let corrected_path = format!("{file_part}::{corrected_symbol}");

@@ -11,12 +11,24 @@ use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
 use rmcp::model::ErrorData;
 
+pub(super) struct RenderOverviewParams<'a> {
+    pub(super) semantic_path: &'a str,
+    pub(super) start_line: usize,
+    pub(super) end_line: usize,
+    pub(super) scope_content: &'a str,
+    pub(super) impact: Option<&'a crate::server::types::ImpactSummary>,
+    pub(super) references: Option<&'a [crate::server::types::SymbolOverviewReference]>,
+    pub(super) files_referenced: usize,
+    pub(super) degraded: bool,
+    pub(super) degraded_reason: Option<DegradedReason>,
+    pub(super) duration_ms: u128,
+}
+
 impl PathfinderServer {
     /// Composite tool: returns source + callers/callees + references in one call.
     ///
     /// Orchestrates `read_symbol_scope` + `find_callers_callees` + `find_all_references`.
     /// Uses depth=2 and capped references for bounded responses.
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn symbol_overview_impl(
         &self,
         params: crate::server::types::TraceParams,
@@ -56,6 +68,68 @@ impl PathfinderServer {
             language: scope.language.clone(),
         });
 
+        let _doc_guard = self.open_document_safely(&semantic_path).await;
+
+        // Clamp max_references to [1, 500] — sub-calls also clamp, but being explicit here
+        // makes the bound visible at the orchestration level.
+        let max_references = params.max_references.clamp(1, 500);
+
+        let (impact, impact_degraded, impact_reason) = self
+            .get_impact_summary(&params.semantic_path, max_references)
+            .await;
+
+        let (references, refs_degraded, refs_reason, files_referenced, _warm_start_in_progress) =
+            self.get_references_summary(&params.semantic_path, max_references)
+                .await;
+
+        let duration_ms = start.elapsed().as_millis();
+
+        let (degraded, degraded_reason, lsp_readiness, warm_start_in_progress) =
+            Self::resolve_degraded_reason(
+                impact_degraded,
+                impact_reason,
+                refs_degraded,
+                refs_reason,
+            );
+
+        let response = crate::server::types::SymbolOverviewResponse {
+            source,
+            impact: impact.clone(),
+            references: references.clone(),
+            files_referenced,
+            degraded,
+            impact_degraded,
+            references_degraded: refs_degraded,
+            degraded_reason,
+            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
+            lsp_readiness,
+            warm_start_in_progress,
+        };
+
+        let render_params = RenderOverviewParams {
+            semantic_path: &params.semantic_path,
+            start_line: scope.start_line,
+            end_line: scope.end_line,
+            scope_content: &scope.content,
+            impact: impact.as_ref(),
+            references: references.as_deref(),
+            files_referenced,
+            degraded,
+            degraded_reason,
+            duration_ms,
+        };
+        let text = Self::render_overview_text(&render_params);
+
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
+        result.structured_content = serialize_metadata(&response);
+        Ok(result)
+    }
+
+    async fn open_document_safely(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+    ) -> Option<Box<dyn pathfinder_lsp::lawyer::DocumentLease>> {
         let file_path = self.workspace_root.path().join(&semantic_path.file_path);
         let file_content = match tokio::fs::read_to_string(&file_path).await {
             Ok(content) => content,
@@ -69,7 +143,7 @@ impl PathfinderServer {
                 String::new()
             }
         };
-        let _doc_guard = match self
+        match self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
@@ -88,14 +162,20 @@ impl PathfinderServer {
                 );
                 None
             }
-        };
+        }
+    }
 
-        // Clamp max_references to [1, 500] — sub-calls also clamp, but being explicit here
-        // makes the bound visible at the orchestration level.
-        let max_references = params.max_references.clamp(1, 500);
-
+    async fn get_impact_summary(
+        &self,
+        semantic_path: &str,
+        max_references: u32,
+    ) -> (
+        Option<crate::server::types::ImpactSummary>,
+        bool,
+        Option<DegradedReason>,
+    ) {
         let impact_params = crate::server::types::TraceParams {
-            semantic_path: params.semantic_path.clone(),
+            semantic_path: semantic_path.to_owned(),
             scope: crate::server::types::TraceScope::Callers,
             max_depth: 2,
             max_references,
@@ -104,17 +184,19 @@ impl PathfinderServer {
 
         let impact_result = self.find_callers_callees_impl(impact_params).await;
 
-        let (impact, impact_degraded, impact_reason) = match impact_result {
+        match impact_result {
             Ok(result) => {
                 let raw = result.structured_content.unwrap_or_default();
                 let meta: crate::server::types::FindCallersCalleesMetadata =
                     serde_json::from_value(raw).unwrap_or_else(|e| {
-                        debug_assert!(false, "find_callers_callees metadata deserialization failed: {e}");
+                        #[allow(clippy::manual_assert)]
+                        if cfg!(debug_assertions) {
+                            panic!("find_callers_callees metadata deserialization failed: {e}");
+                        }
                         tracing::warn!(
                             error = %e,
                             "symbol_overview: find_callers_callees metadata deserialization failed — using degraded default"
                         );
-                        // Item 11: Use degraded=true to avoid hiding the bug from consumers.
                         crate::server::types::FindCallersCalleesMetadata {
                             degraded: true,
                             degraded_reason: Some(DegradedReason::LspErrorGrepFallback),
@@ -162,10 +244,22 @@ impl PathfinderServer {
                 );
                 (None, true, Some(DegradedReason::LspErrorGrepFallback))
             }
-        };
+        }
+    }
 
+    async fn get_references_summary(
+        &self,
+        semantic_path: &str,
+        max_references: u32,
+    ) -> (
+        Option<Vec<crate::server::types::SymbolOverviewReference>>,
+        bool,
+        Option<DegradedReason>,
+        usize,
+        Option<bool>,
+    ) {
         let refs_params = crate::server::types::TraceParams {
-            semantic_path: params.semantic_path.clone(),
+            semantic_path: semantic_path.to_owned(),
             scope: crate::server::types::TraceScope::References,
             max_depth: 0,
             max_references,
@@ -174,100 +268,59 @@ impl PathfinderServer {
 
         let refs_result = self.find_all_references_impl(refs_params).await;
 
-        let (references, refs_degraded, refs_reason, files_referenced, _refs_warm_start) =
-            match refs_result {
-                Ok(result) => {
-                    let raw = result.structured_content.unwrap_or_default();
-                    let meta: crate::server::types::FindAllReferencesMetadata =
+        match refs_result {
+            Ok(result) => {
+                let raw = result.structured_content.unwrap_or_default();
+                let meta: crate::server::types::FindAllReferencesMetadata =
                     serde_json::from_value(raw).unwrap_or_else(|e| {
-                        debug_assert!(false, "find_all_references metadata deserialization failed: {e}");
+                        #[allow(clippy::manual_assert)]
+                        if cfg!(debug_assertions) {
+                            panic!("find_all_references metadata deserialization failed: {e}");
+                        }
                         tracing::warn!(
                             error = %e,
                             "symbol_overview: find_all_references metadata deserialization failed — using degraded default"
                         );
-                        // Item 11: Use degraded=true to avoid hiding the bug from consumers.
                         crate::server::types::FindAllReferencesMetadata {
                             degraded: true,
                             degraded_reason: Some(DegradedReason::LspErrorGrepFallback),
                             ..Default::default()
                         }
                     });
-                    let refs = meta.references.map(|refs| {
-                        refs.into_iter()
-                            .map(|r| crate::server::types::SymbolOverviewReference {
-                                file: r.file,
-                                line: r.line,
-                                column: r.column,
-                                snippet: r.snippet,
-                            })
-                            .collect()
-                    });
-                    let warm_start_in_progress = meta.warm_start_in_progress;
-                    (
-                        refs,
-                        meta.degraded,
-                        meta.degraded_reason,
-                        meta.files_referenced,
-                        warm_start_in_progress,
-                    )
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tool = "symbol_overview",
-                        error = %e,
-                        "find_all_references_impl failed — references will be unavailable"
-                    );
-                    (
-                        None,
-                        true,
-                        Some(DegradedReason::LspErrorGrepFallback),
-                        0,
-                        None,
-                    )
-                }
-            };
-
-        let duration_ms = start.elapsed().as_millis();
-
-        let (degraded, degraded_reason, lsp_readiness, warm_start_in_progress) =
-            Self::resolve_degraded_reason(
-                impact_degraded,
-                impact_reason,
-                refs_degraded,
-                refs_reason,
-            );
-
-        let response = crate::server::types::SymbolOverviewResponse {
-            source,
-            impact: impact.clone(),
-            references: references.clone(),
-            files_referenced,
-            degraded,
-            impact_degraded,
-            references_degraded: refs_degraded,
-            degraded_reason,
-            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
-            lsp_readiness,
-            warm_start_in_progress,
-        };
-
-        let text = Self::render_overview_text(
-            &params.semantic_path,
-            scope.start_line,
-            scope.end_line,
-            &scope.content,
-            impact.as_ref(),
-            references.as_deref(),
-            files_referenced,
-            degraded,
-            degraded_reason,
-            duration_ms,
-        );
-
-        let mut result =
-            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
-        result.structured_content = serialize_metadata(&response);
-        Ok(result)
+                let refs = meta.references.map(|refs| {
+                    refs.into_iter()
+                        .map(|r| crate::server::types::SymbolOverviewReference {
+                            file: r.file,
+                            line: r.line,
+                            column: r.column,
+                            snippet: r.snippet,
+                        })
+                        .collect()
+                });
+                let warm_start_in_progress = meta.warm_start_in_progress;
+                (
+                    refs,
+                    meta.degraded,
+                    meta.degraded_reason,
+                    meta.files_referenced,
+                    warm_start_in_progress,
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tool = "symbol_overview",
+                    error = %e,
+                    "find_all_references_impl failed — references will be unavailable"
+                );
+                (
+                    None,
+                    true,
+                    Some(DegradedReason::LspErrorGrepFallback),
+                    0,
+                    None,
+                )
+            }
+        }
     }
 
     pub(super) fn resolve_degraded_reason(
@@ -328,31 +381,19 @@ impl PathfinderServer {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_overview_text(
-        semantic_path: &str,
-        start_line: usize,
-        end_line: usize,
-        scope_content: &str,
-        impact: Option<&crate::server::types::ImpactSummary>,
-        references: Option<&[crate::server::types::SymbolOverviewReference]>,
-        files_referenced: usize,
-        degraded: bool,
-        degraded_reason: Option<DegradedReason>,
-        duration_ms: u128,
-    ) -> String {
-        let line_count = end_line - start_line + 1;
-        let mut source_block = format!("SYMBOL: {semantic_path} ({line_count} lines)\n");
+    pub(super) fn render_overview_text(params: &RenderOverviewParams<'_>) -> String {
+        let line_count = params.end_line - params.start_line + 1;
+        let mut source_block = format!("SYMBOL: {} ({line_count} lines)\n", params.semantic_path);
         if line_count <= 10 {
             source_block.push_str("```\n");
-            source_block.push_str(scope_content);
-            if !scope_content.ends_with('\n') {
+            source_block.push_str(params.scope_content);
+            if !params.scope_content.ends_with('\n') {
                 source_block.push('\n');
             }
             source_block.push_str("```\n");
         }
 
-        let impact_block = if let Some(imp) = impact {
+        let impact_block = if let Some(imp) = params.impact {
             let inc = imp.incoming.as_ref().map_or(0, Vec::len);
             let out = imp.outgoing.as_ref().map_or(0, Vec::len);
             let deg = if imp.degraded { " (degraded)" } else { "" };
@@ -361,26 +402,30 @@ impl PathfinderServer {
             "CALLERS: unavailable\nCALLEES: unavailable\n".to_owned()
         };
 
-        let refs_block = if let Some(refs) = references {
+        let refs_block = if let Some(refs) = params.references {
             let total = refs.len();
-            format!("REFERENCES: {total} total across {files_referenced} files\n")
+            format!(
+                "REFERENCES: {total} total across {} files\n",
+                params.files_referenced
+            )
         } else {
             "REFERENCES: unavailable\n".to_owned()
         };
 
-        let degraded_block = if degraded {
-            let notice = degraded_reason.map_or_else(
-                || "DEGRADED (unknown)".to_owned(),
-                |r| format_degraded_notice(&r),
-            );
+        let degraded_block = if params.degraded {
+            let notice = params
+                .degraded_reason
+                .as_ref()
+                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
             format!("{notice}\n")
         } else {
             "DEGRADED: no (LSP-backed, authoritative)\n".to_owned()
         };
 
-        let extra = if degraded { "\n" } else { "" };
+        let extra = if params.degraded { "\n" } else { "" };
         format!(
-            "{source_block}{impact_block}{refs_block}{degraded_block}{extra}[completed in {duration_ms}ms]"
+            "{source_block}{impact_block}{refs_block}{degraded_block}{extra}[completed in {}ms]",
+            params.duration_ms
         )
     }
 }

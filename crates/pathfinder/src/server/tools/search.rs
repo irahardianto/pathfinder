@@ -159,18 +159,7 @@ impl PathfinderServer {
 
                 // For the flat `matches` list, strip content/context from known files
                 // so the response is still useful even when grouping is off.
-                let flat_matches: Vec<SearchMatch> = filtered_matches
-                    .into_iter()
-                    .map(|mut m| {
-                        if known_set.contains(&*normalize_path(&m.file)) {
-                            m.content = String::default();
-                            m.context_before = vec![];
-                            m.context_after = vec![];
-                            m.known = Some(true);
-                        }
-                        m
-                    })
-                    .collect();
+                let flat_matches = process_flat_matches(filtered_matches, &known_set);
 
                 let returned_count = flat_matches.len();
                 let duration_ms = start.elapsed().as_millis();
@@ -188,42 +177,16 @@ impl PathfinderServer {
                     FilterMode::CommentsOnly => "comments_only",
                 };
 
-                let hint = if returned_count == 0
-                    && result.total_matches > 0
-                    && filter_mode != FilterMode::All
-                {
-                    Some(format!(
-                        "0 matches with filter_mode={} but {} match(es) exist with filter_mode=all. Retry with filter_mode='all' to see all match types.",
-                        filter_mode_name,
-                        result.total_matches,
-                    ))
-                } else if returned_count == 0 && result.total_matches == 0 {
-                    // P2-7: Zero total matches — help the agent recover.
-                    let mut msg = "No matches found. Check spelling, try a regex pattern, or broaden path_glob.".to_owned();
-                    if coverage_percent < 100 {
-                        use std::fmt::Write;
-                        let _ = write!(
-                            msg,
-                            " Note: only {coverage_percent}% of in-scope files were searched."
-                        );
-                    }
-                    Some(msg)
-                } else if coverage_percent < 50 {
-                    // Low coverage with results: warn the agent that a significant portion of the
-                    // codebase was not searched. Check skip counters for the cause.
-                    Some(format!(
-                        "Low coverage: only {coverage_percent}% of in-scope files were searched. \
-                        Results may be incomplete. \
-                        Possible causes: binary_skipped={binary}, gitignored_skipped={gitignored}, other_skipped={other}. \
-                        Try narrowing path_glob or checking .gitignore rules.",
-                        coverage_percent = coverage_percent,
-                        binary = result.binary_skipped,
-                        gitignored = result.gitignored_skipped,
-                        other = result.other_skipped,
-                    ))
-                } else {
-                    None
-                };
+                let hint = determine_search_hint(
+                    returned_count,
+                    result.total_matches,
+                    coverage_percent,
+                    filter_mode,
+                    filter_mode_name,
+                    result.binary_skipped,
+                    result.gitignored_skipped,
+                    result.other_skipped,
+                );
 
                 tracing::info!(
                     tool = "search_codebase",
@@ -482,6 +445,63 @@ fn build_file_groups(
         .into_iter()
         .filter_map(|k| groups.remove(&k))
         .collect()
+}
+
+fn process_flat_matches(
+    filtered_matches: Vec<SearchMatch>,
+    known_set: &std::collections::HashSet<String>,
+) -> Vec<SearchMatch> {
+    filtered_matches
+        .into_iter()
+        .map(|mut m| {
+            if known_set.contains(&*normalize_path(&m.file)) {
+                m.content = String::default();
+                m.context_before = vec![];
+                m.context_after = vec![];
+                m.known = Some(true);
+            }
+            m
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn determine_search_hint(
+    returned_count: usize,
+    total_matches: usize,
+    coverage_percent: u8,
+    filter_mode: FilterMode,
+    filter_mode_name: &str,
+    result_binary_skipped: usize,
+    result_gitignored_skipped: usize,
+    result_other_skipped: usize,
+) -> Option<String> {
+    if returned_count == 0 && total_matches > 0 && filter_mode != FilterMode::All {
+        Some(format!(
+            "0 matches with filter_mode={filter_mode_name} but {total_matches} match(es) exist with filter_mode=all. Retry with filter_mode='all' to see all match types.",
+        ))
+    } else if returned_count == 0 && total_matches == 0 {
+        let mut msg =
+            "No matches found. Check spelling, try a regex pattern, or broaden path_glob."
+                .to_owned();
+        if coverage_percent < 100 {
+            use std::fmt::Write as _;
+            let _ = write!(
+                msg,
+                " Note: only {coverage_percent}% of in-scope files were searched."
+            );
+        }
+        Some(msg)
+    } else if coverage_percent < 50 {
+        Some(format!(
+            "Low coverage: only {coverage_percent}% of in-scope files were searched. \
+            Results may be incomplete. \
+            Possible causes: binary_skipped={result_binary_skipped}, gitignored_skipped={result_gitignored_skipped}, other_skipped={result_other_skipped}. \
+            Try narrowing path_glob or checking .gitignore rules.",
+        ))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

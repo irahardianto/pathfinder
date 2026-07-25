@@ -764,98 +764,108 @@ async fn test_find_symbol_impl_validation_errors() {
     );
 }
 
-#[allow(clippy::too_many_lines)]
+fn setup_find_symbol_env(
+    ws_dir: &std::path::Path,
+    result: Result<SearchResult, String>,
+) -> (PathfinderServer, Arc<MockScout>, Arc<MockSurgeon>) {
+    let ws = WorkspaceRoot::new(ws_dir).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let mock_scout = MockScout::default();
+    mock_scout.set_result(result);
+    let mock_surgeon = Arc::new(MockSurgeon::new());
+    let server = PathfinderServer::with_engines(
+        ws,
+        config,
+        sandbox,
+        Arc::new(mock_scout.clone()),
+        mock_surgeon.clone(),
+    );
+    (server, Arc::new(mock_scout), mock_surgeon)
+}
+
+fn create_various_filters_matches() -> Vec<SearchMatch> {
+    vec![
+        SearchMatch {
+            file: "../outside.rs".to_owned(),
+            line: 1,
+            column: 0,
+            content: "fn test() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "123".to_owned(),
+            known: None,
+        },
+        SearchMatch {
+            file: ".git/denied.rs".to_owned(), // denied by sandbox
+            line: 1,
+            column: 0,
+            content: "fn test() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "123".to_owned(),
+            known: None,
+        },
+        SearchMatch {
+            file: "src/prefix_mismatch.rs".to_owned(),
+            line: 1,
+            column: 0,
+            content: "fn test() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "123".to_owned(),
+            known: None,
+        },
+        SearchMatch {
+            file: "target_dir/match_fallback.rs".to_owned(),
+            line: 5,
+            column: 0,
+            content: "fn my_fallback() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "123".to_owned(),
+            known: None,
+        },
+        SearchMatch {
+            file: "target_dir/match_empty_ts.rs".to_owned(),
+            line: 10,
+            column: 0,
+            content: "fn my_empty_ts() {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "123".to_owned(),
+            known: None,
+        },
+        SearchMatch {
+            file: "target_dir/match_kind_mismatch.rs".to_owned(),
+            line: 15,
+            column: 0,
+            content: "struct Mismatch {}".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "123".to_owned(),
+            known: None,
+        },
+    ]
+}
+
 #[tokio::test]
 async fn test_find_symbol_impl_various_filters_and_fallbacks() {
     let ws_dir = tempdir().expect("temp dir");
-    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-    let config = PathfinderConfig::default();
-    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
-
-    // Mock scout returning a mix of matches:
-    // 1. Unsafe path (with ..)
-    // 2. Denied path (denied by sandbox)
-    // 3. Prefix mismatch
-    // 4. Successful match with treesitter detail returning None (uses fallback)
-    // 5. Successful match with treesitter detail returning empty semantic path (uses fallback)
-    // 6. Match skipped due to kind filter mismatch
-    // 7. Successful match with empty fallback name (skipped)
-    let mock_scout = MockScout::default();
-    mock_scout.set_result(Ok(SearchResult {
-        matches: vec![
-            SearchMatch {
-                file: "../outside.rs".to_owned(),
-                line: 1,
-                column: 0,
-                content: "fn test() {}".to_owned(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "123".to_owned(),
-                known: None,
-            },
-            SearchMatch {
-                file: ".git/denied.rs".to_owned(), // denied by sandbox
-                line: 1,
-                column: 0,
-                content: "fn test() {}".to_owned(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "123".to_owned(),
-                known: None,
-            },
-            SearchMatch {
-                file: "src/prefix_mismatch.rs".to_owned(),
-                line: 1,
-                column: 0,
-                content: "fn test() {}".to_owned(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "123".to_owned(),
-                known: None,
-            },
-            SearchMatch {
-                file: "target_dir/match_fallback.rs".to_owned(),
-                line: 5,
-                column: 0,
-                content: "fn my_fallback() {}".to_owned(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "123".to_owned(),
-                known: None,
-            },
-            SearchMatch {
-                file: "target_dir/match_empty_ts.rs".to_owned(),
-                line: 10,
-                column: 0,
-                content: "fn my_empty_ts() {}".to_owned(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "123".to_owned(),
-                known: None,
-            },
-            SearchMatch {
-                file: "target_dir/match_kind_mismatch.rs".to_owned(),
-                line: 15,
-                column: 0,
-                content: "struct Mismatch {}".to_owned(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "123".to_owned(),
-                known: None,
-            },
-        ],
+    let result = SearchResult {
+        matches: create_various_filters_matches(),
         total_matches: 6,
         truncated: false,
         files_searched: 1,
@@ -863,9 +873,10 @@ async fn test_find_symbol_impl_various_filters_and_fallbacks() {
         binary_skipped: 0,
         gitignored_skipped: 0,
         other_skipped: 0,
-    }));
+    };
 
-    let mock_surgeon = Arc::new(MockSurgeon::new());
+    let (server, _mock_scout, mock_surgeon) = setup_find_symbol_env(ws_dir.path(), Ok(result));
+
     // Match 4: returns Ok(None) -> uses fallback "my_fallback"
     mock_surgeon
         .enclosing_symbol_detail_results
@@ -896,14 +907,6 @@ async fn test_find_symbol_impl_various_filters_and_fallbacks() {
         .lock()
         .unwrap()
         .push(Ok(None));
-
-    let server = PathfinderServer::with_engines(
-        ws,
-        config,
-        sandbox,
-        Arc::new(mock_scout.clone()),
-        mock_surgeon,
-    );
 
     let params = SearchToolParams {
         query: "my".to_string(),
@@ -961,19 +964,14 @@ async fn test_find_symbol_impl_scout_error_fallback() {
 ///
 /// Previously only `is_valid_kind_filter` accepted the aliases; now
 /// `kind_matches_filter` also handles them symmetrically.
-#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn test_find_symbol_impl_kind_alias_filter_end_to_end() {
     let ws_dir = tempdir().expect("temp dir");
-    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
-    let config = PathfinderConfig::default();
-    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
 
     // Two matches:
     //   match_const.rs  → tree-sitter returns SymbolKind::Constant  (kind string = "constant")
     //   match_trait.rs  → tree-sitter returns SymbolKind::Interface (kind string = "interface")
-    let mock_scout = MockScout::default();
-    mock_scout.set_result(Ok(SearchResult {
+    let result = SearchResult {
         matches: vec![
             SearchMatch {
                 file: "target_dir/match_const.rs".to_owned(),
@@ -1007,9 +1005,9 @@ async fn test_find_symbol_impl_kind_alias_filter_end_to_end() {
         binary_skipped: 0,
         gitignored_skipped: 0,
         other_skipped: 0,
-    }));
+    };
 
-    let mock_surgeon = Arc::new(MockSurgeon::new());
+    let (server, _mock_scout, mock_surgeon) = setup_find_symbol_env(ws_dir.path(), Ok(result));
 
     // match_const.rs → SymbolKind::Constant → kind_string = "constant"
     mock_surgeon
@@ -1045,9 +1043,6 @@ async fn test_find_symbol_impl_kind_alias_filter_end_to_end() {
             children: vec![],
         })));
 
-    let server =
-        PathfinderServer::with_engines(ws, config, sandbox, Arc::new(mock_scout), mock_surgeon);
-
     // --- Test 1: filter="const" must match SymbolKind::Constant ---
     // Before the fix, filter-side alias "const" was accepted by is_valid_kind_filter
     // but then kind_matches_filter only checked the kind side, so "constant" != "const"
@@ -1081,12 +1076,7 @@ async fn test_find_symbol_impl_kind_alias_filter_end_to_end() {
     // We need a fresh server+mock for the second call since MockSurgeon results
     // are consumed sequentially. Reset via a new scout result + surgeon queue.
     let ws_dir2 = tempdir().expect("temp dir2");
-    let ws2 = WorkspaceRoot::new(ws_dir2.path()).expect("valid root2");
-    let config2 = pathfinder_common::config::PathfinderConfig::default();
-    let sandbox2 = Sandbox::new(ws2.path(), &config2.sandbox);
-
-    let mock_scout2 = MockScout::default();
-    mock_scout2.set_result(Ok(SearchResult {
+    let result2 = SearchResult {
         matches: vec![SearchMatch {
             file: "target_dir/match_trait.rs".to_owned(),
             line: 1,
@@ -1106,9 +1096,9 @@ async fn test_find_symbol_impl_kind_alias_filter_end_to_end() {
         binary_skipped: 0,
         gitignored_skipped: 0,
         other_skipped: 0,
-    }));
+    };
 
-    let mock_surgeon2 = Arc::new(MockSurgeon::new());
+    let (server2, _mock_scout2, mock_surgeon2) = setup_find_symbol_env(ws_dir2.path(), Ok(result2));
     mock_surgeon2
         .enclosing_symbol_detail_results
         .lock()
@@ -1124,14 +1114,6 @@ async fn test_find_symbol_impl_kind_alias_filter_end_to_end() {
             access_level: AccessLevel::Public,
             children: vec![],
         })));
-
-    let server2 = PathfinderServer::with_engines(
-        ws2,
-        config2,
-        sandbox2,
-        Arc::new(mock_scout2),
-        mock_surgeon2,
-    );
 
     let params_trait = SearchToolParams {
         query: "MyTrait".to_string(),
