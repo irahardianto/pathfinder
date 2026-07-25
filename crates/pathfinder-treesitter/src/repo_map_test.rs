@@ -1654,3 +1654,114 @@ fn test_estimate_tokens_empty_and_single() {
     assert_eq!(estimate_tokens("abcd"), 1);
     assert_eq!(estimate_tokens("abcde"), 2);
 }
+
+/// SC-1: Render skeleton for complex AST features (lifetimes, generic traits, multi-line signatures).
+#[test]
+fn test_render_skeleton_complex_ast_features() {
+    // 1. Lifetime-generic Struct & Method
+    let ref_children = vec![ExtractedSymbol {
+        name: "get".to_string(),
+        semantic_path: "Ref.get".to_string(),
+        kind: SymbolKind::Method,
+        byte_range: 0..0,
+        start_line: 4,
+        end_line: 6,
+        name_column: 4,
+        access_level: crate::surgeon::AccessLevel::Public,
+        children: vec![],
+    }];
+    let struct_sym = ExtractedSymbol {
+        name: "Ref".to_string(),
+        semantic_path: "Ref".to_string(),
+        kind: SymbolKind::Struct,
+        byte_range: 0..0,
+        start_line: 1,
+        end_line: 3,
+        name_column: 7,
+        access_level: crate::surgeon::AccessLevel::Public,
+        children: ref_children,
+    };
+
+    // 2. Generic Trait Definition
+    let mapper_children = vec![ExtractedSymbol {
+        name: "map".to_string(),
+        semantic_path: "Mapper.map".to_string(),
+        kind: SymbolKind::Method,
+        byte_range: 0..0,
+        start_line: 10,
+        end_line: 12,
+        name_column: 4,
+        access_level: crate::surgeon::AccessLevel::Public,
+        children: vec![],
+    }];
+    let trait_sym = ExtractedSymbol {
+        name: "Mapper".to_string(),
+        semantic_path: "Mapper".to_string(),
+        kind: SymbolKind::Interface,
+        byte_range: 0..0,
+        start_line: 9,
+        end_line: 13,
+        name_column: 6,
+        access_level: crate::surgeon::AccessLevel::Public,
+        children: mapper_children,
+    };
+
+    // Render them
+    let (out, truncated) = render_file_skeleton(&[struct_sym, trait_sym], MAX_TOKENS_PER_FILE);
+    assert!(!truncated);
+    assert!(out.contains("struct Ref // Ref\n"));
+    assert!(out.contains("  method get // Ref.get\n"));
+    assert!(out.contains("interface Mapper // Mapper\n"));
+    assert!(out.contains("  method map // Mapper.map\n"));
+}
+
+/// SC-1: End-to-end skeleton generation for complex AST features.
+/// Writes a Rust file containing lifetimes, generic traits, macros, and multi-line signatures,
+/// generates the skeleton text, and verifies the parsed symbols are cleanly structured.
+#[tokio::test]
+async fn test_generate_skeleton_complex_features() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).expect("create src/");
+
+    let source = r"
+pub struct DataContainer<'a, T> {
+    pub value: &'a T,
+}
+
+pub trait Processor<I, O> {
+    fn process(
+        &self,
+        input: I,
+    ) -> Result<O, ()>;
+}
+
+impl<'a, T> DataContainer<'a, T> {
+    pub fn get_value(&self) -> &'a T {
+        self.value
+    }
+}
+
+macro_rules! my_macro {
+    () => {};
+}
+";
+    std::fs::write(src.join("lib.rs"), source).expect("write lib.rs");
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test\"\n",
+    )
+    .expect("write Cargo.toml");
+
+    let surgeon = crate::TreeSitterSurgeon::new(100);
+    let config = SkeletonConfig::new(16_000, 3, "all", 2_000).with_detail(SkeletonDetail::Symbols);
+
+    let result = generate_skeleton_text(&surgeon, dir.path(), Path::new(""), &config)
+        .await
+        .expect("skeleton generation should succeed");
+
+    assert!(result.skeleton.contains("struct DataContainer"));
+    assert!(result.skeleton.contains("  method get_value"));
+    assert!(result.skeleton.contains("interface Processor"));
+    assert!(result.skeleton.contains("  func process"));
+}

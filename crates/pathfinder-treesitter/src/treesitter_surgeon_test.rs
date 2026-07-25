@@ -873,3 +873,63 @@ async fn test_vue_sfc_no_script_block() {
     let template_sym = symbols.iter().find(|s| s.name == "template");
     assert!(template_sym.is_some());
 }
+
+/// SC-1: `TreeSitterSurgeon` extracting symbols with lifetimes, generic traits, macros, and multi-line signatures.
+#[tokio::test]
+async fn test_surgeon_extract_complex_rust_features() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".rs").tempfile().unwrap();
+    let source = r"
+pub struct Container<'a, T> {
+    pub inner: &'a T,
+}
+
+pub trait Factory<T> {
+    fn create(
+        &self,
+        config: &str,
+    ) -> Result<T, ()>;
+}
+
+impl<'a, T> Container<'a, T> {
+    pub fn get_inner(&self) -> &'a T {
+        self.inner
+    }
+}
+
+macro_rules! sample_macro {
+    () => {};
+}
+";
+    file.write_all(source.as_bytes()).unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    let (content, lang, symbols) = surgeon
+        .read_source_file(&workspace_root, relative)
+        .await
+        .unwrap();
+
+    assert_eq!(lang, "rust");
+    assert!(content.contains("Container"));
+
+    // Struct
+    let container_sym = symbols
+        .iter()
+        .find(|s| s.name == "Container" && s.kind == SymbolKind::Struct)
+        .expect("Container struct should be extracted");
+    assert!(
+        container_sym.children.iter().any(|c| c.name == "get_inner"),
+        "get_inner method should be merged under Container struct"
+    );
+
+    // Trait
+    let factory_sym = symbols
+        .iter()
+        .find(|s| s.name == "Factory" && s.kind == SymbolKind::Interface)
+        .expect("Factory trait should be extracted");
+    assert_eq!(factory_sym.children.len(), 1);
+    assert_eq!(factory_sym.children[0].name, "create");
+    assert_eq!(factory_sym.children[0].start_line, 6);
+    assert_eq!(factory_sym.children[0].end_line, 9);
+}

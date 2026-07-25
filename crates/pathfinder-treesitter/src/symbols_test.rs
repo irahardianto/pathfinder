@@ -2855,3 +2855,150 @@ trait Repository<K, V> {
         );
     }
 }
+
+/// SC-1: Rust lifetimes in struct and impl block.
+/// Struct and associated impl with lifetime parameter `'a` should extract and merge cleanly.
+#[test]
+fn test_rust_lifetimes_in_struct_and_impl() {
+    let source = r"
+struct Ref<'a> {
+    data: &'a str,
+}
+impl<'a> Ref<'a> {
+    fn get(&self) -> &'a str {
+        self.data
+    }
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let struct_sym = symbols
+        .iter()
+        .find(|s| s.name == "Ref" && s.kind == SymbolKind::Struct)
+        .expect("struct Ref should exist");
+
+    assert_eq!(
+        struct_sym.children.len(),
+        1,
+        "should have merged child method 'get'"
+    );
+    let get_method = &struct_sym.children[0];
+    assert_eq!(get_method.name, "get");
+    assert_eq!(get_method.semantic_path, "Ref.get");
+
+    let chain = SymbolChain::parse("Ref.get").unwrap();
+    let resolved = resolve_symbol_chain(&symbols, &chain);
+    assert!(resolved.is_some(), "Ref.get should resolve");
+}
+
+/// SC-1: Generic traits and implementations.
+/// Traits with type parameters and their implementations should extract and resolve correctly.
+#[test]
+fn test_rust_generic_traits_and_implementations() {
+    let source = r"
+trait Mapper<T> {
+    fn map(&self) -> T;
+}
+struct MyStruct;
+impl<T> Mapper<T> for MyStruct {
+    fn map(&self) -> T {
+        todo!()
+    }
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    // Verify trait definition
+    let trait_sym = symbols
+        .iter()
+        .find(|s| s.name == "Mapper" && s.kind == SymbolKind::Interface)
+        .expect("trait Mapper should exist");
+    assert_eq!(trait_sym.children.len(), 1);
+    assert_eq!(trait_sym.children[0].name, "map");
+
+    // Verify implementation block merging
+    let struct_sym = symbols
+        .iter()
+        .find(|s| s.name == "MyStruct" && s.kind == SymbolKind::Struct)
+        .expect("struct MyStruct should exist");
+
+    assert!(
+        struct_sym.children.iter().any(|c| c.name == "map"),
+        "MyStruct should have merged 'map' method from trait implementation"
+    );
+
+    let chain = SymbolChain::parse("MyStruct.map").unwrap();
+    let resolved = resolve_symbol_chain(&symbols, &chain);
+    assert!(resolved.is_some(), "MyStruct.map should resolve");
+}
+
+/// SC-1: Macro definitions and macro calls.
+/// A `macro_rules!` definition and its top-level usage should parse without crash,
+/// and regular symbols around them must extract cleanly.
+#[test]
+fn test_rust_macro_definitions_and_invocations() {
+    let source = r"
+macro_rules! define_helper {
+    ($name:ident) => {
+        struct $name;
+    };
+}
+struct NormalStruct;
+define_helper!(MyMacroStruct);
+fn regular_function() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    // NormalStruct and regular_function should extract cleanly
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.name == "NormalStruct" && s.kind == SymbolKind::Struct),
+        "NormalStruct should be extracted"
+    );
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.name == "regular_function" && s.kind == SymbolKind::Function),
+        "regular_function should be extracted"
+    );
+}
+
+/// SC-1: Multi-line signatures.
+/// Functions and trait methods with parameters and returns on multiple lines should parse
+/// and extract cleanly, preserving correct line numbers.
+#[test]
+fn test_rust_multi_line_signatures() {
+    let source = r"
+fn multi_line_function(
+    a: i32,
+    b: &str,
+) -> Result<(), ()> {
+    Ok(())
+}
+
+trait Service {
+    fn call(
+        &self,
+        req: String,
+    ) -> String;
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    let func_sym = symbols
+        .iter()
+        .find(|s| s.name == "multi_line_function" && s.kind == SymbolKind::Function)
+        .expect("multi_line_function should exist");
+    assert_eq!(func_sym.start_line, 1);
+    assert_eq!(func_sym.end_line, 6);
+
+    let trait_sym = symbols
+        .iter()
+        .find(|s| s.name == "Service" && s.kind == SymbolKind::Interface)
+        .expect("trait Service should exist");
+    assert_eq!(trait_sym.children.len(), 1);
+    assert_eq!(trait_sym.children[0].name, "call");
+    assert_eq!(trait_sym.children[0].start_line, 9);
+    assert_eq!(trait_sym.children[0].end_line, 12);
+}

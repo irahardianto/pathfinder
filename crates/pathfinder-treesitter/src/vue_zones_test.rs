@@ -233,3 +233,64 @@ fn test_byte_to_point_empty_source() {
     assert_eq!(pt.row, 0);
     assert_eq!(pt.column, 0);
 }
+
+/// SC-1: `scan_vue_zones` on complex script setup blocks containing lifetimes/generics, macros, and multi-line signatures.
+#[test]
+fn test_scan_vue_zones_complex_script_content() {
+    let sfc = b"
+<script setup lang=\"ts\">
+import { ref } from 'vue';
+
+// Generic TS interface mimicking trait with generics
+interface Processor<T, R> {
+    process(
+        input: T,
+        options: Record<string, any>,
+    ): Promise<R>;
+}
+
+// Vue compiler macros and multi-line generic function
+const props = defineProps<{
+    id: string;
+    theme?: 'light' | 'dark';
+}>();
+
+const emit = defineEmits<{
+    (e: 'change', value: string): void;
+}>();
+
+const processValue = async <T, R>(
+    id: string,
+    payload: T,
+): Promise<R> => {
+    console.log(id);
+    return payload as unknown as R;
+};
+</script>
+
+<template>
+  <div>Hello World</div>
+</template>
+";
+    let zones = scan_vue_zones(sfc);
+
+    assert!(zones.script.is_some(), "script zone should be found");
+    assert!(zones.template.is_some(), "template zone should be found");
+
+    let script_range = zones.script.unwrap();
+    let script_content = &sfc[script_range.start_byte..script_range.end_byte];
+    let script_str = std::str::from_utf8(script_content).unwrap();
+
+    assert!(
+        script_str.contains("interface Processor<T, R>"),
+        "should capture processor definition"
+    );
+    assert!(
+        script_str.contains("defineProps"),
+        "should capture defineProps macro"
+    );
+    assert!(
+        script_str.contains("processValue"),
+        "should capture processValue function"
+    );
+}

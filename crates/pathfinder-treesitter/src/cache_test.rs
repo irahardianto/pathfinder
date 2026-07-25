@@ -833,3 +833,58 @@ async fn test_get_or_parse_vue_preloaded_cache_hit() {
         "cache hit must return identical tree presence"
     );
 }
+
+/// SC-1: `get_or_parse_preloaded` with complex Rust AST features (lifetimes, generic traits, macros, multi-line signatures).
+/// Verifies that they parse correctly and are correctly fetched from the cache on hit.
+#[tokio::test]
+async fn test_ast_cache_complex_rust_features() {
+    let cache = AstCache::new(2);
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("complex.rs");
+    let content = r"
+struct Ref<'a> {
+    data: &'a str,
+}
+trait Mapper<T> {
+    fn map(&self) -> T;
+}
+macro_rules! my_macro {
+    () => {};
+}
+fn multi_line(
+    a: i32,
+) -> Result<(), ()> {
+    Ok(())
+}
+";
+    let bytes = content.as_bytes();
+    std::fs::write(&file_path, bytes).unwrap();
+
+    let mtime = std::fs::metadata(&file_path).unwrap().modified().unwrap();
+    let content_arc = Arc::from(bytes);
+
+    // First call — cache miss, parse AST
+    let (tree1, src1) = cache
+        .get_or_parse_preloaded(
+            &file_path,
+            SupportedLanguage::Rust,
+            Arc::clone(&content_arc),
+            mtime,
+        )
+        .await
+        .unwrap();
+    assert_eq!(src1.len(), bytes.len());
+
+    // Second call — cache hit
+    let (tree2, src2) = cache
+        .get_or_parse_preloaded(&file_path, SupportedLanguage::Rust, content_arc, mtime)
+        .await
+        .unwrap();
+    assert_eq!(src2.len(), bytes.len());
+    assert_eq!(
+        tree1.root_node().child_count(),
+        tree2.root_node().child_count(),
+        "complex AST features cache hit must return identical structure"
+    );
+}
