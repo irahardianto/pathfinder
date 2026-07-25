@@ -1124,10 +1124,60 @@ async fn test_search_exclude_glob_multiple_patterns() {
         ..Default::default()
     };
     let result = scout.search(&params).await.expect("search should succeed");
-
     assert_eq!(
         result.total_matches, 1,
         "test and spec files should both be excluded"
     );
     assert_eq!(result.matches[0].file, "src/main.rs");
+}
+
+#[test]
+fn test_is_binary_extension_edge_cases() {
+    assert!(is_binary_extension(std::path::Path::new("file.PNG")));
+    assert!(is_binary_extension(std::path::Path::new("file.png")));
+    assert!(!is_binary_extension(std::path::Path::new("file.txt")));
+    assert!(!is_binary_extension(std::path::Path::new("file")));
+    assert!(!is_binary_extension(std::path::Path::new("file.")));
+}
+
+#[test]
+fn test_filter_entry_windows_path_style() {
+    let glob_matcher = globset::GlobSet::builder()
+        .add(globset::Glob::new("**/*").unwrap())
+        .build()
+        .unwrap();
+
+    let relative = r".git\objects\123";
+    let is_allowed = filter_entry(
+        relative,
+        std::path::Path::new("some_file"),
+        "**/*",
+        &glob_matcher,
+        None,
+        true,
+    );
+    assert!(!is_allowed);
+}
+
+#[tokio::test]
+async fn test_search_unreadable_file_skips() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = make_workspace(&[("unreadable.rs", "needle\n")]);
+        let path = ws.path().join("unreadable.rs");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000); // no read, write, execute permissions
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let scout = RipgrepScout;
+        let result = scout.search(&params_for(&ws, "needle")).await.unwrap();
+        assert_eq!(result.other_skipped, 1);
+        assert_eq!(result.total_matches, 0);
+
+        // Restore permissions so tempdir can clean up
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
 }
