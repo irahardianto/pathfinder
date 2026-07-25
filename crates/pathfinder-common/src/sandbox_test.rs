@@ -446,3 +446,35 @@ fn test_default_deny_env_nested_path() {
         "'config/.env' should be denied by default deny rules matching .env basename"
     );
 }
+
+#[test]
+fn test_hardcoded_deny_hidden_pem_file() {
+    let sandbox = default_sandbox();
+    assert!(sandbox.check(Path::new(".secrets.pem")).is_err());
+}
+
+#[test]
+fn test_path_basename_edge_cases() {
+    assert_eq!(path_basename(""), "");
+    assert_eq!(path_basename("/"), "/");
+    assert_eq!(path_basename("foo"), "foo");
+    assert_eq!(path_basename("foo/bar"), "bar");
+}
+
+#[test]
+fn test_sandbox_is_user_denied_directory_contents() {
+    let workspace = std::env::temp_dir();
+    let mut builder = GitignoreBuilder::new(&workspace);
+    builder
+        .add_line(None, "ignored_dir/**")
+        .expect("valid pattern");
+    let gitignore = builder.build().expect("valid gitignore");
+
+    let sandbox = Sandbox::with_user_rules(
+        workspace.as_path(),
+        &SandboxConfig::default(),
+        Some(gitignore),
+    );
+
+    assert!(sandbox.check(Path::new("ignored_dir/file.txt")).is_err());
+}

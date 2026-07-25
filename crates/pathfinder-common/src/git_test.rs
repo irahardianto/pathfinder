@@ -182,3 +182,11 @@ async fn test_system_git_rejects_dash_prefix_target() {
         "error message should explain the rejection: {err}"
     );
 }
+
+#[tokio::test]
+async fn test_system_git_diff_name_only_nonexistent_workspace_fails() {
+    let nonexistent = std::env::temp_dir().join("nonexistent_git_workspace_123456");
+    let runner = SystemGit;
+    let result = runner.diff_name_only(&nonexistent, "HEAD").await;
+    assert!(result.is_err());
+}

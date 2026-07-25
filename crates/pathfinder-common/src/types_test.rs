@@ -619,3 +619,64 @@ fn test_workspace_root_path_accessor() {
     let canonical = dir.path().canonicalize().expect("canonicalize");
     assert_eq!(path, canonical.as_path());
 }
+
+#[test]
+fn test_workspace_root_new_nonexistent_path_fails() {
+    let nonexistent = std::env::temp_dir().join("nonexistent_path_123456789_xyz");
+    let result = WorkspaceRoot::new(&nonexistent);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_fallback_tool_as_str_and_display() {
+    assert_eq!(FallbackTool::Search.as_str(), "search");
+    assert_eq!(FallbackTool::Read.as_str(), "read");
+    assert_eq!(format!("{}", FallbackTool::Search), "search");
+    assert_eq!(format!("{}", FallbackTool::Read), "read");
+}
+
+#[test]
+fn test_trust_level_as_str_and_display() {
+    assert_eq!(TrustLevel::Unreliable.as_str(), "unreliable");
+    assert_eq!(TrustLevel::Heuristic.as_str(), "heuristic");
+    assert_eq!(TrustLevel::Partial.as_str(), "partial");
+    assert_eq!(TrustLevel::None.as_str(), "none");
+    assert_eq!(format!("{}", TrustLevel::Unreliable), "unreliable");
+    assert_eq!(format!("{}", TrustLevel::Heuristic), "heuristic");
+    assert_eq!(format!("{}", TrustLevel::Partial), "partial");
+    assert_eq!(format!("{}", TrustLevel::None), "none");
+}
+
+#[test]
+fn test_symbol_scope_default_and_serde() {
+    let default_scope = SymbolScope::default();
+    assert_eq!(default_scope.content, "");
+    assert_eq!(default_scope.start_line, 0);
+    assert_eq!(default_scope.end_line, 0);
+    assert_eq!(default_scope.name_column, 0);
+    assert_eq!(default_scope.language, "");
+    assert_eq!(default_scope.parent_kind, None);
+    assert_eq!(default_scope.parent_name, None);
+
+    let scope_json = r#"{
+        "content": "fn foo() {}",
+        "start_line": 1,
+        "end_line": 2,
+        "name_column": 3,
+        "language": "rust"
+    }"#;
+    let decoded: SymbolScope = serde_json::from_str(scope_json).unwrap();
+    assert_eq!(decoded.content, "fn foo() {}");
+    assert_eq!(decoded.parent_kind, None);
+
+    let serialized = serde_json::to_string(&decoded).unwrap();
+    assert!(!serialized.contains("parent_kind"));
+}
+
+#[test]
+fn test_symbol_parse_invalid_cases() {
+    assert!(Symbol::parse("login#invalid").is_none());
+    assert!(Symbol::parse("login#-1").is_none());
+    assert!(Symbol::parse("login#").is_none());
+    assert!(Symbol::parse("").is_none());
+}

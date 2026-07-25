@@ -325,3 +325,66 @@ async fn test_load_propagates_non_notfound_io_error() {
         "expected ReadFailed, got: {result:?}"
     );
 }
+
+#[test]
+fn test_lsp_config_root_override() {
+    let json = r#"{
+        "lsp": {
+            "go": {
+                "command": "gopls",
+                "root_override": "apps/backend"
+            }
+        }
+    }"#;
+    let config: PathfinderConfig = serde_json::from_str(json).unwrap();
+    let go_config = &config.lsp["go"];
+    assert_eq!(go_config.root_override, Some("apps/backend".to_owned()));
+}
+
+#[test]
+fn test_config_errors_display() {
+    // Test ConfigValidationError display
+    let err1 = ConfigValidationError::InvalidLogLevel("invalid_level".to_owned());
+    assert_eq!(
+        err1.to_string(),
+        "invalid log level: 'invalid_level' (expected 'trace', 'debug', 'info', 'warn', or 'error')"
+    );
+
+    let err2 = ConfigValidationError::InvalidMaxResults;
+    assert_eq!(
+        err2.to_string(),
+        "search.max_results must be greater than zero"
+    );
+
+    let err3 = ConfigValidationError::InvalidMaxTokens;
+    assert_eq!(
+        err3.to_string(),
+        "repo_map.max_tokens must be greater than zero"
+    );
+
+    // Test ConfigError display
+    let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+    let err_read = ConfigError::ReadFailed {
+        path: std::path::PathBuf::from("config.json"),
+        source: io_err,
+    };
+    assert_eq!(
+        err_read.to_string(),
+        "failed to read config file config.json: file not found"
+    );
+
+    let json_err = serde_json::from_str::<String>("invalid").unwrap_err();
+    let err_parse = ConfigError::ParseFailed {
+        path: std::path::PathBuf::from("config.json"),
+        source: json_err,
+    };
+    assert!(err_parse
+        .to_string()
+        .starts_with("failed to parse config file config.json:"));
+
+    let err_validation = ConfigError::ValidationError(ConfigValidationError::InvalidMaxResults);
+    assert_eq!(
+        err_validation.to_string(),
+        "invalid configuration: search.max_results must be greater than zero"
+    );
+}
