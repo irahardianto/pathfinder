@@ -669,7 +669,7 @@ async fn test_managed_process_capabilities_default() {
 
     let caps = process.capabilities();
     assert!(
-        !caps.definition_provider,
+        !caps.flags.definition_provider,
         "default capabilities should have definition_provider=false"
     );
 }
@@ -1329,4 +1329,132 @@ fn test_handle_reader_result_lifecycle() {
     );
     assert_eq!(action, ReaderAction::CancelAndBreak);
     assert_eq!(consecutive_io_errors, MAX_CONSECUTIVE_READER_ERRORS);
+}
+
+#[test]
+fn test_setup_rust_env_isolate_disabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cmd = tokio::process::Command::new("cargo");
+
+    // When isolate_target_dir is false, CARGO_TARGET_DIR should not be set
+    super::setup_rust_env(&mut cmd, dir.path(), false, "rust");
+    let std_cmd = cmd.as_std();
+    assert!(std_cmd.get_envs().next().is_none());
+}
+
+#[test]
+fn test_setup_go_env_isolate_disabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cmd = tokio::process::Command::new("go");
+
+    // When isolate_target_dir is false, GOCACHE / GOMODCACHE should not be set
+    super::setup_go_env(&mut cmd, dir.path(), false, "go");
+    let std_cmd = cmd.as_std();
+    assert!(std_cmd.get_envs().next().is_none());
+}
+
+#[test]
+fn test_setup_typescript_env_isolate_disabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cmd = tokio::process::Command::new("node");
+
+    // When isolate_target_dir is false, TMPDIR should not be set
+    super::setup_typescript_env(&mut cmd, dir.path(), false, "typescript");
+    let std_cmd = cmd.as_std();
+    assert!(std_cmd.get_envs().next().is_none());
+}
+
+#[test]
+fn test_setup_python_env_isolate_disabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cmd = tokio::process::Command::new("python");
+
+    // When isolate_target_dir is false, PYTHONPYCACHEPREFIX should not be set
+    super::setup_python_env(&mut cmd, dir.path(), false, "python");
+    let std_cmd = cmd.as_std();
+    assert!(std_cmd.get_envs().next().is_none());
+}
+
+#[test]
+fn test_setup_rust_env_dir_creation_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Create a file where target directory would be created
+    std::fs::write(dir.path().join("target"), "blocking_file").expect("write file");
+
+    let mut cmd = tokio::process::Command::new("cargo");
+    // Should handle create_dir_all failure gracefully without panicking
+    super::setup_rust_env(&mut cmd, dir.path(), true, "rust");
+}
+
+#[test]
+fn test_ensure_pathfinder_in_gitignore_no_trailing_newline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gitignore = dir.path().join(".gitignore");
+    // Write without trailing newline
+    std::fs::write(&gitignore, "target").expect("write");
+
+    ensure_pathfinder_in_gitignore(dir.path());
+
+    let content = std::fs::read_to_string(&gitignore).expect("read");
+    assert!(
+        content.starts_with("target\n"),
+        "should add leading newline if file lacks one"
+    );
+    assert!(content.contains(".pathfinder/"));
+}
+
+#[test]
+fn test_ensure_pathfinder_in_gitignore_directory_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gitignore = dir.path().join(".gitignore");
+    // Create .gitignore as a directory to trigger read/write error
+    std::fs::create_dir_all(&gitignore).expect("create dir");
+
+    // Should log warning and not panic on I/O error
+    ensure_pathfinder_in_gitignore(dir.path());
+}
+
+#[test]
+fn test_resolve_jdtls_data_dir_create_dir_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pathfinder_path = dir.path().join(".pathfinder");
+    // Create .pathfinder as a file to block jdtls directory creation
+    std::fs::write(&pathfinder_path, "blocking_file").expect("write");
+
+    let (data_dir, lock) = resolve_jdtls_data_dir(dir.path());
+    assert_eq!(data_dir, dir.path().join(".pathfinder").join("jdtls-data"));
+    assert!(
+        lock.is_none(),
+        "should return None lock when directory creation fails"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_and_initialize_failing_spawner() {
+    let spawner = MockProcessSpawner::failing();
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let params = SpawnParams {
+        spawner: &spawner,
+        command: "gopls",
+        args: &[],
+        project_root: dir.path(),
+        language_id: "go",
+        dispatcher,
+        init_timeout_secs: None,
+        isolate_target_dir: false,
+        plugins: vec![],
+        init_options: serde_json::Value::Null,
+    };
+
+    let result = spawn_and_initialize(params).await;
+
+    assert!(result.is_err(), "should fail when process spawner fails");
+    if let Err(err) = result {
+        assert!(
+            matches!(err, LspError::Io(_)),
+            "expected LspError::Io, got: {err:?}"
+        );
+    }
 }

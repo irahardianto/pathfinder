@@ -349,9 +349,9 @@ pub(super) async fn spawn_and_initialize(
 
     tracing::info!(
         language = params.language_id,
-        definition_provider = capabilities.definition_provider,
+        definition_provider = capabilities.flags.definition_provider,
         diagnostics_strategy = %capabilities.diagnostics_strategy.as_str(),
-        formatting_provider = capabilities.formatting_provider,
+        formatting_provider = capabilities.flags.formatting_provider,
         "LSP initialized"
     );
 

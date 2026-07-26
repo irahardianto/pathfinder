@@ -93,24 +93,27 @@ pub(crate) enum ProcessEntry {
     Unavailable(UnavailableState),
 }
 
-/// Validation status parameters mapped directly from LSP state and capabilities.
+/// Flags representing LSP validation status boolean properties.
 ///
 /// # Rationale for Struct Excessive Booleans
-/// This is an internal parameter object aggregating multiple independent, orthogonal
-/// boolean flags from live process states, capabilities, and indexing status.
-/// Using individual fields makes constructing and accessing these flags highly explicit
-/// and readable, avoiding convoluted state enums.
+/// Groups independent boolean state flags for process validation.
 #[derive(Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)]
+pub(crate) struct ValidationFlags {
+    pub(crate) running: bool,
+    pub(crate) supports_definition: bool,
+    pub(crate) supports_call_hierarchy: bool,
+    pub(crate) supports_formatting: bool,
+    pub(crate) indexing_complete: bool,
+}
+
+/// Validation status parameters mapped directly from LSP state and capabilities.
+#[derive(Clone, Copy)]
 struct ValidationStatusInput<'a> {
     command: &'a str,
     language_id: &'a str,
-    running: bool,
+    flags: ValidationFlags,
     diagnostics_strategy: DiagnosticsStrategy,
-    supports_definition: bool,
-    supports_call_hierarchy: bool,
-    supports_formatting: bool,
-    indexing_complete: bool,
     uptime_seconds: u64,
     server_name: Option<&'a str>,
     indexing_source: Option<&'a str>,
@@ -148,14 +151,16 @@ impl ProcessEntry {
                 validation_status_from_parts(ValidationStatusInput {
                     command,
                     language_id,
-                    running: true,
+                    flags: ValidationFlags {
+                        running: true,
+                        supports_definition: caps.flags.definition_provider,
+                        supports_call_hierarchy: caps.flags.call_hierarchy_provider,
+                        supports_formatting: caps.flags.formatting_provider,
+                        indexing_complete: state
+                            .indexing_complete
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    },
                     diagnostics_strategy: effective_diag_strategy,
-                    supports_definition: caps.definition_provider,
-                    supports_call_hierarchy: caps.call_hierarchy_provider,
-                    supports_formatting: caps.formatting_provider,
-                    indexing_complete: state
-                        .indexing_complete
-                        .load(std::sync::atomic::Ordering::Relaxed),
                     uptime_seconds: state.spawned_at.elapsed().as_secs(),
                     server_name: caps.server_name.as_deref(),
                     indexing_source,
@@ -167,12 +172,14 @@ impl ProcessEntry {
             Self::Unavailable(_) => validation_status_from_parts(ValidationStatusInput {
                 command,
                 language_id,
-                running: false,
+                flags: ValidationFlags {
+                    running: false,
+                    supports_definition: false,
+                    supports_call_hierarchy: false,
+                    supports_formatting: false,
+                    indexing_complete: false,
+                },
                 diagnostics_strategy: DiagnosticsStrategy::None,
-                supports_definition: false,
-                supports_call_hierarchy: false,
-                supports_formatting: false,
-                indexing_complete: false,
                 uptime_seconds: 0,
                 server_name: None,
                 indexing_source: None,
@@ -219,17 +226,17 @@ fn build_language_status(
         validation,
         reason,
         navigation_ready,
-        indexing_complete: Some(input.indexing_complete),
+        indexing_complete: Some(input.flags.indexing_complete),
         uptime_seconds: Some(input.uptime_seconds),
         diagnostics_strategy: Some(diagnostics_strategy),
-        supports_definition: Some(input.supports_definition),
-        supports_call_hierarchy: Some(input.supports_call_hierarchy),
+        supports_definition: Some(input.flags.supports_definition),
+        supports_call_hierarchy: Some(input.flags.supports_call_hierarchy),
         supports_diagnostics: Some(supports_diagnostics),
-        supports_formatting: Some(input.supports_formatting),
+        supports_formatting: Some(input.flags.supports_formatting),
         server_name: input.server_name.map(ToOwned::to_owned),
         indexing_source: input.indexing_source.map(ToOwned::to_owned),
         indexing_duration_secs: input.indexing_duration_secs,
-        indexing_progress_percent: if input.indexing_complete {
+        indexing_progress_percent: if input.flags.indexing_complete {
             None
         } else {
             input.indexing_progress_pct
@@ -241,7 +248,7 @@ fn build_language_status(
 fn validation_status_from_parts(
     input: ValidationStatusInput<'_>,
 ) -> crate::types::LspLanguageStatus {
-    if !input.running {
+    if !input.flags.running {
         return crate::types::LspLanguageStatus {
             validation: false,
             reason: format!("{} failed to start or crashed repeatedly", input.command),
@@ -267,10 +274,10 @@ fn validation_status_from_parts(
     // periods prevent premature `Some(false)` for slow-registering servers
     // while keeping static servers (rust-analyzer, gopls) immediately conclusive.
     let grace = grace_period_for_language(input.language_id);
-    let navigation_ready = if !input.supports_definition && input.uptime_seconds < grace {
+    let navigation_ready = if !input.flags.supports_definition && input.uptime_seconds < grace {
         None // Indeterminate — too early to tell, registrations may be in flight
     } else {
-        Some(input.supports_definition)
+        Some(input.flags.supports_definition)
     };
 
     match input.diagnostics_strategy {

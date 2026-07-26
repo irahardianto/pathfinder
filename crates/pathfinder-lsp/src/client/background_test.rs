@@ -662,7 +662,7 @@ async fn test_registration_watcher_send_failure_skips_local_update() {
     {
         let caps = caps_for_check.read();
         assert!(
-            !caps.definition_provider,
+            !caps.flags.definition_provider,
             "registration should be skipped when transport.send() fails"
         );
     }
@@ -1201,7 +1201,7 @@ async fn test_registration_watcher_applies_capability_updates() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Verify capability was updated
-    assert!(live_capabilities.read().definition_provider);
+    assert!(live_capabilities.read().flags.definition_provider);
 
     handle.abort();
 }
@@ -1220,7 +1220,7 @@ async fn test_registration_watcher_applies_unregistrations() {
     {
         let mut caps = live_capabilities.write();
         caps.apply_registration("textDocument/definition", "reg-1", &json!({}));
-        assert!(caps.definition_provider);
+        assert!(caps.flags.definition_provider);
     }
 
     let handle = tokio::spawn(registration_watcher_task(
@@ -1246,7 +1246,7 @@ async fn test_registration_watcher_applies_unregistrations() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Verify capability was unregistered
-    assert!(!live_capabilities.read().definition_provider);
+    assert!(!live_capabilities.read().flags.definition_provider);
 
     handle.abort();
 }

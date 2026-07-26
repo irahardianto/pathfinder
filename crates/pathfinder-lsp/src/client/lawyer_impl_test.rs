@@ -10,10 +10,10 @@ fn make_running_client_with_caps(language_id: &str) -> (LspClient, Arc<FakeTrans
     if let Some(entry) = client.processes.get(language_id) {
         if let crate::client::ProcessEntry::Running(state) = entry.value() {
             let mut caps = state.live_capabilities.write();
-            caps.call_hierarchy_provider = true;
-            caps.definition_provider = true;
-            caps.references_provider = true;
-            caps.implementation_provider = true;
+            caps.flags.call_hierarchy_provider = true;
+            caps.flags.definition_provider = true;
+            caps.flags.references_provider = true;
+            caps.flags.implementation_provider = true;
         }
     }
 
@@ -643,23 +643,39 @@ async fn test_lawyer_warm_start_for_languages_and_track() {
     lawyer.warm_start_for_languages_and_track(&["rust".to_owned()]);
 }
 
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy)]
+struct TestCapabilities {
+    definition: bool,
+    references: bool,
+    implementation: bool,
+    call_hierarchy: bool,
+}
+
+impl Default for TestCapabilities {
+    fn default() -> Self {
+        Self {
+            definition: true,
+            references: true,
+            implementation: true,
+            call_hierarchy: true,
+        }
+    }
+}
+
 fn make_running_client_with_custom_caps(
     language_id: &str,
-    def: bool,
-    refs: bool,
-    impl_prov: bool,
-    call_hier: bool,
+    caps_config: TestCapabilities,
 ) -> (LspClient, Arc<FakeTransport>) {
     let (client, fake) = make_running_client(language_id);
 
     if let Some(entry) = client.processes.get(language_id) {
         if let crate::client::ProcessEntry::Running(state) = entry.value() {
             let mut caps = state.live_capabilities.write();
-            caps.definition_provider = def;
-            caps.references_provider = refs;
-            caps.implementation_provider = impl_prov;
-            caps.call_hierarchy_provider = call_hier;
+            caps.flags.definition_provider = caps_config.definition;
+            caps.flags.references_provider = caps_config.references;
+            caps.flags.implementation_provider = caps_config.implementation;
+            caps.flags.call_hierarchy_provider = caps_config.call_hierarchy;
         }
     }
 
@@ -668,7 +684,13 @@ fn make_running_client_with_custom_caps(
 
 #[tokio::test]
 async fn test_lawyer_goto_definition_unsupported_capability() {
-    let (client, _fake) = make_running_client_with_custom_caps("rust", false, true, true, true);
+    let (client, _fake) = make_running_client_with_custom_caps(
+        "rust",
+        TestCapabilities {
+            definition: false,
+            ..Default::default()
+        },
+    );
     let result = client
         .goto_definition(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
         .await;
@@ -680,7 +702,13 @@ async fn test_lawyer_goto_definition_unsupported_capability() {
 
 #[tokio::test]
 async fn test_lawyer_call_hierarchy_prepare_unsupported_capability() {
-    let (client, _fake) = make_running_client_with_custom_caps("rust", true, true, true, false);
+    let (client, _fake) = make_running_client_with_custom_caps(
+        "rust",
+        TestCapabilities {
+            call_hierarchy: false,
+            ..Default::default()
+        },
+    );
     let result = client
         .call_hierarchy_prepare(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
         .await;
@@ -692,7 +720,13 @@ async fn test_lawyer_call_hierarchy_prepare_unsupported_capability() {
 
 #[tokio::test]
 async fn test_lawyer_references_unsupported_capability() {
-    let (client, _fake) = make_running_client_with_custom_caps("rust", true, false, true, true);
+    let (client, _fake) = make_running_client_with_custom_caps(
+        "rust",
+        TestCapabilities {
+            references: false,
+            ..Default::default()
+        },
+    );
     let result = client
         .references(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
         .await;
@@ -704,7 +738,13 @@ async fn test_lawyer_references_unsupported_capability() {
 
 #[tokio::test]
 async fn test_lawyer_goto_implementation_unsupported_capability() {
-    let (client, _fake) = make_running_client_with_custom_caps("rust", true, true, false, true);
+    let (client, _fake) = make_running_client_with_custom_caps(
+        "rust",
+        TestCapabilities {
+            implementation: false,
+            ..Default::default()
+        },
+    );
     let result = client
         .goto_implementation(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
         .await;
