@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1](https://github.com/irahardianto/pathfinder/compare/v0.23.0...v0.23.1) - 2026-07-26
+
+### Other
+
+- *(server)* replace assert!(x == y) with assert_eq!(x, y) in deep_context_test
+- *(server)* add MCP JSON-RPC integration tests for all five navigator tools (SC-4)
+- *(server)* fix DeepSource issues in MCP server and navigation tools
+- *(common)* expand unit test coverage for config, git, sandbox, and types modules
+- *(common,search)* fix DeepSource issues in common and search crates
+- refactor(lsp)+test(lsp): extract process_test.rs and add SC-2 LSP client coverage
+- *(lsp)* fix DeepSource issues and clean up LSP client implementation
+- *(search)* expand ripgrep_test coverage with edge case and platform-specific tests
+- *(treesitter)* comprehensive unit test coverage for all treesitter subsystems
+- *(treesitter)* fix DeepSource issues in treesitter crate
+
 ## [0.23.0](https://github.com/irahardianto/pathfinder/compare/v0.22.0...v0.23.0) - 2026-06-23
 
 ### Added
