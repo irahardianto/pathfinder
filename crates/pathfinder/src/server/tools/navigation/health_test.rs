@@ -3858,3 +3858,100 @@ async fn test_health_status_never_degraded_with_navigation_verified_true() {
         "Invariant violation: status=degraded implies navigation_verified=Some(false)"
     );
 }
+
+// ── Additional Coverage Tests ──────────────────────────────────────────
+
+#[test]
+fn test_format_uptime_and_parse_uptime() {
+    assert_eq!(format_uptime(30), "30s");
+    assert_eq!(format_uptime(60), "1m");
+    assert_eq!(format_uptime(90), "1m30s");
+    assert_eq!(format_uptime(3600), "1h");
+    assert_eq!(format_uptime(3660), "1h1m");
+
+    assert_eq!(parse_uptime_to_seconds(Some("1h2m3s")), Some(3723));
+    assert_eq!(parse_uptime_to_seconds(Some("10m5s")), Some(605));
+    assert_eq!(parse_uptime_to_seconds(Some("45s")), Some(45));
+    assert_eq!(parse_uptime_to_seconds(Some("2h")), Some(7200));
+    assert_eq!(parse_uptime_to_seconds(None), None);
+}
+
+#[test]
+fn test_compute_degraded_tools_from_health_branches() {
+    // 1. Broken navigation
+    let degraded = compute_degraded_tools_from_health(
+        Some(false), // broken
+        Some(true),
+        Some(true),
+        Some(true),
+        None,
+    );
+    assert_eq!(degraded.len(), 4);
+    assert_eq!(degraded[0].severity, "degraded");
+
+    // 2. Warming up
+    let degraded_warm = compute_degraded_tools_from_health(
+        None,        // probe not run
+        Some(false), // warming up
+        Some(true),
+        Some(true),
+        None,
+    );
+    assert_eq!(degraded_warm.len(), 4);
+    assert_eq!(degraded_warm[0].severity, "warming_up");
+
+    // 3. Definition false
+    let degraded_def =
+        compute_degraded_tools_from_health(Some(true), Some(true), Some(false), Some(true), None);
+    assert_eq!(degraded_def.len(), 1);
+    assert_eq!(degraded_def[0].tool, "locate");
+
+    // 4. Call hierarchy false (non-TS/JS vs TS/JS)
+    let ts_name = "typescript-language-server".to_string();
+    let degraded_ts = compute_degraded_tools_from_health(
+        Some(true),
+        Some(true),
+        Some(true),
+        Some(false),
+        Some(&ts_name),
+    );
+    assert_eq!(degraded_ts.len(), 2);
+    assert!(degraded_ts[0].description.contains("TS/JS LSP session"));
+
+    let other_name = "rust-analyzer".to_string();
+    let degraded_other = compute_degraded_tools_from_health(
+        Some(true),
+        Some(true),
+        Some(true),
+        Some(false),
+        Some(&other_name),
+    );
+    assert_eq!(degraded_other.len(), 2);
+    assert!(degraded_other[0]
+        .description
+        .contains("text search instead of call hierarchy"));
+}
+
+#[tokio::test]
+async fn test_find_probe_file_recursive_scan() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let (server, ws_dir) = make_server_with_lawyer(surgeon, lawyer);
+
+    // Remove default created src/main.rs to test ruby fallback search
+    let _ = std::fs::remove_dir_all(ws_dir.path().join("src"));
+
+    // Create deep nested ruby file and ignored directories
+    let target_dir = ws_dir.path().join("target/debug");
+    let deep_dir = ws_dir.path().join("a/b/c");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::create_dir_all(&deep_dir).unwrap();
+
+    // File inside target/ (should be ignored)
+    std::fs::write(target_dir.join("ignored.rb"), "def ignored; end").unwrap();
+    // File inside deep dir (should be found by recursive scan)
+    std::fs::write(deep_dir.join("deep.rb"), "def deep; end").unwrap();
+
+    let probe_file = server.find_probe_file("ruby");
+    assert_eq!(probe_file, Some(std::path::PathBuf::from("a/b/c/deep.rb")));
+}

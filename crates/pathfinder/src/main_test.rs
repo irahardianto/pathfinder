@@ -589,8 +589,65 @@ async fn test_mcp_integration_inspect_tool_deep_context_success() {
     let _ = server_handle.await;
 }
 
+fn build_overview_fixtures() -> (
+    SymbolScope,
+    Vec<CallHierarchyItem>,
+    Vec<CallHierarchyCall>,
+    Vec<CallHierarchyCall>,
+    Vec<ReferenceLocation>,
+) {
+    let scope = SymbolScope {
+        content: "fn login() { }\n".to_string(),
+        start_line: 0,
+        end_line: 0,
+        name_column: 3,
+        language: "rust".to_string(),
+        ..Default::default()
+    };
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 1,
+        column: 4,
+        data: None,
+    };
+    let incoming = vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "handle_request".into(),
+            kind: "function".into(),
+            detail: Some("fn handle_request()".into()),
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![25],
+    }];
+    let outgoing = vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "validate_token".into(),
+            kind: "function".into(),
+            detail: Some("fn validate_token() -> bool".into()),
+            file: "src/token.rs".into(),
+            line: 15,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![9],
+    }];
+    let references = vec![ReferenceLocation {
+        file: "src/main.rs".into(),
+        line: 10,
+        column: 8,
+        snippet: "login();".into(),
+    }];
+
+    (scope, vec![item], incoming, outgoing, references)
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_mcp_integration_trace_tool_overview_success() {
     let bundle = create_integration_test_server();
 
@@ -601,76 +658,19 @@ async fn test_mcp_integration_trace_tool_overview_success() {
         .await
         .unwrap();
 
-    // Mock surgeon
-    let expected_scope = SymbolScope {
-        content: "fn login() { }\n".to_string(),
-        start_line: 0,
-        end_line: 0,
-        name_column: 3,
-        language: "rust".to_string(),
-        ..Default::default()
-    };
+    let (scope, item, incoming, outgoing, references) = build_overview_fixtures();
+
     bundle
         .surgeon
         .read_symbol_scope_results
         .lock()
         .unwrap()
-        .extend([
-            Ok(expected_scope.clone()),
-            Ok(expected_scope.clone()),
-            Ok(expected_scope),
-        ]);
+        .extend([Ok(scope.clone()), Ok(scope.clone()), Ok(scope)]);
 
-    // Mock lawyer for overview
-    let item = CallHierarchyItem {
-        name: "login".into(),
-        kind: "function".into(),
-        detail: None,
-        file: "src/auth.rs".into(),
-        line: 1,
-        column: 4,
-        data: None,
-    };
-    bundle
-        .lawyer
-        .push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
-    bundle
-        .lawyer
-        .push_incoming_call_result(Ok(vec![CallHierarchyCall {
-            item: CallHierarchyItem {
-                name: "handle_request".into(),
-                kind: "function".into(),
-                detail: Some("fn handle_request()".into()),
-                file: "src/server.rs".into(),
-                line: 20,
-                column: 4,
-                data: None,
-            },
-            call_sites: vec![25],
-        }]));
-    bundle
-        .lawyer
-        .push_outgoing_call_result(Ok(vec![CallHierarchyCall {
-            item: CallHierarchyItem {
-                name: "validate_token".into(),
-                kind: "function".into(),
-                detail: Some("fn validate_token() -> bool".into()),
-                file: "src/token.rs".into(),
-                line: 15,
-                column: 4,
-                data: None,
-            },
-            call_sites: vec![9],
-        }]));
-
-    bundle
-        .lawyer
-        .set_references_result(Ok(vec![ReferenceLocation {
-            file: "src/main.rs".into(),
-            line: 10,
-            column: 8,
-            snippet: "login();".into(),
-        }]));
+    bundle.lawyer.push_prepare_call_hierarchy_result(Ok(item));
+    bundle.lawyer.push_incoming_call_result(Ok(incoming));
+    bundle.lawyer.push_outgoing_call_result(Ok(outgoing));
+    bundle.lawyer.set_references_result(Ok(references));
 
     let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
     let server_handle = tokio::spawn(async move {

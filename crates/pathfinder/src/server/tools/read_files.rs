@@ -36,6 +36,31 @@ fn truncate_content(content: &str, max_lines: u32) -> String {
     }
 }
 
+fn format_read_files_text(response: &ReadFilesResponse) -> String {
+    let mut text_parts: Vec<String> = Vec::new();
+    for file in &response.files {
+        if let Some(ref content) = file.content {
+            text_parts.push(format!("--- {} ---", file.path));
+            let numbered_content = content
+                .lines()
+                .enumerate()
+                .map(|(i, line)| format!("{}: {}", i + 1, line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            text_parts.push(numbered_content);
+        } else if let Some(ref error) = file.error {
+            text_parts.push(format!("--- {} (error: {}) ---", file.path, error));
+        }
+    }
+    text_parts.push(format!(
+        "[completed in {}ms, {}/{} files read]",
+        response.duration_ms.unwrap_or(u64::MAX),
+        response.succeeded,
+        response.succeeded + response.failed
+    ));
+    text_parts.join("\n")
+}
+
 impl PathfinderServer {
     /// Consolidated `read` handler → delegates to `read_file_impl`,
     /// `read_source_file_impl`, or `read_files_impl`.
@@ -102,11 +127,55 @@ impl PathfinderServer {
         }
     }
 
+    async fn fetch_files_parallel(&self, paths: &[String], params: &ReadParams) -> Vec<FileResult> {
+        let mut indexed_results: Vec<(usize, FileResult)> = Vec::with_capacity(paths.len());
+        let mut set = JoinSet::new();
+        let mut spawned = 0;
+
+        for (idx, file_path) in paths.iter().enumerate() {
+            let server = self.clone();
+            let file_path = file_path.clone();
+            let params = params.clone();
+
+            while spawned >= READ_FILES_CONCURRENCY {
+                if let Some(res) = set.join_next().await {
+                    spawned -= 1;
+                    match res {
+                        Ok((i, result)) => indexed_results.push((i, result)),
+                        Err(e) => {
+                            tracing::error!(tool = "read_files", error = %e, "spawned task panicked");
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        tool = "read_files",
+                        spawned,
+                        "join_next returned None while spawned > 0 — resetting"
+                    );
+                    spawned = 0;
+                    break;
+                }
+            }
+
+            set.spawn(async move { (idx, server.read_single_file(&file_path, &params).await) });
+            spawned += 1;
+        }
+
+        while let Some(res) = set.join_next().await {
+            match res {
+                Ok((idx, result)) => indexed_results.push((idx, result)),
+                Err(e) => tracing::error!(tool = "read_files", error = %e, "spawned task panicked"),
+            }
+        }
+
+        indexed_results.sort_by_key(|(idx, _)| *idx);
+        indexed_results.into_iter().map(|(_, r)| r).collect()
+    }
+
     /// Core logic for the `read_files` batch tool.
     ///
     /// Reads multiple files in a single call with per-file error resilience.
     /// Files are processed sequentially to avoid file descriptor exhaustion.
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip(self, params), fields(count = %params.paths.as_ref().map_or(0, std::vec::Vec::len)))]
     pub(crate) async fn read_files_impl(
         &self,
@@ -144,50 +213,7 @@ impl PathfinderServer {
             ));
         }
 
-        let mut indexed_results: Vec<(usize, FileResult)> = Vec::with_capacity(paths.len());
-        let mut set = JoinSet::new();
-        let mut spawned = 0;
-
-        for (idx, file_path) in paths.iter().enumerate() {
-            let server = self.clone();
-            let file_path = file_path.clone();
-            let params = params.clone();
-
-            while spawned >= READ_FILES_CONCURRENCY {
-                if let Some(res) = set.join_next().await {
-                    spawned -= 1;
-                    match res {
-                        Ok((i, result)) => indexed_results.push((i, result)),
-                        Err(e) => {
-                            tracing::error!(tool = "read_files", error = %e, "spawned task panicked");
-                        }
-                    }
-                } else {
-                    // Safety valve: JoinSet drained but counter disagrees — break to
-                    // prevent an infinite spin.  This should never happen in practice.
-                    tracing::warn!(
-                        tool = "read_files",
-                        spawned,
-                        "join_next returned None while spawned > 0 — resetting"
-                    );
-                    spawned = 0;
-                    break;
-                }
-            }
-
-            set.spawn(async move { (idx, server.read_single_file(&file_path, &params).await) });
-            spawned += 1;
-        }
-
-        while let Some(res) = set.join_next().await {
-            match res {
-                Ok((idx, result)) => indexed_results.push((idx, result)),
-                Err(e) => tracing::error!(tool = "read_files", error = %e, "spawned task panicked"),
-            }
-        }
-
-        indexed_results.sort_by_key(|(idx, _)| *idx);
-        let file_results: Vec<FileResult> = indexed_results.into_iter().map(|(_, r)| r).collect();
+        let file_results = self.fetch_files_parallel(paths, &params).await;
 
         let (mut succeeded, mut failed) = (0, 0);
         for result in &file_results {
@@ -214,32 +240,155 @@ impl PathfinderServer {
             duration_ms: Some(u64::try_from(duration_ms).unwrap_or(u64::MAX)),
         };
 
-        let mut text_parts: Vec<String> = Vec::new();
-        for file in &response.files {
-            if let Some(ref content) = file.content {
-                text_parts.push(format!("--- {} ---", file.path));
-                let numbered_content = content
-                    .lines()
-                    .enumerate()
-                    .map(|(i, line)| format!("{}: {}", i + 1, line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                text_parts.push(numbered_content);
-            } else if let Some(ref error) = file.error {
-                text_parts.push(format!("--- {} (error: {}) ---", file.path, error));
-            }
-        }
-        text_parts.push(format!(
-            "[completed in {}ms, {}/{} files read]",
-            u64::try_from(duration_ms).unwrap_or(u64::MAX),
-            response.succeeded,
-            response.succeeded + response.failed
-        ));
+        let text_output = format_read_files_text(&response);
 
-        let mut result =
-            CallToolResult::success(vec![rmcp::model::Content::text(text_parts.join("\n"))]);
+        let mut result = CallToolResult::success(vec![rmcp::model::Content::text(text_output)]);
         result.structured_content = serialize_metadata(&response);
         Ok(result)
+    }
+
+    async fn read_single_source_file(&self, file_path: &str, params: &ReadParams) -> FileResult {
+        let rs_params = crate::server::types::ReadParams {
+            filepath: Some(file_path.to_string()),
+            paths: None,
+            detail_level: params.detail_level.clone(),
+            start_line: 1,
+            end_line: None,
+            max_lines_per_file: params.max_lines_per_file,
+        };
+
+        match self.read_source_file_impl(rs_params).await {
+            Ok(result) => {
+                let structured_content_cloned = result.structured_content.clone();
+                let metadata = structured_content_cloned.and_then(|v| {
+                    serde_json::from_value::<crate::server::types::ReadSourceFileMetadata>(v).ok()
+                });
+
+                // Prefer clean content from metadata (without timing line appended).
+                // Fall back to text output for backward compat.
+                let content = metadata
+                    .as_ref()
+                    .and_then(|m| m.content.clone())
+                    .or_else(|| {
+                        result.content.first().and_then(|c| match &c.raw {
+                            rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                    });
+
+                let language = metadata.as_ref().map(|m| m.language.clone()).or_else(|| {
+                    let lang = language_from_path(Path::new(file_path));
+                    if lang == "text" {
+                        None
+                    } else {
+                        Some(lang.to_owned())
+                    }
+                });
+
+                let (content, total_lines, version_hash) = if let Some(content) = content {
+                    // short() = 7-char hex; consistent with the explore tool's version_hashes format.
+                    let version_hash =
+                        pathfinder_common::types::VersionHash::compute(content.as_bytes())
+                            .short()
+                            .to_owned();
+                    let total = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
+                    let truncated = truncate_content(&content, params.max_lines_per_file);
+                    (Some(truncated), Some(total), Some(version_hash))
+                } else {
+                    (None, None, None)
+                };
+
+                FileResult {
+                    path: file_path.to_string(),
+                    content,
+                    language,
+                    total_lines,
+                    version_hash,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                let error = e
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("error"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("failed to read file")
+                    .to_string();
+
+                FileResult {
+                    path: file_path.to_string(),
+                    content: None,
+                    language: None,
+                    total_lines: None,
+                    version_hash: None,
+                    error: Some(error),
+                }
+            }
+        }
+    }
+
+    async fn read_single_text_file(
+        &self,
+        file_path: &str,
+        params: &ReadParams,
+        absolute_path: &Path,
+    ) -> FileResult {
+        let content = match tokio::fs::read_to_string(absolute_path).await {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return FileResult {
+                    path: file_path.to_string(),
+                    content: None,
+                    language: None,
+                    total_lines: None,
+                    version_hash: None,
+                    error: Some("file not found".to_string()),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return FileResult {
+                    path: file_path.to_string(),
+                    content: None,
+                    language: None,
+                    total_lines: None,
+                    version_hash: None,
+                    error: Some("file appears to be binary (not valid UTF-8)".to_string()),
+                }
+            }
+            Err(e) => {
+                return FileResult {
+                    path: file_path.to_string(),
+                    content: None,
+                    language: None,
+                    total_lines: None,
+                    version_hash: None,
+                    error: Some(format!("failed to read file: {e}")),
+                }
+            }
+        };
+
+        // short() = 7-char hex; consistent with the explore tool's version_hashes format.
+        let version_hash = pathfinder_common::types::VersionHash::compute(content.as_bytes())
+            .short()
+            .to_owned();
+        let total_lines = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
+        let content = truncate_content(&content, params.max_lines_per_file);
+        let language = language_from_path(Path::new(file_path));
+        let language = if language == "text" {
+            String::new()
+        } else {
+            language.to_owned()
+        };
+
+        FileResult {
+            path: file_path.to_string(),
+            content: Some(content),
+            language: Some(language),
+            total_lines: Some(total_lines),
+            version_hash: Some(version_hash),
+            error: None,
+        }
     }
 
     /// Read a single file and return its result.
@@ -247,7 +396,6 @@ impl PathfinderServer {
     /// For source files (`.rs`, `.ts`, `.tsx`, `.go`, `.py`, `.pyi`, `.vue`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.java`),
     /// this delegates to `read_source_file_impl` to get full content without symbols (for token efficiency).
     /// For config files and other files, reads raw content directly.
-    #[allow(clippy::too_many_lines)]
     async fn read_single_file(&self, file_path: &str, params: &ReadParams) -> FileResult {
         let path = Path::new(file_path);
 
@@ -265,141 +413,10 @@ impl PathfinderServer {
         let absolute_path = self.workspace_root.resolve(path);
 
         if is_source_file(path) {
-            let rs_params = crate::server::types::ReadParams {
-                filepath: Some(file_path.to_string()),
-                paths: None,
-                detail_level: params.detail_level.clone(),
-                start_line: 1,
-                end_line: None,
-                max_lines_per_file: params.max_lines_per_file,
-            };
-
-            match self.read_source_file_impl(rs_params).await {
-                Ok(result) => {
-                    let structured_content_cloned = result.structured_content.clone();
-                    let metadata = structured_content_cloned.and_then(|v| {
-                        serde_json::from_value::<crate::server::types::ReadSourceFileMetadata>(v)
-                            .ok()
-                    });
-
-                    // Prefer clean content from metadata (without timing line appended).
-                    // Fall back to text output for backward compat.
-                    let content = metadata
-                        .as_ref()
-                        .and_then(|m| m.content.clone())
-                        .or_else(|| {
-                            result.content.first().and_then(|c| match &c.raw {
-                                rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
-                                _ => None,
-                            })
-                        });
-
-                    let language = metadata.as_ref().map(|m| m.language.clone()).or_else(|| {
-                        let lang = language_from_path(Path::new(file_path));
-                        if lang == "text" {
-                            None
-                        } else {
-                            Some(lang.to_owned())
-                        }
-                    });
-
-                    let (content, total_lines, version_hash) = if let Some(content) = content {
-                        // short() = 7-char hex; consistent with the explore tool's version_hashes format.
-                        let version_hash =
-                            pathfinder_common::types::VersionHash::compute(content.as_bytes())
-                                .short()
-                                .to_owned();
-                        let total = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
-                        let truncated = truncate_content(&content, params.max_lines_per_file);
-                        (Some(truncated), Some(total), Some(version_hash))
-                    } else {
-                        (None, None, None)
-                    };
-
-                    FileResult {
-                        path: file_path.to_string(),
-                        content,
-                        language,
-                        total_lines,
-                        version_hash,
-                        error: None,
-                    }
-                }
-                Err(e) => {
-                    let error = e
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.get("error"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("failed to read file")
-                        .to_string();
-
-                    FileResult {
-                        path: file_path.to_string(),
-                        content: None,
-                        language: None,
-                        total_lines: None,
-                        version_hash: None,
-                        error: Some(error),
-                    }
-                }
-            }
+            self.read_single_source_file(file_path, params).await
         } else {
-            let content = match tokio::fs::read_to_string(&absolute_path).await {
-                Ok(c) => c,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return FileResult {
-                        path: file_path.to_string(),
-                        content: None,
-                        language: None,
-                        total_lines: None,
-                        version_hash: None,
-                        error: Some("file not found".to_string()),
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                    return FileResult {
-                        path: file_path.to_string(),
-                        content: None,
-                        language: None,
-                        total_lines: None,
-                        version_hash: None,
-                        error: Some("file appears to be binary (not valid UTF-8)".to_string()),
-                    }
-                }
-                Err(e) => {
-                    return FileResult {
-                        path: file_path.to_string(),
-                        content: None,
-                        language: None,
-                        total_lines: None,
-                        version_hash: None,
-                        error: Some(format!("failed to read file: {e}")),
-                    }
-                }
-            };
-
-            // short() = 7-char hex; consistent with the explore tool's version_hashes format.
-            let version_hash = pathfinder_common::types::VersionHash::compute(content.as_bytes())
-                .short()
-                .to_owned();
-            let total_lines = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
-            let content = truncate_content(&content, params.max_lines_per_file);
-            let language = language_from_path(Path::new(file_path));
-            let language = if language == "text" {
-                String::new()
-            } else {
-                language.to_owned()
-            };
-
-            FileResult {
-                path: file_path.to_string(),
-                content: Some(content),
-                language: Some(language),
-                total_lines: Some(total_lines),
-                version_hash: Some(version_hash),
-                error: None,
-            }
+            self.read_single_text_file(file_path, params, &absolute_path)
+                .await
         }
     }
 }

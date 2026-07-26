@@ -1180,7 +1180,6 @@ async fn test_find_all_references_lsp_timeout_uses_grep_fallback() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Intentionally testing multiple file type filtering
 async fn test_find_all_references_grep_filters_non_source_files() {
     // Grep fallback should only return matches from actual source files,
     // not from docs (.md), configs (.json, .toml, .yaml), etc.
@@ -1212,69 +1211,7 @@ async fn test_find_all_references_grep_filters_non_source_files() {
 
     let scout = Arc::new(MockScout::default());
     // Return mix of source and non-source files
-    scout.set_result(Ok(pathfinder_search::SearchResult {
-        matches: vec![
-            // Rust source - KEPT
-            pathfinder_search::SearchMatch {
-                file: "src/main.rs".to_string(),
-                line: 10,
-                column: 8,
-                content: "login();".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "sha256:a".to_string(),
-                known: Some(false),
-            },
-            // TypeScript source - KEPT
-            pathfinder_search::SearchMatch {
-                file: "web/auth.ts".to_string(),
-                line: 5,
-                column: 4,
-                content: "import { login }".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "sha256:b".to_string(),
-                known: Some(false),
-            },
-            // Markdown doc - FILTERED OUT
-            pathfinder_search::SearchMatch {
-                file: "docs/README.md".to_string(),
-                line: 20,
-                column: 1,
-                content: "call login()".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "sha256:c".to_string(),
-                known: Some(false),
-            },
-            // JSON config - FILTERED OUT
-            pathfinder_search::SearchMatch {
-                file: "config.json".to_string(),
-                line: 3,
-                column: 1,
-                content: "\"login\": true".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "sha256:d".to_string(),
-                known: Some(false),
-            },
-        ],
-        total_matches: 4,
-        truncated: false,
-        files_searched: 4,
-        files_in_scope: 4,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
-    }));
+    scout.set_result(Ok(build_non_source_files_search_result()));
 
     let server = PathfinderServer::with_all_engines(
         ws,
@@ -1315,7 +1252,6 @@ async fn test_find_all_references_grep_filters_non_source_files() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines, reason = "Test data setup needs many lines")]
 async fn test_find_all_references_grep_fallback_unsupported_ext_uses_line_number() {
     // GAP 6 + BUG 1 test:
     // For unsupported extensions (.vue, .mjs, .cjs, .pyi):
@@ -1369,45 +1305,7 @@ async fn test_find_all_references_grep_fallback_unsupported_ext_uses_line_number
     // Return 2 matches in the same .vue file:
     // - Line 5: definition site ("const useAuth = ...") -> should be EXCLUDED via line-number check
     // - Line 8: reference site ("useAuth()") -> should be KEPT (different line from definition)
-    scout.set_result(Ok(pathfinder_search::SearchResult {
-        matches: vec![
-            // Match at line 5 (1-indexed) = definition_scope.start_line + 1 = 4 + 1 = 5
-            // This is the DEFINITION SITE -> should be EXCLUDED
-            pathfinder_search::SearchMatch {
-                file: "src/components/Auth.vue".to_string(),
-                line: 5, // matches definition line
-                column: 20,
-                content: "const useAuth = () => {}".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "sha256:a".to_string(),
-                known: Some(false),
-            },
-            // Match at line 8 (1-indexed) = different line
-            // This is a SAME-FILE REFERENCE -> should be KEPT (BUG 1 would have excluded it)
-            pathfinder_search::SearchMatch {
-                file: "src/components/Auth.vue".to_string(),
-                line: 8, // DIFFERENT line from definition
-                column: 15,
-                content: "<div @click=\"useAuth()\">Login</div>".to_string(),
-                context_before: vec![],
-                context_after: vec![],
-                enclosing_semantic_path: None,
-                is_definition: None,
-                version_hash: "sha256:b".to_string(),
-                known: Some(false),
-            },
-        ],
-        total_matches: 2,
-        truncated: false,
-        files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
-    }));
+    scout.set_result(Ok(build_vue_search_result()));
 
     let server = PathfinderServer::with_all_engines(
         ws,
@@ -1790,4 +1688,112 @@ async fn test_hint_absent_when_references_exist() {
         val.hint.is_none(),
         "hint must be absent when references exist"
     );
+}
+
+fn build_non_source_files_search_result() -> pathfinder_search::SearchResult {
+    pathfinder_search::SearchResult {
+        matches: vec![
+            // Rust source - KEPT
+            pathfinder_search::SearchMatch {
+                file: "src/main.rs".to_string(),
+                line: 10,
+                column: 8,
+                content: "login();".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:a".to_string(),
+                known: Some(false),
+            },
+            // TypeScript source - KEPT
+            pathfinder_search::SearchMatch {
+                file: "web/auth.ts".to_string(),
+                line: 5,
+                column: 4,
+                content: "import { login }".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:b".to_string(),
+                known: Some(false),
+            },
+            // Markdown doc - FILTERED OUT
+            pathfinder_search::SearchMatch {
+                file: "docs/README.md".to_string(),
+                line: 20,
+                column: 1,
+                content: "call login()".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:c".to_string(),
+                known: Some(false),
+            },
+            // JSON config - FILTERED OUT
+            pathfinder_search::SearchMatch {
+                file: "config.json".to_string(),
+                line: 3,
+                column: 1,
+                content: "\"login\": true".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:d".to_string(),
+                known: Some(false),
+            },
+        ],
+        total_matches: 4,
+        truncated: false,
+        files_searched: 4,
+        files_in_scope: 4,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }
+}
+
+fn build_vue_search_result() -> pathfinder_search::SearchResult {
+    pathfinder_search::SearchResult {
+        matches: vec![
+            // Match at line 5 (1-indexed) = definition_scope.start_line + 1 = 4 + 1 = 5
+            // This is the DEFINITION SITE -> should be EXCLUDED
+            pathfinder_search::SearchMatch {
+                file: "src/components/Auth.vue".to_string(),
+                line: 5, // matches definition line
+                column: 20,
+                content: "const useAuth = () => {}".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:a".to_string(),
+                known: Some(false),
+            },
+            // Match at line 8 (1-indexed) = different line
+            // This is a SAME-FILE REFERENCE -> should be KEPT (BUG 1 would have excluded it)
+            pathfinder_search::SearchMatch {
+                file: "src/components/Auth.vue".to_string(),
+                line: 8, // DIFFERENT line from definition
+                column: 15,
+                content: "<div @click=\"useAuth()\">Login</div>".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:b".to_string(),
+                known: Some(false),
+            },
+        ],
+        total_matches: 2,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }
 }

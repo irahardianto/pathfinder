@@ -809,7 +809,6 @@ pub(super) fn format_uptime(seconds: u64) -> String {
 ///
 /// Keys off `navigation_verified` (live probe result) rather than just
 /// `navigation_ready` (capability advertisement).
-#[allow(clippy::too_many_lines)]
 pub(super) fn compute_degraded_tools_from_health(
     navigation_verified: Option<bool>,
     navigation_ready: Option<bool>,
@@ -824,60 +823,12 @@ pub(super) fn compute_degraded_tools_from_health(
     let warming_up = navigation_ready != Some(true);
 
     if navigation_broken {
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "locate".to_owned(),
-            severity: "degraded".to_owned(),
-            description: "LSP navigation probe failed. Uses grep heuristic. Retry or restart LSP."
-                .to_owned(),
-        });
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "trace".to_owned(),
-            severity: "degraded".to_owned(),
-            description: "LSP navigation probe failed. Uses grep fallback. Retry or restart LSP."
-                .to_owned(),
-        });
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "inspect".to_owned(),
-            severity: "degraded".to_owned(),
-            description: "LSP navigation probe failed. Returns source only. Retry or restart LSP."
-                .to_owned(),
-        });
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "trace(scope=\"references\")".to_owned(),
-            severity: "degraded".to_owned(),
-            description:
-                "LSP navigation probe failed. References may be incomplete. Retry or restart LSP."
-                    .to_owned(),
-        });
+        degraded.extend(build_navigation_broken_tools());
         return degraded;
     }
 
     if probe_not_run && warming_up {
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "locate".to_owned(),
-            severity: "warming_up".to_owned(),
-            description: "LSP still initializing. Uses grep heuristic until navigation_ready=true."
-                .to_owned(),
-        });
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "trace".to_owned(),
-            severity: "warming_up".to_owned(),
-            description: "LSP still initializing. Uses grep fallback until navigation_ready=true."
-                .to_owned(),
-        });
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "inspect".to_owned(),
-            severity: "warming_up".to_owned(),
-            description:
-                "LSP still initializing. Returns source only (no dep signatures) until ready."
-                    .to_owned(),
-        });
-        degraded.push(crate::server::types::DegradedToolInfo {
-            tool: "trace(scope=\"references\")".to_owned(),
-            severity: "warming_up".to_owned(),
-            description: "LSP still initializing. Reference results may be incomplete until ready."
-                .to_owned(),
-        });
+        degraded.extend(build_warming_up_tools());
         return degraded;
     }
 
@@ -933,6 +884,66 @@ pub(super) fn compute_degraded_tools_from_health(
     }
 
     degraded
+}
+
+fn build_navigation_broken_tools() -> Vec<crate::server::types::DegradedToolInfo> {
+    vec![
+        crate::server::types::DegradedToolInfo {
+            tool: "locate".to_owned(),
+            severity: "degraded".to_owned(),
+            description: "LSP navigation probe failed. Uses grep heuristic. Retry or restart LSP."
+                .to_owned(),
+        },
+        crate::server::types::DegradedToolInfo {
+            tool: "trace".to_owned(),
+            severity: "degraded".to_owned(),
+            description: "LSP navigation probe failed. Uses grep fallback. Retry or restart LSP."
+                .to_owned(),
+        },
+        crate::server::types::DegradedToolInfo {
+            tool: "inspect".to_owned(),
+            severity: "degraded".to_owned(),
+            description: "LSP navigation probe failed. Returns source only. Retry or restart LSP."
+                .to_owned(),
+        },
+        crate::server::types::DegradedToolInfo {
+            tool: "trace(scope=\"references\")".to_owned(),
+            severity: "degraded".to_owned(),
+            description:
+                "LSP navigation probe failed. References may be incomplete. Retry or restart LSP."
+                    .to_owned(),
+        },
+    ]
+}
+
+fn build_warming_up_tools() -> Vec<crate::server::types::DegradedToolInfo> {
+    vec![
+        crate::server::types::DegradedToolInfo {
+            tool: "locate".to_owned(),
+            severity: "warming_up".to_owned(),
+            description: "LSP still initializing. Uses grep heuristic until navigation_ready=true."
+                .to_owned(),
+        },
+        crate::server::types::DegradedToolInfo {
+            tool: "trace".to_owned(),
+            severity: "warming_up".to_owned(),
+            description: "LSP still initializing. Uses grep fallback until navigation_ready=true."
+                .to_owned(),
+        },
+        crate::server::types::DegradedToolInfo {
+            tool: "inspect".to_owned(),
+            severity: "warming_up".to_owned(),
+            description:
+                "LSP still initializing. Returns source only (no dep signatures) until ready."
+                    .to_owned(),
+        },
+        crate::server::types::DegradedToolInfo {
+            tool: "trace(scope=\"references\")".to_owned(),
+            severity: "warming_up".to_owned(),
+            description: "LSP still initializing. Reference results may be incomplete until ready."
+                .to_owned(),
+        },
+    ]
 }
 
 pub(super) fn parse_uptime_to_seconds(uptime: Option<&str>) -> Option<u64> {
