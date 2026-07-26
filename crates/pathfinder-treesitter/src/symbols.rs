@@ -1393,7 +1393,9 @@ fn walk_jsx_return_sites(
                 collect_jsx_elements(child, source, return_path, out, tag_counts);
             }
             // Arrow function body that IS a JSX element (implicit return).
-            "jsx_element" | "jsx_self_closing_element" if node.kind() == "arrow_function" => {
+            "jsx_element" | "jsx_self_closing_element"
+                if node.kind() == "arrow_function" || node.kind() == "parenthesized_expression" =>
+            {
                 emit_jsx_symbol(child, source, return_path, out, tag_counts);
                 // Also collect nested JSX children (one level deep)
                 collect_jsx_elements(child, source, return_path, out, tag_counts);
@@ -1409,7 +1411,7 @@ fn walk_jsx_return_sites(
             }
             _ => {
                 // For arrow_function nodes, continue searching for JSX in body
-                if node.kind() == "arrow_function" {
+                if node.kind() == "arrow_function" || node.kind() == "parenthesized_expression" {
                     walk_jsx_return_sites(child, source, return_path, out, tag_counts);
                 }
             }
