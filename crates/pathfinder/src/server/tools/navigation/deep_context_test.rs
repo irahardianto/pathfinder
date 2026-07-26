@@ -1079,7 +1079,7 @@ async fn test_extract_file_imports_go_multiline_block() {
     // Should capture: `import (`, `"fmt"`, `"os"`, `)`
     assert_eq!(imports.len(), 4);
     assert!(imports[0].contains("import ("));
-    assert!(imports[3].trim() == ")");
+    assert_eq!(imports[3].trim(), ")");
 }
 
 #[tokio::test]
