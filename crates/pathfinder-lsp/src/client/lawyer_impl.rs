@@ -53,7 +53,7 @@ impl Lawyer for LspClient {
 
         self.wait_for_capability(
             language_id,
-            |caps| caps.definition_provider,
+            |caps| caps.flags.definition_provider,
             "definitionProvider",
         )
         .await?;
@@ -113,7 +113,7 @@ impl Lawyer for LspClient {
 
         self.wait_for_capability(
             language_id,
-            |caps| caps.call_hierarchy_provider,
+            |caps| caps.flags.call_hierarchy_provider,
             "callHierarchyProvider",
         )
         .await?;
@@ -209,7 +209,7 @@ impl Lawyer for LspClient {
 
         self.wait_for_capability(
             language_id,
-            |caps| caps.references_provider,
+            |caps| caps.flags.references_provider,
             "referencesProvider",
         )
         .await?;
@@ -278,7 +278,7 @@ impl Lawyer for LspClient {
 
         self.wait_for_capability(
             language_id,
-            |caps| caps.implementation_provider,
+            |caps| caps.flags.implementation_provider,
             "implementationProvider",
         )
         .await?;

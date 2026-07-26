@@ -15,12 +15,14 @@ impl<'a> TestStatusBuilder<'a> {
             input: super::ValidationStatusInput {
                 command,
                 language_id,
-                running: false,
+                flags: ValidationFlags {
+                    running: false,
+                    supports_definition: false,
+                    supports_call_hierarchy: false,
+                    supports_formatting: false,
+                    indexing_complete: false,
+                },
                 diagnostics_strategy: DiagnosticsStrategy::None,
-                supports_definition: false,
-                supports_call_hierarchy: false,
-                supports_formatting: false,
-                indexing_complete: false,
                 uptime_seconds: 0,
                 server_name: None,
                 indexing_source: None,
@@ -32,7 +34,7 @@ impl<'a> TestStatusBuilder<'a> {
     }
 
     fn running(mut self, running: bool) -> Self {
-        self.input.running = running;
+        self.input.flags.running = running;
         self
     }
 
@@ -42,22 +44,22 @@ impl<'a> TestStatusBuilder<'a> {
     }
 
     fn supports_definition(mut self, supports_definition: bool) -> Self {
-        self.input.supports_definition = supports_definition;
+        self.input.flags.supports_definition = supports_definition;
         self
     }
 
     fn supports_call_hierarchy(mut self, supports_call_hierarchy: bool) -> Self {
-        self.input.supports_call_hierarchy = supports_call_hierarchy;
+        self.input.flags.supports_call_hierarchy = supports_call_hierarchy;
         self
     }
 
     fn supports_formatting(mut self, supports_formatting: bool) -> Self {
-        self.input.supports_formatting = supports_formatting;
+        self.input.flags.supports_formatting = supports_formatting;
         self
     }
 
     fn indexing_complete(mut self, indexing_complete: bool) -> Self {
-        self.input.indexing_complete = indexing_complete;
+        self.input.flags.indexing_complete = indexing_complete;
         self
     }
 
@@ -377,9 +379,12 @@ pub(crate) fn make_running_client(language_id: &str) -> (LspClient, Arc<FakeTran
         indexing_duration_secs: Arc::new(parking_lot::Mutex::new(Some(0))),
         indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
         live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities {
-            definition_provider: true,
-            references_provider: true,
-            implementation_provider: true,
+            flags: crate::client::capabilities::CapabilityFlags {
+                definition_provider: true,
+                references_provider: true,
+                implementation_provider: true,
+                ..Default::default()
+            },
             ..DetectedCapabilities::default()
         })),
         in_coexistence_mode: false,
@@ -971,12 +976,14 @@ fn test_build_language_status_helper() {
     let input = ValidationStatusInput {
         command: "rust-analyzer",
         language_id: "rust",
-        running: true,
+        flags: ValidationFlags {
+            running: true,
+            supports_definition: true,
+            supports_call_hierarchy: true,
+            supports_formatting: true,
+            indexing_complete: true,
+        },
         diagnostics_strategy: DiagnosticsStrategy::Pull,
-        supports_definition: true,
-        supports_call_hierarchy: true,
-        supports_formatting: true,
-        indexing_complete: true,
         uptime_seconds: 120,
         server_name: Some("rust-analyzer"),
         indexing_source: Some("progress"),
@@ -1017,15 +1024,17 @@ fn test_build_language_status_suppresses_progress_pct_when_indexing_complete() {
     // When indexing is done, the in-flight progress percent must be cleared
     // to prevent stale values from reaching callers.
     let input = ValidationStatusInput {
-        running: true,
+        flags: ValidationFlags {
+            running: true,
+            supports_definition: true,
+            supports_call_hierarchy: true,
+            supports_formatting: false,
+            indexing_complete: true,
+        },
         command: "rust-analyzer",
         language_id: "rust",
         diagnostics_strategy: DiagnosticsStrategy::Push,
-        indexing_complete: true,
         uptime_seconds: 60,
-        supports_definition: true,
-        supports_call_hierarchy: true,
-        supports_formatting: false,
         server_name: None,
         indexing_source: Some("progress"),
         indexing_duration_secs: Some(10),

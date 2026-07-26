@@ -382,8 +382,11 @@ async fn test_capabilities_for_running_process_returns_caps() {
     let (client, fake) = make_running_client("rust");
 
     let caps = crate::client::DetectedCapabilities {
-        definition_provider: true,
-        call_hierarchy_provider: true,
+        flags: crate::client::capabilities::CapabilityFlags {
+            definition_provider: true,
+            call_hierarchy_provider: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     fake.with_capabilities(caps.clone());
@@ -399,11 +402,11 @@ async fn test_capabilities_for_running_process_returns_caps() {
     assert!(result.is_ok(), "should return capabilities: {result:?}");
     let caps = result.unwrap();
     assert!(
-        caps.definition_provider,
+        caps.flags.definition_provider,
         "definition_provider should be true"
     );
     assert!(
-        caps.call_hierarchy_provider,
+        caps.flags.call_hierarchy_provider,
         "call_hierarchy_provider should be true"
     );
 }
@@ -415,13 +418,13 @@ async fn test_wait_for_capability_immediate_success() {
     if let Some(entry) = client.processes.get("rust") {
         if let ProcessEntry::Running(state) = entry.value() {
             let mut live_caps = state.live_capabilities.write();
-            live_caps.definition_provider = true;
+            live_caps.flags.definition_provider = true;
         }
     }
     let result = client
         .wait_for_capability(
             "rust",
-            |caps| caps.definition_provider,
+            |caps| caps.flags.definition_provider,
             "definitionProvider",
         )
         .await;
@@ -435,13 +438,13 @@ async fn test_wait_for_capability_immediate_failure_static() {
     if let Some(entry) = client.processes.get("rust") {
         if let ProcessEntry::Running(state) = entry.value() {
             let mut live_caps = state.live_capabilities.write();
-            live_caps.definition_provider = false;
+            live_caps.flags.definition_provider = false;
         }
     }
     let result = client
         .wait_for_capability(
             "rust",
-            |caps| caps.definition_provider,
+            |caps| caps.flags.definition_provider,
             "definitionProvider",
         )
         .await;
@@ -458,7 +461,7 @@ async fn test_wait_for_capability_delayed_success() {
     if let Some(entry) = client.processes.get("java") {
         if let ProcessEntry::Running(state) = entry.value() {
             let mut live_caps = state.live_capabilities.write();
-            live_caps.definition_provider = false;
+            live_caps.flags.definition_provider = false;
         }
     }
 
@@ -468,7 +471,7 @@ async fn test_wait_for_capability_delayed_success() {
         if let Some(entry) = client_clone.processes.get("java") {
             if let ProcessEntry::Running(state) = entry.value() {
                 let mut live_caps = state.live_capabilities.write();
-                live_caps.definition_provider = true;
+                live_caps.flags.definition_provider = true;
             }
         }
     });
@@ -477,7 +480,7 @@ async fn test_wait_for_capability_delayed_success() {
     let result = client
         .wait_for_capability(
             "java",
-            |caps| caps.definition_provider,
+            |caps| caps.flags.definition_provider,
             "definitionProvider",
         )
         .await;
@@ -1609,7 +1612,10 @@ async fn test_capability_status_running_with_coexistence_mode() {
     if let Some(entry) = client.processes.get("rust") {
         if let ProcessEntry::Running(state) = entry.value() {
             *state.live_capabilities.write() = DetectedCapabilities {
-                definition_provider: true,
+                flags: crate::client::capabilities::CapabilityFlags {
+                    definition_provider: true,
+                    ..Default::default()
+                },
                 diagnostics_strategy: DiagnosticsStrategy::Pull,
                 ..Default::default()
             };
@@ -2313,7 +2319,7 @@ async fn test_fake_transport_capabilities_default() {
     let (_client, fake) = make_running_client("rust");
     let caps = fake.capabilities();
     assert!(
-        !caps.definition_provider,
+        !caps.flags.definition_provider,
         "default should have no definition provider"
     );
 }
@@ -2322,14 +2328,17 @@ async fn test_fake_transport_capabilities_default() {
 async fn test_fake_transport_capabilities_with_custom() {
     let (_client, fake) = make_running_client("rust");
     let custom_caps = DetectedCapabilities {
-        definition_provider: true,
-        call_hierarchy_provider: true,
+        flags: crate::client::capabilities::CapabilityFlags {
+            definition_provider: true,
+            call_hierarchy_provider: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     fake.with_capabilities(custom_caps.clone());
     let caps = fake.capabilities();
-    assert!(caps.definition_provider);
-    assert!(caps.call_hierarchy_provider);
+    assert!(caps.flags.definition_provider);
+    assert!(caps.flags.call_hierarchy_provider);
 }
 
 fn make_multi_lang_entry(fake: Arc<crate::client::fake_transport::FakeTransport>) -> ProcessEntry {
@@ -2350,7 +2359,10 @@ fn make_multi_lang_entry(fake: Arc<crate::client::fake_transport::FakeTransport>
         indexing_duration_secs: Arc::new(parking_lot::Mutex::new(Some(0))),
         indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
         live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities {
-            definition_provider: true,
+            flags: crate::client::capabilities::CapabilityFlags {
+                definition_provider: true,
+                ..Default::default()
+            },
             ..DetectedCapabilities::default()
         })),
         in_coexistence_mode: false,
@@ -2643,14 +2655,14 @@ async fn test_wait_for_capability_timeout_after_grace() {
     if let Some(entry) = client.processes.get("typescript") {
         if let ProcessEntry::Running(state) = entry.value() {
             let mut live_caps = state.live_capabilities.write();
-            live_caps.call_hierarchy_provider = false;
+            live_caps.flags.call_hierarchy_provider = false;
         }
     }
 
     let result = client
         .wait_for_capability(
             "typescript",
-            |caps| caps.call_hierarchy_provider,
+            |caps| caps.flags.call_hierarchy_provider,
             "callHierarchyProvider",
         )
         .await;
@@ -2670,7 +2682,7 @@ async fn test_wait_for_capability_unavailable_during_loop() {
     if let Some(entry) = client.processes.get("java") {
         if let ProcessEntry::Running(state) = entry.value() {
             let mut live_caps = state.live_capabilities.write();
-            live_caps.call_hierarchy_provider = false;
+            live_caps.flags.call_hierarchy_provider = false;
         }
     }
 
@@ -2690,7 +2702,7 @@ async fn test_wait_for_capability_unavailable_during_loop() {
     let result = client
         .wait_for_capability(
             "java",
-            |caps| caps.call_hierarchy_provider,
+            |caps| caps.flags.call_hierarchy_provider,
             "callHierarchyProvider",
         )
         .await;
@@ -2710,7 +2722,7 @@ async fn test_capabilities_for_running_returns_caps() {
     assert!(result.is_ok());
     let caps = result.expect("checked");
     // make_running_client sets definition_provider = true
-    assert!(caps.definition_provider);
+    assert!(caps.flags.definition_provider);
 }
 
 // ── Coverage: touch on running process ───────────────────────────

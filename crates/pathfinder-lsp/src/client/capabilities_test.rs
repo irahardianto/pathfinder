@@ -5,14 +5,14 @@ use serde_json::json;
 fn test_empty_capabilities() {
     let response = json!({ "capabilities": {} });
     let detected = DetectedCapabilities::from_response_json(&response);
-    assert!(!detected.definition_provider);
-    assert!(!detected.call_hierarchy_provider);
-    assert!(!detected.formatting_provider);
+    assert!(!detected.flags.definition_provider);
+    assert!(!detected.flags.call_hierarchy_provider);
+    assert!(!detected.flags.formatting_provider);
     assert!(matches!(
         detected.diagnostics_strategy,
         DiagnosticsStrategy::None
     ));
-    assert!(!detected.workspace_diagnostic_provider);
+    assert!(!detected.flags.workspace_diagnostic_provider);
 }
 
 #[test]
@@ -26,14 +26,14 @@ fn test_bool_true_capabilities() {
         }
     });
     let detected = DetectedCapabilities::from_response_json(&response);
-    assert!(detected.definition_provider);
-    assert!(detected.call_hierarchy_provider);
-    assert!(detected.formatting_provider);
+    assert!(detected.flags.definition_provider);
+    assert!(detected.flags.call_hierarchy_provider);
+    assert!(detected.flags.formatting_provider);
     assert!(matches!(
         detected.diagnostics_strategy,
         DiagnosticsStrategy::Pull
     ));
-    assert!(!detected.workspace_diagnostic_provider);
+    assert!(!detected.flags.workspace_diagnostic_provider);
 }
 
 #[test]
@@ -51,14 +51,14 @@ fn test_object_form_capabilities() {
         }
     });
     let detected = DetectedCapabilities::from_response_json(&response);
-    assert!(detected.definition_provider);
-    assert!(detected.call_hierarchy_provider);
-    assert!(detected.formatting_provider);
+    assert!(detected.flags.definition_provider);
+    assert!(detected.flags.call_hierarchy_provider);
+    assert!(detected.flags.formatting_provider);
     assert!(matches!(
         detected.diagnostics_strategy,
         DiagnosticsStrategy::Pull
     ));
-    assert!(detected.workspace_diagnostic_provider);
+    assert!(detected.flags.workspace_diagnostic_provider);
 }
 
 #[test]
@@ -70,13 +70,13 @@ fn test_bool_false_capabilities() {
         }
     });
     let detected = DetectedCapabilities::from_response_json(&response);
-    assert!(!detected.definition_provider);
-    assert!(!detected.call_hierarchy_provider);
+    assert!(!detected.flags.definition_provider);
+    assert!(!detected.flags.call_hierarchy_provider);
     assert!(matches!(
         detected.diagnostics_strategy,
         DiagnosticsStrategy::None
     ));
-    assert!(!detected.workspace_diagnostic_provider);
+    assert!(!detected.flags.workspace_diagnostic_provider);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn test_push_diagnostics_detected() {
         }
     });
     let detected = DetectedCapabilities::from_response_json(&response);
-    assert!(detected.definition_provider);
+    assert!(detected.flags.definition_provider);
     assert!(matches!(
         detected.diagnostics_strategy,
         DiagnosticsStrategy::Push
@@ -225,7 +225,7 @@ fn test_apply_registration_enables_workspace_diagnostics() {
     let options = serde_json::json!({ "workspaceDiagnostics": true });
     caps.apply_registration("textDocument/diagnostic", "reg-002", &options);
     assert!(
-        caps.workspace_diagnostic_provider,
+        caps.flags.workspace_diagnostic_provider,
         "workspaceDiagnostics option should set workspace_diagnostic_provider"
     );
 }
@@ -233,12 +233,15 @@ fn test_apply_registration_enables_workspace_diagnostics() {
 #[test]
 fn test_apply_registration_definition_provider() {
     let mut caps = DetectedCapabilities {
-        definition_provider: false,
+        flags: CapabilityFlags {
+            definition_provider: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
     caps.apply_registration("textDocument/definition", "reg-003", &serde_json::json!({}));
     assert!(
-        caps.definition_provider,
+        caps.flags.definition_provider,
         "textDocument/definition registration should enable definition_provider"
     );
 }
@@ -246,7 +249,10 @@ fn test_apply_registration_definition_provider() {
 #[test]
 fn test_apply_registration_call_hierarchy() {
     let mut caps = DetectedCapabilities {
-        call_hierarchy_provider: false,
+        flags: CapabilityFlags {
+            call_hierarchy_provider: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
     caps.apply_registration(
@@ -255,7 +261,7 @@ fn test_apply_registration_call_hierarchy() {
         &serde_json::json!({}),
     );
     assert!(
-        caps.call_hierarchy_provider,
+        caps.flags.call_hierarchy_provider,
         "callHierarchy registration should enable call_hierarchy_provider"
     );
 }
@@ -263,12 +269,15 @@ fn test_apply_registration_call_hierarchy() {
 #[test]
 fn test_apply_registration_formatting() {
     let mut caps = DetectedCapabilities {
-        formatting_provider: false,
+        flags: CapabilityFlags {
+            formatting_provider: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
     caps.apply_registration("textDocument/formatting", "reg-005", &serde_json::json!({}));
     assert!(
-        caps.formatting_provider,
+        caps.flags.formatting_provider,
         "textDocument/formatting registration should enable formatting_provider"
     );
 }
@@ -354,7 +363,7 @@ fn test_from_response_json_definition_provider_object() {
     });
     let detected = DetectedCapabilities::from_response_json(&response);
     assert!(
-        detected.definition_provider,
+        detected.flags.definition_provider,
         "object form definitionProvider should be treated as true"
     );
 }
@@ -374,14 +383,14 @@ fn test_from_response_json_all_capabilities_enabled() {
         "serverInfo": { "name": "test-server" }
     });
     let detected = DetectedCapabilities::from_response_json(&response);
-    assert!(detected.definition_provider);
-    assert!(detected.call_hierarchy_provider);
-    assert!(detected.formatting_provider);
+    assert!(detected.flags.definition_provider);
+    assert!(detected.flags.call_hierarchy_provider);
+    assert!(detected.flags.formatting_provider);
     assert!(matches!(
         detected.diagnostics_strategy,
         DiagnosticsStrategy::Pull
     ));
-    assert!(detected.workspace_diagnostic_provider);
+    assert!(detected.flags.workspace_diagnostic_provider);
     assert_eq!(detected.server_name.as_deref(), Some("test-server"));
 }
 
@@ -390,7 +399,7 @@ fn test_from_response_json_null_capabilities() {
     let response = json!({ "capabilities": { "definitionProvider": null } });
     let detected = DetectedCapabilities::from_response_json(&response);
     assert!(
-        !detected.definition_provider,
+        !detected.flags.definition_provider,
         "null definitionProvider should be false"
     );
 }
@@ -399,11 +408,11 @@ fn test_from_response_json_null_capabilities() {
 fn test_apply_unregistration_reverts_definition_provider_dynamic_only() {
     let mut caps = DetectedCapabilities::default();
     caps.apply_registration("textDocument/definition", "reg-def-001", &json!({}));
-    assert!(caps.definition_provider);
+    assert!(caps.flags.definition_provider);
 
     caps.apply_unregistration("reg-def-001");
     assert!(
-        !caps.definition_provider,
+        !caps.flags.definition_provider,
         "dynamic definition registration should be reverted"
     );
 }
@@ -411,16 +420,22 @@ fn test_apply_unregistration_reverts_definition_provider_dynamic_only() {
 #[test]
 fn test_apply_unregistration_does_not_revert_static_capability() {
     let mut caps = DetectedCapabilities {
-        definition_provider: true,
-        static_definition_provider: true,
+        flags: CapabilityFlags {
+            definition_provider: true,
+            ..Default::default()
+        },
+        static_flags: StaticCapabilityFlags {
+            definition_provider: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     caps.apply_registration("textDocument/definition", "reg-static-001", &json!({}));
-    assert!(caps.definition_provider);
+    assert!(caps.flags.definition_provider);
 
     caps.apply_unregistration("reg-static-001");
     assert!(
-        caps.definition_provider,
+        caps.flags.definition_provider,
         "should NOT revert static definition_provider"
     );
 }
@@ -429,11 +444,11 @@ fn test_apply_unregistration_does_not_revert_static_capability() {
 fn test_apply_unregistration_reverts_call_hierarchy_dynamic_only() {
     let mut caps = DetectedCapabilities::default();
     caps.apply_registration("callHierarchy/incomingCalls", "reg-ch-001", &json!({}));
-    assert!(caps.call_hierarchy_provider);
+    assert!(caps.flags.call_hierarchy_provider);
 
     caps.apply_unregistration("reg-ch-001");
     assert!(
-        !caps.call_hierarchy_provider,
+        !caps.flags.call_hierarchy_provider,
         "dynamic call hierarchy registration should be reverted"
     );
 }
@@ -442,11 +457,11 @@ fn test_apply_unregistration_reverts_call_hierarchy_dynamic_only() {
 fn test_apply_unregistration_reverts_formatting_dynamic_only() {
     let mut caps = DetectedCapabilities::default();
     caps.apply_registration("textDocument/formatting", "reg-fmt-001", &json!({}));
-    assert!(caps.formatting_provider);
+    assert!(caps.flags.formatting_provider);
 
     caps.apply_unregistration("reg-fmt-001");
     assert!(
-        !caps.formatting_provider,
+        !caps.flags.formatting_provider,
         "dynamic formatting registration should be reverted"
     );
 }
@@ -496,7 +511,7 @@ fn test_apply_unregistration_restore_static_push_after_dynamic_pull() {
         matches!(caps.diagnostics_strategy, DiagnosticsStrategy::Pull),
         "dynamic registration should set Pull"
     );
-    assert!(caps.workspace_diagnostic_provider);
+    assert!(caps.flags.workspace_diagnostic_provider);
 
     caps.apply_unregistration("reg-pull");
     assert!(
@@ -504,7 +519,7 @@ fn test_apply_unregistration_restore_static_push_after_dynamic_pull() {
         "should revert to static Push after unregistering dynamic Pull"
     );
     assert!(
-        !caps.workspace_diagnostic_provider,
+        !caps.flags.workspace_diagnostic_provider,
         "workspace_diagnostic_provider should be cleared on unregistration"
     );
 }
@@ -539,9 +554,9 @@ fn test_from_response_json_static_capabilities_snapshot() {
         }
     });
     let detected = DetectedCapabilities::from_response_json(&response);
-    assert!(detected.static_definition_provider);
-    assert!(detected.static_call_hierarchy_provider);
-    assert!(!detected.static_formatting_provider);
+    assert!(detected.static_flags.definition_provider);
+    assert!(detected.static_flags.call_hierarchy_provider);
+    assert!(!detected.static_flags.formatting_provider);
     assert!(matches!(
         detected.static_diagnostics_strategy,
         DiagnosticsStrategy::Push
@@ -559,10 +574,10 @@ fn test_diagnostics_strategy_default_is_none() {
 #[test]
 fn test_detected_capabilities_default() {
     let caps = DetectedCapabilities::default();
-    assert!(!caps.definition_provider);
-    assert!(!caps.call_hierarchy_provider);
-    assert!(!caps.formatting_provider);
-    assert!(!caps.workspace_diagnostic_provider);
+    assert!(!caps.flags.definition_provider);
+    assert!(!caps.flags.call_hierarchy_provider);
+    assert!(!caps.flags.formatting_provider);
+    assert!(!caps.flags.workspace_diagnostic_provider);
     assert!(caps.server_name.is_none());
     assert!(caps.dynamic_registrations.is_empty());
     assert_eq!(caps.registrations_received, 0);

@@ -42,41 +42,64 @@ impl DiagnosticsStrategy {
     }
 }
 
-/// The subset of LSP server capabilities that Pathfinder uses.
-///
-/// All boolean fields represent on/off server capabilities that drive
-/// binary degradation decisions in the tool handlers.
+/// Boolean flags for capabilities.
 ///
 /// # Rationale for Struct Excessive Booleans
-/// This struct maps directly to JSON-RPC capabilities returned by various LSP servers
-/// and is serialized/deserialized to match the integration boundaries. To preserve
-/// clean serialization compatibility with external data formats without custom serde
-/// attributes or manual bit-mapping, we represent each orthogonal capability as an
-/// individual boolean field.
-#[allow(clippy::struct_excessive_bools)]
+/// This struct aggregates independent boolean capability flags reported by LSP servers.
+/// Storing them as individual named bool fields is the clearest representation for LSP protocol flags.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DetectedCapabilities {
+#[allow(clippy::struct_excessive_bools)]
+pub struct CapabilityFlags {
     /// Server supports `textDocument/definition` (`locate`,
     /// `inspect`). Falls back to Tree-sitter heuristic if false.
     pub definition_provider: bool,
-    /// Server supports `textDocument/references` (`trace`).
-    /// Falls back to Tree-sitter heuristic if false.
+    /// Server supports `textDocument/references` (`trace scope=references`).
     pub references_provider: bool,
-    /// Server supports `textDocument/implementation` (`goto_implementation`).
-    /// Falls back to Tree-sitter heuristic if false.
+    /// Server supports `textDocument/implementation` (`locate`, `trace`).
     pub implementation_provider: bool,
-    /// Server supports `callHierarchy/incomingCalls` + `outgoingCalls`
-    /// (`trace`). Falls back to Tree-sitter scan for outgoing only.
+    /// Server supports `callHierarchy/incomingCalls` and `outgoingCalls`
+    /// (`trace scope=callers`).
     pub call_hierarchy_provider: bool,
-    /// Server supports `textDocument/formatting` (edit tools refinement).
+    /// Server supports `textDocument/formatting`.
     /// Tree-sitter indentation baseline is always applied first.
     pub formatting_provider: bool,
-    /// How this LSP provides diagnostics (pull, push, or none).
-    pub diagnostics_strategy: DiagnosticsStrategy,
     /// Server supports Pull Diagnostics — `workspace/diagnostic` (LSP 3.17).
     /// Used for catching cross-file regressions during edits.
     /// Only relevant when `diagnostics_strategy == DiagnosticsStrategy::Pull`.
     pub workspace_diagnostic_provider: bool,
+}
+
+/// Static capability flags captured from the initial handshake.
+///
+/// # Rationale for Struct Excessive Booleans
+/// Aggregates static LSP capability feature flags. Named bool fields match LSP specification properties.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct StaticCapabilityFlags {
+    /// Server supports `textDocument/definition` statically.
+    pub definition_provider: bool,
+    /// Server supports `textDocument/references` statically.
+    pub references_provider: bool,
+    /// Server supports `textDocument/implementation` statically.
+    pub implementation_provider: bool,
+    /// Server supports `callHierarchy` statically.
+    pub call_hierarchy_provider: bool,
+    /// Server supports `textDocument/formatting` statically.
+    pub formatting_provider: bool,
+}
+
+/// The subset of LSP server capabilities that Pathfinder uses.
+///
+/// All boolean fields represent on/off server capabilities that drive
+/// binary degradation decisions in the tool handlers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DetectedCapabilities {
+    /// Boolean flags for capabilities
+    #[serde(flatten)]
+    /// Parsed capability flags
+    pub flags: CapabilityFlags,
+    /// How this LSP provides diagnostics (pull, push, or none).
+    pub diagnostics_strategy: DiagnosticsStrategy,
     /// MT-2: The reported server name from `initialize` → `serverInfo.name`.
     ///
     /// Used internally to select the appropriate push-diagnostics collection
@@ -97,15 +120,7 @@ pub struct DetectedCapabilities {
     /// Used to prevent `apply_unregistration` from reverting a capability
     /// that was statically advertised by the server.
     #[serde(skip)]
-    pub(crate) static_definition_provider: bool,
-    #[serde(skip)]
-    pub(crate) static_references_provider: bool,
-    #[serde(skip)]
-    pub(crate) static_implementation_provider: bool,
-    #[serde(skip)]
-    pub(crate) static_call_hierarchy_provider: bool,
-    #[serde(skip)]
-    pub(crate) static_formatting_provider: bool,
+    pub(crate) static_flags: StaticCapabilityFlags,
     #[serde(skip)]
     pub(crate) static_diagnostics_strategy: DiagnosticsStrategy,
     /// Number of dynamic capability registrations received.
@@ -175,22 +190,26 @@ impl DetectedCapabilities {
         let formatting_provider = is_cap("documentFormattingProvider");
 
         Self {
-            definition_provider,
-            references_provider,
-            implementation_provider,
-            call_hierarchy_provider,
-            formatting_provider,
+            flags: CapabilityFlags {
+                definition_provider,
+                references_provider,
+                implementation_provider,
+                call_hierarchy_provider,
+                formatting_provider,
+                workspace_diagnostic_provider,
+            },
             diagnostics_strategy,
-            workspace_diagnostic_provider,
             server_name,
             // MT-3: Populated at runtime by registration_watcher_task, not from initialize.
             dynamic_registrations: std::collections::HashMap::new(),
             // M-7: Snapshot static capabilities for safe unregistration.
-            static_definition_provider: definition_provider,
-            static_references_provider: references_provider,
-            static_implementation_provider: implementation_provider,
-            static_call_hierarchy_provider: call_hierarchy_provider,
-            static_formatting_provider: formatting_provider,
+            static_flags: StaticCapabilityFlags {
+                definition_provider,
+                references_provider,
+                implementation_provider,
+                call_hierarchy_provider,
+                formatting_provider,
+            },
             static_diagnostics_strategy: diagnostics_strategy,
             // Counts successful dynamic registrations (monotonic counter).
             registrations_received: 0,
@@ -231,30 +250,30 @@ impl DetectedCapabilities {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
-                    self.workspace_diagnostic_provider = true;
+                    self.flags.workspace_diagnostic_provider = true;
                 }
                 true
             }
             "textDocument/definition" => {
-                self.definition_provider = true;
+                self.flags.definition_provider = true;
                 true
             }
             "textDocument/references" => {
-                self.references_provider = true;
+                self.flags.references_provider = true;
                 true
             }
             "textDocument/implementation" => {
-                self.implementation_provider = true;
+                self.flags.implementation_provider = true;
                 true
             }
             "callHierarchy/incomingCalls"
             | "callHierarchy/outgoingCalls"
             | "textDocument/prepareCallHierarchy" => {
-                self.call_hierarchy_provider = true;
+                self.flags.call_hierarchy_provider = true;
                 true
             }
             "textDocument/formatting" | "textDocument/rangeFormatting" => {
-                self.formatting_provider = true;
+                self.flags.formatting_provider = true;
                 true
             }
             // Unknown methods: silently ignore — future-proofing for LSP extensions.
@@ -299,29 +318,29 @@ impl DetectedCapabilities {
                     && !matches!(self.static_diagnostics_strategy, DiagnosticsStrategy::Pull)
                 {
                     self.diagnostics_strategy = self.static_diagnostics_strategy;
-                    self.workspace_diagnostic_provider = false;
+                    self.flags.workspace_diagnostic_provider = false;
                 }
             }
-            "textDocument/definition" if !self.static_definition_provider => {
-                self.definition_provider = false;
+            "textDocument/definition" if !self.static_flags.definition_provider => {
+                self.flags.definition_provider = false;
             }
-            "textDocument/references" if !self.static_references_provider => {
-                self.references_provider = false;
+            "textDocument/references" if !self.static_flags.references_provider => {
+                self.flags.references_provider = false;
             }
-            "textDocument/implementation" if !self.static_implementation_provider => {
-                self.implementation_provider = false;
+            "textDocument/implementation" if !self.static_flags.implementation_provider => {
+                self.flags.implementation_provider = false;
             }
             "callHierarchy/incomingCalls"
             | "callHierarchy/outgoingCalls"
             | "textDocument/prepareCallHierarchy"
-                if !self.static_call_hierarchy_provider =>
+                if !self.static_flags.call_hierarchy_provider =>
             {
-                self.call_hierarchy_provider = false;
+                self.flags.call_hierarchy_provider = false;
             }
             "textDocument/formatting" | "textDocument/rangeFormatting"
-                if !self.static_formatting_provider =>
+                if !self.static_flags.formatting_provider =>
             {
-                self.formatting_provider = false;
+                self.flags.formatting_provider = false;
             }
             _ => {}
         }
