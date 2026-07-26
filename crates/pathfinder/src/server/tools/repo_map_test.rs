@@ -256,122 +256,53 @@ fn test_derive_lsp_status_empty_map_returns_none() {
 /// - `navigation_ready=Some(false)` OR `indexing_complete=Some(false)` → `"warming_up"`
 /// - `uptime_seconds=Some(_)` but no capability info → `"starting"`
 /// - neither → `"unavailable"`
-#[allow(clippy::too_many_lines)]
-#[test]
-fn test_derive_lsp_status_correct_status_strings() {
+fn build_lsp_status_fixture(
+) -> std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus> {
     use pathfinder_lsp::types::LspLanguageStatus;
 
     let mut map = std::collections::HashMap::new();
 
-    // ready: navigation_ready = Some(true)
-    map.insert(
-        "rust".to_owned(),
-        LspLanguageStatus {
-            validation: false,
-            reason: String::new(),
-            navigation_ready: Some(true),
-            indexing_complete: None,
-            uptime_seconds: Some(30),
-            diagnostics_strategy: None,
-            supports_definition: None,
-            supports_call_hierarchy: None,
-            supports_diagnostics: None,
-            supports_formatting: None,
-            server_name: None,
-            indexing_source: None,
-            indexing_duration_secs: None,
-            indexing_progress_percent: None,
-            registrations_received: None,
-        },
-    );
+    let make_status =
+        |nav: Option<bool>, idx: Option<bool>, uptime: Option<u64>| -> LspLanguageStatus {
+            LspLanguageStatus {
+                validation: false,
+                reason: String::new(),
+                navigation_ready: nav,
+                indexing_complete: idx,
+                uptime_seconds: uptime,
+                diagnostics_strategy: None,
+                supports_definition: None,
+                supports_call_hierarchy: None,
+                supports_diagnostics: None,
+                supports_formatting: None,
+                server_name: None,
+                indexing_source: None,
+                indexing_duration_secs: None,
+                indexing_progress_percent: None,
+                registrations_received: None,
+            }
+        };
 
+    // ready: navigation_ready = Some(true)
+    map.insert("rust".to_owned(), make_status(Some(true), None, Some(30)));
     // warming_up: navigation_ready = Some(false)
     map.insert(
         "csharp".to_owned(),
-        LspLanguageStatus {
-            validation: false,
-            reason: String::new(),
-            navigation_ready: Some(false),
-            indexing_complete: None,
-            uptime_seconds: Some(15),
-            diagnostics_strategy: None,
-            supports_definition: None,
-            supports_call_hierarchy: None,
-            supports_diagnostics: None,
-            supports_formatting: None,
-            server_name: None,
-            indexing_source: None,
-            indexing_duration_secs: None,
-            indexing_progress_percent: None,
-            registrations_received: None,
-        },
+        make_status(Some(false), None, Some(15)),
     );
-
     // warming_up: indexing_complete = Some(false)
-    map.insert(
-        "go".to_owned(),
-        LspLanguageStatus {
-            validation: false,
-            reason: String::new(),
-            navigation_ready: None,
-            indexing_complete: Some(false),
-            uptime_seconds: Some(10),
-            diagnostics_strategy: None,
-            supports_definition: None,
-            supports_call_hierarchy: None,
-            supports_diagnostics: None,
-            supports_formatting: None,
-            server_name: None,
-            indexing_source: None,
-            indexing_duration_secs: None,
-            indexing_progress_percent: None,
-            registrations_received: None,
-        },
-    );
-
+    map.insert("go".to_owned(), make_status(None, Some(false), Some(10)));
     // starting: uptime present, but no capability signals yet (lazy start)
-    map.insert(
-        "typescript".to_owned(),
-        LspLanguageStatus {
-            validation: false,
-            reason: String::new(),
-            navigation_ready: None,
-            indexing_complete: None,
-            uptime_seconds: Some(5),
-            diagnostics_strategy: None,
-            supports_definition: None,
-            supports_call_hierarchy: None,
-            supports_diagnostics: None,
-            supports_formatting: None,
-            server_name: None,
-            indexing_source: None,
-            indexing_duration_secs: None,
-            indexing_progress_percent: None,
-            registrations_received: None,
-        },
-    );
-
+    map.insert("typescript".to_owned(), make_status(None, None, Some(5)));
     // unavailable: no uptime, no navigation_ready
-    map.insert(
-        "python".to_owned(),
-        LspLanguageStatus {
-            validation: false,
-            reason: String::new(),
-            navigation_ready: None,
-            indexing_complete: None,
-            uptime_seconds: None,
-            diagnostics_strategy: None,
-            supports_definition: None,
-            supports_call_hierarchy: None,
-            supports_diagnostics: None,
-            supports_formatting: None,
-            server_name: None,
-            indexing_source: None,
-            indexing_duration_secs: None,
-            indexing_progress_percent: None,
-            registrations_received: None,
-        },
-    );
+    map.insert("python".to_owned(), make_status(None, None, None));
+
+    map
+}
+
+#[test]
+fn test_derive_lsp_status_correct_status_strings() {
+    let map = build_lsp_status_fixture();
 
     let result = super::derive_lsp_status(&map).expect("non-empty map must return Some");
 

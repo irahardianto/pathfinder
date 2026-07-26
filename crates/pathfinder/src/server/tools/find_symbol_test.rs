@@ -1482,3 +1482,49 @@ fn mock_scout() {
         "hint should mention did_you_mean"
     );
 }
+
+// ── Additional Coverage Tests ──────────────────────────────────────────
+
+#[test]
+fn test_infer_single_ext_from_glob() {
+    assert_eq!(infer_single_ext_from_glob("**/*.rs"), Some("rs"));
+    assert_eq!(infer_single_ext_from_glob("src/*.tsx"), Some("tsx"));
+    assert_eq!(infer_single_ext_from_glob("src/*.ts"), Some("ts"));
+    assert_eq!(infer_single_ext_from_glob("**/*.jsx"), Some("jsx"));
+    assert_eq!(infer_single_ext_from_glob("**/*.js"), Some("js"));
+    assert_eq!(infer_single_ext_from_glob("**/*.py"), Some("py"));
+    assert_eq!(infer_single_ext_from_glob("**/*.go"), Some("go"));
+    assert_eq!(infer_single_ext_from_glob("**/*.java"), Some("java"));
+    assert_eq!(infer_single_ext_from_glob("**/*.vue"), Some("vue"));
+    assert_eq!(infer_single_ext_from_glob("**/*.{ts,tsx}"), None);
+    assert_eq!(infer_single_ext_from_glob("**/*.xyz"), None);
+}
+
+#[tokio::test]
+async fn test_find_symbol_scout_error_handling() {
+    let ws_dir = tempdir().expect("tempdir");
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let scout = Arc::new(MockScout::default());
+    scout.set_result(Err("ripgrep binary missing or failed".to_string()));
+    let surgeon = Arc::new(pathfinder_treesitter::mock::MockSurgeon::new());
+    let lawyer = Arc::new(pathfinder_lsp::NoOpLawyer);
+
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws, config, sandbox, scout, surgeon, lawyer,
+    );
+
+    let params = SearchToolParams {
+        query: "my_symbol".to_string(),
+        ..Default::default()
+    };
+
+    let Json(response) = server
+        .find_symbol_impl(params)
+        .await
+        .expect("find_symbol handles scout error gracefully");
+    assert_eq!(response.symbols.len(), 0);
+    assert_eq!(response.total_found, 0);
+}

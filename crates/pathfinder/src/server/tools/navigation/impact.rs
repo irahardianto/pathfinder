@@ -29,10 +29,20 @@ const BFS_CONSECUTIVE_FAILURE_LIMIT: u32 = 2;
 ///
 /// `Incoming` traverses callers (who calls this symbol).
 /// `Outgoing` traverses callees (what this symbol calls).
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum CallDirection {
     Incoming,
     Outgoing,
+}
+
+#[derive(Debug)]
+pub(crate) struct GrepFallbackParams<'a> {
+    pub symbol_name: &'a str,
+    pub definition_path: &'a std::path::Path,
+    pub scope_content: &'a str,
+    pub scope_language: &'a str,
+    pub remaining_outgoing: u32,
+    pub project_only: bool,
 }
 
 impl PathfinderServer {
@@ -123,10 +133,81 @@ impl PathfinderServer {
     ///
     /// Returns `Some(refs)` if outgoing dependencies found, `None` if none found.
     /// Updates `files_referenced` with the files containing matches.
-    // This function is ~102 lines because the search loop is one cohesive unit.
-    // Splitting it into helpers would require passing many local state variables
-    // without a meaningful reduction in complexity.
-    #[allow(clippy::too_many_lines)]
+    async fn resolve_outgoing_candidate(
+        &self,
+        candidate: &str,
+        scope_language: &str,
+        definition_path: &std::path::Path,
+        project_only: bool,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Option<crate::server::types::ImpactReference> {
+        let pattern = super::candidate_definition_pattern(scope_language, candidate);
+        let path_glob = super::language_to_file_glob(scope_language);
+
+        let result = self
+            .scout
+            .search(&pathfinder_search::SearchParams {
+                workspace_root: self.workspace_root.path().to_path_buf(),
+                query: pattern,
+                is_regex: true,
+                max_results: 4,
+                path_glob: path_glob.to_string(),
+                exclude_glob: Vec::new(),
+                context_lines: 0,
+                offset: 0,
+            })
+            .await;
+
+        match result {
+            Ok(search_result) => {
+                for m in &search_result.matches {
+                    if project_only
+                        && (!super::is_source_file(&m.file) || !super::is_workspace_file(&m.file))
+                    {
+                        continue;
+                    }
+
+                    let m_path = std::path::Path::new(&m.file);
+                    if m_path == definition_path {
+                        continue;
+                    }
+
+                    let semantic_path = self
+                        .enrich_semantic_path(
+                            &m.file,
+                            u32::try_from(m.line).unwrap_or(0),
+                            candidate,
+                        )
+                        .await;
+
+                    if seen.contains(&semantic_path) {
+                        continue;
+                    }
+                    seen.insert(semantic_path.clone());
+
+                    return Some(crate::server::types::ImpactReference {
+                        semantic_path,
+                        file: m.file.clone(),
+                        line: usize::try_from(m.line).unwrap_or(usize::MAX),
+                        snippet: m.content.clone(),
+                        direction: "outgoing_heuristic".to_string(),
+                        depth: 0,
+                        confidence: Some("heuristic".to_owned()),
+                    });
+                }
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tool = "grep_outgoing_fallback",
+                    candidate = %candidate,
+                    error = %e,
+                    "search failed for candidate"
+                );
+                None
+            }
+        }
+    }
     async fn grep_outgoing_fallback(
         &self,
         scope_content: &str,
@@ -164,79 +245,18 @@ impl PathfinderServer {
                 break;
             }
 
-            let pattern = super::candidate_definition_pattern(scope_language, &candidate);
-            let path_glob = super::language_to_file_glob(scope_language);
-
-            let result = self
-                .scout
-                .search(&pathfinder_search::SearchParams {
-                    workspace_root: self.workspace_root.path().to_path_buf(),
-                    query: pattern,
-                    is_regex: true,
-                    max_results: 4,
-                    path_glob: path_glob.to_string(),
-                    exclude_glob: Vec::new(),
-                    context_lines: 0,
-                    offset: 0,
-                })
-                .await;
-
-            match result {
-                Ok(search_result) => {
-                    let mut found = false;
-                    for m in &search_result.matches {
-                        if found {
-                            break;
-                        }
-                        if project_only
-                            && (!super::is_source_file(&m.file)
-                                || !super::is_workspace_file(&m.file))
-                        {
-                            continue;
-                        }
-
-                        let m_path = std::path::Path::new(&m.file);
-                        if m_path == definition_path {
-                            continue;
-                        }
-
-                        // Enrich the grep-resolved candidate name to a qualified treesitter path.
-                        // Falls back to `file::candidate` when Surgeon returns None or errors.
-                        let semantic_path = self
-                            .enrich_semantic_path(
-                                &m.file,
-                                u32::try_from(m.line).unwrap_or(0),
-                                &candidate,
-                            )
-                            .await;
-
-                        if seen.contains(&semantic_path) {
-                            continue;
-                        }
-                        seen.insert(semantic_path.clone());
-
-                        files_referenced.insert(m.file.clone());
-
-                        refs.push(crate::server::types::ImpactReference {
-                            semantic_path,
-                            file: m.file.clone(),
-                            line: usize::try_from(m.line).unwrap_or(usize::MAX),
-                            snippet: m.content.clone(),
-                            direction: "outgoing_heuristic".to_string(),
-                            depth: 0,
-                            confidence: Some("heuristic".to_owned()),
-                        });
-                        found = true;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tool = "grep_outgoing_fallback",
-                        candidate = %candidate,
-                        error = %e,
-                        "search failed for candidate"
-                    );
-                }
+            if let Some(reference) = self
+                .resolve_outgoing_candidate(
+                    &candidate,
+                    scope_language,
+                    definition_path,
+                    project_only,
+                    &mut seen,
+                )
+                .await
+            {
+                files_referenced.insert(reference.file.clone());
+                refs.push(reference);
             }
         }
 
@@ -254,31 +274,25 @@ impl PathfinderServer {
     }
 
     /// Runs sequential grep reference fallback and grep outgoing fallback.
-    #[allow(clippy::too_many_arguments)]
     async fn run_grep_fallbacks(
         &self,
-        symbol_name: &str,
-        definition_path: &std::path::Path,
-        scope_content: &str,
-        scope_language: &str,
-        remaining_outgoing: u32,
-        project_only: bool,
+        params: &GrepFallbackParams<'_>,
         files_referenced: &mut std::collections::HashSet<String>,
     ) -> (
         Option<Vec<crate::server::types::ImpactReference>>,
         Option<Vec<crate::server::types::ImpactReference>>,
     ) {
         let incoming = self
-            .grep_reference_fallback(symbol_name, definition_path, files_referenced)
+            .grep_reference_fallback(params.symbol_name, params.definition_path, files_referenced)
             .await;
 
         let outgoing = self
             .grep_outgoing_fallback(
-                scope_content,
-                scope_language,
-                definition_path,
-                remaining_outgoing,
-                project_only,
+                params.scope_content,
+                params.scope_language,
+                params.definition_path,
+                params.remaining_outgoing,
+                params.project_only,
                 files_referenced,
             )
             .await;
@@ -331,7 +345,55 @@ impl PathfinderServer {
     /// Added wall-clock timeout to prevent infinite loops when LSP keeps returning references.
     ///
     /// Returns the collected references and the maximum depth reached during traversal.
-    #[allow(clippy::too_many_lines)]
+    async fn build_impact_reference(
+        &self,
+        referenced_item: &pathfinder_lsp::types::CallHierarchyItem,
+        direction: &CallDirection,
+        current_depth: u32,
+    ) -> crate::server::types::ImpactReference {
+        let semantic_path = self
+            .enrich_semantic_path(
+                &referenced_item.file,
+                referenced_item.line,
+                &referenced_item.name,
+            )
+            .await;
+
+        crate::server::types::ImpactReference {
+            semantic_path,
+            file: referenced_item.file.clone(),
+            line: usize::try_from(referenced_item.line).unwrap_or(usize::MAX),
+            snippet: referenced_item
+                .detail
+                .clone()
+                .unwrap_or_else(|| referenced_item.name.clone()),
+            direction: match direction {
+                CallDirection::Incoming => "incoming".to_owned(),
+                CallDirection::Outgoing => "outgoing".to_owned(),
+            },
+            depth: usize::try_from(current_depth).unwrap_or(0),
+            confidence: Some("lsp".to_owned()),
+        }
+    }
+    async fn fetch_call_hierarchy(
+        &self,
+        item: &pathfinder_lsp::types::CallHierarchyItem,
+        direction: CallDirection,
+    ) -> Result<Vec<pathfinder_lsp::types::CallHierarchyCall>, LspError> {
+        match direction {
+            CallDirection::Incoming => {
+                self.lawyer
+                    .call_hierarchy_incoming(self.workspace_root.path(), item)
+                    .await
+            }
+            CallDirection::Outgoing => {
+                self.lawyer
+                    .call_hierarchy_outgoing(self.workspace_root.path(), item)
+                    .await
+            }
+        }
+    }
+
     async fn bfs_call_hierarchy(
         &self,
         initial_item: &pathfinder_lsp::types::CallHierarchyItem,
@@ -388,18 +450,7 @@ impl PathfinderServer {
                 break;
             }
 
-            let hierarchy_result = match direction {
-                CallDirection::Incoming => {
-                    self.lawyer
-                        .call_hierarchy_incoming(self.workspace_root.path(), &item)
-                        .await
-                }
-                CallDirection::Outgoing => {
-                    self.lawyer
-                        .call_hierarchy_outgoing(self.workspace_root.path(), &item)
-                        .await
-                }
-            };
+            let hierarchy_result = self.fetch_call_hierarchy(&item, direction).await;
 
             match hierarchy_result {
                 Ok(calls) => {
@@ -432,30 +483,10 @@ impl PathfinderServer {
                         if seen.insert(key) {
                             queue.push_back((referenced_item.clone(), current_depth + 1));
 
-                            // Enrich the flat LSP name to a qualified treesitter path.
-                            // Falls back to `file::flat_name` when Surgeon returns None or errors.
-                            let semantic_path = self
-                                .enrich_semantic_path(
-                                    &referenced_item.file,
-                                    referenced_item.line,
-                                    &referenced_item.name,
-                                )
+                            let reference = self
+                                .build_impact_reference(&referenced_item, &direction, current_depth)
                                 .await;
-
-                            references.push(crate::server::types::ImpactReference {
-                                semantic_path,
-                                file: referenced_item.file.clone(),
-                                line: usize::try_from(referenced_item.line).unwrap_or(usize::MAX),
-                                snippet: referenced_item
-                                    .detail
-                                    .unwrap_or_else(|| referenced_item.name.clone()),
-                                direction: match direction {
-                                    CallDirection::Incoming => "incoming".to_owned(),
-                                    CallDirection::Outgoing => "outgoing".to_owned(),
-                                },
-                                depth: usize::try_from(current_depth).unwrap_or(0),
-                                confidence: Some("lsp".to_owned()),
-                            });
+                            references.push(reference);
                             *remaining_references -= 1;
                         }
                     }
@@ -812,12 +843,14 @@ impl PathfinderServer {
                     {
                         let (grep_in, grep_out) = self
                             .run_grep_fallbacks(
-                                &symbol_name,
-                                &semantic_path.file_path,
-                                &scope.content,
-                                &scope.language,
-                                remaining_outgoing,
-                                project_only,
+                                &GrepFallbackParams {
+                                    symbol_name: &symbol_name,
+                                    definition_path: &semantic_path.file_path,
+                                    scope_content: &scope.content,
+                                    scope_language: &scope.language,
+                                    remaining_outgoing,
+                                    project_only,
+                                },
                                 &mut files_referenced,
                             )
                             .await;
@@ -861,12 +894,14 @@ impl PathfinderServer {
                         // by running grep fallback.
                         let (grep_in, grep_out) = self
                             .run_grep_fallbacks(
-                                &symbol_name,
-                                &semantic_path.file_path,
-                                &scope.content,
-                                &scope.language,
-                                remaining_outgoing,
-                                project_only,
+                                &GrepFallbackParams {
+                                    symbol_name: &symbol_name,
+                                    definition_path: &semantic_path.file_path,
+                                    scope_content: &scope.content,
+                                    scope_language: &scope.language,
+                                    remaining_outgoing,
+                                    project_only,
+                                },
                                 &mut files_referenced,
                             )
                             .await;
@@ -891,12 +926,14 @@ impl PathfinderServer {
 
                         let (grep_in, grep_out) = self
                             .run_grep_fallbacks(
-                                &symbol_name,
-                                &semantic_path.file_path,
-                                &scope.content,
-                                &scope.language,
-                                remaining_outgoing,
-                                project_only,
+                                &GrepFallbackParams {
+                                    symbol_name: &symbol_name,
+                                    definition_path: &semantic_path.file_path,
+                                    scope_content: &scope.content,
+                                    scope_language: &scope.language,
+                                    remaining_outgoing,
+                                    project_only,
+                                },
                                 &mut files_referenced,
                             )
                             .await;
@@ -924,12 +961,14 @@ impl PathfinderServer {
 
                     let (grep_in, grep_out) = self
                         .run_grep_fallbacks(
-                            &symbol_name,
-                            &semantic_path.file_path,
-                            &scope.content,
-                            &scope.language,
-                            remaining_outgoing,
-                            project_only,
+                            &GrepFallbackParams {
+                                symbol_name: &symbol_name,
+                                definition_path: &semantic_path.file_path,
+                                scope_content: &scope.content,
+                                scope_language: &scope.language,
+                                remaining_outgoing,
+                                project_only,
+                            },
                             &mut files_referenced,
                         )
                         .await;
@@ -959,12 +998,14 @@ impl PathfinderServer {
 
                     let (grep_in, grep_out) = self
                         .run_grep_fallbacks(
-                            &symbol_name,
-                            &semantic_path.file_path,
-                            &scope.content,
-                            &scope.language,
-                            remaining_outgoing,
-                            project_only,
+                            &GrepFallbackParams {
+                                symbol_name: &symbol_name,
+                                definition_path: &semantic_path.file_path,
+                                scope_content: &scope.content,
+                                scope_language: &scope.language,
+                                remaining_outgoing,
+                                project_only,
+                            },
                             &mut files_referenced,
                         )
                         .await;
@@ -995,12 +1036,14 @@ impl PathfinderServer {
 
                     let (grep_in, grep_out) = self
                         .run_grep_fallbacks(
-                            &symbol_name,
-                            &semantic_path.file_path,
-                            &scope.content,
-                            &scope.language,
-                            remaining_outgoing,
-                            project_only,
+                            &GrepFallbackParams {
+                                symbol_name: &symbol_name,
+                                definition_path: &semantic_path.file_path,
+                                scope_content: &scope.content,
+                                scope_language: &scope.language,
+                                remaining_outgoing,
+                                project_only,
+                            },
                             &mut files_referenced,
                         )
                         .await;

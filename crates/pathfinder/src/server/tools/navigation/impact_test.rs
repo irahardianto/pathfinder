@@ -548,7 +548,6 @@ async fn test_find_callers_callees_grep_fallback_with_mock_scout() {
 // ── PATCH-002: Non-source file filtering in grep fallback ───────────
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_find_callers_callees_grep_fallback_filters_non_source_files() {
     // Issue: grep fallback was returning matches from .md, .json, .txt, etc.
     // causing false positives. This test verifies that non-source files
@@ -582,7 +581,50 @@ async fn test_find_callers_callees_grep_fallback_filters_non_source_files() {
 
     let scout = Arc::new(MockScout::default());
     // Return a mix of source and non-source files that match the symbol name
-    scout.set_result(Ok(pathfinder_search::SearchResult {
+    scout.set_result(Ok(build_non_source_files_search_result()));
+
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        scout,
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 2,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(val.degraded);
+    assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
+    let incoming = val.incoming.as_ref().expect("must be Some from grep");
+
+    // Only the 2 source files should remain (.rs and .ts)
+    // .md and .json should be filtered out
+    assert_eq!(
+        incoming.len(),
+        2,
+        "non-source files should be filtered, got: {:?}",
+        incoming.iter().map(|r| &r.file).collect::<Vec<_>>()
+    );
+
+    // Verify the correct files are kept
+    let files: std::collections::HashSet<_> = incoming.iter().map(|r| r.file.as_str()).collect();
+    assert!(files.contains("src/caller.rs"), "should keep .rs file");
+    assert!(files.contains("web/src/auth.ts"), "should keep .ts file");
+    assert!(!files.contains("docs/README.md"), "should filter .md file");
+    assert!(!files.contains("config.json"), "should filter .json file");
+}
+
+fn build_non_source_files_search_result() -> pathfinder_search::SearchResult {
+    pathfinder_search::SearchResult {
         matches: vec![
             // Legitimate source file caller
             pathfinder_search::SearchMatch {
@@ -644,46 +686,7 @@ async fn test_find_callers_callees_grep_fallback_filters_non_source_files() {
         binary_skipped: 0,
         gitignored_skipped: 0,
         other_skipped: 0,
-    }));
-
-    let server = PathfinderServer::with_all_engines(
-        ws,
-        config,
-        sandbox,
-        scout,
-        surgeon,
-        Arc::new(pathfinder_lsp::NoOpLawyer),
-    );
-
-    let params = TraceParams {
-        semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 2,
-        ..Default::default()
-    };
-    let result = server.find_callers_callees_impl(params).await;
-    let call_res = result.expect("should succeed");
-    let val: crate::server::types::FindCallersCalleesMetadata =
-        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
-
-    assert!(val.degraded);
-    assert_eq!(val.degraded_reason, Some(DegradedReason::NoLspGrepFallback));
-    let incoming = val.incoming.as_ref().expect("must be Some from grep");
-
-    // Only the 2 source files should remain (.rs and .ts)
-    // .md and .json should be filtered out
-    assert_eq!(
-        incoming.len(),
-        2,
-        "non-source files should be filtered, got: {:?}",
-        incoming.iter().map(|r| &r.file).collect::<Vec<_>>()
-    );
-
-    // Verify the correct files are kept
-    let files: std::collections::HashSet<_> = incoming.iter().map(|r| r.file.as_str()).collect();
-    assert!(files.contains("src/caller.rs"), "should keep .rs file");
-    assert!(files.contains("web/src/auth.ts"), "should keep .ts file");
-    assert!(!files.contains("docs/README.md"), "should filter .md file");
-    assert!(!files.contains("config.json"), "should filter .json file");
+    }
 }
 
 // ── DS-1: DocumentGuard lifecycle tests ──────────────────────────────────
@@ -1623,7 +1626,6 @@ async fn test_outgoing_fallback_dedup_by_semantic_path() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_grep_outgoing_fallback_semantic_path_is_hierarchical() {
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
@@ -1674,38 +1676,8 @@ async fn test_grep_outgoing_fallback_semantic_path_is_hierarchical() {
 
     let scout = Arc::new(MockScout::default());
 
-    let validate_match = pathfinder_search::SearchMatch {
-        file: "src/validator.rs".to_string(),
-        line: 1,
-        column: 0,
-        content: "fn validate() -> bool { true }".to_string(),
-        context_before: vec![],
-        context_after: vec![],
-        enclosing_semantic_path: None,
-        is_definition: None,
-        version_hash: "sha256:abc".to_string(),
-        known: Some(false),
-    };
-    let empty_result = Ok(pathfinder_search::SearchResult {
-        matches: vec![],
-        total_matches: 0,
-        truncated: false,
-        files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
-    });
-    let validate_result = Ok(pathfinder_search::SearchResult {
-        matches: vec![validate_match],
-        total_matches: 1,
-        truncated: false,
-        files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
-    });
+    let empty_result = Ok(build_empty_search_result());
+    let validate_result = Ok(build_validate_search_result());
 
     scout.set_results(vec![
         empty_result.clone(),    // incoming search
@@ -1738,6 +1710,43 @@ async fn test_grep_outgoing_fallback_semantic_path_is_hierarchical() {
         outgoing[0].semantic_path, "src/validator.rs::TokenValidator.validate",
         "grep fallback path should be qualified using surgeon enclosing_symbol_detail"
     );
+}
+
+fn build_empty_search_result() -> pathfinder_search::SearchResult {
+    pathfinder_search::SearchResult {
+        matches: vec![],
+        total_matches: 0,
+        truncated: false,
+        files_searched: 0,
+        files_in_scope: 0,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }
+}
+
+fn build_validate_search_result() -> pathfinder_search::SearchResult {
+    pathfinder_search::SearchResult {
+        matches: vec![pathfinder_search::SearchMatch {
+            file: "src/validator.rs".to_string(),
+            line: 1,
+            column: 0,
+            content: "fn validate() -> bool { true }".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "sha256:abc".to_string(),
+            known: Some(false),
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 0,
+        files_in_scope: 0,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }
 }
 
 #[tokio::test]
@@ -4549,5 +4558,197 @@ async fn test_trace_bfs_empty_grep_replacement_is_unverified() {
         val.degraded,
         val.incoming,
         val.incoming_verified
+    );
+}
+
+// ── Additional Coverage Tests ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_find_callers_callees_file_not_found() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(MockLawyer::default());
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/nonexistent_file_xyz.rs::foo".to_owned(),
+        max_depth: 2,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    assert!(result.is_err(), "nonexistent file should return error");
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(err.message.contains("nonexistent_file_xyz.rs"));
+}
+
+#[tokio::test]
+async fn test_find_callers_callees_consecutive_failures_limit() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+    // Push 3 consecutive errors for incoming call hierarchy requests
+    for _ in 0..3 {
+        lawyer.push_incoming_call_result(Err(LspError::ConnectionLost));
+    }
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 5,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed with partial graph");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    let incoming = val.incoming.as_ref().expect("incoming must be Some");
+    assert!(
+        incoming.is_empty(),
+        "incoming should be empty due to consecutive failures"
+    );
+}
+
+#[tokio::test]
+async fn test_find_callers_callees_trait_method_goto_implementation_success() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    let mut scope = make_scope();
+    scope.parent_kind = Some("interface".to_string());
+    scope.parent_name = Some("AuthService".to_string());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(scope));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    // goto_implementation returns 1 concrete implementation
+    lawyer.set_goto_implementation_result(Ok(vec![DefinitionLocation {
+        file: "src/impl.rs".into(),
+        line: 15,
+        column: 4,
+        preview: "fn login(&self) {}".into(),
+    }]));
+
+    // call_hierarchy_prepare for the impl location
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/impl.rs".into(),
+        line: 15,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+
+    lawyer.push_incoming_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "handle_request".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/server.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![25],
+    }]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::AuthService.login".to_owned(),
+        max_depth: 2,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(
+        !val.degraded,
+        "should not be degraded when trait impl expansion succeeds"
+    );
+    let incoming = val.incoming.as_ref().expect("incoming must be Some");
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(incoming[0].file, "src/server.rs");
+    assert!(
+        val.hint
+            .as_ref()
+            .unwrap()
+            .contains("trait/interface method"),
+        "hint should mention trait expansion"
+    );
+}
+
+#[tokio::test]
+async fn test_find_callers_callees_trait_method_goto_implementation_error_falls_back() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    let mut scope = make_scope();
+    scope.parent_kind = Some("interface".to_string());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(scope));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    // goto_implementation fails
+    lawyer.set_goto_implementation_result(Err(LspError::Protocol("unsupported".to_string())));
+
+    // Normal flow call_hierarchy_prepare
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_incoming_call_result(Ok(vec![]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    assert!(
+        val.degraded,
+        "must be degraded when goto_implementation fails"
+    );
+    assert_eq!(
+        val.degraded_reason,
+        Some(DegradedReason::LspErrorGrepFallback)
     );
 }
