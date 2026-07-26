@@ -1,5 +1,15 @@
 use super::*;
 use clap::Parser;
+use pathfinder_common::config::PathfinderConfig;
+use pathfinder_common::sandbox::Sandbox;
+use pathfinder_common::types::{SymbolScope, WorkspaceRoot};
+use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem, ReferenceLocation};
+use pathfinder_lsp::{DefinitionLocation, MockLawyer};
+use pathfinder_search::{MockScout, SearchMatch, SearchResult};
+use pathfinder_treesitter::mock::MockSurgeon;
+use rmcp::ServiceExt;
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 #[test]
 fn test_cli_parse_workspace_path() {
@@ -49,4 +59,662 @@ fn test_parse_init() {
         Ok(msg) => println!("Success: {msg:?}"),
         Err(e) => panic!("Parse failed: {e:?}"),
     }
+}
+
+// ── MCP JSON-RPC Server & Tool Integration Tests (SC-4 Coverage) ──────
+
+struct IntegrationTestBundle {
+    server: PathfinderServer,
+    scout: Arc<MockScout>,
+    surgeon: Arc<MockSurgeon>,
+    lawyer: Arc<MockLawyer>,
+    _temp_dir: tempfile::TempDir,
+    ws: WorkspaceRoot,
+}
+
+fn create_integration_test_server() -> IntegrationTestBundle {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let ws = WorkspaceRoot::new(temp_dir.path()).expect("valid workspace root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let scout = Arc::new(MockScout::default());
+    let surgeon = Arc::new(MockSurgeon::new());
+    let lawyer = Arc::new(MockLawyer::default());
+
+    let server = PathfinderServer::with_all_engines(
+        ws.clone(),
+        config,
+        sandbox,
+        scout.clone(),
+        surgeon.clone(),
+        lawyer.clone(),
+    );
+
+    IntegrationTestBundle {
+        server,
+        scout,
+        surgeon,
+        lawyer,
+        _temp_dir: temp_dir,
+        ws,
+    }
+}
+
+fn create_transport_pair() -> (
+    DuplexStream,
+    DuplexStream,
+    BufReader<DuplexStream>,
+    DuplexStream,
+) {
+    let (server_read, client_write) = tokio::io::duplex(8192);
+    let (client_read, server_write) = tokio::io::duplex(8192);
+    let client_reader = BufReader::new(client_read);
+    (server_read, server_write, client_reader, client_write)
+}
+
+async fn write_jsonrpc(writer: &mut DuplexStream, msg: &serde_json::Value) {
+    let s = msg.to_string();
+    writer.write_all(s.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+}
+
+async fn read_jsonrpc(reader: &mut BufReader<DuplexStream>) -> serde_json::Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(!line.is_empty(), "expected a response but got EOF");
+    serde_json::from_str(&line).unwrap_or_else(|e| {
+        panic!("invalid JSON: {e}\nraw: {line}");
+    })
+}
+
+async fn do_handshake(
+    client_writer: &mut DuplexStream,
+    client_reader: &mut BufReader<DuplexStream>,
+) {
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+            }
+        }
+    });
+    write_jsonrpc(client_writer, &init_req).await;
+
+    let init_resp = read_jsonrpc(client_reader).await;
+    assert_eq!(init_resp["jsonrpc"], "2.0");
+    assert_eq!(init_resp["id"], 1);
+
+    let init_notif = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    write_jsonrpc(client_writer, &init_notif).await;
+}
+
+#[tokio::test]
+async fn test_mcp_integration_locate_tool_definition_success() {
+    let bundle = create_integration_test_server();
+
+    // Create actual test file in temp workspace so exists() passes
+    let src_dir = bundle.ws.path().join("src");
+    tokio::fs::create_dir_all(&src_dir).await.unwrap();
+    let file_path = src_dir.join("auth.rs");
+    tokio::fs::write(&file_path, "fn login() { }\n")
+        .await
+        .unwrap();
+
+    // Mock surgeon to return symbol scope for "src/auth.rs::login"
+    let expected_scope = SymbolScope {
+        content: "fn login() { }\n".to_string(),
+        start_line: 0,
+        end_line: 0,
+        name_column: 3,
+        language: "rust".to_string(),
+        ..Default::default()
+    };
+    bundle
+        .surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(expected_scope));
+
+    // Mock lawyer to return definition location
+    bundle
+        .lawyer
+        .set_goto_definition_result(Ok(Some(DefinitionLocation {
+            file: "src/auth.rs".to_string(),
+            line: 1,
+            column: 4,
+            preview: "fn login() { }\n".to_string(),
+        })));
+
+    // Transport setup
+    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
+    let server_handle = tokio::spawn(async move {
+        bundle
+            .server
+            .serve((server_read, server_write))
+            .await
+            .expect("server serve")
+    });
+
+    do_handshake(&mut client_writer, &mut client_reader).await;
+
+    // Call "locate" tool
+    let locate_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "locate",
+            "arguments": {
+                "semantic_path": "src/auth.rs::login"
+            }
+        }
+    });
+    write_jsonrpc(&mut client_writer, &locate_call).await;
+
+    let response = read_jsonrpc(&mut client_reader).await;
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+
+    let result = &response["result"];
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["file"], "src/auth.rs");
+    assert_eq!(structured["line"], 1);
+    assert_eq!(structured["column"], 4);
+    assert_eq!(structured["degraded"], false);
+
+    // Shutdown
+    drop(client_writer);
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_mcp_integration_trace_tool_impact_success() {
+    let bundle = create_integration_test_server();
+
+    // Create actual test file
+    let src_dir = bundle.ws.path().join("src");
+    tokio::fs::create_dir_all(&src_dir).await.unwrap();
+    let file_path = src_dir.join("auth.rs");
+    tokio::fs::write(&file_path, "fn login() { }\n")
+        .await
+        .unwrap();
+
+    // Mock surgeon
+    let expected_scope = SymbolScope {
+        content: "fn login() { }\n".to_string(),
+        start_line: 0,
+        end_line: 0,
+        name_column: 3,
+        language: "rust".to_string(),
+        ..Default::default()
+    };
+    bundle
+        .surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(expected_scope));
+
+    // Mock lawyer for call hierarchy
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 1,
+        column: 4,
+        data: None,
+    };
+    bundle
+        .lawyer
+        .push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+    bundle
+        .lawyer
+        .push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: Some("fn handle_request()".into()),
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+    bundle
+        .lawyer
+        .push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
+    let server_handle = tokio::spawn(async move {
+        bundle
+            .server
+            .serve((server_read, server_write))
+            .await
+            .expect("server serve")
+    });
+
+    do_handshake(&mut client_writer, &mut client_reader).await;
+
+    // Call "trace" tool (scope callers)
+    let trace_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "trace",
+            "arguments": {
+                "semantic_path": "src/auth.rs::login",
+                "scope": "callers"
+            }
+        }
+    });
+    write_jsonrpc(&mut client_writer, &trace_call).await;
+
+    let response = read_jsonrpc(&mut client_reader).await;
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["degraded"], false);
+    assert!(structured["incoming"].is_array());
+    assert_eq!(
+        structured["incoming"][0]["semantic_path"],
+        "src/server.rs::handle_request"
+    );
+    assert!(structured["outgoing"].is_array());
+    assert_eq!(
+        structured["outgoing"][0]["semantic_path"],
+        "src/token.rs::validate_token"
+    );
+
+    drop(client_writer);
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_mcp_integration_inspect_tool_symbols_success() {
+    let bundle = create_integration_test_server();
+
+    let src_dir = bundle.ws.path().join("src");
+    tokio::fs::create_dir_all(&src_dir).await.unwrap();
+    let file_path = src_dir.join("auth.rs");
+    tokio::fs::write(&file_path, "fn login() { }\n")
+        .await
+        .unwrap();
+
+    // Mock surgeon
+    let expected_scope = SymbolScope {
+        content: "fn login() { }\n".to_string(),
+        start_line: 0,
+        end_line: 0,
+        name_column: 3,
+        language: "rust".to_string(),
+        ..Default::default()
+    };
+    bundle
+        .surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(expected_scope));
+
+    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
+    let server_handle = tokio::spawn(async move {
+        bundle
+            .server
+            .serve((server_read, server_write))
+            .await
+            .expect("server serve")
+    });
+
+    do_handshake(&mut client_writer, &mut client_reader).await;
+
+    // Call "inspect" tool (without dependencies)
+    let inspect_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "inspect",
+            "arguments": {
+                "semantic_path": "src/auth.rs::login"
+            }
+        }
+    });
+    write_jsonrpc(&mut client_writer, &inspect_call).await;
+
+    let response = read_jsonrpc(&mut client_reader).await;
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["language"], "rust");
+    assert_eq!(structured["start_line"], 0);
+    assert_eq!(structured["end_line"], 0);
+
+    drop(client_writer);
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_mcp_integration_search_tool_success() {
+    let bundle = create_integration_test_server();
+
+    // Mock scout
+    let search_match = SearchMatch {
+        file: "src/auth.rs".to_string(),
+        line: 1,
+        column: 0,
+        content: "fn login() {}".to_string(),
+        context_before: vec![],
+        context_after: vec![],
+        enclosing_semantic_path: None,
+        is_definition: Some(true),
+        version_hash: "sha256:123".to_string(),
+        known: None,
+    };
+    bundle.scout.set_result(Ok(SearchResult {
+        matches: vec![search_match],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 1,
+        files_in_scope: 1,
+        binary_skipped: 0,
+        gitignored_skipped: 0,
+        other_skipped: 0,
+    }));
+
+    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
+    let server_handle = tokio::spawn(async move {
+        bundle
+            .server
+            .serve((server_read, server_write))
+            .await
+            .expect("server serve")
+    });
+
+    do_handshake(&mut client_writer, &mut client_reader).await;
+
+    // Call "search" tool
+    let search_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "search",
+            "arguments": {
+                "query": "login"
+            }
+        }
+    });
+    write_jsonrpc(&mut client_writer, &search_call).await;
+
+    let response = read_jsonrpc(&mut client_reader).await;
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+
+    let text_content = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text content");
+    let structured: serde_json::Value =
+        serde_json::from_str(text_content).expect("valid JSON in text content");
+    assert_eq!(structured["total_matches"], 1);
+    assert_eq!(structured["matches"][0]["file"], "src/auth.rs");
+    assert_eq!(structured["matches"][0]["content"], "fn login() {}");
+
+    drop(client_writer);
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_mcp_integration_inspect_tool_deep_context_success() {
+    let bundle = create_integration_test_server();
+
+    let src_dir = bundle.ws.path().join("src");
+    tokio::fs::create_dir_all(&src_dir).await.unwrap();
+    let file_path = src_dir.join("auth.rs");
+    tokio::fs::write(&file_path, "fn login() { }\n")
+        .await
+        .unwrap();
+
+    // Mock surgeon
+    let expected_scope = SymbolScope {
+        content: "fn login() { }\n".to_string(),
+        start_line: 0,
+        end_line: 0,
+        name_column: 3,
+        language: "rust".to_string(),
+        ..Default::default()
+    };
+    bundle
+        .surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .extend([Ok(expected_scope.clone()), Ok(expected_scope)]);
+
+    // Mock lawyer for deep context
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 1,
+        column: 4,
+        data: None,
+    };
+    bundle
+        .lawyer
+        .push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+    bundle
+        .lawyer
+        .push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
+    let server_handle = tokio::spawn(async move {
+        bundle
+            .server
+            .serve((server_read, server_write))
+            .await
+            .expect("server serve")
+    });
+
+    do_handshake(&mut client_writer, &mut client_reader).await;
+
+    // Call "inspect" tool (with include_dependencies = true)
+    let inspect_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "inspect",
+            "arguments": {
+                "semantic_path": "src/auth.rs::login",
+                "include_dependencies": true
+            }
+        }
+    });
+    write_jsonrpc(&mut client_writer, &inspect_call).await;
+
+    let response = read_jsonrpc(&mut client_reader).await;
+    println!("DEBUG: INSPECT RESPONSE = {response:#?}");
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["degraded"], false);
+    assert!(structured["dependencies"].is_array());
+    assert_eq!(
+        structured["dependencies"][0]["semantic_path"],
+        "src/token.rs::validate_token"
+    );
+
+    drop(client_writer);
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_mcp_integration_trace_tool_overview_success() {
+    let bundle = create_integration_test_server();
+
+    let src_dir = bundle.ws.path().join("src");
+    tokio::fs::create_dir_all(&src_dir).await.unwrap();
+    let file_path = src_dir.join("auth.rs");
+    tokio::fs::write(&file_path, "fn login() { }\n")
+        .await
+        .unwrap();
+
+    // Mock surgeon
+    let expected_scope = SymbolScope {
+        content: "fn login() { }\n".to_string(),
+        start_line: 0,
+        end_line: 0,
+        name_column: 3,
+        language: "rust".to_string(),
+        ..Default::default()
+    };
+    bundle
+        .surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .extend([
+            Ok(expected_scope.clone()),
+            Ok(expected_scope.clone()),
+            Ok(expected_scope),
+        ]);
+
+    // Mock lawyer for overview
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 1,
+        column: 4,
+        data: None,
+    };
+    bundle
+        .lawyer
+        .push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
+    bundle
+        .lawyer
+        .push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: Some("fn handle_request()".into()),
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+    bundle
+        .lawyer
+        .push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
+
+    bundle
+        .lawyer
+        .set_references_result(Ok(vec![ReferenceLocation {
+            file: "src/main.rs".into(),
+            line: 10,
+            column: 8,
+            snippet: "login();".into(),
+        }]));
+
+    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
+    let server_handle = tokio::spawn(async move {
+        bundle
+            .server
+            .serve((server_read, server_write))
+            .await
+            .expect("server serve")
+    });
+
+    do_handshake(&mut client_writer, &mut client_reader).await;
+
+    // Call "trace" tool (scope overview)
+    let trace_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "trace",
+            "arguments": {
+                "semantic_path": "src/auth.rs::login",
+                "scope": "overview"
+            }
+        }
+    });
+    write_jsonrpc(&mut client_writer, &trace_call).await;
+
+    let response = read_jsonrpc(&mut client_reader).await;
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["source"]["content"], "fn login() { }\n");
+    assert_eq!(
+        structured["impact"]["incoming"][0]["semantic_path"],
+        "src/server.rs::handle_request"
+    );
+    assert_eq!(
+        structured["impact"]["outgoing"][0]["semantic_path"],
+        "src/token.rs::validate_token"
+    );
+    assert_eq!(structured["references"][0]["file"], "src/main.rs");
+    assert_eq!(structured["references"][0]["snippet"], "login();");
+
+    drop(client_writer);
+    let _ = server_handle.await;
 }
