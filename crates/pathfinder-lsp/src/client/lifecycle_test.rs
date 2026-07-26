@@ -3161,3 +3161,82 @@ fn test_detect_concurrent_lsp_macos_detailed_paths() {
     assert!(!found_zombie);
     assert!(found_external);
 }
+
+#[tokio::test]
+async fn test_client_lifecycle_reader_crash_cleanup() {
+    use crate::client::background::reader_supervisor_task;
+    use crate::client::fake_transport::FakeTransport;
+    use crate::client::{LanguageState, ProcessEntry};
+
+    // Create client
+    let client = client_with_descriptors(vec!["rust"], HashMap::new());
+
+    // Insert doc version
+    client.doc_versions.insert(
+        "file:///foo.rs".to_string(),
+        ("rust".to_string(), std::sync::atomic::AtomicI32::new(1)),
+    );
+    client.doc_versions.insert(
+        "file:///bar.go".to_string(),
+        ("go".to_string(), std::sync::atomic::AtomicI32::new(1)),
+    );
+
+    // Register a pending request in the dispatcher
+    let (_request_id, rx) = client.dispatcher.register("rust");
+
+    // Create a fake transport and running entry
+    let fake_transport = Arc::new(FakeTransport::new());
+    fake_transport.set_dispatcher(Arc::clone(&client.dispatcher));
+
+    let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reader_handle = tokio::spawn(async {
+        // Simulating crash / panic
+        panic!("simulated reader task crash!");
+    });
+
+    let entry = ProcessEntry::Running(Box::new(LanguageState {
+        transport: fake_transport as Arc<dyn LspTransport>,
+        lifecycle: None,
+        reader_handle: tokio::spawn(async {}), // placeholder for supervisor lookup
+        reader_alive: Arc::clone(&reader_alive),
+        restart_count: 0,
+        spawned_at: Instant::now(),
+        indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+        indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+        indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+        live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities::default())),
+        in_coexistence_mode: false,
+        watcher_handles: vec![],
+    }));
+
+    client.processes.insert("rust".to_owned(), entry);
+
+    // Run the supervisor task to detect the crash
+    reader_supervisor_task(
+        "rust".to_owned(),
+        reader_handle,
+        reader_alive,
+        Arc::clone(&client.processes),
+        Arc::clone(&client.dispatcher),
+        Arc::clone(&client.doc_versions),
+    )
+    .await;
+
+    // Verify:
+    // 1. "rust" doc_versions cleared, but "go" remains
+    assert!(!client.doc_versions.contains_key("file:///foo.rs"));
+    assert!(client.doc_versions.contains_key("file:///bar.go"));
+
+    // 2. Pending request is canceled (channel closed/error)
+    let res = rx.await;
+    assert!(res.is_err() || matches!(res, Ok(Err(crate::LspError::ConnectionLost))));
+
+    // 3. Process is transitioned to Unavailable state
+    let entry_rust = client.processes.get("rust");
+    assert!(entry_rust.is_some());
+    assert!(matches!(
+        entry_rust.unwrap().value(),
+        ProcessEntry::Unavailable(_)
+    ));
+}

@@ -642,3 +642,74 @@ async fn test_lawyer_warm_start_for_languages_and_track() {
     let lawyer: &dyn Lawyer = &client;
     lawyer.warm_start_for_languages_and_track(&["rust".to_owned()]);
 }
+
+#[allow(clippy::fn_params_excessive_bools)]
+fn make_running_client_with_custom_caps(
+    language_id: &str,
+    def: bool,
+    refs: bool,
+    impl_prov: bool,
+    call_hier: bool,
+) -> (LspClient, Arc<FakeTransport>) {
+    let (client, fake) = make_running_client(language_id);
+
+    if let Some(entry) = client.processes.get(language_id) {
+        if let crate::client::ProcessEntry::Running(state) = entry.value() {
+            let mut caps = state.live_capabilities.write();
+            caps.definition_provider = def;
+            caps.references_provider = refs;
+            caps.implementation_provider = impl_prov;
+            caps.call_hierarchy_provider = call_hier;
+        }
+    }
+
+    (client, fake)
+}
+
+#[tokio::test]
+async fn test_lawyer_goto_definition_unsupported_capability() {
+    let (client, _fake) = make_running_client_with_custom_caps("rust", false, true, true, true);
+    let result = client
+        .goto_definition(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(
+        matches!(result, Err(LspError::UnsupportedCapability { ref capability }) if capability == "definitionProvider"),
+        "expected UnsupportedCapability(definitionProvider), got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_lawyer_call_hierarchy_prepare_unsupported_capability() {
+    let (client, _fake) = make_running_client_with_custom_caps("rust", true, true, true, false);
+    let result = client
+        .call_hierarchy_prepare(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(
+        matches!(result, Err(LspError::UnsupportedCapability { ref capability }) if capability == "callHierarchyProvider"),
+        "expected UnsupportedCapability(callHierarchyProvider), got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_lawyer_references_unsupported_capability() {
+    let (client, _fake) = make_running_client_with_custom_caps("rust", true, false, true, true);
+    let result = client
+        .references(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(
+        matches!(result, Err(LspError::UnsupportedCapability { ref capability }) if capability == "referencesProvider"),
+        "expected UnsupportedCapability(referencesProvider), got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_lawyer_goto_implementation_unsupported_capability() {
+    let (client, _fake) = make_running_client_with_custom_caps("rust", true, true, false, true);
+    let result = client
+        .goto_implementation(Path::new("/workspace"), Path::new("src/main.rs"), 1, 1)
+        .await;
+    assert!(
+        matches!(result, Err(LspError::UnsupportedCapability { ref capability }) if capability == "implementationProvider"),
+        "expected UnsupportedCapability(implementationProvider), got: {result:?}"
+    );
+}

@@ -1684,3 +1684,75 @@ async fn test_reader_supervisor_clears_doc_versions_with_lifecycle() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_watchers_aborted_on_crash() {
+    let processes = Arc::new(DashMap::new());
+    let dispatcher = Arc::new(RequestDispatcher::new());
+    let doc_versions = Arc::new(DashMap::new());
+
+    // 1. Create mock watcher tasks with oneshot channels to detect termination
+    let (tx1, rx1) = tokio::sync::oneshot::channel::<()>();
+    let progress_handle = tokio::spawn(async move {
+        let _tx = tx1;
+        std::future::pending::<()>().await;
+    });
+
+    let (tx2, rx2) = tokio::sync::oneshot::channel::<()>();
+    let registration_handle = tokio::spawn(async move {
+        let _tx = tx2;
+        std::future::pending::<()>().await;
+    });
+
+    let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reader_handle = tokio::spawn(async {
+        panic!("simulated reader crash");
+    });
+
+    let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+
+    processes.insert(
+        "rust".to_owned(),
+        ProcessEntry::Running(Box::new(crate::client::LanguageState {
+            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            lifecycle: None,
+            reader_handle: tokio::spawn(async {}),
+            reader_alive: Arc::clone(&reader_alive),
+            restart_count: 0,
+            spawned_at: Instant::now(),
+            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+            live_capabilities: Arc::new(parking_lot::RwLock::new(
+                crate::client::DetectedCapabilities::default(),
+            )),
+            in_coexistence_mode: false,
+            watcher_handles: vec![progress_handle, registration_handle],
+        })),
+    );
+
+    // 2. Call the supervisor task
+    reader_supervisor_task(
+        "rust".to_owned(),
+        reader_handle,
+        reader_alive,
+        Arc::clone(&processes),
+        dispatcher,
+        doc_versions,
+    )
+    .await;
+
+    // 3. Verify that supervisor reaped the state and aborted the watchers
+    let res_progress = rx1.await;
+    let res_reg = rx2.await;
+
+    assert!(
+        res_progress.is_err(),
+        "progress watcher must be aborted (sender dropped)"
+    );
+    assert!(
+        res_reg.is_err(),
+        "registration watcher must be aborted (sender dropped)"
+    );
+}

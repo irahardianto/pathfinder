@@ -2369,3 +2369,76 @@ async fn test_filters_missing_language_with_no_source_files() {
     })
     .await;
 }
+
+#[test]
+fn test_validate_marker_file_non_existent() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("non_existent_file.toml");
+    assert!(validate_marker_file(&path, "rust").is_ok());
+}
+
+#[test]
+fn test_validate_marker_file_is_directory() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("Cargo.toml");
+    std::fs::create_dir_all(&path).expect("create dir");
+    let result = validate_marker_file(&path, "rust");
+    assert!(result.is_err(), "reading a directory as a file should fail");
+    assert!(result
+        .expect_err("expected Err")
+        .contains("cannot read Cargo.toml"));
+}
+
+#[test]
+fn test_validate_marker_file_valid_build_gradle() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("build.gradle");
+    std::fs::write(&path, "plugins { id 'java' }").expect("write");
+    assert!(validate_marker_file(&path, "java").is_ok());
+}
+
+#[test]
+fn test_detect_venv_conda_prefix_non_existent() {
+    let _guard = match PATH_MUTEX.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let orig = std::env::var("CONDA_PREFIX").ok();
+    std::env::set_var("CONDA_PREFIX", "/non/existent/conda/path");
+
+    let result = detect_venv(Path::new("/workspace"));
+
+    if let Some(orig_val) = orig {
+        std::env::set_var("CONDA_PREFIX", orig_val);
+    } else {
+        std::env::remove_var("CONDA_PREFIX");
+    }
+
+    assert!(
+        result.is_none(),
+        "should return None when conda path does not exist"
+    );
+}
+
+#[test]
+fn test_detect_venv_virtual_env_non_existent() {
+    let _guard = match PATH_MUTEX.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let orig = std::env::var("VIRTUAL_ENV").ok();
+    std::env::set_var("VIRTUAL_ENV", "/non/existent/venv/path");
+
+    let result = detect_venv(Path::new("/workspace"));
+
+    if let Some(orig_val) = orig {
+        std::env::set_var("VIRTUAL_ENV", orig_val);
+    } else {
+        std::env::remove_var("VIRTUAL_ENV");
+    }
+
+    assert!(
+        result.is_none(),
+        "should return None when virtual env path does not exist"
+    );
+}

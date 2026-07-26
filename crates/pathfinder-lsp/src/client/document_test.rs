@@ -348,3 +348,108 @@ async fn test_open_document_guard_dedup_in_composite_tool() {
         "should be exactly one notification (didClose), not more"
     );
 }
+
+#[tokio::test]
+async fn test_document_state_cleaned_on_crash() {
+    use crate::client::background::reader_supervisor_task;
+    use crate::client::{DetectedCapabilities, LanguageState, LspTransport, ProcessEntry};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let (client, fake) = make_running_client("rust");
+
+    let workspace = Path::new("/workspace");
+    let file_path = Path::new("src/main.rs");
+
+    // 1. Open the document
+    let opened = client
+        .did_open(workspace, file_path, "fn main() {}")
+        .await
+        .unwrap();
+    assert!(opened, "did_open should succeed");
+
+    // Clear notifications
+    fake.take_notifications();
+
+    // Verify it is tracked
+    let file_uri = Url::from_file_path(workspace.join(file_path))
+        .unwrap()
+        .to_string();
+    assert!(
+        client.doc_versions.contains_key(&file_uri),
+        "doc_versions should track the open file"
+    );
+
+    // 2. Simulate reader supervisor task running after a crash.
+    // To do this, we need to find the reader_handle and reader_alive from the current Running process.
+    let (reader_handle, reader_alive) = {
+        let entry = client.processes.get("rust").unwrap();
+        if let ProcessEntry::Running(state) = entry.value() {
+            let h = tokio::spawn(async {
+                std::future::pending::<()>().await;
+            });
+            h.abort();
+            (h, Arc::clone(&state.reader_alive))
+        } else {
+            panic!("Expected process to be Running");
+        }
+    };
+
+    // Run the supervisor task to simulate crash cleanup
+    reader_supervisor_task(
+        "rust".to_owned(),
+        reader_handle,
+        reader_alive,
+        Arc::clone(&client.processes),
+        Arc::clone(&client.dispatcher),
+        Arc::clone(&client.doc_versions),
+    )
+    .await;
+
+    // 3. Verify doc_versions was cleared for the crashed language
+    assert!(
+        !client.doc_versions.contains_key(&file_uri),
+        "doc_versions should be cleared on crash"
+    );
+
+    // 4. Restart/Re-enable the server by inserting a new running process entry
+    let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    fake_transport.set_dispatcher(Arc::clone(&client.dispatcher));
+
+    let entry = ProcessEntry::Running(Box::new(LanguageState {
+        transport: Arc::clone(&fake_transport) as Arc<dyn LspTransport>,
+        lifecycle: None,
+        reader_handle: tokio::spawn(async {}),
+        reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        restart_count: 0,
+        spawned_at: Instant::now(),
+        indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+        indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+        indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+        live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities::default())),
+        in_coexistence_mode: false,
+        watcher_handles: vec![],
+    }));
+    client.processes.insert("rust".to_owned(), entry);
+
+    // 5. Open the same document again. Since it was cleaned up on crash,
+    // the client must NOT deduplicate it, but instead send a new didOpen notification!
+    let opened_again = client
+        .did_open(workspace, file_path, "fn main() {}")
+        .await
+        .unwrap();
+    assert!(
+        opened_again,
+        "did_open after crash should succeed as a fresh open"
+    );
+
+    // Verify notification was sent on the new transport
+    let notifications = fake_transport.take_notifications();
+    assert!(
+        notifications
+            .iter()
+            .any(|(m, _)| m == "textDocument/didOpen"),
+        "A new didOpen notification must be sent after crash recovery"
+    );
+}
