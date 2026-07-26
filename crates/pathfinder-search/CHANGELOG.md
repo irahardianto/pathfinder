@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.10](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-search-v0.5.9...pathfinder-mcp-search-v0.5.10) - 2026-07-26
+
+### Other
+
+- *(search)* expand ripgrep_test coverage with edge case and platform-specific tests
+- *(common,search)* fix DeepSource issues in common and search crates
+
 ## [0.5.9](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-search-v0.5.8...pathfinder-mcp-search-v0.5.9) - 2026-06-23
 
 ### Other
