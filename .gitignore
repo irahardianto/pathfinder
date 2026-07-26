@@ -23,6 +23,9 @@ lcov.info
 coverage/
 coverage.txt
 coverage_detail.txt
+# LLVM raw profile data emitted by cargo-llvm-cov or LLVM_PROFILE_FILE.
+# Contains absolute local paths and binary data — never commit.
+*.profraw
 
 .agents/
 .claude/
