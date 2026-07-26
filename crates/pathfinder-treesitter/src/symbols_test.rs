@@ -3002,3 +3002,284 @@ trait Service {
     assert_eq!(trait_sym.children[0].start_line, 9);
     assert_eq!(trait_sym.children[0].end_line, 12);
 }
+
+#[test]
+fn test_make_unique_name_handling() {
+    let mut counts = std::collections::HashMap::new();
+    let (name1, suf1) = make_unique_name(&mut counts, "foo".to_string());
+    assert_eq!(name1, "foo");
+    assert_eq!(suf1, "");
+
+    let (name2, suf2) = make_unique_name(&mut counts, "foo".to_string());
+    assert_eq!(name2, "foo");
+    assert_eq!(suf2, "#2");
+
+    let (name3, suf3) = make_unique_name(&mut counts, "foo".to_string());
+    assert_eq!(name3, "foo");
+    assert_eq!(suf3, "#3");
+}
+
+#[test]
+fn test_strip_path_prefix_and_generics_helper() {
+    assert_eq!(strip_path_prefix("super::MyStruct"), "MyStruct");
+    assert_eq!(strip_path_prefix("crate::Config"), "Config");
+    assert_eq!(strip_path_prefix("std::collections::HashMap"), "HashMap");
+    assert_eq!(strip_path_prefix("Simple"), "Simple");
+
+    assert_eq!(strip_generics("MyStruct<T, U>"), "MyStruct");
+    assert_eq!(strip_generics("Handler<'a>"), "Handler");
+    assert_eq!(strip_generics("NoGenerics"), "NoGenerics");
+}
+
+#[test]
+fn test_refine_class_kind_helpers() {
+    let source = r"
+enum Color { Red, Green }
+struct Point { x: i32 }
+trait Printable { fn print(&self); }
+";
+    let source_bytes = source.as_bytes();
+    let tree = AstParser::parse_source(
+        std::path::Path::new("dummy.rs"),
+        SupportedLanguage::Rust,
+        source_bytes,
+    )
+    .unwrap();
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let items: Vec<_> = root.named_children(&mut cursor).collect();
+
+    assert_eq!(refine_class_kind(items[0]), SymbolKind::Enum);
+    assert_eq!(refine_class_kind(items[1]), SymbolKind::Struct);
+    assert_eq!(refine_class_kind(items[2]), SymbolKind::Interface);
+}
+
+#[test]
+fn test_detect_access_level_rust() {
+    let source = r"
+pub fn pub_fn() {}
+pub(crate) fn crate_fn() {}
+pub(super) fn super_fn() {}
+fn private_fn() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+    assert_eq!(symbols[0].access_level, crate::surgeon::AccessLevel::Public);
+    assert_eq!(
+        symbols[1].access_level,
+        crate::surgeon::AccessLevel::Package
+    );
+    assert_eq!(
+        symbols[2].access_level,
+        crate::surgeon::AccessLevel::Protected
+    );
+    assert_eq!(
+        symbols[3].access_level,
+        crate::surgeon::AccessLevel::Private
+    );
+}
+
+#[test]
+fn test_detect_access_level_go() {
+    let source = r"
+package main
+
+func Exported() {}
+func internal() {}
+func _private() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Go);
+    assert_eq!(symbols[0].access_level, crate::surgeon::AccessLevel::Public);
+    assert_eq!(
+        symbols[1].access_level,
+        crate::surgeon::AccessLevel::Package
+    );
+    assert_eq!(
+        symbols[2].access_level,
+        crate::surgeon::AccessLevel::Private
+    );
+}
+
+#[test]
+fn test_detect_access_level_typescript() {
+    let source = r"
+export function exportedFn() {}
+function internalFn() {}
+function _privateFn() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::TypeScript);
+    assert_eq!(symbols[0].access_level, crate::surgeon::AccessLevel::Public);
+    assert_eq!(
+        symbols[1].access_level,
+        crate::surgeon::AccessLevel::Package
+    );
+    assert_eq!(
+        symbols[2].access_level,
+        crate::surgeon::AccessLevel::Private
+    );
+}
+
+#[test]
+fn test_detect_access_level_python() {
+    let source = r"
+def public_fn(): pass
+def _protected_fn(): pass
+def __private_fn(): pass
+def __init__(): pass
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Python);
+    let pub_sym = symbols.iter().find(|s| s.name == "public_fn").unwrap();
+    let prot_sym = symbols.iter().find(|s| s.name == "_protected_fn").unwrap();
+    let priv_sym = symbols.iter().find(|s| s.name == "__private_fn").unwrap();
+    let dunder_sym = symbols.iter().find(|s| s.name == "__init__").unwrap();
+
+    assert_eq!(pub_sym.access_level, crate::surgeon::AccessLevel::Public);
+    assert_eq!(
+        prot_sym.access_level,
+        crate::surgeon::AccessLevel::Protected
+    );
+    assert_eq!(priv_sym.access_level, crate::surgeon::AccessLevel::Private);
+    assert_eq!(dunder_sym.access_level, crate::surgeon::AccessLevel::Public);
+}
+
+#[test]
+fn test_detect_access_level_java() {
+    let source = r"
+class Test {
+    public void pubMethod() {}
+    protected void protMethod() {}
+    private void privMethod() {}
+    void pkgMethod() {}
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Java);
+    let class_sym = &symbols[0];
+    let pub_m = class_sym
+        .children
+        .iter()
+        .find(|s| s.name == "pubMethod")
+        .unwrap();
+    let prot_m = class_sym
+        .children
+        .iter()
+        .find(|s| s.name == "protMethod")
+        .unwrap();
+    let priv_m = class_sym
+        .children
+        .iter()
+        .find(|s| s.name == "privMethod")
+        .unwrap();
+    let pkg_m = class_sym
+        .children
+        .iter()
+        .find(|s| s.name == "pkgMethod")
+        .unwrap();
+
+    assert_eq!(pub_m.access_level, crate::surgeon::AccessLevel::Public);
+    assert_eq!(prot_m.access_level, crate::surgeon::AccessLevel::Protected);
+    assert_eq!(priv_m.access_level, crate::surgeon::AccessLevel::Private);
+    assert_eq!(pkg_m.access_level, crate::surgeon::AccessLevel::Package);
+}
+
+#[test]
+fn test_did_you_mean_fuzzy_matching() {
+    let syms = vec![
+        ExtractedSymbol {
+            name: "LoginUser".to_string(),
+            semantic_path: "auth.LoginUser".to_string(),
+            kind: SymbolKind::Function,
+            byte_range: 0..10,
+            start_line: 0,
+            end_line: 0,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        },
+        ExtractedSymbol {
+            name: "LogoutUser".to_string(),
+            semantic_path: "auth.LogoutUser".to_string(),
+            kind: SymbolKind::Function,
+            byte_range: 10..20,
+            start_line: 1,
+            end_line: 1,
+            name_column: 0,
+            access_level: crate::surgeon::AccessLevel::Public,
+            children: vec![],
+        },
+    ];
+
+    // Empty chain returns empty
+    let empty_chain = SymbolChain { segments: vec![] };
+    assert!(did_you_mean(&syms, &empty_chain, 3).is_empty());
+
+    // Exact match returns exact match
+    let exact_chain = SymbolChain::parse("auth.LoginUser").unwrap();
+    assert_eq!(did_you_mean(&syms, &exact_chain, 3), vec!["auth.LoginUser"]);
+
+    // Fuzzy typo match
+    let typo_chain = SymbolChain::parse("auth.LognUser").unwrap();
+    let suggestions = did_you_mean(&syms, &typo_chain, 3);
+    assert!(!suggestions.is_empty());
+    assert_eq!(suggestions[0], "auth.LoginUser");
+}
+
+#[test]
+fn test_find_enclosing_symbol_nesting() {
+    let source = r"
+struct Outer {
+    field: i32,
+}
+impl Outer {
+    fn inner(&self) {}
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+
+    // Line 1 is inside Outer
+    let enc1 = find_enclosing_symbol(&symbols, 1);
+    assert_eq!(enc1.as_deref(), Some("Outer"));
+
+    // Line 5 is inside inner method
+    let enc2 = find_enclosing_symbol(&symbols, 5);
+    assert_eq!(enc2.as_deref(), Some("Outer.inner"));
+
+    // Out of bounds row
+    let enc3 = find_enclosing_symbol(&symbols, 999);
+    assert_eq!(enc3, None);
+}
+
+#[test]
+fn test_jsx_self_closing_and_component_extraction() {
+    let source = r"
+const Header = () => (
+    <div>
+        <Nav.Menu />
+        <Button onClick={() => {}}>Click</Button>
+    </div>
+);
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Tsx);
+    let header_sym = symbols.iter().find(|s| s.name == "Header").unwrap();
+    assert_eq!(header_sym.kind, SymbolKind::Function);
+    assert!(!header_sym.children.is_empty());
+}
+
+#[test]
+fn test_css_at_rules_and_selectors_extraction() {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_css::LANGUAGE.into())
+        .unwrap();
+    let source = r"
+@media (min-width: 600px) {
+    .container { color: blue; }
+}
+@media (min-width: 900px) {
+    #hero { font-size: 20px; }
+}
+";
+    let tree = parser.parse(source, None).unwrap();
+    let style_syms = extract_style_symbols(&tree, source.as_bytes());
+    assert_eq!(style_syms.len(), 2);
+    assert_eq!(style_syms[0].name, "@media");
+    assert_eq!(style_syms[1].name, "@media[2]");
+}

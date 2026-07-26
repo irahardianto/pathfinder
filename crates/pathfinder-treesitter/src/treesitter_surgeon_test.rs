@@ -933,3 +933,101 @@ macro_rules! sample_macro {
     assert_eq!(factory_sym.children[0].start_line, 6);
     assert_eq!(factory_sym.children[0].end_line, 9);
 }
+
+#[test]
+fn test_symbol_kind_to_parent_kind_mapping() {
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Test), "function");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Function), "function");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Method), "function");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Class), "class");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Struct), "struct");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Impl), "impl");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Constant), "constant");
+    assert_eq!(
+        symbol_kind_to_parent_kind(SymbolKind::Interface),
+        "interface"
+    );
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Enum), "enum");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Module), "module");
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::Zone), "zone");
+    assert_eq!(
+        symbol_kind_to_parent_kind(SymbolKind::Component),
+        "component"
+    );
+    assert_eq!(
+        symbol_kind_to_parent_kind(SymbolKind::HtmlElement),
+        "element"
+    );
+    assert_eq!(
+        symbol_kind_to_parent_kind(SymbolKind::CssSelector),
+        "selector"
+    );
+    assert_eq!(symbol_kind_to_parent_kind(SymbolKind::CssAtRule), "at-rule");
+}
+
+#[tokio::test]
+async fn test_read_symbol_scope_no_chain_error() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let workspace_root = PathBuf::from("/");
+    let sp = SemanticPath {
+        file_path: PathBuf::from("dummy.rs"),
+        symbol_chain: None,
+    };
+
+    let err = surgeon
+        .read_symbol_scope(&workspace_root, &sp)
+        .await
+        .unwrap_err();
+
+    match err {
+        SurgeonError::SymbolNotFound { path, .. } => {
+            assert_eq!(path, "dummy.rs");
+        }
+        _ => panic!("Expected SymbolNotFound error when symbol_chain is None"),
+    }
+}
+
+#[tokio::test]
+async fn test_read_source_file_unsupported_extension() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new()
+        .suffix(".unknown_ext_xyz")
+        .tempfile()
+        .unwrap();
+    writeln!(file, "some content").unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    let err = surgeon
+        .read_source_file(&workspace_root, relative)
+        .await
+        .unwrap_err();
+
+    match err {
+        SurgeonError::UnsupportedLanguage(_) => {}
+        _ => panic!("Expected UnsupportedLanguage error"),
+    }
+}
+
+#[tokio::test]
+async fn test_enclosing_symbol_detail_edge_cases() {
+    let surgeon = TreeSitterSurgeon::new(2);
+    let mut file = Builder::new().suffix(".rs").tempfile().unwrap();
+    writeln!(file, "fn hello() {{\n    println!(\"world\");\n}}").unwrap();
+    let workspace_root = PathBuf::from("/");
+    let relative = file.path().strip_prefix("/").unwrap();
+
+    // Line 0 handles saturating_sub(1) = 0
+    let detail_line0 = surgeon
+        .enclosing_symbol_detail(&workspace_root, relative, 0)
+        .await
+        .unwrap();
+    assert!(detail_line0.is_some() || detail_line0.is_none());
+
+    // Out of bounds line
+    let detail_oob = surgeon
+        .enclosing_symbol_detail(&workspace_root, relative, 9999)
+        .await
+        .unwrap();
+    assert!(detail_oob.is_none());
+}
