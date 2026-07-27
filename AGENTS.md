@@ -90,7 +90,7 @@ Never skip validation "to save time." Validation IS the work.
 | Go | `go vet ./...`, `staticcheck ./...`, `go test ./...` |
 | TypeScript / Vue | `npx tsc --noEmit`, `npx eslint .`, `npm test` |
 | Flutter / Dart | `dart analyze`, `flutter test` |
-| Rust | `cargo clippy -- -D warnings`, `cargo test` |
+| Rust | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace --all-targets`, `cargo test --workspace --all-targets --all-features`, `cargo deny check` |
 | Python | `ruff check .`, `mypy .`, `pytest` |
 
 ### Failure Protocol
