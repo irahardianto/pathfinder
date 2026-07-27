@@ -82,19 +82,28 @@ pub struct ImpactSummary {
 /// A single entry in the impact summary.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SymbolOverviewImpactEntry {
+    /// Semantic path of the impacted symbol.
     pub semantic_path: String,
+    /// File path containing the entry.
     pub file: String,
+    /// Line number of the entry.
     pub line: usize,
+    /// Code snippet preview.
     pub snippet: String,
+    /// Call direction ("caller" or "callee").
     pub direction: String,
 }
 
 /// A reference location in `symbol_overview`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SymbolOverviewReference {
+    /// Relative file path.
     pub file: String,
+    /// Line number (1-based).
     pub line: u32,
+    /// Column number (1-based).
     pub column: u32,
+    /// Code snippet preview.
     pub snippet: String,
 }
 
@@ -1084,7 +1093,7 @@ pub enum ExcludeGlob {
 
 impl Default for ExcludeGlob {
     fn default() -> Self {
-        Self::Single(String::new())
+        Self::Single(String::default())
     }
 }
 
@@ -1189,7 +1198,7 @@ pub struct SearchParams {
 impl Default for SearchParams {
     fn default() -> Self {
         Self {
-            query: String::new(),
+            query: String::default(),
             mode: SearchMode::Text,
             path_glob: default_path_glob(),
             max_results: default_max_results(),
@@ -1328,18 +1337,26 @@ pub struct LocateParams {
 /// Result entry for a single inspect operation in a batch.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct InspectResultEntry {
+    /// Semantic path inspected.
     pub semantic_path: String,
-    pub status: String, // "ok" or "error"
+    /// Operation status ("ok" or "error").
+    pub status: String,
+    /// Source code content if successful.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Start line of symbol definition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_line: Option<usize>,
+    /// End line of symbol definition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<usize>,
+    /// Detected language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Symbol dependencies if requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Vec<DeepContextDependency>>,
+    /// Error message if status is "error".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1347,29 +1364,42 @@ pub struct InspectResultEntry {
 /// Response from a batch `inspect` tool call.
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchInspectResult {
+    /// Batch inspect result entries.
     pub results: Vec<InspectResultEntry>,
+    /// Number of succeeded inspections.
     pub succeeded: usize,
+    /// Number of failed inspections.
     pub failed: usize,
+    /// Total duration of batch inspection in milliseconds.
     pub total_duration_ms: u64,
 }
 
 /// Result entry for a single locate operation in a batch.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct LocateResultEntry {
-    pub input: LocateEntry, // echo back for correlation
-    pub status: String,     // "ok" or "error"
+    /// Echo back input for correlation.
+    pub input: LocateEntry,
+    /// Operation status ("ok" or "error").
+    pub status: String,
+    /// Resolved file path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Resolved line number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    /// Resolved column number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column: Option<u32>,
+    /// Resolved semantic path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_path: Option<String>,
+    /// Preview snippet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// Strategy used for resolution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution_strategy: Option<String>,
+    /// Error message if status is "error".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1377,9 +1407,13 @@ pub struct LocateResultEntry {
 /// Response from a batch `locate` tool call.
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchLocateResult {
+    /// Batch locate result entries.
     pub results: Vec<LocateResultEntry>,
+    /// Number of succeeded locations.
     pub succeeded: usize,
+    /// Number of failed locations.
     pub failed: usize,
+    /// Total duration of batch location in milliseconds.
     pub total_duration_ms: u64,
 }
 
@@ -1457,62 +1491,77 @@ pub struct HealthParams {
 
 // ── Default Value Functions ─────────────────────────────────────────
 
+/// Default path glob pattern ("**/*").
 #[must_use]
 pub fn default_path_glob() -> String {
     "**/*".to_owned()
 }
+/// Default max search results (50).
 #[must_use]
 pub const fn default_max_results() -> u32 {
     50
 }
+/// Default context lines (2).
 #[must_use]
 pub const fn default_context_lines() -> u32 {
     2
 }
+/// Default repo map path (".").
 #[must_use]
 pub fn default_repo_map_path() -> String {
     ".".to_owned()
 }
+/// Default max token limit (16,000).
 #[must_use]
 pub const fn default_max_tokens() -> u32 {
     16_000
 }
+/// Default max tokens per file (2,000).
 #[must_use]
 pub const fn default_max_tokens_per_file() -> u32 {
     2_000
 }
+/// Default max depth (3).
 #[must_use]
 pub const fn default_max_depth() -> u32 {
     3
 }
+/// Default max references (50).
 #[must_use]
 pub const fn default_max_references() -> u32 {
     50
 }
+/// Default max dependencies (50).
 #[must_use]
 pub const fn default_max_dependencies() -> u32 {
     50
 }
+/// Default start line (1).
 #[must_use]
 pub const fn default_start_line() -> u32 {
     1
 }
+/// Default max lines (500).
 #[must_use]
 pub const fn default_max_lines() -> u32 {
     500
 }
+/// Default detail level ("compact").
 #[must_use]
 pub fn default_detail_level() -> String {
     "compact".to_string()
 }
+/// Default explore depth (3).
 #[must_use]
 pub const fn default_explore_depth() -> u32 {
     3
 }
+/// Default group by file flag (true).
 #[must_use]
 pub const fn default_group_by_file() -> bool {
     true
 }
+/// Default filter mode (`CodeOnly`).
 #[must_use]
 pub const fn default_filter_mode() -> FilterMode {
     FilterMode::CodeOnly

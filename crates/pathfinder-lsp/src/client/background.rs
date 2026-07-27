@@ -18,6 +18,7 @@ const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins
 pub(crate) const MAX_BACKOFF_SECS: u64 = 60;
 const IDLE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
+/// Supervisor task monitoring LSP process reader handle and handling crashes/restarts.
 pub async fn reader_supervisor_task(
     language_id: String,
     reader_handle: tokio::task::JoinHandle<()>,
@@ -117,6 +118,7 @@ pub async fn reader_supervisor_task(
     }
 }
 
+/// Background task watching $/progress notifications to update indexing status.
 pub async fn progress_watcher_task(
     language_id: String,
     // M-6: Accept pre-created receiver instead of creating via dispatcher.
@@ -135,17 +137,17 @@ pub async fn progress_watcher_task(
         match rx.recv().await {
             Ok(msg) => {
                 let action = extract_progress_action(&msg);
-                if let ProgressAction::End { .. } = &action {
-                    if indexing_complete.load(std::sync::atomic::Ordering::Relaxed) {
-                        let duration_secs = spawned_at.elapsed().as_secs();
-                        tracing::warn!(
-                            language = %language_id,
-                            duration_sec = duration_secs,
-                            "LSP: WorkDoneProgressEnd arrived {0}s after timeout fallback already fired — consider increasing timeout",
-                            duration_secs
-                        );
-                        continue;
-                    }
+                if matches!(action, ProgressAction::End { .. })
+                    && indexing_complete.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let duration_secs = spawned_at.elapsed().as_secs();
+                    tracing::warn!(
+                        language = %language_id,
+                        duration_sec = duration_secs,
+                        "LSP: WorkDoneProgressEnd arrived {0}s after timeout fallback already fired — consider increasing timeout",
+                        duration_secs
+                    );
+                    continue;
                 }
                 apply_progress_action(
                     action,
@@ -171,6 +173,7 @@ pub async fn progress_watcher_task(
     }
 }
 
+/// Background task handling dynamic capability registrations/unregistrations from LSP.
 pub async fn registration_watcher_task(
     language_id: String,
     // M-6: Accept pre-created receiver instead of creating via dispatcher.
@@ -448,6 +451,7 @@ async fn reap_idle_processes(
     }
 }
 
+/// Periodic background task checking for idle/dead LSP processes and shutting down.
 pub async fn idle_timeout_task(
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
@@ -470,13 +474,18 @@ pub async fn idle_timeout_task(
     }
 }
 
+/// Parsed progress action from an LSP progress notification.
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum ProgressAction {
+    /// Work done progress ended.
     End { duration_secs: Option<u64> },
+    /// Work done progress report with percentage.
     Report { percentage: u8 },
+    /// Non-progress message.
     None,
 }
 
+/// Extract a `ProgressAction` from a JSON-RPC progress notification.
 pub fn extract_progress_action(msg: &serde_json::Value) -> ProgressAction {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -504,6 +513,7 @@ pub fn extract_progress_action(msg: &serde_json::Value) -> ProgressAction {
     }
 }
 
+/// Apply a `ProgressAction` to atomic and mutex indexing status fields.
 pub fn apply_progress_action(
     action: ProgressAction,
     indexing_complete: &std::sync::atomic::AtomicBool,
@@ -542,13 +552,18 @@ pub fn apply_progress_action(
     }
 }
 
+/// Action required after parsing dynamic capability registration message.
 #[derive(Debug, PartialEq)]
 pub struct RegistrationAction {
+    /// List of (method, id, options) tuples to register.
     pub registrations: Vec<(String, String, serde_json::Value)>,
+    /// List of registration IDs to unregister.
     pub unregistrations: Vec<String>,
+    /// Optional JSON-RPC request ID needing a success response.
     pub response_id: Option<serde_json::Value>,
 }
 
+/// Extract a `RegistrationAction` from a JSON-RPC capability registration notification.
 pub fn extract_registration_action(msg: &serde_json::Value) -> RegistrationAction {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
@@ -576,7 +591,7 @@ pub fn extract_registration_action(msg: &serde_json::Value) -> RegistrationActio
                     let opts = reg
                         .get("registerOptions")
                         .cloned()
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
+                        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::default()));
                     registrations.push((reg_method, reg_id, opts));
                 }
             }
@@ -607,6 +622,7 @@ pub fn extract_registration_action(msg: &serde_json::Value) -> RegistrationActio
     }
 }
 
+/// Build a JSON-RPC success response for a client/registerCapability request.
 pub fn build_registration_response(id: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",

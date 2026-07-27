@@ -398,13 +398,14 @@ pub(crate) fn detect_venv(workspace_root: &std::path::Path) -> Option<std::path:
 #[must_use]
 pub(crate) fn detect_python_init_options(workspace_root: &std::path::Path) -> serde_json::Value {
     use serde_json::json;
-    detect_venv(workspace_root).map_or(serde_json::Value::Null, |py_path| {
-        json!({
+    match detect_venv(workspace_root) {
+        Some(py_path) => json!({
             "python": {
                 "pythonPath": py_path.to_string_lossy().as_ref()
             }
-        })
-    })
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// Helper to detect JDK home directory based on env vars and project files (.sdkmanrc, .java-version).

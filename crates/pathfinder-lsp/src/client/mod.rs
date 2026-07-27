@@ -20,7 +20,9 @@ mod lawyer_impl;
 mod lifecycle;
 pub(crate) mod process;
 mod protocol;
+/// Response parsers for LSP server output.
 pub mod response_parsers;
+/// Transport abstraction for LSP JSON-RPC communication.
 pub mod transport;
 
 pub use capabilities::{DetectedCapabilities, DiagnosticsStrategy};

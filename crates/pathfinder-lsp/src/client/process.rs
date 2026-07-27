@@ -455,7 +455,7 @@ pub(crate) fn resolve_jdtls_data_dir(
     let lock_path = base_dir.join(".pathfinder-lock");
     match std::fs::File::create(&lock_path) {
         Ok(lock_file) => {
-            if let Ok(()) = lock_file.try_lock() {
+            if lock_file.try_lock().is_ok() {
                 tracing::info!(
                     data_dir = %base_dir.display(),
                     "LSP: acquired jdtls data directory lock (primary instance)"
@@ -733,7 +733,7 @@ fn ensure_pathfinder_in_gitignore(project_root: &Path) {
         }
     };
 
-    let mut existing = String::new();
+    let mut existing = String::default();
     if let Err(e) = file.read_to_string(&mut existing) {
         tracing::warn!(
             path = %gitignore_path.display(),
@@ -751,7 +751,7 @@ fn ensure_pathfinder_in_gitignore(project_root: &Path) {
         }
     }
 
-    let mut to_write = String::new();
+    let mut to_write = String::default();
     if existing.is_empty() {
         to_write.push_str("# Pathfinder LSP cache isolation\n.pathfinder/\n");
     } else {

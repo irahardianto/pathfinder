@@ -63,7 +63,7 @@ fn extract_identifier_prefix(token: &str) -> Option<&str> {
 
 fn truncate_preview(content: &str, max_chars: usize) -> String {
     if content.is_empty() {
-        return String::new();
+        return String::default();
     }
 
     if content.len() <= max_chars {
@@ -744,60 +744,25 @@ fn extract_name_from_line(line: &str) -> String {
 /// (e.g. Java methods are extracted as `SymbolKind::Function`). An agent asking
 /// for `kind="method"` should still find Java methods.
 fn kind_matches_filter(kind: &str, filter: &str) -> bool {
-    // Use eq_ignore_ascii_case to avoid to_lowercase() allocations.
-    // All kind/filter strings are ASCII-only ("function", "struct", etc.).
-    if kind.eq_ignore_ascii_case(filter) {
+    let k = kind.to_ascii_lowercase();
+    let f = filter.to_ascii_lowercase();
+    if k == f {
         return true;
     }
-
-    // Normalize filter once for matching. All arms are ASCII lowercase literals.
-    if filter.eq_ignore_ascii_case("function")
-        || filter.eq_ignore_ascii_case("method")
-        || filter.eq_ignore_ascii_case("fn")
-    {
-        // "function" and "method" are symmetric — both accept function-like kinds
-        kind.eq_ignore_ascii_case("function")
-            || kind.eq_ignore_ascii_case("method")
-            || kind.eq_ignore_ascii_case("fn")
-    } else if filter.eq_ignore_ascii_case("class") {
-        kind.eq_ignore_ascii_case("class")
-            || kind.eq_ignore_ascii_case("struct")
-            || kind.eq_ignore_ascii_case("interface")
-    } else if filter.eq_ignore_ascii_case("struct") {
-        kind.eq_ignore_ascii_case("struct")
-    } else if filter.eq_ignore_ascii_case("interface") || filter.eq_ignore_ascii_case("trait") {
-        kind.eq_ignore_ascii_case("interface") || kind.eq_ignore_ascii_case("trait")
-    } else if filter.eq_ignore_ascii_case("enum") {
-        kind.eq_ignore_ascii_case("enum")
-    } else if filter.eq_ignore_ascii_case("type") {
-        kind.eq_ignore_ascii_case("class")
-            || kind.eq_ignore_ascii_case("struct")
-            || kind.eq_ignore_ascii_case("interface")
-            || kind.eq_ignore_ascii_case("trait")
-            || kind.eq_ignore_ascii_case("enum")
-    } else if filter.eq_ignore_ascii_case("constant")
-        || filter.eq_ignore_ascii_case("const")
-        || filter.eq_ignore_ascii_case("static")
-        || filter.eq_ignore_ascii_case("let")
-    {
-        // Canonical kind from tree-sitter is always "constant".
-        // Aliases on the filter side (const/static/let) must also resolve to
-        // the constant category so agents aren't surprised by 0 results.
-        kind.eq_ignore_ascii_case("constant")
-            || kind.eq_ignore_ascii_case("const")
-            || kind.eq_ignore_ascii_case("static")
-            || kind.eq_ignore_ascii_case("let")
-    } else if filter.eq_ignore_ascii_case("module")
-        || filter.eq_ignore_ascii_case("mod")
-        || filter.eq_ignore_ascii_case("namespace")
-    {
-        // Canonical kind from tree-sitter is always "module".
-        // Aliases on the filter side must also resolve correctly.
-        kind.eq_ignore_ascii_case("module")
-            || kind.eq_ignore_ascii_case("mod")
-            || kind.eq_ignore_ascii_case("namespace")
-    } else {
-        false
+    match f.as_str() {
+        "function" | "method" | "fn" => matches!(k.as_str(), "function" | "method" | "fn"),
+        "class" => matches!(k.as_str(), "class" | "struct" | "interface"),
+        "struct" => k == "struct",
+        "interface" | "trait" => matches!(k.as_str(), "interface" | "trait"),
+        "enum" => k == "enum",
+        "type" => matches!(k.as_str(), "class" | "struct" | "interface" | "trait" | "enum"),
+        "constant" | "const" | "static" | "let" => {
+            matches!(k.as_str(), "constant" | "const" | "static" | "let")
+        }
+        "module" | "mod" | "namespace" => {
+            matches!(k.as_str(), "module" | "mod" | "namespace")
+        }
+        _ => false,
     }
 }
 

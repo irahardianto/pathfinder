@@ -239,6 +239,7 @@ impl VersionHash {
         Self::compute_from_raw(hash_bytes)
     }
 
+    /// Compute `ContentHash` from 32 raw SHA-256 hash bytes.
     #[must_use]
     pub fn compute_from_raw(hash_bytes: [u8; 32]) -> Self {
         // "sha256:" (7 bytes) + 64 hex chars = 71 bytes total
@@ -580,11 +581,14 @@ impl fmt::Display for DegradedReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FallbackTool {
+    /// Fall back to the search tool.
     Search,
+    /// Fall back to the read tool.
     Read,
 }
 
 impl FallbackTool {
+    /// Return static string representation of the fallback tool.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -604,13 +608,18 @@ impl fmt::Display for FallbackTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustLevel {
+    /// Results are unreliable due to error or missing data.
     Unreliable,
+    /// Results are produced by regex/heuristic grep search.
     Heuristic,
+    /// Results are partially complete.
     Partial,
+    /// Results carry no trust.
     None,
 }
 
 impl TrustLevel {
+    /// Return static string representation of the trust level.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {

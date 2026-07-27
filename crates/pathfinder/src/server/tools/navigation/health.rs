@@ -34,16 +34,13 @@ impl PathfinderServer {
 
         // IW-4: Handle action="restart" before the normal health query flow.
         if params.action.as_deref() == Some("restart") {
-            let lang = match &params.language {
-                Some(l) => l.clone(),
-                None => {
-                    return Err(crate::server::helpers::invalid_params_error(
-                        "health action='restart' requires 'language' to be set",
-                    ));
-                }
+            let Some(ref lang) = params.language else {
+                return Err(crate::server::helpers::invalid_params_error(
+                    "health action='restart' requires 'language' to be set",
+                ));
             };
             tracing::info!(language = %lang, "lsp_health: restart requested by agent");
-            match self.lawyer.force_respawn(&lang).await {
+            match self.lawyer.force_respawn(lang).await {
                 Ok(()) => {
                     tracing::info!(language = %lang, "lsp_health: restart successful");
                 }

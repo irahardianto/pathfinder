@@ -666,75 +666,44 @@ impl PathfinderServer {
                 break;
             }
 
-            let trimmed = line.trim();
-
-            match ext {
-                "java" | "kt" | "scala" => {
-                    if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
-                        imports.push(line.to_owned());
-                    }
-                }
-                "cs" => {
-                    if trimmed.starts_with("using ") || trimmed.starts_with("namespace ") {
-                        imports.push(line.to_owned());
-                    }
-                }
-                "py" => {
-                    if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
-                        imports.push(line.to_owned());
-                    }
-                }
-                "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
-                    // Match import statements and require() calls
-                    if trimmed.starts_with("import ")
-                        || trimmed.starts_with("import{")
-                        || trimmed.contains("require(")
-                    {
-                        imports.push(line.to_owned());
-                    }
-                }
-                "rs" => {
-                    // `use foo::bar;` — leading `use ` distinguishes from `use` keyword
-                    // in other contexts (e.g., `use std::io::{Read, Write};`).
-                    // Also capture `extern crate` for older Rust code.
-                    if trimmed.starts_with("use ") || trimmed.starts_with("extern crate ") {
-                        imports.push(line.to_owned());
-                    }
-                }
-                "go" => {
-                    // Go has single-line `import "pkg"` and multi-line `import (\n...)` blocks.
-                    if trimmed == "import (" {
-                        in_go_import_block = true;
-                        imports.push(line.to_owned());
-                    } else if in_go_import_block {
-                        imports.push(line.to_owned());
-                        if trimmed == ")" {
-                            in_go_import_block = false;
-                        }
-                    } else if trimmed.starts_with("import \"") {
-                        imports.push(line.to_owned());
-                    }
-                }
-                "swift" => {
-                    if trimmed.starts_with("import ") {
-                        imports.push(line.to_owned());
-                    }
-                }
-                "rb" => {
-                    if trimmed.starts_with("require ") || trimmed.starts_with("require_relative ") {
-                        imports.push(line.to_owned());
-                    }
-                }
-                _ => {
-                    // Unknown extension — try the most common pattern
-                    if trimmed.starts_with("import ") {
-                        imports.push(line.to_owned());
-                    }
-                }
+            if is_import_line(ext, line, &mut in_go_import_block) {
+                imports.push(line.to_owned());
             }
         }
 
         imports
+    }
+}
+
+fn is_import_line(ext: &str, line: &str, in_go_import_block: &mut bool) -> bool {
+    let trimmed = line.trim();
+    match ext {
+        "java" | "kt" | "scala" => {
+            trimmed.starts_with("import ") || trimmed.starts_with("package ")
+        }
+        "cs" => trimmed.starts_with("using ") || trimmed.starts_with("namespace "),
+        "py" => trimmed.starts_with("import ") || trimmed.starts_with("from "),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
+            trimmed.starts_with("import ")
+                || trimmed.starts_with("import{")
+                || trimmed.contains("require(")
+        }
+        "rs" => trimmed.starts_with("use ") || trimmed.starts_with("extern crate "),
+        "go" => {
+            if trimmed == "import (" {
+                *in_go_import_block = true;
+                true
+            } else if *in_go_import_block {
+                if trimmed == ")" {
+                    *in_go_import_block = false;
+                }
+                true
+            } else {
+                trimmed.starts_with("import \"")
+            }
+        }
+        "rb" => trimmed.starts_with("require ") || trimmed.starts_with("require_relative "),
+        _ => trimmed.starts_with("import "),
     }
 }
 

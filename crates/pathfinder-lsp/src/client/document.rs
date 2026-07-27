@@ -10,6 +10,7 @@ use crate::LspError;
 use serde_json::json;
 use url::Url;
 
+/// RAII guard that manages LSP textDocument/didOpen and textDocument/didClose lifecycle.
 pub struct DocumentGuard {
     pub(crate) client: LspClient,
     pub(crate) workspace_root: std::path::PathBuf,

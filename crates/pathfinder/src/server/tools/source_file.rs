@@ -178,7 +178,7 @@ impl PathfinderServer {
                 let tree_sitter_ms = ts_start.elapsed().as_millis();
                 let duration_ms = start.elapsed().as_millis();
 
-                if let pathfinder_treesitter::error::SurgeonError::UnsupportedLanguage(_) = e {
+                if matches!(e, pathfinder_treesitter::error::SurgeonError::UnsupportedLanguage(_)) {
                     self.handle_unsupported_language_fallback(
                         file_path,
                         &params,

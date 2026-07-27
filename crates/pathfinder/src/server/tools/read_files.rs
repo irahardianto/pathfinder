@@ -376,7 +376,7 @@ impl PathfinderServer {
         let content = truncate_content(&content, params.max_lines_per_file);
         let language = language_from_path(Path::new(file_path));
         let language = if language == "text" {
-            String::new()
+            String::default()
         } else {
             language.to_owned()
         };

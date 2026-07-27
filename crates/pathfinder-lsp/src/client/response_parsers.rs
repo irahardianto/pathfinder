@@ -26,7 +26,7 @@ fn resolve_relative_path(uri_str: &str, workspace_root: &Path, fallback: &str) -
 async fn read_preview_line(abs_path: &Path, line_index: usize) -> String {
     use tokio::io::AsyncReadExt;
     let Ok(file) = tokio::fs::File::open(abs_path).await else {
-        return String::new();
+        return String::default();
     };
     let mut reader = tokio::io::BufReader::new(file);
     let mut line = Vec::new();
@@ -60,7 +60,7 @@ async fn read_preview_line(abs_path: &Path, line_index: usize) -> String {
                 if idx == line_index && !line.is_empty() {
                     break;
                 }
-                return String::new();
+                return String::default();
             }
         }
     }
@@ -146,7 +146,7 @@ pub async fn parse_definition_response(
     let preview = if let Some(ref p) = abs_path {
         read_preview_line(p, usize::try_from(start_line).unwrap_or(0)).await
     } else {
-        String::new()
+        String::default()
     };
 
     Ok(Some(DefinitionLocation {
@@ -175,7 +175,7 @@ pub async fn parse_single_definition_location(
     let preview = if let Some(ref p) = abs_path {
         read_preview_line(p, usize::try_from(start_line).unwrap_or(0)).await
     } else {
-        String::new()
+        String::default()
     };
 
     Some(DefinitionLocation {
