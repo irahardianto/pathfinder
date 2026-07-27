@@ -755,7 +755,10 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
         "struct" => k == "struct",
         "interface" | "trait" => matches!(k.as_str(), "interface" | "trait"),
         "enum" => k == "enum",
-        "type" => matches!(k.as_str(), "class" | "struct" | "interface" | "trait" | "enum"),
+        "type" => matches!(
+            k.as_str(),
+            "class" | "struct" | "interface" | "trait" | "enum"
+        ),
         "constant" | "const" | "static" | "let" => {
             matches!(k.as_str(), "constant" | "const" | "static" | "let")
         }
