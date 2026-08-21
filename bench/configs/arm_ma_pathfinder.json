@@ -1,0 +1,71 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [],
+  "agent": {
+    "nav": {
+      "description": "Benchmark arm ma_pathfinder: orchestrator that delegates via subagents.",
+      "mode": "primary",
+      "temperature": 0.0,
+      "steps": 40,
+      "prompt": "{file:../prompts/agent_multiagent.txt}",
+      "tools": {
+        "bash": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "apply_patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "read": false,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "pathfinder_*": true,
+        "codegraph_*": false,
+        "task": true
+      }
+    },
+    "explore": {
+      "description": "Read-only codebase explorer. Answers one narrow question and reports back concisely.",
+      "mode": "subagent",
+      "temperature": 0.0,
+      "steps": 20,
+      "prompt": "{file:../prompts/agent_subagent.txt}",
+      "tools": {
+        "bash": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "apply_patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "read": false,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "pathfinder_*": true,
+        "codegraph_*": false,
+        "task": false
+      }
+    }
+  },
+  "mcp": {
+    "pathfinder": {
+      "type": "local",
+      "command": [
+        "bash",
+        "-c",
+        "exec \"${PF_BENCH_MCP_BIN:-pathfinder-mcp}\" \"${PF_BENCH_REPO:-$PWD}\" 2>>${PF_BENCH_LOGDIR:-/tmp}/mcp-stderr.log"
+      ],
+      "enabled": true
+    }
+  }
+}

@@ -1,0 +1,6 @@
+# Raw per-run event streams are large and regenerable from the matrix.
+*/raw/
+_smoke*/
+__pycache__/
+.ruff_cache/
+*.bak

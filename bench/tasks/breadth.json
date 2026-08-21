@@ -1,0 +1,162 @@
+{
+  "suite": "breadth",
+  "agent": "nav",
+  "_rationale": "Four suites so far measured DEPTH (one long chain) and SHALLOW (one fact). Neither is the regime a real security audit or codebase survey operates in, which is BREADTH: many independent code paths across a whole repository, where the answer is a set rather than a trail. Field reports of very large speedups from graph indexes come from that regime, and nothing here had tested it. These tasks also move off the 159-file benchmark repo onto tokio (793 Rust files) and juice-shop (642 TS/JS files), so repository scale and a non-Rust language stop being confounds. Each task carries a precision trap: a near-miss that a text search surfaces and a correct answer must exclude, so an arm cannot win by dumping every match.",
+  "repos": {
+    "tokio": "large Rust workspace, 793 source files, 13,606 indexed nodes",
+    "juiceshop": "fullstack TypeScript/JavaScript, 642 source files, 7,980 indexed nodes"
+  },
+  "tasks": [
+    {
+      "id": "B1_tokio_api_surface_survey",
+      "repo": "tokio",
+      "capability": "breadth \u2014 exhaustive API surface enumeration",
+      "prompt": "I am writing documentation for tokio's synchronisation primitives and need the complete non-blocking API surface.\n\nEnumerate every DISTINCT method name matching `try_*` that is declared as a `pub fn` anywhere under `tokio/src/sync/`.\n\nRules:\n- Distinct NAMES only. If the same name is declared on several types, list it once.\n- `pub fn` only. Ignore private helpers, and ignore anything declared inside a test module or a `tests/` directory.\n- Do not include names that merely appear in doc comments, macros, or call sites \u2014 only actual declarations.\n\nOutput format \u2014 inside <answer></answer>, one method name per line, alphabetical, no other text.",
+      "grade": {
+        "type": "set_of_lines",
+        "normalize": "lower_nospace",
+        "expected": [
+          "try_acquire",
+          "try_acquire_many",
+          "try_acquire_many_owned",
+          "try_acquire_owned",
+          "try_downgrade_map",
+          "try_lock",
+          "try_lock_owned",
+          "try_map",
+          "try_read",
+          "try_read_owned",
+          "try_recv",
+          "try_reserve",
+          "try_reserve_many",
+          "try_reserve_owned",
+          "try_send",
+          "try_write",
+          "try_write_owned"
+        ]
+      }
+    },
+    {
+      "id": "B2_tokio_spawn_chain",
+      "repo": "tokio",
+      "capability": "depth at scale \u2014 public API to scheduler",
+      "prompt": "In this tokio checkout, trace what happens when application code calls `tokio::spawn(future)`.\n\nFollow the call path from the public `spawn` function until control reaches the runtime handle that actually hands the task to a scheduler. I need the real chain, not a summary.\n\nAnswer:\n1. The relative file path and name of the public entry function.\n2. Each internal function it delegates to, in call order, with file paths.\n3. The context accessor used to reach the current runtime handle.\n4. The method on the runtime handle that receives the task.\n\nOutput format \u2014 inside <answer></answer>, one hop per line in call order:\n<relative/file/path> :: <function_name>\nThen a final line:\ncontext_accessor: <function or path used to reach the current handle>\nNothing else inside the tags.",
+      "grade": {
+        "type": "symbol_chain",
+        "required": [
+          "spawn",
+          "spawn_inner"
+        ],
+        "required_any": [
+          [
+            "with_current",
+            "context::with_current"
+          ],
+          [
+            "handle.spawn",
+            "Handle::spawn",
+            "handle::spawn",
+            "runtime/handle.rs"
+          ]
+        ],
+        "required_patterns": [
+          "(?im)^\\s*context_accessor:\\s*.*with_current",
+          "(?im)^[^\\n]*task/spawn\\.rs\\s*::\\s*spawn\\s*$"
+        ],
+        "required_files": [
+          "tokio/src/task/spawn.rs"
+        ]
+      }
+    },
+    {
+      "id": "B3_juiceshop_sql_injection_audit",
+      "repo": "juiceshop",
+      "capability": "breadth \u2014 security audit across a route layer",
+      "prompt": "Security audit of this Express application.\n\nFind every place in the `routes/` directory where a raw SQL query is executed with a string that INTERPOLATES request-controlled data directly into the SQL text. These are SQL-injection sinks.\n\nBe precise. A raw query built from a fixed, constant string is NOT a finding, even though it is also a raw query \u2014 do not report it.\n\nFor each genuine finding give the relative file path, the line number, and the request-derived expression that is interpolated.\n\nOutput format \u2014 inside <answer></answer>, one finding per line, sorted by path:\n<relative/file/path>:<line> | <interpolated expression>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "login_sink",
+            "must_match": "(?im)^[^\\n]*routes/login\\.ts:3[2-6]\\s*\\|[^\\n]*req\\.body\\.email"
+          },
+          {
+            "key": "search_sink",
+            "must_match": "(?im)^[^\\n]*routes/search\\.ts:2[1-5]\\s*\\|[^\\n]*criteria"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^[^\\n]*routes/search\\.ts:4[5-9]\\s*\\|",
+          "(?im)^[^\\n]*sqlite_master"
+        ]
+      }
+    },
+    {
+      "id": "B4_juiceshop_auth_flow",
+      "repo": "juiceshop",
+      "capability": "fullstack depth \u2014 route to token issuance",
+      "prompt": "Trace the complete login flow in this Express application, from HTTP route registration to the moment a JWT is produced.\n\nAnswer:\n1. The file and line where the login route is registered, and the HTTP method plus path.\n2. The module and exported function that handles it.\n3. The line where the user lookup query runs.\n4. The security helper called to mint the token.\n5. The file where that helper is defined and the JWT library call plus signing algorithm it uses.\n\nOutput format \u2014 inside <answer></answer>:\nroute: <relative/path>:<line> | <METHOD> <path>\nhandler: <relative/path> :: <exported_function>\nquery_at: <relative/path>:<line>\ntoken_helper: <function_name>\nhelper_defined_in: <relative/path>:<line>\njwt_call: <library.method>\nalgorithm: <ALG>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "route",
+            "must_match": "(?im)^\\s*route:\\s*server\\.ts:6[01][0-9]\\s*\\|\\s*POST\\s+/rest/user/login\\s*$"
+          },
+          {
+            "key": "handler",
+            "must_match": "(?im)^\\s*handler:\\s*\\S*routes/login\\.ts\\s*::\\s*login\\s*$"
+          },
+          {
+            "key": "query",
+            "must_match": "(?im)^\\s*query_at:\\s*\\S*routes/login\\.ts:3[2-6]\\s*$"
+          },
+          {
+            "key": "helper",
+            "must_match": "(?im)^\\s*token_helper:\\s*(security\\.)?authorize\\s*$"
+          },
+          {
+            "key": "helper_file",
+            "must_match": "(?im)^\\s*helper_defined_in:\\s*\\S*insecurity\\.ts:5[2-6]\\s*$"
+          },
+          {
+            "key": "jwt_call",
+            "must_match": "(?im)^\\s*jwt_call:\\s*jwt\\.sign\\s*$"
+          },
+          {
+            "key": "algorithm",
+            "must_match": "(?im)^\\s*algorithm:\\s*RS256\\s*$"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*algorithm:\\s*(HS256|none|ES256)\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "B5_juiceshop_authz_gap_survey",
+      "repo": "juiceshop",
+      "capability": "breadth \u2014 whole-layer survey with a two-predicate join",
+      "_note": "This is the closest analogue in the suite to a real security audit: the answer is not one chain and not one grep, it is a predicate evaluated independently across 61 files and then joined. Ground truth verified mechanically: 61 route modules, 29 touch the database, 9 of those never reference the security helper.",
+      "prompt": "Security review of this Express application's route layer.\n\nEvery file directly under `routes/` is one route module. I need to find the modules that talk to the database but never reference the application's security/authorization helper \u2014 those are the candidates for a missing authorization check.\n\nApply BOTH predicates to EVERY route module:\n- Predicate A: the module touches the database. It references a Sequelize model (for example `UserModel`, `ProductModel`, `BasketModel`, ... ), or `models.`, or calls `sequelize.query`.\n- Predicate B: the module references the security helper at all \u2014 an import of the `insecurity` library, or any use of a `security.` member.\n\nReport only the modules where A is true and B is FALSE.\n\nAlso report the two counts so I can sanity-check your coverage.\n\nOutput format \u2014 inside <answer></answer>:\ntotal_route_modules: <N>\ntouch_database: <N>\nfindings:\n<relative/file/path>\n... (one per line, alphabetical)\nNothing else inside the tags.",
+      "grade": {
+        "type": "set_of_lines",
+        "normalize": "lower_nospace",
+        "expected": [
+          "routes/address.ts",
+          "routes/continueCode.ts",
+          "routes/memory.ts",
+          "routes/metrics.ts",
+          "routes/payment.ts",
+          "routes/recycles.ts",
+          "routes/search.ts",
+          "routes/securityQuestion.ts",
+          "routes/wallet.ts"
+        ],
+        "ignore_lines": [
+          "^\\s*(total_route_modules|touch_database|findings)\\s*:?\\s*\\d*\\s*$"
+        ]
+      }
+    }
+  ]
+}

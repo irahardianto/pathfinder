@@ -1,0 +1,130 @@
+{
+  "suite": "resolve",
+  "agent": "nav",
+  "_rationale": "Every task in the nav and deep suites tied at a correctness ceiling on frontier models, so neither can distinguish a semantically-resolved answer from a textually-plausible one. This suite is built to break that tie. Each task has a grep-shaped wrong answer that is easy to reach and a correct answer that requires resolving through Rust's type system: trait implementations behind qualified paths, same-named methods on unrelated traits, a method that exists only after macro expansion, and a runtime wiring decision hidden behind dependency injection. Pathfinder resolves through rust-analyzer and should be right. CodeGraph documents its cross-file resolution as 'best-effort name matching' and grep has no type system at all, so both should be plausibly wrong. Scoring is precision-weighted: naming test doubles as production code, or inventing a source location for a macro-generated method, costs more than omitting them.",
+  "tasks": [
+    {
+      "id": "R1_trait_impls_production_vs_test",
+      "capability": "trait implementation resolution across crates",
+      "prompt": "I am about to change the `Lawyer` trait in this Rust workspace and need to know every type I will have to update.\n\nFind every type that implements `Lawyer`. Watch out: at least one implementation writes the trait through a fully-qualified path rather than the bare name, and some implementations are test doubles rather than production code.\n\nFor each implementation give the implementing type, its relative file path, and classify it as `production` (compiled into the shipped binary) or `test` (only exists for tests — test modules, `_test.rs` files, or types whose only purpose is to be a test double).\n\nOutput format — inside <answer></answer>, one implementation per line, sorted alphabetically by type name:\n<TypeName> | <relative/file/path> | <production|test>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "LspClient",
+            "must_match": "(?im)^\\s*LspClient\\s*\\|[^|]*lawyer_impl\\.rs\\s*\\|\\s*production\\s*$"
+          },
+          {
+            "key": "NoOpLawyer",
+            "must_match": "(?im)^\\s*NoOpLawyer\\s*\\|[^|]*no_op\\.rs\\s*\\|\\s*production\\s*$"
+          },
+          {
+            "key": "MockLawyer",
+            "must_match": "(?im)^\\s*MockLawyer\\s*\\|[^|]*mock\\.rs\\s*\\|\\s*\\w+\\s*$"
+          },
+          {
+            "key": "SlowMockLawyer",
+            "must_match": "(?im)^\\s*SlowMockLawyer\\s*\\|[^|]*health_test\\.rs\\s*\\|\\s*test\\s*$"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*(LspClientBuilder|LawyerImpl|DefaultLawyer|RealLawyer|StubLawyer)\\s*\\|"
+        ]
+      }
+    },
+    {
+      "id": "R2_macro_generated_method",
+      "capability": "macro-expansion awareness",
+      "prompt": "In `crates/pathfinder/src/server.rs` the constructor calls `Self::tool_router()`.\n\nI need to know where that method comes from before I can change how tools are registered.\n\nAnswer precisely:\n1. Is there a hand-written `fn tool_router` anywhere in this workspace's source? Answer exactly `yes` or `no`.\n2. If no, name the attribute macro that generates it, and give the relative file path and line number of the attribute application that produces it for `PathfinderServer`.\n3. Name the crate that provides that macro.\n\nDo not invent a source location for a definition that is not written in the source.\n\nOutput format — inside <answer></answer>, exactly four lines:\nhandwritten_definition: <yes|no>\ngenerated_by: <#[macro_name]>\nattribute_at: <relative/path>:<line>\nmacro_crate: <crate_name>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "no_handwritten_def",
+            "must_match": "(?im)^\\s*handwritten_definition:\\s*no\\s*$"
+          },
+          {
+            "key": "macro_named",
+            "must_match": "(?im)^\\s*generated_by:\\s*#?\\[?\\s*tool_router\\s*\\]?\\s*$"
+          },
+          {
+            "key": "attribute_line",
+            "must_match": "(?im)^\\s*attribute_at:\\s*\\S*server\\.rs:19[0-4]\\s*$"
+          },
+          {
+            "key": "macro_crate",
+            "must_match": "(?im)^\\s*macro_crate:\\s*rmcp\\s*$"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*handwritten_definition:\\s*yes\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "R3_runtime_wiring",
+      "capability": "dependency-injection resolution",
+      "prompt": "This server injects three engine traits — `Scout`, `Surgeon`, `Lawyer` — and each has more than one implementation in the workspace.\n\nI need to know what is actually wired in when the shipped binary starts, not what is available.\n\nFor each of the three traits, name the concrete type used by the production constructor path (the one `main` reaches, not the test-only constructors), and its relative file path.\n\nThen answer one more thing: the `Lawyer` wiring has a fallback. Name the concrete type used when the primary one fails to initialise, and the one-line reason given in the log message at that fallback.\n\nOutput format — inside <answer></answer>:\nScout: <TypeName> | <relative/file/path>\nSurgeon: <TypeName> | <relative/file/path>\nLawyer: <TypeName> | <relative/file/path>\nLawyer_fallback: <TypeName>\nfallback_trigger: <short description>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "scout",
+            "must_match": "(?im)^\\s*Scout:\\s*RipgrepScout\\s*\\|[^|]*ripgrep\\.rs\\s*$"
+          },
+          {
+            "key": "surgeon",
+            "must_match": "(?im)^\\s*Surgeon:\\s*TreeSitterSurgeon\\s*\\|[^|]*treesitter_surgeon\\.rs\\s*$"
+          },
+          {
+            "key": "lawyer",
+            "must_match": "(?im)^\\s*Lawyer:\\s*LspClient\\s*\\|[^|]*lawyer_impl\\.rs\\s*$"
+          },
+          {
+            "key": "fallback_type",
+            "must_match": "(?im)^\\s*Lawyer_fallback:\\s*NoOpLawyer\\s*$"
+          },
+          {
+            "key": "fallback_reason",
+            "must_match": "(?is)fallback_trigger:[^\\n]*(detection fail|zero-config|zero config|LspClient::new|initialis|initializ|LSP.*fail)"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*Scout:\\s*MockScout\\b",
+          "(?im)^\\s*Surgeon:\\s*(MockSurgeon|DummySurgeon)\\b",
+          "(?im)^\\s*Lawyer:\\s*(MockLawyer|NoOpLawyer|SlowMockLawyer)\\b"
+        ]
+      }
+    },
+    {
+      "id": "R4_same_name_different_traits",
+      "capability": "method-name disambiguation across traits",
+      "prompt": "The identifier `references` is overloaded in this workspace — it is defined on more than one type.\n\nI need to disambiguate before I rename anything.\n\nFind every `async fn references` definition in NON-TEST source (exclude `_test.rs` files and `#[cfg(test)]` modules). For each one, report:\n- the relative file path,\n- the OWNER of that definition, and\n- whether it is a trait declaration or a trait implementation.\n\nDefinition of OWNER, read this carefully:\n- If the definition is inside `trait X { ... }`, the owner is the trait name `X`.\n- If the definition is inside `impl X for Y { ... }`, the owner is the CONCRETE TYPE `Y` — the type on the right of `for`. It is NOT the trait name `X`. Writing the trait name here is wrong.\n\nOutput format — inside <answer></answer>, one per line, sorted by file path:\n<relative/file/path> | <OwnerName> | <declaration|implementation>\nNothing else inside the tags.",
+        "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "trait_decl",
+            "must_match": "(?im)^[^|\\n]*lawyer\\.rs\\s*\\|\\s*Lawyer\\s*\\|\\s*declaration\\s*$"
+          },
+          {
+            "key": "lsp_impl",
+            "must_match": "(?im)^[^|\\n]*lawyer_impl\\.rs\\s*\\|\\s*LspClient\\s*\\|\\s*implementation\\s*$"
+          },
+          {
+            "key": "mock_impl",
+            "must_match": "(?im)^[^|\\n]*mock\\.rs\\s*\\|\\s*MockLawyer\\s*\\|\\s*implementation\\s*$"
+          },
+          {
+            "key": "noop_impl",
+            "must_match": "(?im)^[^|\\n]*no_op\\.rs\\s*\\|\\s*NoOpLawyer\\s*\\|\\s*implementation\\s*$"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^[^|\\n]*_test\\.rs\\s*\\|",
+          "(?im)^[^|\\n]*health_test\\.rs\\s*\\|"
+        ]
+      }
+    }
+  ]
+}

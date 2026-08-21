@@ -1,0 +1,141 @@
+{
+  "suite": "nav",
+  "agent": "nav",
+  "tasks": [
+    {
+      "id": "N1_blast_radius",
+      "capability": "callers / blast radius",
+      "prompt": "In this Rust workspace, the method `Sandbox::check` (defined in `crates/pathfinder-common/src/sandbox.rs`) is the sandbox gate that every file-touching tool must call.\n\nI need the complete blast radius of production call sites before I change its signature.\n\nFind EVERY place in NON-TEST, NON-BENCHMARK source that invokes `Sandbox::check`. Exclude any file whose name ends in `_test.rs`, anything under a `tests/` directory, and anything under a `benches/` directory.\n\nOutput format — inside <answer></answer>, one call site per line, as `<relative/file/path>:<line>` sorted alphabetically by path. Nothing else inside the tags.",
+      "grade": {
+        "type": "set_of_lines",
+        "normalize": "path_line",
+        "expected": [
+          "crates/pathfinder/src/server/tools/file_ops.rs:46",
+          "crates/pathfinder/src/server/tools/find_symbol.rs:348",
+          "crates/pathfinder/src/server/tools/navigation/deep_context.rs:428",
+          "crates/pathfinder/src/server/tools/navigation/definition.rs:53",
+          "crates/pathfinder/src/server/tools/navigation/impact.rs:554",
+          "crates/pathfinder/src/server/tools/navigation/overview.rs:47",
+          "crates/pathfinder/src/server/tools/navigation/references.rs:228",
+          "crates/pathfinder/src/server/tools/read_files.rs:402",
+          "crates/pathfinder/src/server/tools/repo_map.rs:201",
+          "crates/pathfinder/src/server/tools/semantic_path.rs:57",
+          "crates/pathfinder/src/server/tools/source_file.rs:152",
+          "crates/pathfinder/src/server/tools/symbols.rs:240"
+        ],
+        "line_tolerance": 2
+      }
+    },
+    {
+      "id": "N2_tool_registry",
+      "capability": "architecture inventory / explore",
+      "prompt": "This crate is an MCP server. The `#[tool_router]` impl block registers the server's public MCP tools.\n\nList every registered MCP tool and the private impl method each one delegates to.\n\nOutput format — inside <answer></answer>, one tool per line as `<tool_name> -> <delegate_method_name>`, in the order they are declared in the source. Nothing else inside the tags.",
+      "grade": {
+        "type": "set_of_lines",
+        "normalize": "lower_nospace",
+        "expected": [
+          "explore -> get_repo_map_impl",
+          "search -> search_impl",
+          "read -> read_impl",
+          "inspect -> inspect_impl",
+          "locate -> locate_impl",
+          "trace -> trace_impl",
+          "health -> health_impl"
+        ]
+      }
+    },
+    {
+      "id": "N3_error_localize",
+      "capability": "string -> code localization",
+      "prompt": "A user reports seeing this hint in a tool response:\n\n  \"File is outside workspace sandbox. Check .pathfinderignore rules.\"\n\nI need to know exactly what produces it.\n\nAnswer these three things:\n1. The relative file path and line number of the source line that contains that string literal.\n2. The name of the function/method that contains it.\n3. The exact name of the enum variant that this hint is returned for.\n\nOutput format — inside <answer></answer>, exactly three lines:\nfile: <relative/path>:<line>\nfunction: <name>\nvariant: <EnumName::VariantName>\nNothing else inside the tags.",
+      "grade": {
+        "type": "regex_all",
+        "patterns": [
+          "(?im)^\\s*file:\\s*crates/pathfinder-common/src/error\\.rs:12[3-7]\\s*$",
+          "(?im)^\\s*function:\\s*(PathfinderError::)?hint\\(?\\)?\\s*$",
+          "(?im)^\\s*variant:\\s*(PathfinderError::|Self::)?AccessDenied\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "N4_dispatch_chain",
+      "capability": "cross-file call-chain trace",
+      "prompt": "Trace the dispatch chain of the `trace` MCP tool.\n\nStart at the `#[tool(name = \"trace\")]` handler on the server and follow the delegation until you reach the three distinct scope handler methods it can dispatch to.\n\nAnswer these:\n1. The relative file path where `trace_impl` is defined.\n2. The three handler method names `trace_impl` dispatches to, and the `TraceScope` variant that selects each.\n\nOutput format — inside <answer></answer>, exactly four lines:\ndefined_in: <relative/path>\nCallers -> <method_name>\nReferences -> <method_name>\nOverview -> <method_name>\nNothing else inside the tags.",
+      "grade": {
+        "type": "regex_all",
+        "patterns": [
+          "(?im)^\\s*defined_in:\\s*crates/pathfinder/src/server/tools/navigation/mod\\.rs\\s*$",
+          "(?im)^\\s*Callers\\s*->\\s*find_callers_callees_impl\\s*$",
+          "(?im)^\\s*References\\s*->\\s*find_all_references_impl\\s*$",
+          "(?im)^\\s*Overview\\s*->\\s*symbol_overview_impl\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "N5_signature_extract",
+      "capability": "symbol lookup / signature extraction",
+      "prompt": "I need the exact public API of the `Sandbox` type in `crates/pathfinder-common/src/sandbox.rs`.\n\nList every `pub fn` associated with `Sandbox` (inherent impl only — ignore trait impls, ignore anything in test modules), with its full parameter list and return type.\n\nOutput format — inside <answer></answer>, one function per line as:\n<fn_name>(<param_name>: <param_type>, ...) -> <return_type>\nUse the types exactly as written in the source. Use `Self` where the source writes `Self`. Nothing else inside the tags.",
+      "grade": {
+        "type": "regex_all",
+        "patterns": [
+          "(?im)^\\s*(pub\\s+fn\\s+)?new\\s*\\(\\s*workspace_root\\s*:\\s*&Path\\s*,\\s*config\\s*:\\s*&SandboxConfig\\s*\\)\\s*->\\s*Self\\s*$",
+          "(?im)^\\s*(pub\\s+fn\\s+)?with_user_rules\\s*\\(\\s*workspace_root\\s*:\\s*&Path\\s*,\\s*config\\s*:\\s*&SandboxConfig\\s*,\\s*user_ignore\\s*:\\s*Option<Gitignore>\\s*,?\\s*\\)\\s*->\\s*Self\\s*$",
+          "(?im)^\\s*(pub\\s+fn\\s+)?check\\s*\\(\\s*&self\\s*,\\s*relative_path\\s*:\\s*&Path\\s*\\)\\s*->\\s*Result<\\(\\)\\s*,\\s*PathfinderError>\\s*$"
+        ],
+        "forbid_patterns": [
+          "(?im)^\\s*(pub\\s+fn\\s+)?(is_additional_denied|matches_tier)\\b"
+        ]
+      }
+    },
+    {
+      "id": "N6_line_to_symbol",
+      "capability": "location -> semantic path resolution",
+      "prompt": "A panic backtrace points at these two locations in this workspace:\n\n  crates/pathfinder-treesitter/src/repo_map.rs:275\n  crates/pathfinder/src/server/tools/navigation/mod.rs:917\n\nFor each location, tell me the name of the innermost function or method that encloses that line.\n\nOutput format — inside <answer></answer>, exactly two lines:\nrepo_map.rs:275 -> <function_name>\nmod.rs:917 -> <function_name>\nNothing else inside the tags.",
+      "grade": {
+        "type": "regex_all",
+        "patterns": [
+          "(?im)^\\s*repo_map\\.rs:275\\s*->\\s*render_symbols_recursive\\s*$",
+          "(?im)^\\s*mod\\.rs:917\\s*->\\s*trace_impl\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "N7_enum_exhaustive",
+      "capability": "enum inventory + exhaustive match audit",
+      "prompt": "I want to add a new variant to the `PathfinderError` enum in `crates/pathfinder-common/src/error.rs`.\n\nBefore I do, I need to know what will break at compile time.\n\nAnswer:\n1. How many variants `PathfinderError` currently has.\n2. Which methods in that file `match` on `self` over `PathfinderError` WITHOUT a catch-all `_ =>` arm (these are the ones that will fail to compile). Give the method names.\n\nOutput format — inside <answer></answer>:\nvariant_count: <N>\nexhaustive_matches: <comma-separated method names, alphabetical>\nNothing else inside the tags.",
+      "grade": {
+        "type": "regex_all",
+        "patterns": [
+          "(?im)^\\s*variant_count:\\s*13\\s*$",
+          "(?im)^\\s*exhaustive_matches:\\s*(PathfinderError::)?error_code(\\(\\))?\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "N8_reverse_callgraph",
+      "capability": "multi-hop reverse call graph",
+      "prompt": "In `crates/pathfinder-treesitter/src/repo_map.rs` there is a free function `symbol_prefix`.\n\nBuild its reverse call graph two levels deep, restricted to that same file and excluding any test module, test file, or benchmark.\n\n- level1 = functions that call `symbol_prefix` directly.\n- level2 = functions that call any level1 function, EXCLUDING self-recursion and excluding any function already named in level1.\n\nOutput format — inside <answer></answer>, exactly two lines:\nlevel1: <comma-separated function names, alphabetical>\nlevel2: <comma-separated function names, alphabetical>\nNothing else inside the tags.",
+      "grade": {
+        "type": "regex_all",
+        "patterns": [
+          "(?im)^\\s*level1:\\s*render_symbols_recursive\\s*,\\s*render_truncated_file_skeleton\\s*$",
+          "(?im)^\\s*level2:\\s*render_file_skeleton\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "N9_needle_in_large_file",
+      "capability": "surgical extraction from a large file",
+      "prompt": "I need to add depth telemetry to the breadth-first call-hierarchy traversal.\n\nThe method is `bfs_call_hierarchy`, in `crates/pathfinder/src/server/tools/navigation/impact.rs` — a large file, so retrieve only what you need.\n\nAnswer:\n1. The line number where its signature begins (the line containing `async fn bfs_call_hierarchy`).\n2. The name of the parameter that caps traversal depth.\n3. The name of the constant used to build its timeout.\n4. Every method it invokes on `self` (bare method names, no `self.` prefix, alphabetical, comma separated).\n\nOutput format — inside <answer></answer>, exactly four lines:\nsignature_line: <N>\ndepth_param: <name>\ntimeout_const: <NAME>\nself_calls: <comma separated>\nNothing else inside the tags.",
+      "grade": {
+        "type": "regex_all",
+        "patterns": [
+          "(?im)^\\s*signature_line:\\s*39[6-8]\\s*$",
+          "(?im)^\\s*depth_param:\\s*max_depth\\s*$",
+          "(?im)^\\s*timeout_const:\\s*BFS_TIMEOUT_SECS\\s*$",
+          "(?im)^\\s*self_calls:\\s*build_impact_reference\\s*,\\s*fetch_call_hierarchy\\s*$"
+        ]
+      }
+    }
+  ]
+}

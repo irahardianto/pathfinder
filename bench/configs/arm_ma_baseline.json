@@ -1,0 +1,60 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [],
+  "agent": {
+    "nav": {
+      "description": "Benchmark arm ma_baseline: orchestrator that delegates via subagents.",
+      "mode": "primary",
+      "temperature": 0.0,
+      "steps": 40,
+      "prompt": "{file:../prompts/agent_multiagent.txt}",
+      "tools": {
+        "bash": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "apply_patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "pathfinder_*": false,
+        "codegraph_*": false,
+        "task": true
+      }
+    },
+    "explore": {
+      "description": "Read-only codebase explorer. Answers one narrow question and reports back concisely.",
+      "mode": "subagent",
+      "temperature": 0.0,
+      "steps": 20,
+      "prompt": "{file:../prompts/agent_subagent.txt}",
+      "tools": {
+        "bash": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "apply_patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "pathfinder_*": false,
+        "codegraph_*": false,
+        "task": false
+      }
+    }
+  }
+}

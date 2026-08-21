@@ -1,0 +1,60 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [],
+  "agent": {
+    "nav": {
+      "description": "Benchmark arm: baseline built-in tools, read-only navigation suite.",
+      "mode": "primary",
+      "temperature": 0.0,
+      "steps": 40,
+      "prompt": "{file:../prompts/agent_nav.txt}",
+      "tools": {
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "bash": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "apply_patch": false,
+        "task": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "pathfinder_*": false,
+        "codegraph_*": false
+      }
+    },
+    "edit": {
+      "description": "Benchmark arm: baseline built-in tools, mutation suite.",
+      "mode": "primary",
+      "temperature": 0.0,
+      "steps": 60,
+      "prompt": "{file:../prompts/agent_edit.txt}",
+      "tools": {
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "bash": true,
+        "write": true,
+        "edit": true,
+        "patch": true,
+        "apply_patch": true,
+        "task": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "pathfinder_*": false,
+        "codegraph_*": false
+      }
+    }
+  }
+}

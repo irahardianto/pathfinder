@@ -1,0 +1,71 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [],
+  "mcp": {
+    "codegraph": {
+      "type": "local",
+      "command": [
+        "bash",
+        "-c",
+        "cd \"${PF_BENCH_REPO:-$PWD}\" && exec codegraph serve --mcp 2>>${PF_BENCH_LOGDIR:-/tmp}/codegraph-stderr.log"
+      ],
+      "enabled": true
+    }
+  },
+  "agent": {
+    "nav": {
+      "description": "Benchmark arm: codegraph-only tools, read-only navigation suite.",
+      "mode": "primary",
+      "temperature": 0.0,
+      "steps": 40,
+      "prompt": "{file:../prompts/agent_nav.txt}",
+      "tools": {
+        "read": false,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "bash": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "apply_patch": false,
+        "task": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "pathfinder_*": false,
+        "codegraph_*": true
+      }
+    },
+    "edit": {
+      "description": "Benchmark arm: codegraph-only navigation + bash/edit, mutation suite.",
+      "mode": "primary",
+      "temperature": 0.0,
+      "steps": 60,
+      "prompt": "{file:../prompts/agent_edit.txt}",
+      "tools": {
+        "read": false,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "bash": true,
+        "write": true,
+        "edit": true,
+        "patch": true,
+        "apply_patch": true,
+        "task": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "skill": false,
+        "question": false,
+        "pathfinder_*": false,
+        "codegraph_*": true
+      }
+    }
+  }
+}

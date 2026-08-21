@@ -1,0 +1,41 @@
+{
+  "suite": "edit",
+  "agent": "edit",
+  "tasks": [
+    {
+      "id": "E1_add_error_variant",
+      "capability": "multi-site refactor under compiler constraints",
+      "prompt": "Add a new error variant to this workspace's central error type.\n\nRequirements:\n1. In `crates/pathfinder-common/src/error.rs`, add a variant to `PathfinderError` named exactly:\n     `WorkspaceLocked { path: PathBuf, holder: String }`\n   Give it a `thiserror` display message that renders exactly like the other variants do, containing the text `workspace locked`.\n2. Map it in `error_code()` to the string `\"WORKSPACE_LOCKED\"`.\n3. Add an arm in `hint()` that returns `Some(\"Another Pathfinder instance holds the workspace lock. Retry after it exits.\".to_owned())` for this variant.\n4. Add an arm in `to_details()` that returns `serde_json::json!({ \"path\": path, \"holder\": holder })` for this variant.\n5. Everything must still compile with the workspace lint settings (this workspace denies `clippy::unwrap_used` and warns on pedantic lints).\n\nVerify your work by running:\n  cargo check -p pathfinder-mcp-common --all-targets\nand make sure it exits cleanly. Do not modify any other crate.",
+      "grade": {
+        "type": "shell_gate",
+        "gates": [
+          {
+            "name": "variant_declared",
+            "cmd": "rg -q 'WorkspaceLocked\\s*\\{' crates/pathfinder-common/src/error.rs"
+          },
+          {
+            "name": "error_code_mapped",
+            "cmd": "rg -q 'WorkspaceLocked\\s*\\{\\s*\\.\\.\\s*\\}\\s*=>\\s*\"WORKSPACE_LOCKED\"' crates/pathfinder-common/src/error.rs"
+          },
+          {
+            "name": "hint_arm",
+            "cmd": "rg -q 'Another Pathfinder instance holds the workspace lock' crates/pathfinder-common/src/error.rs"
+          },
+          {
+            "name": "details_arm",
+            "cmd": "rg -q '\"holder\"\\s*:\\s*holder' crates/pathfinder-common/src/error.rs"
+          },
+          {
+            "name": "compiles",
+            "cmd": "cargo check -p pathfinder-mcp-common --all-targets 2>&1 | tail -40",
+            "expect_exit": 0
+          },
+          {
+            "name": "no_collateral_damage",
+            "cmd": "test -z \"$(git status --porcelain -- ':!crates/pathfinder-common/src/error.rs' ':!AGENTS.md' ':!Cargo.lock' ':!target' ':!.codegraph')\""
+          }
+        ]
+      }
+    }
+  ]
+}

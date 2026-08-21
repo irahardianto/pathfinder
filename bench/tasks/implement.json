@@ -1,0 +1,82 @@
+{
+  "suite": "implement",
+  "agent": "edit",
+  "_rationale": "Every other suite stops at the answer: the agent retrieves, writes prose, and is graded on the prose. That cannot test the claim that better retrieval produces better work, because the work is never done. These two tasks make correctness depend on retrieval completeness rather than on retrieval being merely mentioned. I1 requires finding all twelve production call sites of one method and editing every one — miss a single site and the gate fails, so recall is enforced by the compiler and the grader rather than by a rubric. I2 requires threading a new parameter along a four-hop call chain that spans two files and passes through a scope dispatcher; an agent that has not resolved the chain will either fail to compile or wire the parameter to the wrong hop. Both are graded by shell gates: exact occurrence counts, per-file presence, cargo check, and a collateral-damage check that fails the run if test files were edited to make the gates pass.",
+  "tasks": [
+    {
+      "id": "I1_instrument_every_call_site",
+      "capability": "blast-radius discovery enforced by the grader",
+      "prompt": "Every file-touching tool in this workspace routes through the sandbox gate `Sandbox::check`, and today a denial is silent at the call site.\n\nAdd observability at EVERY production call site of `Sandbox::check`.\n\nAt each place where the result of `self.sandbox.check(...)` is handled as an error, add a `tracing::warn!` immediately before the existing error handling, in exactly this shape:\n\n    tracing::warn!(target: \"sandbox_denied\", tool = \"<TOOL>\", \"sandbox denied path access\");\n\nwhere `<TOOL>` is a short identifier for the tool or module that call site belongs to — use the file's stem (for example `read_files` for `read_files.rs`, `impact` for `impact.rs`).\n\nRules:\n- Cover every production call site. Do not miss any.\n- Do NOT touch test files (`*_test.rs`), anything under `tests/`, or anything under `benches/`.\n- Do not change any existing behaviour, only add the log line.\n- `use tracing;` is not needed — the crate is already a dependency and other code in these files already calls `tracing::` macros directly.\n\nVerify with:\n  cargo check -p pathfinder-mcp --all-targets\n\nThe change is only complete when every production call site is instrumented and the crate still compiles.",
+      "grade": {
+        "type": "shell_gate",
+        "gates": [
+          {
+            "name": "all_12_sites_instrumented",
+            "cmd": "test \"$(rg -c 'sandbox_denied' --type rust -g '!**/*_test.rs' -g '!**/tests/**' -g '!**/benches/**' crates | awk -F: '{s+=$2} END {print s+0}')\" = 12"
+          },
+          {
+            "name": "every_expected_file_touched",
+            "cmd": "for f in file_ops find_symbol read_files repo_map semantic_path source_file symbols navigation/deep_context navigation/definition navigation/impact navigation/overview navigation/references; do rg -q 'sandbox_denied' \"crates/pathfinder/src/server/tools/$f.rs\" || { echo \"MISSING: $f\"; exit 1; }; done"
+          },
+          {
+            "name": "compiles",
+            "cmd": "cargo check -p pathfinder-mcp --all-targets 2>&1 | tail -30",
+            "expect_exit": 0,
+            "timeout": 1200
+          },
+          {
+            "name": "no_test_files_edited",
+            "cmd": "test -z \"$(git status --porcelain -- '*_test.rs' 'crates/**/tests' 'crates/**/benches')\""
+          },
+          {
+            "name": "no_collateral_damage",
+            "cmd": "test -z \"$(git status --porcelain -- ':!crates/pathfinder/src/server/tools' ':!AGENTS.md' ':!Cargo.lock' ':!.codegraph' ':!target')\""
+          }
+        ]
+      }
+    },
+    {
+      "id": "I2_thread_param_through_chain",
+      "capability": "call-chain resolution enforced by the compiler",
+      "prompt": "The breadth-first call-hierarchy traversal behind the `trace` tool uses a hard-coded timeout constant. I need it to be overridable per request.\n\nAdd an optional `timeout_seconds` parameter to the `trace` tool and thread it all the way down to the traversal.\n\nRequirements:\n1. Add `timeout_seconds: Option<u64>` to the `trace` tool's parameter struct, with a doc comment and whatever schema attributes the neighbouring optional fields already use so the generated JSON schema stays consistent.\n2. Thread it through every hop of the existing dispatch chain down to the breadth-first traversal method. Do not bypass a hop by reading it from somewhere else — pass it as an argument along the chain.\n3. In the traversal, when the caller supplies a value, use it to build the timeout; when it is `None`, fall back to the existing hard-coded constant. Clamp any supplied value to the inclusive range 1..=300 seconds.\n4. Only the `callers` scope needs it. The other scopes may ignore it.\n\nVerify with:\n  cargo check -p pathfinder-mcp --all-targets\n\nThe workspace denies `clippy::unwrap_used`, so do not introduce one.",
+        "grade": {
+        "type": "shell_gate",
+        "gates": [
+          {
+            "name": "param_declared",
+            "cmd": "rg -q 'timeout_seconds\\s*:\\s*Option<u64>' crates/pathfinder/src/server/types.rs"
+          },
+          {
+            "name": "threaded_into_bfs",
+            "_note": "rg -q suppresses output, so it must never be the LHS of a pipe. An earlier revision of this gate did exactly that and was unpassable by construction; every arm failed it identically, which is the signature of a broken gate rather than six failing agents.",
+            "cmd": "rg -A 14 'fn bfs_call_hierarchy' crates/pathfinder/src/server/tools/navigation/impact.rs | rg -q 'timeout_seconds'"
+          },
+          {
+            "name": "clamped",
+            "cmd": "rg -q 'clamp\\s*\\(\\s*1\\s*,\\s*300\\s*\\)|\\.min\\(\\s*300\\s*\\)|300\\s*\\)\\.max\\(\\s*1' crates/pathfinder/src/server/tools/navigation/impact.rs"
+          },
+          {
+            "name": "fallback_to_constant",
+            "_note": "An earlier revision just grepped for BFS_TIMEOUT_SECS, which already exists on a clean tree — the gate was vacuous and handed every run free credit. It must assert the constant is used as a CONDITIONAL fallback, which only a correct implementation produces.",
+            "cmd": "rg -q 'map_or\\s*\\(\\s*BFS_TIMEOUT_SECS|unwrap_or\\s*\\(\\s*BFS_TIMEOUT_SECS|None\\s*=>\\s*BFS_TIMEOUT_SECS|else\\s*\\{[^}]*BFS_TIMEOUT_SECS' crates/pathfinder/src/server/tools/navigation/impact.rs"
+          },
+          {
+            "name": "compiles",
+            "cmd": "cargo check -p pathfinder-mcp --all-targets 2>&1 | tail -30",
+            "expect_exit": 0,
+            "timeout": 1200
+          },
+          {
+            "name": "no_unwrap_introduced",
+            "cmd": "cargo clippy -p pathfinder-mcp --all-targets 2>&1 | rg -q 'unwrap_used' && exit 1 || exit 0",
+            "timeout": 1200
+          },
+          {
+            "name": "no_test_files_edited",
+            "cmd": "test -z \"$(git status --porcelain -- '*_test.rs' 'crates/**/tests' 'crates/**/benches')\""
+          }
+        ]
+      }
+    }
+  ]
+}

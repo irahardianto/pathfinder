@@ -1,0 +1,89 @@
+{
+  "suite": "deep",
+  "agent": "nav",
+  "_rationale": "The `nav` suite measures precision lookups that a baseline agent solves in 3-4 tool calls. CodeGraph's own published benchmark shows its advantage scales with how much discovery a question demands: 57-78% cheaper where the file-reading arm needed 28-43 tool calls, but 13% on Django (14 calls) and break-even on Gin (7 calls). At 3-4 calls the `nav` suite sits below even their break-even point, so it structurally cannot observe the effect they market. This suite replicates their query shape instead: open-ended 'how does X work end-to-end' architecture questions whose answers span multiple crates and at least one dynamic-dispatch hop. Grading stays mechanical - recall over a hand-verified required-symbol set, minus a penalty for named symbols that do not exist in the repository.",
+  "tasks": [
+    {
+      "id": "D1_request_to_lsp",
+      "capability": "cross-crate architecture trace through a trait object",
+      "prompt": "I am new to this Rust workspace and need to understand one end-to-end flow before I can debug it.\n\nWhen an MCP client calls the `trace` tool with `scope=\"callers\"`, the request travels from the tool handler on the server all the way down to a JSON-RPC message written to a language server's stdin, and the response comes back up.\n\nExplain that flow. I need the actual chain, not a summary.\n\nName every function, method or trait method the request passes through, in call order, and give the relative file path of each. Include the trait boundary where the concrete LSP client is reached through dynamic dispatch, and name the exact LSP protocol method string that goes on the wire for incoming calls.\n\nOutput format — inside <answer></answer>, one hop per line, in call order:\n<relative/file/path> :: <function_or_method_name>\nThen a final line:\nlsp_method: <the protocol method string>\nNothing else inside the tags.",
+      "grade": {
+        "type": "symbol_chain",
+        "required": [
+          "trace_impl",
+          "find_callers_callees_impl",
+          "bfs_call_hierarchy",
+          "fetch_call_hierarchy",
+          "call_hierarchy_incoming"
+        ],
+        "required_any": [
+          ["Lawyer", "lawyer"],
+          ["parse_call_hierarchy_calls_response", "response_parsers"],
+          ["write_message", "send", "transport"]
+        ],
+        "required_patterns": [
+          "(?im)^\\s*lsp_method:\\s*[\"'`]?callHierarchy/incomingCalls[\"'`]?\\s*$"
+        ],
+        "required_files": [
+          "server/tools/navigation/mod.rs",
+          "server/tools/navigation/impact.rs",
+          "pathfinder-lsp"
+        ]
+      }
+    },
+    {
+      "id": "D2_sandbox_defense_layers",
+      "capability": "layered-policy trace + ordering",
+      "prompt": "I need to audit how this workspace stops a tool from reading a file it should not.\n\nEvery file-touching tool routes through one sandbox gate. That gate applies several independent checks in a fixed order, each mapping to a named tier, and any failure produces a single error variant which is then rendered to the agent with a hint.\n\nExplain the whole mechanism:\n1. The gate method and its file.\n2. Every check the gate calls internally, in the exact order it calls them, with the tier each one reports.\n3. The error variant produced, and the method that turns that variant into the agent-facing hint string.\n\nOutput format — inside <answer></answer>:\ngate: <relative/path> :: <method>\nchecks:\n<check_method_name> -> <TierName>\n... (one per line, in call order)\nerror_variant: <VariantName>\nhint_method: <method_name>\nNothing else inside the tags.",
+      "grade": {
+        "type": "symbol_chain",
+        "required": [
+          "is_hardcoded_denied",
+          "is_default_denied",
+          "is_additional_denied",
+          "is_user_denied"
+        ],
+        "required_patterns": [
+          "(?im)^\\s*gate:\\s*\\S*sandbox\\.rs\\s*::\\s*(Sandbox\\.|Sandbox::)?check\\s*$",
+          "(?im)^\\s*error_variant:\\s*(PathfinderError::|Self::)?AccessDenied\\s*$",
+          "(?im)^\\s*hint_method:\\s*(PathfinderError::)?hint(\\(\\))?\\s*$"
+        ],
+        "ordered": [
+          "is_hardcoded_denied",
+          "is_default_denied",
+          "is_additional_denied",
+          "is_user_denied"
+        ],
+        "required_any": [
+          ["HardcodedDeny"],
+          ["DefaultDeny"],
+          ["UserDefined"]
+        ]
+      }
+    },
+    {
+      "id": "D3_lsp_restart_path",
+      "capability": "lifecycle + supervision architecture",
+      "prompt": "A language server in this workspace has wedged and an agent wants to recover it without restarting the whole MCP server.\n\nThere is an agent-facing escape hatch for exactly this, and separately there are background tasks that reap dead or idle processes on their own.\n\nExplain both paths:\n1. The agent-triggered path: which MCP tool, which parameter value triggers it, the impl method that handles it, and the trait method it calls to respawn the server.\n2. The automatic path: name the background supervision tasks and reaper functions that detect and clean up dead or idle language-server processes, with the file they live in.\n\nOutput format — inside <answer></answer>:\ntool: <mcp_tool_name>\ntrigger: <parameter>=<value>\nhandler: <relative/path> :: <method>\nrespawn: <trait_method_name>\nbackground:\n<function_name> — <relative/path>\n... (one per line)\nNothing else inside the tags.",
+      "grade": {
+        "type": "symbol_chain",
+        "required": [
+          "force_respawn",
+          "reap_dead_processes",
+          "reap_idle_processes"
+        ],
+        "required_any": [
+          ["reader_supervisor_task", "idle_timeout_task"],
+          ["lsp_health_impl", "health_impl", "health.rs"]
+        ],
+        "required_patterns": [
+          "(?im)^\\s*tool:\\s*health\\s*$",
+          "(?im)^\\s*trigger:\\s*action\\s*=\\s*[\"'`]?restart[\"'`]?\\s*$"
+        ],
+        "required_files": [
+          "client/background.rs"
+        ]
+      }
+    }
+  ]
+}
