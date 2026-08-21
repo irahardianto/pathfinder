@@ -1,0 +1,145 @@
+[
+  {
+    "model": "google-vertex/claude-opus-5@default",
+    "baseline": {
+      "model": "google-vertex/claude-opus-5@default",
+      "status": "OK",
+      "detail": "first_request_ctx=2129 cost=$0.01368"
+    },
+    "pathfinder": {
+      "model": "google-vertex/claude-opus-5@default",
+      "status": "OK",
+      "detail": "first_request_ctx=9795 cost=$0.06169"
+    }
+  },
+  {
+    "model": "google-vertex/claude-opus-4-8@default",
+    "baseline": {
+      "model": "google-vertex/claude-opus-4-8@default",
+      "status": "ERROR",
+      "detail": "Not Found: [{   \"error\": {     \"code\": 404,     \"message\": \"Publisher model `projects/irahardianto-labs/locations/global/publishers/anthropic/models/claude-opus-4-8@default` was not found or your project does not have ac"
+    },
+    "pathfinder": {
+      "model": "google-vertex/claude-opus-4-8@default",
+      "status": "ERROR",
+      "detail": "Not Found: [{   \"error\": {     \"code\": 404,     \"message\": \"Publisher model `projects/irahardianto-labs/locations/global/publishers/anthropic/models/claude-opus-4-8@default` was not found or your project does not have ac"
+    }
+  },
+  {
+    "model": "google-vertex/claude-opus-4-7@default",
+    "baseline": {
+      "model": "google-vertex/claude-opus-4-7@default",
+      "status": "ERROR",
+      "detail": "Not Found: [{   \"error\": {     \"code\": 404,     \"message\": \"Publisher model `projects/irahardianto-labs/locations/global/publishers/anthropic/models/claude-opus-4-7@default` was not found or your project does not have ac"
+    },
+    "pathfinder": {
+      "model": "google-vertex/claude-opus-4-7@default",
+      "status": "ERROR",
+      "detail": "Not Found: [{   \"error\": {     \"code\": 404,     \"message\": \"Publisher model `projects/irahardianto-labs/locations/global/publishers/anthropic/models/claude-opus-4-7@default` was not found or your project does not have ac"
+    }
+  },
+  {
+    "model": "google-vertex/claude-opus-4-6@default",
+    "baseline": {
+      "model": "google-vertex/claude-opus-4-6@default",
+      "status": "ERROR",
+      "detail": "Not Found: [{   \"error\": {     \"code\": 404,     \"message\": \"Publisher model `projects/irahardianto-labs/locations/global/publishers/anthropic/models/claude-opus-4-6@default` was not found or your project does not have ac"
+    },
+    "pathfinder": {
+      "model": "google-vertex/claude-opus-4-6@default",
+      "status": "ERROR",
+      "detail": "Not Found: [{   \"error\": {     \"code\": 404,     \"message\": \"Publisher model `projects/irahardianto-labs/locations/global/publishers/anthropic/models/claude-opus-4-6@default` was not found or your project does not have ac"
+    }
+  },
+  {
+    "model": "google-vertex/gemini-3.5-flash",
+    "baseline": {
+      "model": "google-vertex/gemini-3.5-flash",
+      "status": "OK",
+      "detail": "first_request_ctx=1046 cost=$0.00447"
+    },
+    "pathfinder": {
+      "model": "google-vertex/gemini-3.5-flash",
+      "status": "SCHEMA_REJECTED",
+      "detail": "Unable to submit request because `pathfinder_inspect` functionDeclaration `parameters.semantic_paths` schema specified other fields alongside any_of. When using any_of, it must be the only field set. Learn more: https://"
+    }
+  },
+  {
+    "model": "google-vertex/gemini-3.1-pro-preview",
+    "baseline": {
+      "model": "google-vertex/gemini-3.1-pro-preview",
+      "status": "OK",
+      "detail": "first_request_ctx=1050 cost=$0.00346"
+    },
+    "pathfinder": {
+      "model": "google-vertex/gemini-3.1-pro-preview",
+      "status": "SCHEMA_REJECTED",
+      "detail": "Unable to submit request because `pathfinder_inspect` functionDeclaration `parameters.semantic_paths` schema specified other fields alongside any_of. When using any_of, it must be the only field set. Learn more: https://"
+    }
+  },
+  {
+    "model": "google-vertex/gemini-2.5-pro",
+    "baseline": {
+      "model": "google-vertex/gemini-2.5-pro",
+      "status": "OK",
+      "detail": "first_request_ctx=1003 cost=$0.00151"
+    },
+    "pathfinder": {
+      "model": "google-vertex/gemini-2.5-pro",
+      "status": "SCHEMA_REJECTED",
+      "detail": "Unable to submit request because `pathfinder_inspect` functionDeclaration `parameters.semantic_paths` schema specified other fields alongside any_of. When using any_of, it must be the only field set. Learn more: https://"
+    }
+  },
+  {
+    "model": "google-vertex-anthropic/claude-fable-5",
+    "baseline": {
+      "model": "google-vertex-anthropic/claude-fable-5",
+      "status": "ERROR",
+      "detail": "Too Many Requests: [{   \"error\": {     \"code\": 429,     \"message\": \"Quota exceeded for aiplatform.googleapis.com/global_online_prediction_requests_per_base_model with base model: anthropic-claude-fable. Please submit a q"
+    },
+    "pathfinder": {
+      "model": "google-vertex-anthropic/claude-fable-5",
+      "status": "ERROR",
+      "detail": "Too Many Requests: [{   \"error\": {     \"code\": 429,     \"message\": \"Quota exceeded for aiplatform.googleapis.com/global_online_prediction_requests_per_base_model with base model: anthropic-claude-fable. Please submit a q"
+    }
+  },
+  {
+    "model": "opencode/deepseek-v4-flash-free",
+    "baseline": {
+      "model": "opencode/deepseek-v4-flash-free",
+      "status": "OK",
+      "detail": "first_request_ctx=1591 cost=$0.00000"
+    },
+    "pathfinder": {
+      "model": "opencode/deepseek-v4-flash-free",
+      "status": "OK",
+      "detail": "first_request_ctx=6857 cost=$0.00000"
+    }
+  },
+  {
+    "model": "opencode/hy3-free",
+    "baseline": {
+      "model": "opencode/hy3-free",
+      "status": "OK",
+      "detail": "first_request_ctx=1415 cost=$0.00000"
+    },
+    "pathfinder": {
+      "model": "opencode/hy3-free",
+      "status": "OK",
+      "detail": "first_request_ctx=6628 cost=$0.00000"
+    }
+  },
+  {
+    "model": "opencode/mimo-v2.5-free",
+    "baseline": {
+      "model": "opencode/mimo-v2.5-free",
+      "status": "OK",
+      "detail": "first_request_ctx=1557 cost=$0.00000"
+    },
+    "pathfinder": {
+      "model": "opencode/mimo-v2.5-free",
+      "status": "OK",
+      "detail": "first_request_ctx=6964 cost=$0.00000"
+    }
+  }
+]

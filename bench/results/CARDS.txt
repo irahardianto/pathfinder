@@ -1,0 +1,196 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE SAME TOOL IS A WIN AND A LOSS
+median tool calls to reach an identical answer
+──────────────────────────────────────────────────────────────────────────
+
+  DEEP architecture questions  (baseline needs ~12 tool calls)
+
+  grep + read     11.5 calls   base  ██████████████████████
+  Pathfinder      10.0 calls    -13%  ███████████████████
+  PF + builtin    13.5 calls    +17%  ██████████████████████████
+  CodeGraph        5.5 calls    -52%  ███████████
+  CG + builtin     8.5 calls    -26%  ████████████████
+
+  SHALLOW lookups  (baseline needs ~2 tool calls)
+
+  grep + read      2.0 calls   base  ███████████████
+  Pathfinder       2.0 calls     +0%  ███████████████
+  PF + builtin     2.0 calls     +0%  ███████████████
+  CodeGraph        3.5 calls    +75%  ██████████████████████████
+  CG + builtin     2.0 calls     +0%  ███████████████
+──────────────────────────────────────────────────────────────────────────
+Claude Sonnet 5 · n=6/arm deep, n=18/arm shallow · frozen repo, shuffled order
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE WIN DOES NOT SURVIVE SCALE
+same tools, bigger codebases, opposite result
+──────────────────────────────────────────────────────────────────────────
+
+  tokio (793 Rust files) + juice-shop (642 TS/JS files)
+  5 tasks · same model · same grader · n=10 per arm
+
+                 accuracy      tokens   calls    wall     cost
+  grep + read       0.944      62,554     8.0     34s    0.130
+  Pathfinder        0.949     125,266     7.5     34s    0.252
+  CodeGraph         0.921   1,076,234    13.5    115s    0.915
+
+  On a 159-file repo the graph cut tool calls 52%.
+  On 800-file repos it RAISED them 69% and cost 7x more —
+  at slightly worse accuracy.
+──────────────────────────────────────────────────────────────────────────
+Claude Sonnet 5 · n=10/arm · tokio @625954f3, juice-shop @1618a611b
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DELEGATION IS PRICED BY TASK WIDTH
+sub-agent windows rescue dense payloads — only when the work splits
+──────────────────────────────────────────────────────────────────────────
+
+  Token change when the agent is allowed to delegate to sub-agents,
+  by how WIDE the question is:
+
+  task                         baseline  Pathfinder   CodeGraph
+  survey 61 route files             -28%        -61%        -68%
+  trace 1 auth chain                +16%        +58%        -65%
+  audit 1 pattern                  +126%         -2%        +38%
+  enumerate 1 API                   +85%        +71%       +100%
+  trace 1 call chain               +167%       +178%       +141%
+
+  Delegation only pays on the WIDE task — and there it pays most
+  for the graph. On narrow questions it is pure overhead.
+
+  This is why a multi-agent audit and a single-agent lookup
+  report opposite results for the same tool.
+──────────────────────────────────────────────────────────────────────────
+Claude Sonnet 5 · tokio + juice-shop · n=2/cell · sub-agent tokens included
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INDEXING IS NOT FREE
+a code graph pays off only when discovery is expensive
+──────────────────────────────────────────────────────────────────────────
+
+  SHALLOW lookups — mean cost per task
+
+  grep + read     0.0305 USD   base  ███
+  Pathfinder      0.0641 USD   +111%  █████
+  PF + builtin    0.0610 USD   +100%  █████
+  CodeGraph       0.3049 USD   +901%  ██████████████████████████
+  CG + builtin    0.0496 USD    +63%  ████
+
+  DEEP architecture questions — mean cost per task
+
+  grep + read     0.1952 USD   base  █████████████████
+  Pathfinder      0.3043 USD    +56%  ██████████████████████████
+  PF + builtin    0.2670 USD    +37%  ███████████████████████
+  CodeGraph       0.1933 USD     -1%  █████████████████
+  CG + builtin    0.2195 USD    +12%  ███████████████████
+──────────────────────────────────────────────────────────────────────────
+Same model, same repo, same grader. Only the question shape changed.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SPEED IS NOT THE ONLY AXIS
+semantic resolution: where an index beats text search
+──────────────────────────────────────────────────────────────────────────
+
+  Tasks where a plausible WRONG answer is one grep away:
+
+    · trait impls hidden behind a fully-qualified path
+    · a method that only exists after macro expansion
+    · which concrete type is wired in at runtime (DI)
+    · one method name defined on four different types
+
+  Accuracy  (1.00 = every fact correct, no invented symbols)
+
+  grep + read    0.950   7/8 perfect   ████████████████████████████
+  Pathfinder     1.000   8/8 perfect   ██████████████████████████████
+  PF + builtin   1.000   8/8 perfect   ██████████████████████████████
+  CodeGraph      0.919   5/8 perfect   ████████████████████████████
+  CG + builtin   0.925   6/8 perfect   ████████████████████████████
+──────────────────────────────────────────────────────────────────────────
+Claude Sonnet 5 · n=8/arm · wrong answers penalised 1.5x vs omissions
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+'SURGICAL CONTEXT' IS ROUND TRIPS, NOT PRECISION
+same answer, same accuracy, more characters read
+──────────────────────────────────────────────────────────────────────────
+
+  Characters the agent had to read to reach the SAME answer:
+
+  grep + read       65,228   base  ███████████████
+  Pathfinder       111,499    +71%  ██████████████████████████
+  PF + builtin      67,497     +3%  ████████████████
+  CodeGraph        107,392    +65%  █████████████████████████
+  CG + builtin     110,390    +69%  ██████████████████████████
+
+  Correctness was identical across all arms.
+
+  So the graph is not returning BETTER information.
+  It is returning MORE information, in FEWER round trips.
+──────────────────────────────────────────────────────────────────────────
+Deep suite · Claude Sonnet 5 · mean tool-output characters per task
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FEWER CALLS, BIGGER PAYLOADS
+a graph does not return less — it returns it all at once
+──────────────────────────────────────────────────────────────────────────
+
+  How each arm spends its tool budget on one deep question:
+
+  grep + read    13.7 calls     4,773 chars/call
+                grep x40  read x33  glob x9
+
+  Pathfinder     14.5 calls     7,690 chars/call
+                pf_search x40  pf_inspect x26  pf_explore x14
+
+  PF + builtin   16.0 calls     4,219 chars/call
+                pf_search x26  pf_read x25  grep x20
+
+  CodeGraph       5.0 calls    21,478 chars/call
+                cg_explore x30
+
+  CG + builtin    7.7 calls    14,399 chars/call
+                cg_explore x29  read x9  grep x8
+
+──────────────────────────────────────────────────────────────────────────
+Deep suite · Claude Sonnet 5 · characters of tool output per call
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE COST YOU CANNOT SEE
+fixed tool-schema overhead, measured on the first request
+──────────────────────────────────────────────────────────────────────────
+
+  Tokens added to EVERY request, before any code is retrieved:
+
+  Pathfinder       +7,666 tok   █████████████████████████
+  PF + builtin     +9,104 tok   ██████████████████████████████
+  CodeGraph          +808 tok   ███
+  CG + builtin     +2,246 tok   ███████
+
+  An MCP server ships its tool schemas on every single turn.
+  At 10 turns a 7,700-token schema costs 77,000 tokens of context
+  before the agent has read one line of code.
+──────────────────────────────────────────────────────────────────────────
+Claude Sonnet 5 · median of n=6 runs per arm
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOES BETTER RETRIEVAL PRODUCE BETTER CODE?
+graded by cargo check, not by prose
+──────────────────────────────────────────────────────────────────────────
+
+  Task: instrument EVERY production call site of one method.
+  Miss one and the build gate fails. Retrieval recall is
+  enforced by the compiler, not by a rubric.
+
+  grep + read   4/4 passed   1.00 score   0.505 USD
+  Pathfinder    4/4 passed   1.00 score   0.625 USD
+  CodeGraph     4/4 passed   1.00 score   0.483 USD
+──────────────────────────────────────────────────────────────────────────
+Claude Sonnet 5 · multi-file change · shell-gated
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

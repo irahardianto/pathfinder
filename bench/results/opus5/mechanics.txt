@@ -1,0 +1,19 @@
+====================================================================================================
+TOOL ERGONOMICS / MECHANICS REPORT
+====================================================================================================
+
+A. PER-TOOL FAILURE MODES (counts, and rate over that tool's calls)
+arm         tool                        calls    error  inv_par   empty  degraded  repeat  avg_chars
+
+
+
+B. INFORMATION YIELD (task score earned per 1,000 chars of tool output)
+arm             mean score   mean tool chars    score per 1k chars
+baseline             1.000                 0                   nan
+pathfinder           1.000                 0                   nan
+both                 1.000                 0                   nan
+
+C. SELF-CORRECTION PRESSURE (exact-repeat tool calls per run)
+  baseline          0.00 repeats/run   (0 over 20 runs)
+  pathfinder        0.00 repeats/run   (0 over 20 runs)
+  both              0.00 repeats/run   (0 over 20 runs)

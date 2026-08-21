@@ -1,0 +1,24 @@
+============================================================================================
+CODEGRAPH MCP TOOL SCHEMA AUDIT
+============================================================================================
+tools exposed: 1
+
+tool            desc chars  desc lines  json schema     total  est tokens
+codegraph_explore         582           1          949     1,548         430
+(server instructions)       4,597          51            0     4,597       1,277
+--------------------------------------------------------------------------------------------
+TOTAL                  582                      949     6,145       1,707
+
+tool description prose 9% | JSON parameter schema 15% | server instructions 75%
+
+This payload is re-sent on every request in the agent loop. At the median of
+3 requests per navigation task it is charged 3 times per task.
+
+REDUCTION SIMULATION (information-preserving edits only)
+change                                                       chars  est tokens    saving
+current                                                      6,128       1,702         -
+A. drop duplicated prose from JSON parameter schema          5,319       1,478      -13%
+B. collapse oneOf/anyOf const unions to plain enums          6,128       1,702        0%
+C. cap tool description at 6 lines                           6,128       1,702        0%
+D. all of the above                                          5,319       1,478      -13%
+E. D, plus delegate read+search to the host's built-ins      5,319       1,478      -13%

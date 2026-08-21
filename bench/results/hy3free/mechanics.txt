@@ -1,0 +1,34 @@
+====================================================================================================
+TOOL ERGONOMICS / MECHANICS REPORT
+====================================================================================================
+
+A. PER-TOOL FAILURE MODES (counts, and rate over that tool's calls)
+arm         tool                        calls    error  inv_par   empty  degraded  repeat  avg_chars
+
+
+
+codegraph   codegraph_codegraph_explore    226   0   0%   0   0%  0   0%    0   0%  3   1%     15,993
+codegraph   edit                           12   0   0%   0   0%  0   0%    0   0%  0   0%         26
+codegraph   invalid                        11   1   9%   0   0%  0   0%    0   0%  0   0%        131
+codegraph   bash                            9   0   0%   0   0%  0   0%    0   0%  0   0%        365
+
+cg_both     grep                           44   0   0%   0   0%  0   0%    0   0%  4   9%      3,299
+cg_both     read                           38   0   0%   0   0%  0   0%    0   0%  0   0%      7,598
+cg_both     edit                           12   0   0%   0   0%  0   0%    0   0%  0   0%         26
+cg_both     codegraph_codegraph_explore     11   0   0%   0   0%  0   0%    0   0%  0   0%     15,053
+cg_both     bash                            6   0   0%   0   0%  0   0%    0   0%  0   0%        100
+
+B. INFORMATION YIELD (task score earned per 1,000 chars of tool output)
+arm             mean score   mean tool chars    score per 1k chars
+baseline             0.933                 0                   nan
+pathfinder           0.883                 0                   nan
+both                 0.967                 0                   nan
+codegraph            0.900           120,649                0.0075
+cg_both              0.900            20,013                0.0450
+
+C. SELF-CORRECTION PRESSURE (exact-repeat tool calls per run)
+  baseline          0.00 repeats/run   (0 over 30 runs)
+  pathfinder        0.00 repeats/run   (0 over 30 runs)
+  both              0.00 repeats/run   (0 over 30 runs)
+  codegraph         0.10 repeats/run   (3 over 30 runs)
+  cg_both           0.13 repeats/run   (4 over 30 runs)

@@ -1,0 +1,29 @@
+====================================================================================================
+TOOL ERGONOMICS / MECHANICS REPORT
+====================================================================================================
+
+A. PER-TOOL FAILURE MODES (counts, and rate over that tool's calls)
+arm         tool                        calls    error  inv_par   empty  degraded  repeat  avg_chars
+ma_baseline task                           15   0   0%   0   0%  0   0%    0   0%  0   0%      2,376
+ma_baseline read                           13   0   0%   0   0%  0   0%    0   0%  0   0%      2,765
+ma_baseline grep                           11   0   0%   0   0%  0   0%    0   0%  0   0%      4,720
+ma_baseline glob                            6   0   0%   0   0%  0   0%    0   0%  0   0%      2,938
+
+ma_pathfindertask                           18   0   0%   0   0%  0   0%    0   0%  0   0%      2,315
+ma_pathfinderpathfinder_search              17   1   6%   0   0%  0   0%    0   0%  0   0%      4,581
+ma_pathfinderpathfinder_explore              5   0   0%   0   0%  0   0%    0   0%  0   0%      1,136
+ma_pathfinderpathfinder_read                 4   0   0%   0   0%  0   0%    0   0%  0   0%     10,524
+
+ma_codegraphcodegraph_codegraph_explore     36   0   0%   0   0%  0   0%    0   0%  0   0%     22,190
+ma_codegraphtask                           29   0   0%   0   0%  0   0%    0   0%  0   0%      3,607
+
+B. INFORMATION YIELD (task score earned per 1,000 chars of tool output)
+arm             mean score   mean tool chars    score per 1k chars
+ma_baseline          0.944            14,113                0.0669
+ma_pathfinder        0.944            16,732                0.0564
+ma_codegraph         0.929            90,347                0.0103
+
+C. SELF-CORRECTION PRESSURE (exact-repeat tool calls per run)
+  ma_baseline       0.00 repeats/run   (0 over 10 runs)
+  ma_pathfinder     0.00 repeats/run   (0 over 10 runs)
+  ma_codegraph      0.00 repeats/run   (0 over 10 runs)

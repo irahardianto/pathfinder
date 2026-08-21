@@ -1,0 +1,39 @@
+====================================================================================================
+TOOL ERGONOMICS / MECHANICS REPORT
+====================================================================================================
+
+A. PER-TOOL FAILURE MODES (counts, and rate over that tool's calls)
+arm         tool                        calls    error  inv_par   empty  degraded  repeat  avg_chars
+baseline    grep                           31   0   0%   0   0%  0   0%    0   0%  0   0%      2,856
+baseline    read                           20   0   0%   0   0%  0   0%    0   0%  0   0%      4,604
+baseline    glob                            6   0   0%   0   0%  0   0%    0   0%  0   0%      1,723
+
+pathfinder  pathfinder_search              41   0   0%   0   0%  0   0%    0   0%  0   0%     11,097
+pathfinder  pathfinder_read                16   0   0%   0   0%  0   0%    0   0%  0   0%      4,450
+
+both        pathfinder_search              28   0   0%   0   0%  0   0%    0   0%  0   0%      6,216
+both        grep                           17   0   0%   0   0%  0   0%    0   0%  0   0%      2,514
+both        pathfinder_read                14   0   0%   0   0%  0   0%    0   0%  0   0%      3,083
+both        read                            8   0   0%   0   0%  0   0%    0   0%  0   0%      4,596
+both        glob                            3   0   0%   0   0%  0   0%    0   0%  0   0%        151
+
+codegraph   codegraph_codegraph_explore     84   0   0%   0   0%  0   0%    0   0%  0   0%     20,396
+
+cg_both     grep                           19   0   0%   0   0%  0   0%    0   0%  0   0%      1,659
+cg_both     read                           17   0   0%   0   0%  0   0%    0   0%  0   0%      3,259
+cg_both     codegraph_codegraph_explore      9   0   0%   0   0%  0   0%    0   0%  0   0%     19,679
+
+B. INFORMATION YIELD (task score earned per 1,000 chars of tool output)
+arm             mean score   mean tool chars    score per 1k chars
+baseline             0.762            23,868                0.0319
+pathfinder           1.000            65,773                0.0152
+both                 0.812            37,148                0.0219
+codegraph            0.950           214,155                0.0044
+cg_both              0.831            33,003                0.0252
+
+C. SELF-CORRECTION PRESSURE (exact-repeat tool calls per run)
+  baseline          0.00 repeats/run   (0 over 8 runs)
+  pathfinder        0.00 repeats/run   (0 over 8 runs)
+  both              0.00 repeats/run   (0 over 8 runs)
+  codegraph         0.00 repeats/run   (0 over 8 runs)
+  cg_both           0.00 repeats/run   (0 over 8 runs)

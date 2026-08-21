@@ -1,0 +1,238 @@
+====================================================================================================
+PATHFINDER A/B BENCHMARK REPORT
+====================================================================================================
+runs=135  arms=['baseline', 'pathfinder', 'both', 'codegraph', 'cg_both']  models=['opencode/hy3-free']
+tasks=['N1_blast_radius', 'N2_tool_registry', 'N3_error_localize', 'N4_dispatch_chain', 'N5_signature_extract', 'N6_line_to_symbol', 'N7_enum_exhaustive', 'N8_reverse_callgraph', 'N9_needle_in_large_file']
+
+1. PER-ARM AGGREGATE
+--------------------
+Two rows per metric. `med` is the robust view (a single runaway agent loop
+can triple a 27-run mean); `mean` is what you actually pay in aggregate.
+
+metric                stat                      baseline                  pathfinder                        both                   codegraph                     cg_both
+billed_tokens         med         16,535 [13,382,19,708]      36,011 [27,771,39,710]      43,404 [36,755,47,622]    122,523 [22,052,157,665]      23,785 [19,170,28,289]
+                      mean       50,017 [15,494,116,547]      40,101 [33,141,48,634]      50,835 [41,705,61,937]    180,545 [98,232,287,488]      25,706 [21,883,30,115]
+context_tokens        med         16,118 [13,225,19,388]      35,889 [27,555,39,435]      43,251 [36,432,47,274]    122,177 [21,761,156,599]      23,328 [19,002,28,017]
+                      mean       49,645 [15,218,115,975]      39,857 [32,924,48,344]      50,497 [41,433,61,529]    179,765 [97,792,286,259]      25,439 [21,630,29,833]
+output_tokens         med            235.0 [203.0,375.0]         216.0 [158.0,275.0]         258.0 [205.0,323.0]         450.0 [267.0,749.0]         225.0 [216.0,274.0]
+                      mean           371.5 [259.5,554.1]         243.8 [196.7,300.3]         337.6 [252.1,450.3]         779.9 [470.1,1,185]         267.3 [228.9,309.4]
+cost_usd              med         0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]
+                      mean        0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]
+tool_calls            med               4.00 [3.00,4.00]            3.00 [3.00,4.00]            3.00 [3.00,4.00]            6.00 [2.00,9.00]            3.00 [3.00,4.00]
+                      mean              5.07 [3.48,7.93]            3.44 [2.96,3.96]            4.37 [3.41,5.74]            8.56 [5.37,12.6]            3.33 [2.81,3.81]
+tool_output_chars     med         13,597 [10,381,18,269]       14,579 [6,622,20,768]       13,597 [6,638,16,869]     78,103 [43,267,121,924]      18,721 [15,814,23,191]
+                      mean        17,924 [12,466,25,561]      22,606 [13,715,33,524]      16,917 [11,790,23,702]    131,131 [79,948,197,579]      20,580 [17,256,24,194]
+steps                 med               4.00 [4.00,5.00]            4.00 [3.00,4.00]            4.00 [4.00,5.00]            6.00 [3.00,9.00]            4.00 [3.00,5.00]
+                      mean              5.70 [4.15,8.56]            3.89 [3.59,4.19]            4.67 [4.15,5.26]            6.67 [5.26,8.19]            4.07 [3.59,4.56]
+wall_s                med               15.8 [12.6,21.5]            16.0 [12.9,22.1]            16.7 [14.8,20.0]            49.6 [20.6,94.7]            16.5 [14.1,23.7]
+                      mean              25.9 [17.2,40.2]            19.7 [16.3,23.7]            22.1 [17.5,27.6]          133.4 [57.9,234.0]            21.2 [17.7,25.1]
+score                 med               1.00 [1.00,1.00]            1.00 [1.00,1.00]            1.00 [1.00,1.00]            1.00 [1.00,1.00]            1.00 [1.00,1.00]
+                      mean          0.9259 [0.8148,1.00]      0.8704 [0.7407,0.9815]        0.9630 [0.8889,1.00]        0.8889 [0.7407,1.00]        0.8889 [0.7778,1.00]
+tool_errors           med         0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]
+                      mean        0.0000 [0.0000,0.0000]      0.0370 [0.0000,0.1111]      0.0000 [0.0000,0.0000]      0.0370 [0.0000,0.1111]      0.0000 [0.0000,0.0000]
+pass_rate                   25/27 0.9259 [0.7663,0.9794]23/27 0.8519 [0.6752,0.9408]26/27 0.9630 [0.8172,0.9934]24/27 0.8889 [0.7194,0.9615]24/27 0.8889 [0.7194,0.9615]
+
+2. COST OF CORRECTNESS (tokens per solved task)
+-----------------------------------------------
+arm             billed tok/run   pass rate    tok / solved    usd / solved
+baseline                50,017      0.9259          54,018          0.0000
+pathfinder              40,101      0.8519          47,075          0.0000
+both                    50,835      0.9630          52,790          0.0000
+codegraph              180,545      0.8889         203,114          0.0000
+cg_both                 25,706      0.8889          28,919          0.0000
+
+3. EFFECT vs 'baseline' (bootstrap CI on MEDIAN diff; Cliff's delta)
+--------------------------------------------------------------------
+Median difference, because token distributions are heavy-tailed. Cliff's delta is
+the fraction of pairwise comparisons favouring one arm and is outlier-immune, so
+when it disagrees with the mean, believe Cliff's delta about typical behaviour and
+the mean about the bill.
+
+  pathfinder vs baseline
+    metric                   med delta                    95% CI      rel%    cliff  effect
+    billed_tokens               19,476          [10,644, 25,607]     117.8   0.7503  large  *
+    context_tokens              19,771          [10,793, 25,617]     122.7   0.7586  large  *
+    output_tokens                -19.0            [-150.0, 51.0]     -8.09  -0.3004  small
+    cost_usd                    0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+    tool_calls                   -1.00           [-1.00, 0.0000]     -25.0  -0.2318  small
+    tool_output_chars            982.0          [-10,003, 7,171]      7.22  -0.0069  negligible
+    steps                       0.0000           [-2.00, 0.0000]    0.0000  -0.3032  small
+    wall_s                      0.2310             [-6.31, 7.11]      1.47  -0.0178  negligible
+    score                       0.0000          [0.0000, 0.0000]    0.0000  -0.0713  negligible
+    tool_errors                 0.0000          [0.0000, 0.0000]       n/a   0.0370  negligible
+
+  both vs baseline
+    metric                   med delta                    95% CI      rel%    cliff  effect
+    billed_tokens               26,869          [19,065, 32,798]     162.5   0.8244  large  *
+    context_tokens              27,133          [19,184, 32,495]     168.3   0.8244  large  *
+    output_tokens                 23.0            [-112.0, 82.0]      9.79  -0.0494  negligible
+    cost_usd                    0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+    tool_calls                   -1.00           [-1.00, 0.0000]     -25.0  -0.1056  negligible
+    tool_output_chars           0.0000           [-8,113, 4,342]    0.0000  -0.0261  negligible
+    steps                       0.0000             [-1.00, 1.00]    0.0000  -0.0288  negligible
+    wall_s                      0.9260             [-4.98, 5.50]      5.88   0.1221  negligible
+    score                       0.0000          [0.0000, 0.0000]    0.0000   0.0370  negligible
+    tool_errors                 0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+
+  codegraph vs baseline
+    metric                   med delta                    95% CI      rel%    cliff  effect
+    billed_tokens              105,988          [7,820, 141,130]     641.0   0.6488  large  *
+    context_tokens             106,059          [7,921, 140,481]     658.0   0.6488  large  *
+    output_tokens                215.0            [-17.0, 522.0]      91.5   0.3004  small
+    cost_usd                    0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+    tool_calls                    2.00             [-2.00, 5.00]      50.0   0.2291  small
+    tool_output_chars           64,506         [30,740, 108,327]     474.4   0.9040  large  *
+    steps                         2.00             [-1.00, 5.00]      50.0   0.2579  small
+    wall_s                        33.9              [3.13, 78.3]     215.1   0.5528  large  *
+    score                       0.0000          [0.0000, 0.0000]    0.0000  -0.0370  negligible
+    tool_errors                 0.0000          [0.0000, 0.0000]       n/a   0.0370  negligible
+
+  cg_both vs baseline
+    metric                   med delta                    95% CI      rel%    cliff  effect
+    billed_tokens                7,250           [1,724, 13,976]      43.8   0.4376  medium  *
+    context_tokens               7,210           [1,886, 13,769]      44.7   0.4376  medium  *
+    output_tokens                -10.0            [-150.0, 50.0]     -4.26  -0.1289  negligible
+    cost_usd                    0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+    tool_calls                   -1.00             [-1.00, 1.00]     -25.0  -0.2016  small
+    tool_output_chars            5,124           [-60.0, 10,366]      37.7   0.3498  medium
+    steps                       0.0000             [-1.00, 1.00]    0.0000  -0.1619  small
+    wall_s                      0.7180             [-5.64, 8.37]      4.56   0.1276  negligible
+    score                       0.0000          [0.0000, 0.0000]    0.0000  -0.0370  negligible
+    tool_errors                 0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+
+  * = 95% CI excludes zero.  cliff > 0 means the arm spends MORE than baseline.
+
+4. PER-TASK BREAKDOWN (mean score | mean billed tokens | mean tool calls)
+-------------------------------------------------------------------------
+task                                        baseline                pathfinder                      both                 codegraph                   cg_both
+N1_blast_radius                  1.00 | 41,943 | 5.7       0.67 | 90,118 | 4.7     1.00 | 123,799 | 11.3     0.00 | 743,958 | 32.7       1.00 | 38,210 | 4.7
+N2_tool_registry                 1.00 | 15,998 | 3.3       1.00 | 46,796 | 2.7       1.00 | 42,559 | 3.3      1.00 | 221,584 | 9.0       1.00 | 29,915 | 4.0
+N3_error_localize                1.00 | 11,012 | 3.3       1.00 | 22,754 | 2.0       1.00 | 34,443 | 3.0       1.00 | 66,011 | 4.3       1.00 | 17,360 | 3.0
+N4_dispatch_chain                 1.00 | 8,244 | 4.0       1.00 | 28,348 | 3.7       1.00 | 42,855 | 5.0       1.00 | 21,860 | 2.0       1.00 | 16,085 | 1.3
+N5_signature_extract             1.00 | 16,003 | 2.3       1.00 | 27,768 | 2.0       1.00 | 41,716 | 2.7      1.00 | 115,928 | 8.3       1.00 | 20,676 | 2.0
+N6_line_to_symbol                0.67 | 10,181 | 3.3       0.67 | 31,493 | 5.3       0.67 | 33,238 | 3.7      1.00 | 165,152 | 8.3       0.00 | 16,682 | 3.0
+N7_enum_exhaustive             0.67 | 308,705 | 15.3       1.00 | 35,605 | 2.7       1.00 | 43,463 | 3.0       1.00 | 10,635 | 1.0       1.00 | 37,173 | 4.0
+N8_reverse_callgraph             1.00 | 18,736 | 4.3       0.50 | 43,424 | 4.7       1.00 | 49,390 | 3.7      1.00 | 262,333 | 9.3       1.00 | 21,839 | 3.3
+N9_needle_in_large_file          1.00 | 19,327 | 4.0       1.00 | 34,602 | 3.3       1.00 | 46,051 | 3.7       1.00 | 17,448 | 2.0       1.00 | 33,415 | 4.7
+
+5. TOOL USAGE PROFILE
+---------------------
+
+  baseline  (n=27 runs, 137 tool calls)
+    tool                         calls    share   avg out chars   errors
+    grep                            88    64.2%           2,452        0
+    read                            47    34.3%           5,648        0
+    glob                             1     0.7%           2,576        0
+    invalid                          1     0.7%             136        0
+
+  pathfinder  (n=27 runs, 93 tool calls)
+    tool                         calls    share   avg out chars   errors
+    pathfinder_search               40    43.0%           9,010        1
+    pathfinder_read                 35    37.6%           5,521        0
+    pathfinder_locate                9     9.7%             120        0
+    pathfinder_trace                 9     9.7%           6,183        0
+
+  both  (n=27 runs, 118 tool calls)
+    tool                         calls    share   avg out chars   errors
+    read                            55    46.6%           4,952        0
+    grep                            52    44.1%           2,188        0
+    pathfinder_search                6     5.1%          10,781        0
+    pathfinder_locate                4     3.4%             134        0
+    pathfinder_trace                 1     0.8%           5,403        0
+
+  codegraph  (n=27 runs, 231 tool calls)
+    tool                         calls    share   avg out chars   errors
+    codegraph_codegraph_explore     223    96.5%          15,873        0
+    invalid                          8     3.5%             117        1
+
+  cg_both  (n=27 runs, 90 tool calls)
+    tool                         calls    share   avg out chars   errors
+    grep                            44    48.9%           3,299        0
+    read                            35    38.9%           6,997        0
+    codegraph_codegraph_explore      11    12.2%          15,053        0
+
+6. SPONTANEOUS ADOPTION (arm 'both' — free choice, no prompt steering)
+----------------------------------------------------------------------
+  runs that used >=1 MCP tool : 8/27 (30%, 95% CI [16%, 48%])
+  navigation call share       : MCP 11/118 (9%), built-in 107/118 (91%)
+  first tool reached for:
+    grep                           14  (52%)
+    read                           10  (37%)
+    pathfinder_locate               2  (7%)
+    pathfinder_search               1  (4%)
+
+6. SPONTANEOUS ADOPTION (arm 'cg_both' — free choice, no prompt steering)
+-------------------------------------------------------------------------
+  runs that used >=1 MCP tool : 10/27 (37%, 95% CI [22%, 56%])
+  navigation call share       : MCP 11/90 (12%), built-in 79/90 (88%)
+  first tool reached for:
+    grep                           14  (52%)
+    read                           10  (37%)
+    codegraph_codegraph_explore     3  (11%)
+
+7. FAILURE FORENSICS
+--------------------
+  baseline     no_answer=2    stream_error=0    timeout=0    runs_with_tool_error=0
+  pathfinder   no_answer=3    stream_error=0    timeout=0    runs_with_tool_error=1
+  both         no_answer=1    stream_error=0    timeout=0    runs_with_tool_error=0
+  codegraph    no_answer=1    stream_error=0    timeout=1    runs_with_tool_error=1
+  cg_both      no_answer=3    stream_error=0    timeout=0    runs_with_tool_error=0
+
+  runs that did not fully solve the task (13/135):
+    N1_blast_radius         codegraph   score=0.00 tok=1,118,612  missing=['crates/pathfinder/src/server/tools/file_ops.rs:46', 'crates/pathfinder/src/server/tools/find_symbol.
+    N7_enum_exhaustive      baseline    score=0.00 tok=880,089  no <answer> block in final message
+    N1_blast_radius         codegraph   score=0.00 tok=794,732  missing=['crates/pathfinder/src/server/tools/file_ops.rs:46', 'crates/pathfinder/src/server/tools/find_symbol.
+    N1_blast_radius         codegraph   score=0.00 tok=318,531  no <answer> block in final message
+    N1_blast_radius         pathfinder  score=0.00 tok=112,251  no <answer> block in final message
+    N8_reverse_callgraph    pathfinder  score=0.00 tok= 39,710  no <answer> block in final message
+    N6_line_to_symbol       both        score=0.00 tok= 26,676  no <answer> block in final message
+    N6_line_to_symbol       pathfinder  score=0.00 tok= 23,107  no <answer> block in final message
+    N6_line_to_symbol       cg_both     score=0.00 tok= 17,625  no <answer> block in final message
+    N6_line_to_symbol       cg_both     score=0.00 tok= 17,075  no <answer> block in final message
+    N6_line_to_symbol       cg_both     score=0.00 tok= 15,346  no <answer> block in final message
+    N6_line_to_symbol       baseline    score=0.00 tok= 10,112  no <answer> block in final message
+    N8_reverse_callgraph    pathfinder  score=0.50 tok= 52,520  failed=1
+
+9. FIXED SCHEMA OVERHEAD (first-request context tokens)
+-------------------------------------------------------
+arm              median 1st-req ctx tokens     n
+baseline                           no data     0
+pathfinder                         no data     0
+both                               no data     0
+codegraph                            2,239    27
+cg_both                              3,264    27
+
+10. COST AT MATCHED CORRECTNESS (score == 1.0 runs only)
+--------------------------------------------------------
+arm            n solved    med tok                  95% CI   vs base   mean tok   vs base   cliff
+baseline             25     16,535        [13,382, 19,708]         -     18,410         -     n/a
+pathfinder           23     32,455        [27,635, 39,587]      +96%     37,180     +102%  0.7983
+both                 26     43,410        [37,307, 48,165]     +163%     51,764     +181%  0.8954
+codegraph            24     73,440       [21,800, 153,910]     +344%    110,119     +498%  0.6600
+cg_both              24     25,256        [21,425, 29,828]      +53%     26,834      +46%  0.5233
+
+11. PER-TASK WINNER (cheapest arm that reached score 1.0)
+---------------------------------------------------------
+task                        winner        winner tok  runner-up        gap  arms solving
+N1_blast_radius             cg_both           38,210  baseline        +10%  baseline(3/3), pathfinder(2/3), both(3/3), cg_both(3/3)
+N2_tool_registry            baseline          15,998  cg_both         +87%  baseline(3/3), pathfinder(3/3), both(3/3), codegraph(3/3), cg_both(3/3)
+N3_error_localize           baseline          11,012  cg_both         +58%  baseline(3/3), pathfinder(3/3), both(3/3), codegraph(3/3), cg_both(3/3)
+N4_dispatch_chain           baseline           8,244  cg_both         +95%  baseline(3/3), pathfinder(3/3), both(3/3), codegraph(3/3), cg_both(3/3)
+N5_signature_extract        baseline          16,003  cg_both         +29%  baseline(3/3), pathfinder(3/3), both(3/3), codegraph(3/3), cg_both(3/3)
+N6_line_to_symbol           baseline          10,215  pathfinder     +249%  baseline(2/3), pathfinder(2/3), both(2/3), codegraph(3/3)
+N7_enum_exhaustive          codegraph         10,635  baseline       +116%  baseline(2/3), pathfinder(3/3), both(3/3), codegraph(3/3), cg_both(3/3)
+N8_reverse_callgraph        baseline          18,736  cg_both         +17%  baseline(3/3), pathfinder(1/3), both(3/3), codegraph(3/3), cg_both(3/3)
+N9_needle_in_large_file     codegraph         17,448  baseline        +11%  baseline(3/3), pathfinder(3/3), both(3/3), codegraph(3/3), cg_both(3/3)
+
+12. TAIL RISK / PREDICTABILITY (billed tokens)
+----------------------------------------------
+arm                   p50        p90         max   max/p50  runs>3x p50  step-cap hits
+baseline           16,535     45,194     880,089      53.2         1/27           1/27
+pathfinder         36,011     78,755     112,251       3.1         1/27           0/27
+both               43,404    119,192     127,807       2.9         0/27           0/27
+codegraph         122,523    461,344   1,118,612       9.1         3/27           0/27
+cg_both            23,785     40,855      62,888       2.6         0/27           0/27
+
+13. WHERE THE EXTRA TOKENS COME FROM (schema tax vs retrieval)
+--------------------------------------------------------------
+  no baseline data

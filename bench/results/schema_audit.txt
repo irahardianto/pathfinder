@@ -1,0 +1,29 @@
+============================================================================================
+PATHFINDER MCP TOOL SCHEMA AUDIT
+============================================================================================
+tools exposed: 7
+
+tool            desc chars  desc lines  json schema     total  est tokens
+search               1,201          22        4,164     5,371       1,492
+explore              1,720          28        3,013     4,740       1,317
+trace                2,067          30        1,766     3,838       1,066
+locate                 951          15        1,267     2,224         618
+inspect              1,003          18        1,129     2,139         594
+read                   957          16        1,143     2,104         584
+health                 419           9          697     1,122         312
+--------------------------------------------------------------------------------------------
+TOTAL                8,318                   13,179    21,538       5,983
+
+tool description prose 39% | JSON parameter schema 61% | server instructions 0%
+
+This payload is re-sent on every request in the agent loop. At the median of
+3 requests per navigation task it is charged 3 times per task.
+
+REDUCTION SIMULATION (information-preserving edits only)
+change                                                       chars  est tokens    saving
+current                                                     21,497       5,971         -
+A. drop duplicated prose from JSON parameter schema         11,393       3,165      -47%
+B. collapse oneOf/anyOf const unions to plain enums         20,398       5,666       -5%
+C. cap tool description at 6 lines                          16,418       4,561      -24%
+D. all of the above                                          6,025       1,674      -72%
+E. D, plus delegate read+search to the host's built-ins      4,217       1,171      -80%

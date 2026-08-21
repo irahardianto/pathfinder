@@ -1,0 +1,166 @@
+====================================================================================================
+PATHFINDER A/B BENCHMARK REPORT
+====================================================================================================
+runs=30  arms=['baseline', 'pathfinder', 'codegraph']  models=['google-vertex/claude-sonnet-5@default']
+tasks=['B1_tokio_api_surface_survey', 'B2_tokio_spawn_chain', 'B3_juiceshop_sql_injection_audit', 'B4_juiceshop_auth_flow', 'B5_juiceshop_authz_gap_survey']
+
+1. PER-ARM AGGREGATE
+--------------------
+Two rows per metric. `med` is the robust view (a single runaway agent loop
+can triple a 27-run mean); `mean` is what you actually pay in aggregate.
+
+metric                stat                      baseline                  pathfinder                   codegraph
+billed_tokens         med        62,554 [23,645,120,893]    125,266 [88,250,214,715]1,076,234 [531,004,2,846,899]
+                      mean       89,006 [42,470,153,373]   218,988 [107,237,405,236]1,672,160 [802,694,2,677,307]
+context_tokens        med        60,765 [22,817,117,019]    123,466 [86,164,210,525]1,067,726 [527,418,2,839,305]
+                      mean       86,213 [40,855,148,995]   215,614 [105,526,399,550]1,660,902 [796,302,2,660,450]
+output_tokens         med            2,126 [902.5,3,982]         2,262 [1,115,4,834]        7,706 [4,191,19,771]
+                      mean           2,793 [1,458,4,456]         3,374 [1,685,5,675]       11,257 [5,564,18,150]
+cost_usd              med         0.0973 [0.0650,0.1668]      0.1774 [0.1124,0.3665]        0.6707 [0.4091,1.39]
+                      mean        0.1297 [0.0783,0.1973]      0.2520 [0.1392,0.4040]        0.9148 [0.5179,1.38]
+tool_calls            med               8.00 [5.00,11.0]            7.50 [5.50,11.0]            13.5 [10.0,33.0]
+                      mean              9.30 [6.00,13.8]            7.90 [6.00,9.90]            22.2 [11.3,36.0]
+tool_output_chars     med         22,218 [17,740,39,735]     41,156 [25,300,127,250]   309,792 [233,934,601,251]
+                      mean        40,057 [19,422,73,593]     84,544 [32,530,156,778]   417,767 [256,281,612,392]
+steps                 med               5.50 [4.00,8.00]            5.00 [4.00,9.00]            14.5 [9.50,23.0]
+                      mean              6.00 [4.70,7.40]            6.20 [4.90,7.80]            15.0 [10.8,19.3]
+wall_s                med               33.5 [17.4,48.6]            33.5 [18.6,55.4]          115.2 [67.0,209.9]
+                      mean              35.8 [23.5,50.5]            42.7 [26.1,65.5]          134.3 [79.8,197.3]
+score                 med             1.00 [0.8987,1.00]          1.00 [0.8987,1.00]        0.9737 [0.8237,1.00]
+                      mean        0.9445 [0.8792,0.9947]      0.9495 [0.8942,0.9895]      0.9207 [0.8363,0.9875]
+tool_errors           med         0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]
+                      mean        0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]      0.0000 [0.0000,0.0000]
+pass_rate                    7/10 0.7000 [0.3968,0.8922] 7/10 0.7000 [0.3968,0.8922] 5/10 0.5000 [0.2366,0.7634]
+
+2. COST OF CORRECTNESS (tokens per solved task)
+-----------------------------------------------
+arm             billed tok/run   pass rate    tok / solved    usd / solved
+baseline                89,006      0.7000         127,151          0.1853
+pathfinder             218,988      0.7000         312,839          0.3600
+codegraph            1,672,160      0.5000       3,344,320            1.83
+
+3. EFFECT vs 'baseline' (bootstrap CI on MEDIAN diff; Cliff's delta)
+--------------------------------------------------------------------
+Median difference, because token distributions are heavy-tailed. Cliff's delta is
+the fraction of pairwise comparisons favouring one arm and is outlier-immune, so
+when it disagrees with the mean, believe Cliff's delta about typical behaviour and
+the mean about the bill.
+
+  pathfinder vs baseline
+    metric                   med delta                    95% CI      rel%    cliff  effect
+    billed_tokens               62,712          [9,552, 152,161]     100.3   0.6200  large  *
+    context_tokens              62,700         [10,559, 149,760]     103.2   0.6200  large  *
+    output_tokens                136.5           [-2,090, 2,540]      6.42   0.1600  small
+    cost_usd                    0.0801         [-0.0111, 0.2519]      82.3   0.5200  large
+    tool_calls                 -0.5000             [-4.00, 4.50]     -6.25   0.0000  negligible
+    tool_output_chars           18,938         [-2,201, 105,032]      85.2   0.5200  large
+    steps                      -0.5000             [-3.50, 3.50]     -9.09   0.0900  negligible
+    wall_s                      0.0090             [-17.1, 28.8]    0.0268   0.1400  negligible
+    score                       0.0000         [-0.0750, 0.0750]    0.0000   0.0100  negligible
+    tool_errors                 0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+
+  codegraph vs baseline
+    metric                   med delta                    95% CI      rel%    cliff  effect
+    billed_tokens            1,013,680      [466,088, 2,813,571]     1,620   0.9400  large  *
+    context_tokens           1,006,960      [463,817, 2,806,611]     1,657   0.9400  large  *
+    output_tokens                5,580           [1,626, 17,146]     262.5   0.6600  large  *
+    cost_usd                    0.5734            [0.2996, 1.29]     589.3   0.9600  large  *
+    tool_calls                    5.50              [1.00, 25.5]      68.8   0.5400  large  *
+    tool_output_chars          287,574        [205,398, 579,033]     1,294   0.9800  large  *
+    steps                         9.00              [2.50, 18.0]     163.6   0.7900  large  *
+    wall_s                        81.6             [33.0, 177.7]     243.5   0.7600  large  *
+    score                      -0.0263         [-0.1500, 0.0526]     -2.63  -0.1300  negligible
+    tool_errors                 0.0000          [0.0000, 0.0000]       n/a   0.0000  negligible
+
+  * = 95% CI excludes zero.  cliff > 0 means the arm spends MORE than baseline.
+
+4. PER-TASK BREAKDOWN (mean score | mean billed tokens | mean tool calls)
+-------------------------------------------------------------------------
+task                                        baseline                pathfinder                 codegraph
+B1_tokio_api_surface_survey       1.00 | 44,262 | 6.0      1.00 | 113,249 | 3.5     0.97 | 728,419 | 10.5
+B2_tokio_spawn_chain            0.77 | 77,731 | 11.0     0.80 | 168,077 | 12.5   0.69 | 1,388,916 | 16.5
+B3_juiceshop_sql_injection_audit       1.00 | 23,382 | 5.0       1.00 | 72,291 | 7.0     1.00 | 531,004 | 11.0
+B4_juiceshop_auth_flow           1.00 | 46,760 | 6.0      1.00 | 110,032 | 7.5   1.00 | 1,462,422 | 13.5
+B5_juiceshop_authz_gap_survey     0.95 | 252,894 | 18.5      0.95 | 631,290 | 9.0   0.95 | 4,250,039 | 59.5
+
+5. TOOL USAGE PROFILE
+---------------------
+
+  baseline  (n=10 runs, 93 tool calls)
+    tool                         calls    share   avg out chars   errors
+    grep                            55    59.1%           5,341        0
+    read                            31    33.3%           3,012        0
+    glob                             7     7.5%           1,925        0
+
+  pathfinder  (n=10 runs, 79 tool calls)
+    tool                         calls    share   avg out chars   errors
+    pathfinder_search               55    69.6%          14,315        0
+    pathfinder_read                 20    25.3%           2,631        0
+    pathfinder_explore               4     5.1%           1,368        0
+
+  codegraph  (n=10 runs, 222 tool calls)
+    tool                         calls    share   avg out chars   errors
+    codegraph_codegraph_explore     221    99.5%          18,903        0
+    invalid                          1     0.5%             173        0
+
+7. FAILURE FORENSICS
+--------------------
+  baseline     no_answer=0    stream_error=0    timeout=0    runs_with_tool_error=0
+  pathfinder   no_answer=0    stream_error=0    timeout=0    runs_with_tool_error=0
+  codegraph    no_answer=0    stream_error=0    timeout=0    runs_with_tool_error=0
+
+  runs that did not fully solve the task (13/30):
+    B2_tokio_spawn_chain    codegraph   score=0.68 tok=1,242,872  
+    B2_tokio_spawn_chain    codegraph   score=0.70 tok=1,534,959  
+    B2_tokio_spawn_chain    baseline    score=0.70 tok= 84,208  
+    B2_tokio_spawn_chain    pathfinder  score=0.75 tok=155,149  
+    B2_tokio_spawn_chain    pathfinder  score=0.85 tok=181,005  
+    B2_tokio_spawn_chain    baseline    score=0.85 tok= 71,254  
+    B1_tokio_api_surface_surveycodegraph   score=0.94 tok=547,241  missing=['try_read_owned', 'try_write_owned']
+    B5_juiceshop_authz_gap_surveycodegraph   score=0.95 tok=4,888,340  
+    B5_juiceshop_authz_gap_surveycodegraph   score=0.95 tok=3,611,738  
+    B5_juiceshop_authz_gap_surveypathfinder  score=0.95 tok=988,298  
+    B5_juiceshop_authz_gap_surveybaseline    score=0.95 tok=335,255  
+    B5_juiceshop_authz_gap_surveypathfinder  score=0.95 tok=274,281  
+    B5_juiceshop_authz_gap_surveybaseline    score=0.95 tok=170,532  
+
+9. FIXED SCHEMA OVERHEAD (first-request context tokens)
+-------------------------------------------------------
+arm              median 1st-req ctx tokens     n
+baseline                             2,739    10
+pathfinder                          10,405    10
+codegraph                            3,547    10
+
+  pathfinder schema tax vs baseline : +7,666 tokens on EVERY request
+
+10. COST AT MATCHED CORRECTNESS (score == 1.0 runs only)
+--------------------------------------------------------
+arm            n solved    med tok                  95% CI   vs base   mean tok   vs base   cliff
+baseline              6     28,486        [23,363, 62,554]         -     38,134         -     n/a
+pathfinder            6     98,015       [72,291, 125,266]     +244%     98,524     +158%    1.00
+codegraph             5    601,581     [77,945, 2,846,899]    +2012%    979,290    +2468%    1.00
+
+11. PER-TASK WINNER (cheapest arm that reached score 1.0)
+---------------------------------------------------------
+task                        winner        winner tok  runner-up        gap  arms solving
+B1_tokio_api_surface_survey  baseline          44,262  pathfinder     +156%  baseline(2/2), pathfinder(2/2), codegraph(1/2)
+B2_tokio_spawn_chain        NONE                   -  -                  -  -
+B3_juiceshop_sql_injection_audit  baseline          23,382  pathfinder     +209%  baseline(2/2), pathfinder(2/2), codegraph(2/2)
+B4_juiceshop_auth_flow      baseline          46,760  pathfinder     +135%  baseline(2/2), pathfinder(2/2), codegraph(2/2)
+B5_juiceshop_authz_gap_survey  NONE                   -  -                  -  -
+
+12. TAIL RISK / PREDICTABILITY (billed tokens)
+----------------------------------------------
+arm                   p50        p90         max   max/p50  runs>3x p50  step-cap hits
+baseline           62,554    335,255     335,255       5.4         1/10           0/10
+pathfinder        125,266    988,298     988,298       7.9         1/10           0/10
+codegraph       1,076,234  4,888,340   4,888,340       4.5         2/10           0/10
+
+13. WHERE THE EXTRA TOKENS COME FROM (schema tax vs retrieval)
+--------------------------------------------------------------
+arm             med total delta  per-req tax  med steps  tax x steps  tax share  retrieval delta
+pathfinder               62,712        7,666        5.0       38,330        61%           24,382
+codegraph             1,013,680          808       14.5       11,716         1%        1,001,964
+
+  Reading: 'tax x steps' is the fixed tool-schema cost re-sent on every request.
+  'retrieval delta' is what remains — the genuine cost of the tools' own output.

@@ -1,0 +1,58 @@
+[
+  {
+    "name": "search",
+    "desc_chars": 1201,
+    "schema_chars": 4164,
+    "total_chars": 5371,
+    "est_tokens": 1492,
+    "desc_lines": 22
+  },
+  {
+    "name": "explore",
+    "desc_chars": 1720,
+    "schema_chars": 3013,
+    "total_chars": 4740,
+    "est_tokens": 1317,
+    "desc_lines": 28
+  },
+  {
+    "name": "trace",
+    "desc_chars": 2067,
+    "schema_chars": 1766,
+    "total_chars": 3838,
+    "est_tokens": 1066,
+    "desc_lines": 30
+  },
+  {
+    "name": "locate",
+    "desc_chars": 951,
+    "schema_chars": 1267,
+    "total_chars": 2224,
+    "est_tokens": 618,
+    "desc_lines": 15
+  },
+  {
+    "name": "inspect",
+    "desc_chars": 1003,
+    "schema_chars": 1129,
+    "total_chars": 2139,
+    "est_tokens": 594,
+    "desc_lines": 18
+  },
+  {
+    "name": "read",
+    "desc_chars": 957,
+    "schema_chars": 1143,
+    "total_chars": 2104,
+    "est_tokens": 584,
+    "desc_lines": 16
+  },
+  {
+    "name": "health",
+    "desc_chars": 419,
+    "schema_chars": 697,
+    "total_chars": 1122,
+    "est_tokens": 312,
+    "desc_lines": 9
+  }
+]

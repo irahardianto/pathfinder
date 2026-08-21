@@ -1,0 +1,19 @@
+================================================================================================
+COUNTERFACTUAL: LEANER TOOL SCHEMA  (suite=nav)
+================================================================================================
+baseline median billed tokens: 16,535
+
+arm             reduction   tax/req  med steps     saved  proj. median  vs baseline
+both          0% (actual)     6,238        4.0         0        43,404         162%
+                      47%     3,306        4.0    11,727        31,677          92%
+                      72%     1,747        4.0    17,965        25,439          54%
+                      80%     1,248        4.0    19,962        22,958          39%
+
+pathfinder    0% (actual)     5,213        4.0         0        36,011         118%
+                      47%     2,763        4.0     9,800        26,666          61%
+                      72%     1,460        4.0    15,013        20,150          22%
+                      80%     1,043        4.0    16,682        18,065           9%
+
+Assumption: the schema payload is re-sent on every request, so the saving scales
+with step count. Reduction fractions come from schema_audit.py's simulation of
+information-preserving edits (A = 47%, D = 72%).
