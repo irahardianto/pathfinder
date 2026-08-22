@@ -198,13 +198,15 @@ fn test_symbol_kind_to_filter_string() {
 }
 
 #[test]
-fn test_kind_matches_filter() {
-    // Exact matches
+fn test_kind_matches_filter_exact_matches() {
     assert!(kind_matches_filter("function", "function"));
     assert!(kind_matches_filter("struct", "struct"));
     assert!(kind_matches_filter("class", "class"));
+}
 
-    // Cross-language mappings: filter="function" accepts method/fn kinds
+#[test]
+fn test_kind_matches_filter_cross_language_mappings() {
+    // filter="function" accepts method/fn kinds
     assert!(kind_matches_filter("fn", "function"));
     assert!(kind_matches_filter("method", "function"));
     assert!(kind_matches_filter("interface", "class"));
@@ -213,8 +215,11 @@ fn test_kind_matches_filter() {
     assert!(kind_matches_filter("trait", "trait"));
     assert!(kind_matches_filter("const", "constant"));
     assert!(kind_matches_filter("mod", "module"));
+}
 
-    // Symmetric: filter="method" also accepts function/fn kinds
+#[test]
+fn test_kind_matches_filter_method_function_symmetric() {
+    // Symmetric: filter="method" also accepts function/fn kinds.
     // This is critical for Java: methods are extracted as SymbolKind::Function
     // (mapped to kind="function"), but agents may search with kind="method".
     assert!(kind_matches_filter("function", "method"));
@@ -224,14 +229,18 @@ fn test_kind_matches_filter() {
     // filter="fn" also works symmetrically
     assert!(kind_matches_filter("function", "fn"));
     assert!(kind_matches_filter("method", "fn"));
+}
 
-    // Case insensitive
+#[test]
+fn test_kind_matches_filter_case_insensitive() {
     assert!(kind_matches_filter("FUNCTION", "function"));
     assert!(kind_matches_filter("struct", "STRUCT"));
     assert!(kind_matches_filter("METHOD", "function"));
     assert!(kind_matches_filter("function", "METHOD"));
+}
 
-    // No match
+#[test]
+fn test_kind_matches_filter_no_match() {
     assert!(!kind_matches_filter("class", "function"));
     assert!(!kind_matches_filter("enum", "function"));
     assert!(!kind_matches_filter("unknown", "class"));

@@ -141,7 +141,325 @@ fn is_valid_kind_filter(kind: &str) -> bool {
     )
 }
 
+/// Validates `find_symbol` input parameters.
+///
+/// Rejects empty queries, path-traversal-looking queries, and unknown `kind`
+/// filter values (an invalid `kind` would otherwise silently return zero
+/// results, which is confusing for callers).
+fn validate_find_symbol_params(params: &SearchToolParams) -> Result<(), ErrorData> {
+    if params.query.trim().is_empty() {
+        return Err(invalid_params_error("query must not be empty"));
+    }
+
+    let name_lower = params.query.to_lowercase();
+    if name_lower.contains("..") || name_lower.contains('/') || name_lower.contains('\\') {
+        return Err(invalid_params_error(
+            "query must not contain path separators",
+        ));
+    }
+
+    if let Some(ref kind) = params.kind {
+        if !is_valid_kind_filter(kind) {
+            return Err(invalid_params_error(format!(
+                "Unknown kind filter: \"{kind}\". \
+                 Canonical values: function, class, struct, interface, enum, type, constant, module, impl. \
+                 Accepted aliases (case-insensitive): method/fn -> function; trait -> interface; \
+                 const/static/let -> constant; mod/namespace -> module. \
+                 class also matches struct and interface; type matches class, struct, interface, trait, and enum."
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns `true` when `path_glob` already scopes the search to a single
+/// known source-file extension (directly or via [`infer_single_ext_from_glob`]).
+fn glob_has_ext_filter(path_glob: &str) -> bool {
+    infer_single_ext_from_glob(path_glob).is_some()
+        || path_glob.contains("*.rs")
+        || path_glob.contains("*.ts")
+        || path_glob.contains("*.tsx")
+        || path_glob.contains("*.js")
+        || path_glob.contains("*.jsx")
+        || path_glob.contains("*.py")
+        || path_glob.contains("*.go")
+        || path_glob.contains("*.java")
+}
+
+/// Determines which (extension, glob) pairs to search.
+///
+/// - Single known extension inferred from `path_glob` → that extension's
+///   language-specific patterns, scoped to the user's glob.
+/// - Ambiguous/unrecognised extension filter (e.g. brace expansion) → a
+///   catch-all `"any"` bare word-boundary search.
+/// - No extension filter at all → every supported language, each with its
+///   own default glob.
+fn resolve_search_extensions(path_glob: &str) -> Vec<(&'static str, String)> {
+    if let Some(ext) = infer_single_ext_from_glob(path_glob) {
+        return vec![(ext, path_glob.to_string())];
+    }
+    if glob_has_ext_filter(path_glob) {
+        return vec![("any", path_glob.to_string())];
+    }
+    vec![
+        ("rs", String::from("**/*.rs")),
+        ("ts", String::from("**/*.ts")),
+        ("tsx", String::from("**/*.tsx")),
+        ("js", String::from("**/*.js")),
+        ("jsx", String::from("**/*.jsx")),
+        ("py", String::from("**/*.py")),
+        ("go", String::from("**/*.go")),
+        ("java", String::from("**/*.java")),
+    ]
+}
+
+/// When the user's `path_glob` is a plain directory prefix (not an extension
+/// filter, not the catch-all `"**/*"`), extracts that prefix for post-search
+/// directory filtering. Returns `None` when no such filtering applies.
+fn compute_user_path_prefix(path_glob: &str, has_ext_filter: bool) -> Option<String> {
+    if has_ext_filter || path_glob.is_empty() || path_glob == "**/*" {
+        return None;
+    }
+    let trimmed = path_glob.trim_end_matches("/**").trim_end_matches("/*");
+    if trimmed.is_empty() || trimmed == "." {
+        None
+    } else {
+        Some(format!("{trimmed}/"))
+    }
+}
+
+/// Builds one [`SearchParams`] per language-specific definition pattern
+/// across the given `(extension, glob)` pairs.
+fn build_search_params_list(
+    workspace_root: &Path,
+    extensions: Vec<(&str, String)>,
+    query: &str,
+) -> Vec<SearchParams> {
+    let mut search_params_list = Vec::new();
+    for (ext, glob) in extensions {
+        let ext_patterns = crate::server::tools::navigation::definition_patterns(ext, query);
+        for pattern in ext_patterns {
+            search_params_list.push(SearchParams {
+                workspace_root: workspace_root.to_path_buf(),
+                query: pattern,
+                is_regex: true,
+                path_glob: glob.clone(),
+                exclude_glob: vec!["**/node_modules/**".to_string()],
+                max_results: 100,
+                offset: 0,
+                context_lines: 0,
+            });
+        }
+    }
+    search_params_list
+}
+
 impl PathfinderServer {
+    /// Runs every search in `search_params_list` concurrently, treating a
+    /// failed individual search as an empty result rather than aborting the
+    /// whole `find_symbol` call.
+    async fn run_parallel_searches(
+        &self,
+        search_params_list: Vec<SearchParams>,
+    ) -> Vec<pathfinder_search::SearchResult> {
+        futures::stream::iter(search_params_list)
+            .map(|search_params| async move {
+                let query = search_params.query.clone();
+                match self.scout.search(&search_params).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = "find_symbol",
+                            error = %e,
+                            pattern = %query,
+                            "scout search failed"
+                        );
+                        pathfinder_search::SearchResult {
+                            matches: Vec::new(),
+                            total_matches: 0,
+                            truncated: false,
+                            files_searched: 0,
+                            files_in_scope: 0,
+                            binary_skipped: 0,
+                            gitignored_skipped: 0,
+                            other_skipped: 0,
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(SEARCH_CONCURRENCY)
+            .collect()
+            .await
+    }
+
+    /// Flattens raw search results into enrichment candidates, rejecting
+    /// unsafe/out-of-workspace/sandbox-denied paths and applying the user's
+    /// directory prefix filter, then deduplicates by `(file, line)`.
+    fn filter_and_dedup_matches(
+        &self,
+        search_results: Vec<pathfinder_search::SearchResult>,
+        user_path_prefix: Option<&str>,
+    ) -> Vec<MatchToEnrich> {
+        let canonical_root = self
+            .workspace_root
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace_root.path().to_path_buf());
+
+        let mut matches_to_enrich: Vec<MatchToEnrich> = Vec::new();
+        for result in search_results {
+            for m in result.matches {
+                if !self.is_admissible_match(&m, user_path_prefix, &canonical_root) {
+                    continue;
+                }
+                matches_to_enrich.push(MatchToEnrich {
+                    file: m.file,
+                    line: m.line,
+                    content: m.content,
+                });
+            }
+        }
+
+        let mut seen_locations = std::collections::HashSet::new();
+        matches_to_enrich.retain(|m| seen_locations.insert((m.file.clone(), m.line)));
+        matches_to_enrich
+    }
+
+    /// Returns `true` if a raw search match should be enriched: the path is
+    /// safe (no traversal), inside the workspace, not sandbox-denied, and
+    /// (when set) matches the user's directory prefix filter.
+    fn is_admissible_match(
+        &self,
+        m: &pathfinder_search::SearchMatch,
+        user_path_prefix: Option<&str>,
+        canonical_root: &Path,
+    ) -> bool {
+        if m.file.contains("..") || m.file.starts_with('/') || m.file.starts_with('\\') {
+            tracing::warn!(
+                tool = "find_symbol",
+                file = %m.file,
+                "skipping potentially unsafe path"
+            );
+            return false;
+        }
+
+        let file_path = Path::new(&m.file);
+
+        if !is_workspace_file(file_path, self.workspace_root.path(), canonical_root) {
+            return false;
+        }
+
+        if let Err(e) = self.sandbox.check(file_path) {
+            tracing::warn!(
+                tool = "find_symbol",
+                file = %m.file,
+                error = %e,
+                "sandbox denied access to file"
+            );
+            return false;
+        }
+
+        if let Some(prefix) = user_path_prefix {
+            if !m.file.starts_with(prefix) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Enriches a single ripgrep match with Tree-sitter's enclosing-symbol
+    /// detail (name + kind), falling back to line-based heuristics when
+    /// Tree-sitter can't resolve it. Returns `(None, _)` when the match
+    /// should be dropped (empty symbol name, or filtered out by `kind`).
+    async fn enrich_one_match(
+        &self,
+        m: MatchToEnrich,
+        kind_filter: Option<&str>,
+    ) -> (Option<EnrichedMatch>, bool) {
+        let file_path = Path::new(&m.file);
+        // m.line is 1-indexed from ripgrep; tree-sitter also expects 1-indexed.
+        // Default to 1 (first line) if conversion fails, preserving valid indexing.
+        let line_usize = usize::try_from(m.line).unwrap_or(1);
+
+        let fallback_name = extract_name_from_line(&m.content);
+        let fallback_kind = infer_kind_from_line(&m.content);
+
+        let (symbol_name, kind, is_degraded) = match self
+            .surgeon
+            .enclosing_symbol_detail(self.workspace_root.path(), file_path, line_usize)
+            .await
+        {
+            Ok(Some(detail)) => {
+                let symbol_part = match detail.semantic_path.find("::") {
+                    Some(pos) => detail.semantic_path[pos + 2..].to_string(),
+                    None => detail.semantic_path,
+                };
+
+                if symbol_part.is_empty() {
+                    tracing::warn!(
+                        tool = "find_symbol",
+                        file = %m.file,
+                        line = m.line,
+                        "Tree-sitter returned empty symbol name, using fallback"
+                    );
+                    (fallback_name, fallback_kind, true)
+                } else {
+                    let ts_kind = symbol_kind_to_filter_string(detail.kind);
+                    (symbol_part, ts_kind, false)
+                }
+            }
+            Ok(None) | Err(_) => (fallback_name, fallback_kind, true),
+        };
+
+        if symbol_name.trim().is_empty() {
+            tracing::warn!(
+                tool = "find_symbol",
+                file = %m.file,
+                line = m.line,
+                "empty symbol name, skipping match"
+            );
+            return (None, is_degraded);
+        }
+
+        if let Some(filter_kind) = kind_filter {
+            if !kind_matches_filter(kind, filter_kind) {
+                return (None, is_degraded);
+            }
+        }
+
+        let semantic_path = format!("{}::{}", m.file, symbol_name);
+        let preview = truncate_preview(&m.content, 100);
+
+        (
+            Some(EnrichedMatch {
+                semantic_path,
+                kind,
+                file: m.file,
+                line: m.line,
+                preview,
+            }),
+            is_degraded,
+        )
+    }
+
+    /// Enriches every candidate match concurrently.
+    async fn enrich_find_symbol_matches(
+        &self,
+        matches_to_enrich: Vec<MatchToEnrich>,
+        kind_filter: Option<String>,
+    ) -> Vec<(Option<EnrichedMatch>, bool)> {
+        futures::stream::iter(matches_to_enrich)
+            .map(|m| {
+                let kind_filter = kind_filter.clone();
+                async move { self.enrich_one_match(m, kind_filter.as_deref()).await }
+            })
+            .buffer_unordered(ENRICHMENT_CONCURRENCY)
+            .collect()
+            .await
+    }
+
     /// Core logic for the `find_symbol` tool.
     ///
     /// Runs ripgrep across the workspace with language-aware definition patterns
@@ -170,320 +488,39 @@ impl PathfinderServer {
             "find_symbol_inner: start"
         );
 
-        if params.query.trim().is_empty() {
-            return Err(invalid_params_error("query must not be empty"));
-        }
+        validate_find_symbol_params(&params)?;
 
-        // Validate name doesn't contain path traversal or regex metacharacters
-        let name_lower = params.query.to_lowercase();
-        if name_lower.contains("..") || name_lower.contains('/') || name_lower.contains('\\') {
-            return Err(invalid_params_error(
-                "query must not contain path separators",
-            ));
-        }
+        let has_ext_filter = glob_has_ext_filter(&params.path_glob);
+        let extensions = resolve_search_extensions(&params.path_glob);
+        let user_path_prefix = compute_user_path_prefix(&params.path_glob, has_ext_filter);
+        let search_params_list =
+            build_search_params_list(self.workspace_root.path(), extensions, &params.query);
 
-        // Validate kind filter early — invalid values silently return 0 results otherwise.
-        // Return a descriptive error so agents immediately know what values are accepted.
-        if let Some(ref kind) = params.kind {
-            if !is_valid_kind_filter(kind) {
-                return Err(invalid_params_error(format!(
-                    "Unknown kind filter: \"{kind}\". \
-                     Canonical values: function, class, struct, interface, enum, type, constant, module, impl. \
-                     Accepted aliases (case-insensitive): method/fn -> function; trait -> interface; \
-                     const/static/let -> constant; mod/namespace -> module. \
-                     class also matches struct and interface; type matches class, struct, interface, trait, and enum."
-                )));
-            }
-        }
-
-        // Check if path_glob already filters by a single known extension.
-        // When it does, use the proper language-specific definition patterns for that
-        // extension instead of the "any" catch-all (which falls back to a bare \bname\b
-        // word boundary search and produces false positives in call sites, imports, etc.).
-        //
-        // Examples:
-        //   "**/*.rs"      → inferred ext "rs" → Rust fn/struct/enum patterns
-        //   "src/**/*.ts"  → inferred ext "ts" → TS function/class/const patterns
-        //   "**/*.go"      → inferred ext "go" → Go func/type patterns
-        //   "**/*"         → no ext, has_ext_filter = false → all languages searched
-        //   "**/*.{ts,tsx}"→ multi-ext brace expansion → "any" fallback (ambiguous)
-        let inferred_single_ext = infer_single_ext_from_glob(&params.path_glob);
-        let has_ext_filter = inferred_single_ext.is_some()
-            || params.path_glob.contains("*.rs")
-            || params.path_glob.contains("*.ts")
-            || params.path_glob.contains("*.tsx")
-            || params.path_glob.contains("*.js")
-            || params.path_glob.contains("*.jsx")
-            || params.path_glob.contains("*.py")
-            || params.path_glob.contains("*.go")
-            || params.path_glob.contains("*.java");
-
-        // Build patterns for all supported languages unless filtered.
-        // When a single extension is detected, run only that extension's patterns
-        // against the user-provided glob (which already scopes the file set).
-        let extensions: Vec<(&str, String)> = if let Some(ext) = inferred_single_ext {
-            // Single extension detected — use language-specific patterns + user glob.
-            vec![(ext, params.path_glob.clone())]
-        } else if has_ext_filter {
-            // Multi-extension or unrecognised glob pattern — fall back to bare word search.
-            // This is less precise but avoids producing zero results for unusual globs.
-            vec![("any", params.path_glob.clone())]
-        } else {
-            vec![
-                ("rs", String::from("**/*.rs")),
-                ("ts", String::from("**/*.ts")),
-                ("tsx", String::from("**/*.tsx")),
-                ("js", String::from("**/*.js")),
-                ("jsx", String::from("**/*.jsx")),
-                ("py", String::from("**/*.py")),
-                ("go", String::from("**/*.go")),
-                ("java", String::from("**/*.java")),
-            ]
-        };
-
-        // Phase 1: Build all search tasks
-        let mut search_params_list: Vec<SearchParams> = Vec::new();
-        for (ext, glob) in extensions {
-            let ext_patterns =
-                crate::server::tools::navigation::definition_patterns(ext, &params.query);
-            for pattern in ext_patterns {
-                search_params_list.push(SearchParams {
-                    workspace_root: self.workspace_root.path().to_path_buf(),
-                    query: pattern,
-                    is_regex: true,
-                    path_glob: glob.clone(),
-                    exclude_glob: vec!["**/node_modules/**".to_string()],
-                    max_results: 100,
-                    offset: 0,
-                    context_lines: 0,
-                });
-            }
-        }
-
-        // When the user's path_glob is not an extension filter and is not a
-        // catch-all, extract a directory prefix for post-search filtering.
-        let user_path_prefix: Option<String> =
-            if !has_ext_filter && !params.path_glob.is_empty() && params.path_glob != "**/*" {
-                let trimmed = params
-                    .path_glob
-                    .trim_end_matches("/**")
-                    .trim_end_matches("/*");
-                if trimmed.is_empty() || trimmed == "." {
-                    None
-                } else {
-                    Some(format!("{trimmed}/"))
-                }
-            } else {
-                None
-            };
-
-        // Phase 2: Parallel searches
         tracing::debug!(
             tool = "find_symbol",
             num_searches = search_params_list.len(),
             "find_symbol: starting parallel searches"
         );
+        let search_results = self.run_parallel_searches(search_params_list).await;
 
-        let search_results: Vec<pathfinder_search::SearchResult> =
-            futures::stream::iter(search_params_list)
-                .map(|search_params| async move {
-                    let query = search_params.query.clone();
-                    let result = self.scout.search(&search_params).await;
-                    match result {
-                        Ok(r) => r,
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = "find_symbol",
-                                error = %e,
-                                pattern = %query,
-                                "scout search failed"
-                            );
-                            pathfinder_search::SearchResult {
-                                matches: Vec::new(),
-                                total_matches: 0,
-                                truncated: false,
-                                files_searched: 0,
-                                files_in_scope: 0,
-                                binary_skipped: 0,
-                                gitignored_skipped: 0,
-                                other_skipped: 0,
-                            }
-                        }
-                    }
-                })
-                .buffer_unordered(SEARCH_CONCURRENCY)
-                .collect()
-                .await;
+        let pre_dedup_count: usize = search_results.iter().map(|r| r.matches.len()).sum();
+        let matches_to_enrich =
+            self.filter_and_dedup_matches(search_results, user_path_prefix.as_deref());
+        let dedup_eliminated = pre_dedup_count.saturating_sub(matches_to_enrich.len());
 
-        // Phase 3: Flatten results and filter matches
-        // OPT-1: Pre-compute canonical workspace root once to avoid the
-        // expensive canonicalize() syscall (10-100µs) on every match.
-        let canonical_root = self
-            .workspace_root
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace_root.path().to_path_buf());
-
-        let mut matches_to_enrich: Vec<MatchToEnrich> = Vec::new();
-        for result in search_results {
-            for m in result.matches {
-                // Validate file path is safe (no path traversal)
-                if m.file.contains("..") || m.file.starts_with('/') || m.file.starts_with('\\') {
-                    tracing::warn!(
-                        tool = "find_symbol",
-                        file = %m.file,
-                        "skipping potentially unsafe path"
-                    );
-                    continue;
-                }
-
-                let file_path = Path::new(&m.file);
-
-                // Skip non-workspace files
-                if !is_workspace_file(file_path, self.workspace_root.path(), &canonical_root) {
-                    continue;
-                }
-
-                // Apply sandbox policy check
-                if let Err(e) = self.sandbox.check(file_path) {
-                    tracing::warn!(
-                        tool = "find_symbol",
-                        file = %m.file,
-                        error = %e,
-                        "sandbox denied access to file"
-                    );
-                    continue;
-                }
-
-                // Apply user's path_glob as directory filter
-                if let Some(ref prefix) = user_path_prefix {
-                    if !m.file.starts_with(prefix.as_str()) {
-                        continue;
-                    }
-                }
-
-                matches_to_enrich.push(MatchToEnrich {
-                    file: m.file,
-                    line: m.line,
-                    content: m.content,
-                });
-            }
-        }
-
-        // OPT-4: Deduplicate by (file, line) before enrichment.
-        // Multiple ripgrep patterns can match the same definition (e.g. `fn\s+foo`
-        // and `\bfoo\b`). Deduplicating here avoids redundant Tree-sitter file
-        // parses + AST walks — the most expensive per-match operation.
-        let pre_dedup_count = matches_to_enrich.len();
-        {
-            let mut seen_locations = std::collections::HashSet::new();
-            matches_to_enrich.retain(|m| seen_locations.insert((m.file.clone(), m.line)));
-        }
-        let dedup_eliminated = pre_dedup_count - matches_to_enrich.len();
-
-        // Phase 4: Parallel enrichments
         tracing::debug!(
             tool = "find_symbol",
             num_matches = matches_to_enrich.len(),
             dedup_eliminated = dedup_eliminated,
             "find_symbol: starting parallel enrichments"
         );
+        let enriched_with_degraded = self
+            .enrich_find_symbol_matches(matches_to_enrich, params.kind.clone())
+            .await;
 
-        let kind_filter = params.kind.clone();
-        let enriched_with_degraded: Vec<(Option<EnrichedMatch>, bool)> =
-            futures::stream::iter(matches_to_enrich)
-                .map(|m| {
-                    let kind_filter = kind_filter.clone();
-                    async move {
-                        let file_path = Path::new(&m.file);
-                        // m.line is 1-indexed from ripgrep; tree-sitter also expects 1-indexed.
-                        // Default to 1 (first line) if conversion fails, preserving valid indexing.
-                        let line_usize = usize::try_from(m.line).unwrap_or(1);
-
-                        // Enrich with Tree-sitter to get symbol name and kind.
-                        // Use enclosing_symbol_detail() to get the full ExtractedSymbol
-                        // including SymbolKind — this provides accurate kind classification
-                        // for all languages with treesitter support (including Java methods
-                        // which lack a keyword like `fn`/`def`/`function`).
-                        let fallback_name = extract_name_from_line(&m.content);
-                        let fallback_kind = infer_kind_from_line(&m.content);
-
-                        let (symbol_name, kind, is_degraded) = match self
-                            .surgeon
-                            .enclosing_symbol_detail(
-                                self.workspace_root.path(),
-                                file_path,
-                                line_usize,
-                            )
-                            .await
-                        {
-                            Ok(Some(detail)) => {
-                                // Use the semantic path from treesitter for the symbol name
-                                let symbol_part = match detail.semantic_path.find("::") {
-                                    Some(pos) => detail.semantic_path[pos + 2..].to_string(),
-                                    None => detail.semantic_path,
-                                };
-
-                                // Validate symbol name is non-empty
-                                if symbol_part.is_empty() {
-                                    tracing::warn!(
-                                        tool = "find_symbol",
-                                        file = %m.file,
-                                        line = m.line,
-                                        "Tree-sitter returned empty symbol name, using fallback"
-                                    );
-                                    (fallback_name, fallback_kind, true)
-                                } else {
-                                    // Use SymbolKind from treesitter — accurate for all
-                                    // supported languages including Java, Go, Python, etc.
-                                    let ts_kind = symbol_kind_to_filter_string(detail.kind);
-                                    (symbol_part, ts_kind, false)
-                                }
-                            }
-                            Ok(None) | Err(_) => (fallback_name, fallback_kind, true),
-                        };
-
-                        // Validate symbol name is non-empty
-                        if symbol_name.trim().is_empty() {
-                            tracing::warn!(
-                                tool = "find_symbol",
-                                file = %m.file,
-                                line = m.line,
-                                "empty symbol name, skipping match"
-                            );
-                            return (None, is_degraded);
-                        }
-
-                        // Filter by kind if specified
-                        if let Some(ref filter_kind) = kind_filter {
-                            if !kind_matches_filter(kind, filter_kind) {
-                                return (None, is_degraded);
-                            }
-                        }
-
-                        let semantic_path = format!("{}::{}", m.file, symbol_name);
-                        let preview = truncate_preview(&m.content, 100);
-
-                        (
-                            Some(EnrichedMatch {
-                                semantic_path,
-                                kind,
-                                file: m.file,
-                                line: m.line,
-                                preview,
-                            }),
-                            is_degraded,
-                        )
-                    }
-                })
-                .buffer_unordered(ENRICHMENT_CONCURRENCY)
-                .collect()
-                .await;
-
-        // Phase 5: Build FoundSymbol list, deduplicate, sort, truncate
+        // Build FoundSymbol list, deduplicate, sort, truncate
         let mut any_degraded = false;
         let mut all_matches: Vec<FoundSymbol> = Vec::new();
-
         for (enriched, is_degraded) in enriched_with_degraded {
             if is_degraded {
                 any_degraded = true;
