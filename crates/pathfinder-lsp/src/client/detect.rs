@@ -544,6 +544,119 @@ async fn has_marker(dir: &Path, marker: &str) -> bool {
     tokio::fs::metadata(dir.join(marker)).await.is_ok()
 }
 
+/// Returns `true` if `entry`'s file type is a symlink.
+///
+/// Symlinked directories are skipped during marker scans to avoid infinite
+/// loops on cyclic symlinks and to avoid double-counting the same project
+/// reached via two different paths.
+async fn is_symlink_entry(entry: &tokio::fs::DirEntry) -> bool {
+    entry
+        .file_type()
+        .await
+        .is_ok_and(|file_type| file_type.is_symlink())
+}
+
+/// Scans the immediate (non-symlink) subdirectories of `dir` for `marker`,
+/// recursing one further level when `depth_remaining` allows.
+///
+/// Returns every directory found to contain `marker` at this level or the
+/// next.
+async fn scan_children_for_marker(
+    dir: &Path,
+    marker: &str,
+    depth_remaining: usize,
+) -> Vec<std::path::PathBuf> {
+    let mut matches = Vec::new();
+
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return matches;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.is_dir() || is_symlink_entry(&entry).await {
+            continue;
+        }
+
+        if has_marker(&path, marker).await {
+            matches.push(path.clone());
+        }
+
+        if depth_remaining >= 2 {
+            matches.extend(scan_one_level(&path, marker).await);
+        }
+    }
+
+    matches
+}
+
+/// Scans the immediate (non-symlink) subdirectories of `dir` for `marker`,
+/// without recursing further. Used by [`scan_children_for_marker`] to check
+/// one additional level of depth.
+async fn scan_one_level(dir: &Path, marker: &str) -> Vec<std::path::PathBuf> {
+    let mut matches = Vec::new();
+
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return matches;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.is_dir() && !is_symlink_entry(&entry).await && has_marker(&path, marker).await {
+            matches.push(path);
+        }
+    }
+
+    matches
+}
+
+/// Narrows `matches` to directories that also contain `sibling` (e.g.
+/// `tsconfig.json` next to `package.json`), filtering out e2e/test
+/// sub-projects that have the marker but not the sibling.
+async fn refine_by_sibling(
+    matches: &[std::path::PathBuf],
+    sibling: &str,
+) -> Vec<std::path::PathBuf> {
+    let mut refined = Vec::new();
+    for dir in matches {
+        if tokio::fs::metadata(dir.join(sibling)).await.is_ok() {
+            refined.push(dir.clone());
+        }
+    }
+    refined
+}
+
+/// Resolves the outcome of a marker scan that found 2+ candidate directories.
+///
+/// If `sibling_filter` is set and narrows the candidates to exactly one
+/// directory, that directory is used. Otherwise falls back to `base` (the
+/// workspace root), treating the ambiguity as a monorepo.
+async fn resolve_multiple_matches(
+    matches: &[std::path::PathBuf],
+    marker: &str,
+    sibling_filter: Option<&str>,
+    base: &Path,
+) -> std::path::PathBuf {
+    if let Some(sibling) = sibling_filter {
+        let refined = refine_by_sibling(matches, sibling).await;
+        if let [only] = refined.as_slice() {
+            tracing::info!(
+                "Multiple {} markers found; selected {} (has {} sibling)",
+                marker,
+                only.display(),
+                sibling,
+            );
+            return only.clone();
+        }
+        // refined.len() == 0 or still multiple — fall through to workspace root
+    }
+
+    tracing::info!(
+        "Multiple {} marker files found in monorepo. Using workspace root {} as project root.",
+        marker,
+        base.display()
+    );
+    base.to_path_buf()
+}
+
 /// Searches for a marker file starting from `base` up to `max_depth` subdirectory levels.
 ///
 /// `max_depth` is clamped to 2 — deeper scans are not supported.
@@ -573,85 +686,12 @@ async fn find_marker(
         return None;
     }
 
-    let mut matches = Vec::new();
+    let matches = scan_children_for_marker(base, marker, max_depth).await;
 
-    // Scan immediate children (depth 1)
-    let Ok(mut dir) = tokio::fs::read_dir(base).await else {
-        return None;
-    };
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        // Skip symlinks
-        if let Ok(file_type) = entry.file_type().await {
-            if file_type.is_symlink() {
-                continue;
-            }
-        }
-
-        // Check this subdirectory
-        if has_marker(&path, marker).await {
-            matches.push(path.clone());
-        }
-
-        // One more level if depth allows
-        if max_depth >= 2 {
-            let Ok(mut sub) = tokio::fs::read_dir(&path).await else {
-                continue;
-            };
-            while let Ok(Some(sub_entry)) = sub.next_entry().await {
-                let sub_path = sub_entry.path();
-                if sub_path.is_dir() {
-                    // Skip symlinks
-                    if let Ok(file_type) = sub_entry.file_type().await {
-                        if file_type.is_symlink() {
-                            continue;
-                        }
-                    }
-                    if has_marker(&sub_path, marker).await {
-                        matches.push(sub_path);
-                    }
-                }
-            }
-        }
-    }
-
-    match matches.len() {
-        0 => None,
-        1 => Some(matches[0].clone()),
-        _ => {
-            // Multiple matches found. If sibling_filter is set, prefer directories
-            // that also have the sibling file (e.g., tsconfig.json next to package.json).
-            // This filters out e2e/test sub-projects that have package.json but no TS config.
-            if let Some(sibling) = sibling_filter {
-                let mut refined = Vec::new();
-                for dir in &matches {
-                    if tokio::fs::metadata(dir.join(sibling)).await.is_ok() {
-                        refined.push(dir.clone());
-                    }
-                }
-                if refined.len() == 1 {
-                    tracing::info!(
-                        "Multiple {} markers found; selected {} (has {} sibling)",
-                        marker,
-                        refined[0].display(),
-                        sibling,
-                    );
-                    return Some(refined[0].clone());
-                }
-                // refined.len() == 0 or still multiple — fall through to workspace root
-            }
-
-            tracing::info!(
-                "Multiple {} marker files found in monorepo. Using workspace root {} as project root.",
-                marker,
-                base.display()
-            );
-            Some(base.to_path_buf())
-        }
+    match matches.as_slice() {
+        [] => None,
+        [only] => Some(only.clone()),
+        multiple => Some(resolve_multiple_matches(multiple, marker, sibling_filter, base).await),
     }
 }
 
