@@ -1,3 +1,4 @@
+//! Benchmarks for tree-sitter parsing throughput across languages.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

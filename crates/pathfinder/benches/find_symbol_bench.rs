@@ -1,3 +1,4 @@
+//! Benchmarks for `find_symbol` helper functions (name extraction, preview truncation).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

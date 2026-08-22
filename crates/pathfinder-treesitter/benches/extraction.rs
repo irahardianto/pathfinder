@@ -1,3 +1,4 @@
+//! Benchmarks for symbol extraction across supported languages.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

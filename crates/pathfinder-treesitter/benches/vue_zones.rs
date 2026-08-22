@@ -1,3 +1,4 @@
+//! Benchmarks for Vue single-file-component template/script zone extraction.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::format_push_string)]
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

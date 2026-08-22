@@ -1,3 +1,4 @@
+//! Benchmarks for sandbox path-access validation.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};

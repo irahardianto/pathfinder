@@ -1,3 +1,4 @@
+//! Benchmarks for "did you mean" fuzzy symbol-name suggestion.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

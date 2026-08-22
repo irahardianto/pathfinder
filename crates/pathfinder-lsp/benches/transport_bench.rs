@@ -1,3 +1,4 @@
+//! Benchmarks for LSP `Content-Length`-framed message transport (de)serialization.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};

@@ -1,3 +1,4 @@
+//! Benchmarks for the ripgrep-fallback search scout.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

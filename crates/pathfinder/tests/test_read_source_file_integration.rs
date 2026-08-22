@@ -1,3 +1,4 @@
+//! Integration test for reading source files via the tree-sitter surgeon.
 #![allow(clippy::uninlined_format_args)]
 use pathfinder_treesitter::surgeon::Surgeon;
 use pathfinder_treesitter::TreeSitterSurgeon;

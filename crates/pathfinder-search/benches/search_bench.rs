@@ -1,3 +1,4 @@
+//! Benchmarks for the codebase search scout across query modes and result sizes.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

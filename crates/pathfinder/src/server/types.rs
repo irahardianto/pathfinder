@@ -828,8 +828,10 @@ pub struct LspLanguageHealth {
     /// while still indexing in the background.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_status: Option<String>,
+    /// Which mechanism reported the indexing status (e.g. `"watcher"`, `"probe"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_source: Option<String>,
+    /// How long the current/last indexing pass has taken so far, in seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_duration_secs: Option<u64>,
     /// Whether the LSP advertised navigation capabilities during initialize.

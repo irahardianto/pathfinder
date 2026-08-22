@@ -1,3 +1,5 @@
+//! Benchmarks for degraded-reason guidance message generation.
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pathfinder_common::types::DegradedReason;
 use std::hint::black_box;

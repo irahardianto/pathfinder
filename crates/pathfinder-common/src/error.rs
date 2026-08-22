@@ -50,40 +50,72 @@ pub enum PathfinderError {
 
     /// No language server available for this file type.
     #[error("no LSP available for language: {language}")]
-    NoLspAvailable { language: String },
+    NoLspAvailable {
+        /// The language identifier that has no registered LSP.
+        language: String,
+    },
 
     /// Language server crashed or returned an error.
     #[error("LSP error: {message}")]
-    LspError { message: String },
+    LspError {
+        /// Description of the LSP failure.
+        message: String,
+    },
 
     /// A generic I/O error occurred.
     #[error("I/O error: {message}")]
-    IoError { message: String },
+    IoError {
+        /// Description of the I/O failure.
+        message: String,
+    },
 
     /// LSP didn't respond within timeout.
     #[error("LSP timeout after {timeout_ms}ms")]
-    LspTimeout { timeout_ms: u64 },
+    LspTimeout {
+        /// How long Pathfinder waited before giving up, in milliseconds.
+        timeout_ms: u64,
+    },
 
     /// File is in the sandbox deny-list.
     #[error("access denied: {path}")]
-    AccessDenied { path: PathBuf, tier: SandboxTier },
+    AccessDenied {
+        /// Path that was denied access.
+        path: PathBuf,
+        /// Sandbox tier that rejected the access.
+        tier: SandboxTier,
+    },
 
     /// Tree-sitter couldn't parse the file.
     #[error("parse error in {path}: {reason}")]
-    ParseError { path: PathBuf, reason: String },
+    ParseError {
+        /// Path to the file that failed to parse.
+        path: PathBuf,
+        /// Human-readable parse failure reason.
+        reason: String,
+    },
 
     /// The language of the semantic path's file is not supported.
     #[error("unsupported language for target file: {path}")]
-    UnsupportedLanguage { path: PathBuf },
+    UnsupportedLanguage {
+        /// Path to the file with the unsupported language.
+        path: PathBuf,
+    },
 
     /// Response would exceed `max_tokens`.
     #[error("token budget exceeded: {used} / {budget}")]
-    TokenBudgetExceeded { used: usize, budget: usize },
+    TokenBudgetExceeded {
+        /// Estimated token count of the would-be response.
+        used: usize,
+        /// The configured maximum token budget.
+        budget: usize,
+    },
 
     /// Path traversal detected in `resolve_strict`.
     #[error("path traversal rejected: {path} escapes workspace root {workspace_root}")]
     PathTraversal {
+        /// The offending path that escapes the workspace root.
         path: PathBuf,
+        /// The workspace root it was expected to stay within.
         workspace_root: PathBuf,
     },
 }

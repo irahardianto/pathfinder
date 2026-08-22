@@ -1,3 +1,4 @@
+//! Integration tests for top-level Rust symbol extraction.
 #![allow(clippy::unwrap_used)]
 use pathfinder_treesitter::language::SupportedLanguage;
 use pathfinder_treesitter::parser::AstParser;
