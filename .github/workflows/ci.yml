@@ -116,8 +116,7 @@ jobs:
 
       - name: Run tests with coverage
         if: needs.changes.outputs.code == 'true'
-        # Includes `--features integration` so coverage includes integration tests,
-        # and `--branch` so LLVM branch coverage metrics are exported.
+        # Includes `--features integration` so coverage includes integration tests.
         run: >-
           cargo llvm-cov nextest
           --workspace
@@ -125,7 +124,6 @@ jobs:
           --exclude test-mock-lsp
           --ignore-filename-regex "_test\.rs"
           --lcov
-          --branch
           --output-path lcov.info
           --remap-path-prefix
 
