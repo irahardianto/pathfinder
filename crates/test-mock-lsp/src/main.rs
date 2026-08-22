@@ -1,69 +1,55 @@
-//! `test-mock-lsp` — a lightweight mock LSP server for integration testing.
+#![allow(
+    clippy::pedantic,
+    clippy::missing_errors_doc,
+    clippy::cast_possible_truncation,
+    clippy::doc_markdown,
+    clippy::needless_pass_by_value,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
+//! `test-mock-lsp` — a scriptable mock LSP server for integration testing.
 //!
 //! # Purpose
 //!
-//! This binary is the testcontainers-equivalent for LSP integration tests.
-//! Just as testcontainers spins up a real `PostgreSQL` instance for database
-//! integration tests, integration tests in `crates/pathfinder-lsp/tests/` spin
-//! up this binary to give `LspClient` a real JSON-RPC counterpart to talk to.
+//! This binary acts as an LSP test fixture for `pathfinder-lsp` integration tests.
+//! It speaks the real LSP wire protocol (JSON-RPC 2.0 over stdin/stdout with
+//! `Content-Length` framing) and supports:
 //!
-//! It speaks the real LSP wire protocol (JSON-RPC over stdin/stdout with
-//! `Content-Length` framing) so `LspClient` exercises the exact same code paths
-//! as production — including `spawn_and_initialize`, `request`, the reader
-//! supervisor task, and the progress watcher.
-//!
-//! # Scope (minimal by design)
-//!
-//! The server implements only the LSP methods currently exercised by integration
-//! tests. Future agents: add new method handlers in `handlers.rs` and route them
-//! in `handle_message` below. DO NOT expand scope speculatively — add handlers
-//! only when a corresponding integration test exists.
-//!
-//! # Configuration
-//!
-//! All behavior is driven by CLI flags (see `config.rs`). Tests pass flags when
-//! spawning the binary to exercise specific `LspClient` code paths:
-//!
-//!   --no-diagnostic-provider     Test `validation_skipped` paths
-//!   --crash-after=N              Test crash-recovery / reconnect logic
-//!   --init-delay-ms=N            Test initialization timeout handling
-//!
-//! # Protocol coverage
-//!
-//! Current minimal set (grow as integration tests expand):
-//!   initialize            ✓  (capability negotiation)
-//!   initialized           ✓  (notification, no response)
-//!   shutdown              ✓  (graceful exit)
-//!   exit                  ✓  (process termination)
-//!   textDocument/didOpen  ✓  (notification, no response)
-//!   textDocument/didChange ✓ (notification, no response)
-//!   textDocument/didClose ✓  (notification, no response)
-//!   textDocument/definition ✓ (canned Location or null)
-//!   textDocument/diagnostic ✓ (canned error list)
-//!   workspace/diagnostic   ✓ (empty list)
-//!   callHierarchy/*        ✓ (empty/null stubs)
+//! - Scriptable response timelines (`--script`)
+//! - Position-aware canned index (`--index`)
+//! - Server-initiated messages (dynamic registrations, progress, config queries)
+//! - Handlers for references, implementation, call hierarchy, definition, diagnostics
+//! - Malformed response injection (`--malform`) for defensibility testing
+//! - Position encoding negotiation (`--position-encoding`)
 
-mod config;
-mod handlers;
-mod protocol;
-
-use config::MockConfig;
-use protocol::{read_message, write_response, JsonRpcResponse};
-
-use std::io::{stdin, stdout, BufReader, BufWriter};
+use std::io::{stdin, stdout, BufReader, BufWriter, Stdout};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use test_mock_lsp::config::{self, MockConfig};
+use test_mock_lsp::emitter::MessageEmitter;
+use test_mock_lsp::protocol::{
+    read_message, write_malformed_response, write_response, JsonRpcResponse, MalformMode,
+};
+use test_mock_lsp::script::ScriptAction;
+
 fn main() {
     let config = config::parse_args();
-    run(&config);
+    run(config);
 }
 
-fn run(config: &MockConfig) {
+fn run(mut config: MockConfig) {
     let stdin = stdin();
-    let stdout = stdout();
+    let stdout_handle = stdout();
     let mut reader = BufReader::new(stdin.lock());
-    let mut writer = BufWriter::new(stdout.lock());
+    let writer: Arc<Mutex<BufWriter<Stdout>>> = Arc::new(Mutex::new(BufWriter::new(stdout_handle)));
+
+    // Launch server-initiated emitter if configured
+    let emitter = MessageEmitter::new(config.clone());
+    emitter.start_background_emitter(Arc::clone(&writer));
 
     let mut request_count: usize = 0;
     let mut shutdown_received = false;
@@ -72,7 +58,7 @@ fn run(config: &MockConfig) {
         let msg = match read_message(&mut reader) {
             Ok(Some(m)) => m,
             Ok(None) => {
-                // Clean EOF — client closed the pipe (normal after shutdown/exit).
+                // Clean EOF — client closed the pipe.
                 break;
             }
             Err(e) => {
@@ -82,7 +68,6 @@ fn run(config: &MockConfig) {
         };
 
         // Count requests for crash-after fault injection.
-        // Only increment for messages that have an `id` (requests, not notifications).
         if msg.id.is_some() {
             request_count += 1;
             if config.crash_after > 0 && request_count >= config.crash_after {
@@ -94,25 +79,82 @@ fn run(config: &MockConfig) {
         let method = match &msg.method {
             Some(m) => m.clone(),
             None => {
-                // Response to our own requests — we never send requests, so ignore.
+                // Response from client to our server-initiated request (e.g. create progress / registerCapability).
                 continue;
             }
         };
 
-        match handle_message(&method, msg.id.clone(), msg.params, config, &mut writer) {
-            Some(response) => {
-                if let Err(e) = write_response(&mut writer, &response) {
-                    eprintln!("test-mock-lsp: write error: {e}");
-                    break;
+        // Capture workspace root from initialize params if not explicitly configured
+        if method == "initialize" && config.workspace_root.is_none() {
+            if let Some(p) = &msg.params {
+                if let Some(root_uri) = p.get("rootUri").and_then(|u| u.as_str()) {
+                    let cleaned = root_uri.trim_start_matches("file://");
+                    config.workspace_root = Some(cleaned.to_string());
+                } else if let Some(root_path) = p.get("rootPath").and_then(|u| u.as_str()) {
+                    config.workspace_root = Some(root_path.to_string());
                 }
             }
-            None if method == "exit" => {
-                // `exit` is a notification; process exits immediately after receiving it.
+        }
+
+        // ── 1. Evaluate scripted timeline ──────────────────────────────────
+        let mut handled_by_script = false;
+        if let Some(script) = &mut config.script {
+            if let Some(eval) = script.evaluate(&method) {
+                handled_by_script = true;
+                if let Some(delay) = eval.delay {
+                    thread::sleep(delay);
+                }
+
+                match eval.action {
+                    ScriptAction::Hang => {
+                        // Sleep indefinitely until killed
+                        thread::sleep(Duration::from_secs(3600));
+                    }
+                    ScriptAction::Crash => {
+                        eprintln!("test-mock-lsp: crashing on method {method} via script");
+                        std::process::exit(1);
+                    }
+                    ScriptAction::Error {
+                        code,
+                        message,
+                        data,
+                    } => {
+                        let resp =
+                            JsonRpcResponse::error_with_data(msg.id.clone(), code, message, data);
+                        send_response(&writer, &resp, Some(&method), &config);
+                    }
+                    ScriptAction::Respond(val) => {
+                        let resp = JsonRpcResponse::success(msg.id.clone(), val);
+                        send_response(&writer, &resp, Some(&method), &config);
+                    }
+                    ScriptAction::Malformed { mode, payload } => {
+                        let resp = JsonRpcResponse::success(msg.id.clone(), payload);
+                        if let Ok(mut guard) = writer.lock() {
+                            let _ =
+                                write_malformed_response(&mut *guard, &resp, Some(&method), mode);
+                        }
+                    }
+                }
+            }
+        }
+
+        if handled_by_script {
+            if shutdown_received && method == "exit" {
                 break;
             }
-            None => {
-                // Notification with no response (didOpen, didChange, initialized, etc.).
+            if method == "shutdown" {
+                shutdown_received = true;
             }
+            continue;
+        }
+
+        // ── 2. Standard Handler Dispatch ───────────────────────────────────
+        let response_opt = handle_message(&method, msg.id.clone(), msg.params, &config);
+
+        if let Some(resp) = response_opt {
+            send_response(&writer, &resp, Some(&method), &config);
+        } else if method == "exit" {
+            break;
         }
 
         if shutdown_received && method == "exit" {
@@ -124,75 +166,109 @@ fn run(config: &MockConfig) {
     }
 }
 
-/// Route an incoming LSP message to its handler.
-///
-/// Returns `Some(response)` for requests, `None` for notifications.
-///
-/// Future agents: add new method routes here when adding integration test
-/// coverage for additional `Lawyer` trait methods. Keep the match arm ordering
-/// consistent with the `Lawyer` trait definition in `pathfinder-lsp/src/lib.rs`.
+/// Send a response, applying framing malformation if configured.
+fn send_response<W: std::io::Write>(
+    writer: &Arc<Mutex<W>>,
+    response: &JsonRpcResponse,
+    method: Option<&str>,
+    config: &MockConfig,
+) {
+    let should_malform = config.malform != MalformMode::None
+        && config
+            .malform_method
+            .as_deref()
+            .is_none_or(|m| method == Some(m));
+
+    if let Ok(mut guard) = writer.lock() {
+        let res = if should_malform {
+            write_malformed_response(&mut *guard, response, method, config.malform)
+        } else {
+            write_response(&mut *guard, response)
+        };
+        if let Err(e) = res {
+            eprintln!("test-mock-lsp: write error: {e}");
+        }
+    }
+}
+
+/// Route an incoming LSP message to its default handler.
 fn handle_message(
     method: &str,
     id: Option<serde_json::Value>,
     params: Option<serde_json::Value>,
     config: &MockConfig,
-    _writer: &mut impl std::io::Write,
 ) -> Option<JsonRpcResponse> {
     match method {
         // ── Lifecycle ─────────────────────────────────────────────────────
         "initialize" => {
-            // Optional delay to test initialization timeout handling.
             if config.init_delay_ms > 0 {
                 thread::sleep(Duration::from_millis(config.init_delay_ms));
             }
             Some(JsonRpcResponse::success(
                 id,
-                handlers::handle_initialize(params, config),
+                test_mock_lsp::handlers::handle_initialize(params, config),
             ))
         }
-        // Notifications — no response returned
         "initialized"
         | "exit"
         | "textDocument/didOpen"
         | "textDocument/didChange"
         | "textDocument/didClose"
         | "workspace/didChangeWatchedFiles" => None,
-        "shutdown" => Some(JsonRpcResponse::success(id, handlers::handle_shutdown())),
+        "shutdown" => Some(JsonRpcResponse::success(
+            id,
+            test_mock_lsp::handlers::handle_shutdown(),
+        )),
 
         // ── Navigation ────────────────────────────────────────────────────
         "textDocument/definition" => Some(JsonRpcResponse::success(
             id,
-            handlers::handle_definition(params, config),
+            test_mock_lsp::handlers::handle_definition(params, config),
+        )),
+        "textDocument/references" => Some(JsonRpcResponse::success(
+            id,
+            test_mock_lsp::handlers::handle_references(params, config),
+        )),
+        "textDocument/implementation" => Some(JsonRpcResponse::success(
+            id,
+            test_mock_lsp::handlers::handle_implementation(params, config),
         )),
 
         // ── Diagnostics ───────────────────────────────────────────────────
         "textDocument/diagnostic" => Some(JsonRpcResponse::success(
             id,
-            handlers::handle_pull_diagnostics(params, config),
+            test_mock_lsp::handlers::handle_pull_diagnostics(params, config),
         )),
         "workspace/diagnostic" => Some(JsonRpcResponse::success(
             id,
-            handlers::handle_workspace_diagnostics(params, config),
+            test_mock_lsp::handlers::handle_workspace_diagnostics(params, config),
         )),
 
         // ── Call hierarchy ────────────────────────────────────────────────
         "textDocument/prepareCallHierarchy" => Some(JsonRpcResponse::success(
             id,
-            handlers::handle_call_hierarchy_prepare(params, config),
+            test_mock_lsp::handlers::handle_call_hierarchy_prepare(params, config),
         )),
-        "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls" => Some(
-            JsonRpcResponse::success(id, handlers::handle_call_hierarchy_calls(params, config)),
-        ),
+        "callHierarchy/incomingCalls" => Some(JsonRpcResponse::success(
+            id,
+            test_mock_lsp::handlers::handle_call_hierarchy_incoming(params, config),
+        )),
+        "callHierarchy/outgoingCalls" => Some(JsonRpcResponse::success(
+            id,
+            test_mock_lsp::handlers::handle_call_hierarchy_outgoing(params, config),
+        )),
 
         // ── Formatting ────────────────────────────────────────────────────
-        "textDocument/rangeFormatting" | "textDocument/formatting" => Some(
-            JsonRpcResponse::success(id, handlers::handle_formatting(params, config)),
-        ),
+        "textDocument/rangeFormatting" | "textDocument/formatting" => {
+            Some(JsonRpcResponse::success(
+                id,
+                test_mock_lsp::handlers::handle_formatting(params, config),
+            ))
+        }
 
         // ── Unknown methods ───────────────────────────────────────────────
         _ => {
             eprintln!("test-mock-lsp: unhandled method {method:?}");
-            // Return method-not-found error only for requests (id is Some).
             id.map(|req_id| {
                 JsonRpcResponse::error(Some(req_id), -32601, format!("method not found: {method}"))
             })
