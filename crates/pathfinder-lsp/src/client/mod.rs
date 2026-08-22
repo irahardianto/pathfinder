@@ -208,11 +208,11 @@ pub(crate) fn grace_period_for_language(language_id: &str) -> u64 {
     }
 }
 
-/// Pure helper that maps raw process state to [`LspLanguageStatus`].
+/// Pure helper that maps raw process state to [`crate::types::LspLanguageStatus`].
 ///
 /// Extracted from [`ProcessEntry::to_validation_status`] to make the
 /// mapping logic independently unit-testable without requiring a live
-/// [`ManagedProcess`] (which embeds an OS child process handle).
+/// [`process::ManagedProcess`] (which embeds an OS child process handle).
 ///
 /// MT-2: `server_name` added so the status carries the server identity for
 /// per-server push diagnostics config selection in validation tools.

@@ -178,7 +178,7 @@ impl AstCache {
 
     /// Retrieve the tree and source code using pre-loaded content and mtime.
     ///
-    /// Identical to [`get_or_parse`] but accepts pre-read file bytes and mtime
+    /// Identical to [`Self::get_or_parse`] but accepts pre-read file bytes and mtime
     /// instead of reading from disk. Eliminates the double-read when the caller
     /// already has the file content (e.g., `generate_skeleton_text`).
     ///
@@ -198,7 +198,7 @@ impl AstCache {
 
     /// Retrieve the multi-zone parse result for a Vue SFC.
     ///
-    /// Uses file mtime as a fast-path guard identical to [`get_or_parse`].
+    /// Uses file mtime as a fast-path guard identical to [`Self::get_or_parse`].
     /// On a cache miss, reads the SFC from disk and calls `parse_vue_multizone`.
     ///
     /// # Errors
@@ -221,7 +221,7 @@ impl AstCache {
 
     /// Retrieve the multi-zone parse result for a Vue SFC using pre-loaded content.
     ///
-    /// Identical to [`get_or_parse_vue`] but accepts pre-read file bytes and mtime
+    /// Identical to [`Self::get_or_parse_vue`] but accepts pre-read file bytes and mtime
     /// instead of reading from disk. Eliminates the double-read when the caller
     /// already has the file content (e.g., `generate_skeleton_text`).
     ///

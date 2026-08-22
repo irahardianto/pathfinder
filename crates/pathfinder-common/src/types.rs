@@ -261,7 +261,7 @@ impl VersionHash {
 
     /// Get the full internal hash string (`sha256:<64 hex chars>`).
     ///
-    /// Use [`short`] for agent-facing responses; use this only for
+    /// Use [`Self::short`] for agent-facing responses; use this only for
     /// diagnostic messages and error context where precision is needed.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -302,13 +302,13 @@ impl VersionHash {
     /// This is the single authoritative hash comparison — it replaces all raw
     /// `==` / `!=` string comparisons and `check_occ` prefix logic. Accepting
     /// all formats prevents version-mismatch failures when agents supply the
-    /// short form produced by [`short`].
+    /// short form produced by [`Self::short`].
     ///
     /// # Accepted formats
     ///
     /// | Format | Example | Notes |
     /// |--------|---------|-------|
-    /// | Short (no prefix) | `"e3dc7f9"` | Preferred — what [`short`] emits |
+    /// | Short (no prefix) | `"e3dc7f9"` | Preferred — what [`Self::short`] emits |
     /// | Short (with prefix) | `"sha256:e3dc7f9"` | Legacy short form |
     /// | Full (with prefix) | `"sha256:<64 hex>"` | Full hash |
     ///

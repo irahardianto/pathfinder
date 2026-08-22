@@ -220,7 +220,7 @@ fn filter_by_visibility(
 ///
 /// If the rendered output exceeds `max_tokens_per_file`, the result is
 /// collapsed to a truncated stub showing only class/struct names and method
-/// counts. Pass [`MAX_TOKENS_PER_FILE`] as the default when no caller override
+/// counts. Pass `MAX_TOKENS_PER_FILE` as the default when no caller override
 /// is available.
 #[must_use]
 pub fn render_file_skeleton(

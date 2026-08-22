@@ -37,7 +37,7 @@ pub enum SupportedLanguage {
     Python,
     /// The Rust programming language.
     Rust,
-    /// Vue Single-File Component (Phase 1: <script> block parsed as TypeScript).
+    /// Vue Single-File Component (Phase 1: `<script>` block parsed as TypeScript).
     Vue,
     /// The Java programming language.
     Java,

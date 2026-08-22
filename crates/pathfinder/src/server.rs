@@ -3,9 +3,9 @@
 //! Implements `rmcp::ServerHandler` for all Pathfinder discovery & navigation tools.
 //!
 //! # Module Layout
-//! - [`helpers`] — error conversion, stub builder, language detection
-//! - [`types`] — all parameter and response structs
-//! - [`tools`] — handler logic:
+//! - `helpers` — error conversion, stub builder, language detection
+//! - `types` — all parameter and response structs
+//! - `tools` — handler logic:
 //!   - The `#[tool_router]` impl block below registers 7 consolidated tools:
 //!     `explore`, `search`, `read`, `inspect`, `locate`, `trace`, `health`.
 //!   - Submodules (`search`, `repo_map`, `navigation`, etc.) contain

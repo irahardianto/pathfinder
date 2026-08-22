@@ -1,9 +1,9 @@
 //! JSON-RPC / LSP message framing over stdin/stdout.
 //!
 //! The LSP wire protocol is:
-//!   Content-Length: <N>\r\n
-//!   \r\n
-//!   <N bytes of UTF-8 JSON>
+//!   `Content-Length: <N>\r\n`
+//!   `\r\n`
+//!   `<N bytes of UTF-8 JSON>`
 //!
 //! This module provides read/write helpers that are synchronous (no async runtime
 //! needed for the mock server — it processes one message at a time).

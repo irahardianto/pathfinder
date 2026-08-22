@@ -78,7 +78,7 @@ pub struct MultiZoneTree {
 /// `column` is **byte-based**, not character-based. This is intentional and
 /// correct: tree-sitter's `Point` uses byte offsets for column positions, not
 /// Unicode character counts. Changing this to character-based would break
-/// [`set_included_ranges`] interop with the tree-sitter C API.
+/// `set_included_ranges` interop with the tree-sitter C API.
 fn byte_to_point(source: &[u8], byte: usize) -> Point {
     let safe = byte.min(source.len());
     let prefix = &source[..safe];

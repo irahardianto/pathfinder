@@ -60,14 +60,14 @@ const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Gets a set of files changed since a given Git target (e.g., ref, duration).
 ///
 /// Uses the provided [`GitRunner`] so callers can inject a fake in tests.
-/// A hard timeout of [`GIT_TIMEOUT`] (10 s) is applied; if `git` blocks longer,
+/// A hard timeout of `GIT_TIMEOUT` (10 s) is applied; if `git` blocks longer,
 /// the future is cancelled and a [`std::io::ErrorKind::TimedOut`] error is
 /// returned.
 ///
 /// # Errors
 /// Returns an error if:
 /// - `git` fails to execute or exits non-zero.
-/// - The operation exceeds [`GIT_TIMEOUT`].
+/// - The operation exceeds `GIT_TIMEOUT`.
 pub async fn get_changed_files_since<R: GitRunner>(
     runner: &R,
     workspace_root: &Path,

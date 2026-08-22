@@ -85,8 +85,8 @@ impl Default for MockConfig {
 ///   --no-formatting-provider         Omit documentFormattingProvider
 ///   --definition-returns-null        Make textDocument/definition return null
 ///   --no-diagnostics                 Return empty diagnostic list
-///   --crash-after=<N>                Exit after N requests (1-indexed)
-///   --init-delay-ms=<N>              Sleep N ms before initialize response
+///   --crash-after=`<N>`              Exit after N requests (1-indexed)
+///   --init-delay-ms=`<N>`            Sleep N ms before initialize response
 #[must_use]
 pub fn parse_args() -> MockConfig {
     let mut config = MockConfig::default();

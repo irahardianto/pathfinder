@@ -37,7 +37,7 @@ pub trait LanguagePlugin: Send + Sync {
 
     /// File extensions that this language handles.
     ///
-    /// Used by [`language_id_for_extension`] and [`touch_language`] in LT-4.
+    /// Used by `language_id_for_extension` and `touch_language` in LT-4.
     /// Example: `&["rs"]` for Rust, `&["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue"]` for TypeScript.
     fn file_extensions(&self) -> &'static [&'static str];
 

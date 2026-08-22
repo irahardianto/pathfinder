@@ -113,7 +113,7 @@ pub trait Surgeon: Send + Sync {
 
     /// Extract symbols using pre-loaded file content and mtime.
     ///
-    /// Default implementation delegates to [`extract_symbols`]. Override in
+    /// Default implementation delegates to [`Self::extract_symbols`]. Override in
     /// implementations that support pre-loaded content to avoid redundant
     /// disk reads.
     async fn extract_symbols_preloaded(
