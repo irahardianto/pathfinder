@@ -38,7 +38,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 regex = "1"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-url = "2.5.8"
 
 [dev-dependencies]
 async-trait = "0.1"
