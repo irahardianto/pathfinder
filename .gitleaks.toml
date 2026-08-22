@@ -1,0 +1,20 @@
+# gitleaks configuration — https://github.com/gitleaks/gitleaks
+#
+# Extends gitleaks' default rule set (do not replace it — omitting `[extend]`
+# would silently drop all built-in detectors).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Benchmark harness artifacts — not developer-authored secrets"
+paths = [
+  # bench/results/**/*.jsonl are raw transcripts of AI agent sessions
+  # benchmarking Pathfinder against OWASP Juice Shop (an intentionally
+  # vulnerable test app). They quote/observe Juice Shop's own fake test
+  # fixtures (a placeholder RSA key, a base64-encoded dummy password) —
+  # these are the *target* of the benchmarked security audits, not secrets
+  # belonging to this repository. report_*.txt files are generated summaries
+  # whose benchmark task-name strings occasionally match generic-api-key
+  # heuristics by coincidence.
+  '''bench/results/.*''',
+]

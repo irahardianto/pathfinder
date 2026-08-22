@@ -1,0 +1,564 @@
+#!/usr/bin/env bash
+# Pathfinder pre-commit gate.
+#
+# Enforces .agents/rules/*.md (priority order per rule-priority.md) and the
+# quality commands defined in .agents/skills/rust-idioms/SKILL.md. Each gate
+# below states the rule/skill it manifests.
+#
+# Design: graceful degradation. A gate whose toolchain is absent is reported
+# SKIPPED, never FAILED, so the hook works on every contributor's machine
+# without requiring the full security/lint toolchain to be installed first.
+#
+# Non-skippable: gate_secrets and the Layer 1 (staged-diff) half of
+# gate_structural_suppress — security-mandate.md always wins.
+# Skippable gates: set PATHFINDER_HOOK_SKIP=id1,id2 (see README.md).
+# Fast path for large refactors: PATHFINDER_HOOK_FAST=1 skips test + audit gates.
+#
+# Working-tree isolation: cargo/clippy/typos/gitleaks/semgrep read the
+# filesystem, not the git index. Before running any gate, unstaged/untracked
+# changes are stashed (index preserved) so every gate sees exactly the tree
+# this commit will produce, then unconditionally restored on exit. Disable
+# only if isolation itself is misbehaving: PATHFINDER_HOOK_NO_ISOLATE=1.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# shellcheck source=lib/gates.sh
+source "$SCRIPT_DIR/lib/gates.sh"
+
+printf '%sPathfinder pre-commit gate%s\n' "$C_CYN" "$C_RST"
+
+# =============================================================================
+# UNIVERSAL GATES — always run, no toolchain dependency
+# Rules: security-mandate (#1), rugged-software-constitution (#2),
+#        git-workflow-principles.md, documentation-principles.md
+# =============================================================================
+
+# --- Gate: structural lint suppression guard ---------------------------------
+# rust-idioms.md §3 "Clippy suppression policy — fix the code, don't silence
+# the lint". As of the Cargo.toml lint upgrade, too_many_lines,
+# cognitive_complexity, too_many_arguments, type_complexity,
+# struct_excessive_bools, and large_enum_variant are `deny`d at the workspace
+# level (priority = 1) — a *new*, unattributed violation already fails
+# `cargo clippy` on its own. This gate adds two things clippy can't:
+#   Layer 1 — staged diff: blocks ANY newly added suppression *attribute* in
+#             this commit, unconditionally. No baseline exception, ever.
+#   Layer 2 — full codebase: ratchets the pre-existing suppression count
+#             against .githooks/suppression-baseline.txt. A count going UP
+#             fails (something slipped past Layer 1 — e.g. a rebase); a
+#             count going DOWN just passes with a note to lock it in.
+# Non-skippable: structural soundness always wins (code-idioms-and-conventions.md).
+gate_structural_suppress() {
+  local regex; regex="$(forbidden_suppression_regex)"
+  local blocked=0
+
+  # Layer 1: staged diff (new additions in this commit).
+  if staged_any '*.rs'; then
+    local staged_hits
+    staged_hits="$(git diff --cached --unified=0 -- '*.rs' \
+      | grep '^+' \
+      | grep -v '^+++' \
+      | grep -E "$regex" || true)"
+    if [[ -n "$staged_hits" ]]; then
+      while IFS= read -r line; do
+        emit fail structural-suppress "$line — new clippy suppression forbidden, no exceptions (rust-idioms.md §3)"
+      done <<< "$staged_hits"
+      blocked=1
+    fi
+  fi
+
+  # Layer 2: full-codebase ratchet against the baseline.
+  local baseline_file="$SCRIPT_DIR/suppression-baseline.txt"
+  declare -A baseline_counts=()
+  if [[ -f "$baseline_file" ]]; then
+    while IFS=$'\t' read -r count file; do
+      [[ "$count" == \#* || -z "$count" ]] && continue
+      baseline_counts["$file"]="$count"
+    done < "$baseline_file"
+  fi
+
+  local current_total=0 improved=0 f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    is_suppression_exempt_path "$f" && continue
+    local count
+    count="$(grep -cE "$regex" "$f" 2>/dev/null || echo 0)"
+    [[ "$count" -eq 0 ]] && continue
+    local baseline_count="${baseline_counts[$f]:-0}"
+    current_total=$((current_total + count))
+    if [[ "$count" -gt "$baseline_count" ]]; then
+      emit fail structural-suppress "$f: $count forbidden suppression(s), baseline allows $baseline_count — new debt not caught by the staged-diff check (rebase/merge?)"
+      blocked=1
+    elif [[ "$count" -lt "$baseline_count" ]]; then
+      improved=1
+    fi
+  done < <(grep -rlE --include='*.rs' "$regex" crates/ 2>/dev/null)
+
+  [[ $blocked -eq 1 ]] && return 1
+  if [[ $improved -eq 1 ]]; then
+    pass structural-suppress "no new suppressions; debt reduced ($current_total tracked) — run .githooks/update-suppression-baseline.sh to lock it in"
+  else
+    pass structural-suppress "no new suppressions ($current_total tracked, within baseline)"
+  fi
+}
+
+# --- Gate: unsafe_code / unwrap_used suppression review ----------------------
+# rust-idioms.md: unsafe_code is workspace-denied except at documented FFI
+# boundaries; unwrap_used/expect_used are only acceptable in test code.
+# WARN-only by design: verifying "is there a matching // SAFETY: comment on
+# the unsafe block inside this function" requires parsing function
+# boundaries, which a shell regex cannot reliably do without false-failing on
+# legitimate, already-justified code (see client/process.rs). This gate
+# surfaces new occurrences in non-test code for human review instead.
+gate_unsafe_unwrap_suppress() {
+  if ! staged_any '*.rs'; then emit skip unsafe-unwrap-suppress "no staged .rs files"; return 0; fi
+  local pattern='#!?\[(cfg_attr\([^)]*,[ \t]*)?(allow|expect)\((unsafe_code|clippy::unwrap_used)'
+  local warned=0 f
+  for f in "${STAGED[@]:-}"; do
+    case "$f" in *.rs) ;; *) continue ;; esac
+    is_suppression_exempt_path "$f" && continue
+    local hits
+    hits="$(git diff --cached --unified=0 -- "$f" 2>/dev/null | grep '^+' | grep -v '^+++' | grep -E "$pattern" || true)"
+    if [[ -n "$hits" ]]; then
+      while IFS= read -r line; do
+        emit warn unsafe-unwrap-suppress "$f: $line — review: unsafe_code needs an FFI boundary + // SAFETY: comment on the unsafe block; unwrap_used is only acceptable in test code (rust-idioms.md)"
+      done <<< "$hits"
+      warned=1
+    fi
+  done
+  [[ $warned -eq 0 ]] && pass unsafe-unwrap-suppress "no new unsafe_code/unwrap_used suppressions in production code"
+  return 0
+}
+
+# --- Gate: secrets -----------------------------------------------------------
+# security-mandate.md (always wins), security-principles.md §Secrets Management,
+# git-workflow-principles.md "Don't commit secrets". NON-SKIPPABLE.
+gate_secrets() {
+  local blocked=0
+  local f base
+  for f in "${STAGED[@]:-}"; do
+    base="$(basename "$f")"
+    case "$base" in
+      .env|.env.local|.env.*.local|\
+      id_rsa|id_rsa.*|id_dsa|id_ecdsa|id_ed25519|\
+      *.pem|*.key|*.p12|*.pfx|\
+      credentials.json|serviceaccount.json|*.kubeconfig|\
+      .npmrc|.pypirc|.netrc)
+        emit fail secrets "prohibited credential file staged: $f (security-mandate.md)"
+        blocked=1 ;;
+    esac
+    case "$f" in
+      .ssh/*|.aws/*|.gnupg/*|.config/gcloud/*) \
+        emit fail secrets "credential directory content staged: $f (security-mandate.md)"; blocked=1 ;;
+    esac
+  done
+
+  # High-precision secret patterns scanned against the staged index.
+  local SECRET_SCAN_EXCLUDE_PATTERNS=('docs/')
+  local scan_targets=()
+  for f in "${STAGED[@]:-}"; do
+    local exclude=0
+    for excl in "${SECRET_SCAN_EXCLUDE_PATTERNS[@]}"; do
+      if [[ "$f" == "$excl" || "$f" == ${excl}* ]]; then
+        exclude=1; break
+      fi
+    done
+    [[ $exclude -eq 0 ]] && scan_targets+=("$f")
+  done
+
+  if [[ ${#scan_targets[@]} -gt 0 ]]; then
+    local pats=(
+      '-----BEGIN (RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----'
+      'AKIA[0-9A-Z]{16}'
+      'gh[pousr]_[A-Za-z0-9]{36,}'
+      'github_pat_[A-Za-z0-9_]{22,}'
+      'AIza[0-9A-Za-z_-]{35}'
+      'xox[baprs]-[A-Za-z0-9-]{10,}'
+      '(password|passwd|secret|api[_-]?key|apikey|access[_-]?token|private[_-]?key)[[:space:]]*[:=][[:space:]]*(['"'"'"][^'"'"'"]{8,}['"'"'"]|[A-Za-z0-9_+/=]{20,})'
+    )
+    local joined
+    joined="$(printf '%s|' "${pats[@]}")"; joined="${joined%|}"
+    local hits
+    hits="$(git grep -niE --cached -- "$joined" -- "${scan_targets[@]}" 2>/dev/null || true)"
+    if [[ -n "$hits" ]]; then
+      while IFS= read -r line; do emit fail secrets "possible secret in staged content: $line"; done <<<"$hits"
+      blocked=1
+    fi
+  fi
+
+  if [[ $blocked -eq 1 ]]; then return 1; fi
+  pass secrets "no secrets detected"
+}
+
+# --- Gate: debug / dead code -------------------------------------------------
+# rugged-software-constitution.md "No TODO comments for security holes",
+# git-workflow-principles.md "Don't commit debug code", rust-idioms.md
+# (dbg!/todo!/unimplemented!). Rust-only — no TS/Vue in this repo.
+gate_debug() {
+  if ! staged_any '*.rs'; then emit skip debug "no staged .rs files"; return 0; fi
+  local blocked=0 warned=0
+  local block_pats=(
+    '\bdbg!\('
+    '\b(todo|unimplemented)!\('
+  )
+  local joined; joined="$(printf '%s|' "${block_pats[@]}")"; joined="${joined%|}"
+  local scan=()
+  local f
+  for f in "${STAGED[@]:-}"; do case "$f" in *.rs) scan+=("$f") ;; esac; done
+  if [[ ${#scan[@]} -gt 0 ]]; then
+    local h
+    h="$(git grep -nE --cached -- "$joined" -- "${scan[@]}" 2>/dev/null || true)"
+    [[ -n "$h" ]] && { while IFS= read -r l; do emit fail debug "$l (remove debug code)"; done <<<"$h"; blocked=1; }
+    local sec
+    sec="$(git grep -nEi --cached -- 'TODO[[:space:]]*\((hack|security)\)|FIXME[[:space:]]*:[[:space:]]*(security|sec\b)' -- "${scan[@]}" 2>/dev/null || true)"
+    [[ -n "$sec" ]] && { while IFS= read -r l; do emit fail debug "$l (security TODO — fix or document severity)"; done <<<"$sec"; blocked=1; }
+    local adv
+    adv="$(git grep -nE --cached -- '\b(TODO|FIXME|XXX)\b' -- "${scan[@]}" 2>/dev/null || true)"
+    if [[ -n "$adv" ]]; then
+      while IFS= read -r l; do emit warn debug "$l (resolve before merge per rugged-software-constitution)"; done <<<"$adv"
+      warned=1
+    fi
+  fi
+  [[ $blocked -eq 1 ]] && return 1
+  pass debug "no debug/security-hole markers${warned:+ (advisory warnings above)}"
+}
+
+# --- Gate: merge conflict markers + whitespace ------------------------------
+# git-workflow-principles.md commit hygiene.
+gate_conflict_whitespace() {
+  local out
+  out="$(git diff --cached --check 2>/dev/null || true)"
+  if [[ -n "$out" ]]; then
+    local has_ws=0 has_conf=0
+    while IFS= read -r l; do
+      case "$l" in
+        *conflict*|*'<<<<<<<'*|*'>>>>>>>'*|*'|||||||'*) has_conf=1; emit fail conflict "$l" ;;
+        *) has_ws=1; emit warn whitespace "$l (trailing whitespace / space-before-tab)" ;;
+      esac
+    done <<<"$out"
+    [[ $has_conf -eq 1 ]] && return 1
+    return 0
+  fi
+  pass conflict-whitespace "no conflict markers, clean whitespace"
+}
+
+# --- Gate: large files -------------------------------------------------------
+gate_largefile() {
+  local blocked=0 warned=0
+  local f size
+  for f in "${STAGED[@]:-}"; do
+    size="$(blob_bytes "$f")"
+    [[ "$size" -gt 1048576 ]] && { emit warn largefile "$f is $((size/1024)) KiB (>1 MiB)"; warned=1; }
+    [[ "$size" -gt 5242880 ]] && { emit fail largefile "$f is $((size/1048576)) MiB (>5 MiB cap)"; blocked=1; }
+  done
+  [[ $blocked -eq 1 ]] && return 1
+  pass largefile "no oversized files${warned:+ (advisory warnings above)}"
+}
+
+# --- Gate: lockfile discipline ----------------------------------------------
+# dependency-management-principles.md "Use lock files" + "Pin exact versions".
+gate_lockfile() {
+  local cargo_t=0 f
+  for f in "${STAGED[@]:-}"; do
+    case "$f" in
+      Cargo.toml|crates/*/Cargo.toml) cargo_t=1 ;;
+    esac
+  done
+  if [[ $cargo_t -eq 1 ]] && [[ -f Cargo.lock ]]; then
+    if ! git diff --cached --name-only 2>/dev/null | grep -q '^Cargo.lock$'; then
+      if ! git diff --quiet -- Cargo.lock 2>/dev/null; then
+        emit warn lockfile "Cargo.toml staged but Cargo.lock not staged — commit the lockfile (dependency-management-principles.md)"
+      fi
+    fi
+  fi
+  pass lockfile "lockfile discipline checked"
+}
+
+# --- Gate: .agents/ product integrity ---------------------------------------
+# documentation-principles.md, skill/agent/rule/workflow file conventions.
+gate_agents() {
+  local md=0 blocked=0 warned=0
+  local f firstline
+  local check_files=()
+  for f in "${STAGED[@]:-}"; do
+    case "$f" in
+      .agents/agents/*.md|.agents/skills/*/SKILL.md|.agents/rules/*.md|.agents/workflows/*.md)
+        check_files+=("$f"); md=1 ;;
+    esac
+  done
+  [[ $md -eq 0 ]] && { pass agents "no .agents/ changes"; return 0; }
+  for f in "${check_files[@]:-}"; do
+    [[ -z "$f" ]] && continue
+    local body; body="$(git show ":./$f" 2>/dev/null || true)"
+    if [[ -z "$body" ]]; then emit fail agents "$f is empty"; blocked=1; continue; fi
+    if ! printf '%s' "$body" | grep -qE '^# '; then
+      emit fail agents "$f missing a single '# Title' H1 (pathfinder doc convention)"; blocked=1
+    fi
+    firstline="$(printf '%s' "$body" | head -n1)"
+    if [[ "$firstline" != "---" ]]; then
+      emit warn agents "$f missing YAML front-matter '---' (convention: name/description/trigger fields)"; warned=1
+    fi
+  done
+  [[ $blocked -eq 1 ]] && return 1
+  pass agents ".agents/ structure ok${warned:+ (advisory warnings above)}"
+}
+
+# --- Gate: bench/ Python lint (optional, low-risk) ---------------------------
+# code-idioms-and-conventions.md extended to the repo's one pocket of
+# non-Rust code (bench/harness/*.py). WARN-only: no bench/pyproject.toml
+# exists yet to configure rules deliberately, and this cannot affect Rust
+# enforcement in any way — it only lints Python benchmark harness scripts.
+gate_bench_ruff() {
+  if ! staged_any 'bench/**/*.py'; then emit skip bench-ruff "no staged bench/*.py files"; return 0; fi
+  if ! command -v ruff >/dev/null 2>&1; then
+    emit warn bench-ruff "ruff not installed — pip install ruff (optional)"
+    return 0
+  fi
+  local out
+  if out="$(ruff check bench/harness 2>&1)"; then
+    pass bench-ruff "ruff check bench/harness"
+  else
+    emit warn bench-ruff "ruff findings in bench/harness (non-blocking, no bench/pyproject.toml yet):"
+    printf '%s\n' "$out" | while IFS= read -r l; do emit warn bench-ruff "$l"; done
+  fi
+  return 0
+}
+
+# --- Gate: typos -------------------------------------------------------------
+gate_typos() {
+  if ! command -v typos >/dev/null 2>&1; then
+    emit warn typos "typos not installed — cargo install typos-cli (code-idioms)"
+    return 0
+  fi
+  if ! should_run typos; then emit skip typos "PATHFINDER_HOOK_SKIP"; return 0; fi
+  local cfg_flag=""
+  [[ -f typos.toml ]] && cfg_flag="--config typos.toml"
+  if typos $cfg_flag >/dev/null 2>&1; then
+    pass typos "typos${cfg_flag:+ $cfg_flag}"
+  else
+    emit fail typos "spelling errors detected — run 'typos' to see details, fix before committing"
+    return 1
+  fi
+}
+
+# --- Gate: gitleaks ----------------------------------------------------------
+# security-mandate.md (always wins). Deep secret scan of staged content.
+# Complements gate_secrets (pattern-based). Non-skippable in spirit but left
+# technically skippable like Lattice's own hook — security wins by policy
+# (git-workflow-principles.md --no-verify ban), not by hook enforcement alone.
+gate_gitleaks() {
+  if ! command -v gitleaks >/dev/null 2>&1; then
+    emit warn gitleaks "gitleaks not installed — see https://github.com/gitleaks/gitleaks#installing"
+    return 0
+  fi
+  local cfg_flag=""
+  [[ -f .gitleaks.toml ]] && cfg_flag="--config .gitleaks.toml"
+  if gitleaks protect --staged $cfg_flag --no-banner >/dev/null 2>&1; then
+    pass gitleaks "gitleaks protect --staged (no secrets detected)"
+  else
+    emit fail gitleaks "gitleaks detected potential secrets in staged content — review before committing (security-mandate.md)"
+    return 1
+  fi
+}
+
+# --- Gate: semgrep SAST ------------------------------------------------------
+# security-mandate.md, rugged-software-constitution.md.
+gate_semgrep() {
+  if ! command -v semgrep >/dev/null 2>&1; then
+    emit warn semgrep "semgrep not installed — pip install semgrep (security-mandate.md)"
+    return 0
+  fi
+  if ! should_run semgrep; then emit skip semgrep "PATHFINDER_HOOK_SKIP"; return 0; fi
+  if ! staged_any '*.rs'; then emit skip semgrep "no staged .rs files"; return 0; fi
+  if semgrep scan --config auto --error --quiet --no-git-ignore crates/ >/dev/null 2>&1; then
+    pass semgrep "semgrep scan --config auto (no SAST findings)"
+  else
+    emit fail semgrep "semgrep SAST findings detected in crates/ — review and fix (security-mandate.md)"
+    return 1
+  fi
+}
+
+# =============================================================================
+# RUST GATES — CI parity (see .github/workflows/ci.yml) + rust-idioms.md
+# =============================================================================
+
+have_rust() { [[ -f Cargo.toml ]] && command -v cargo >/dev/null 2>&1; }
+
+# --- Gate: cargo fmt --all --check ------------------------------------------
+gate_rust_fmt() {
+  if ! have_rust; then emit skip fmt "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! should_run fmt; then emit skip fmt "PATHFINDER_HOOK_SKIP"; return 0; fi
+  if cargo fmt --all -- --check >/dev/null 2>&1; then
+    pass fmt "cargo fmt --all -- --check"
+  else
+    emit fail fmt "rust not formatted — run 'cargo fmt --all' (rust-idioms.md)"
+    return 1
+  fi
+}
+
+# --- Gate: cargo clippy -------------------------------------------------------
+# rust-idioms.md "clippy must pass with zero warnings". --all-features per
+# the idioms skill's mandated pre-commit command (CI's lint job currently
+# omits --all-features — see README for the tracked gap).
+gate_rust_clippy() {
+  if ! have_rust; then emit skip clippy "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! should_run clippy; then emit skip clippy "PATHFINDER_HOOK_SKIP"; return 0; fi
+  local out
+  if out="$(cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1)"; then
+    pass clippy "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+  else
+    printf '%s\n' "$out" | grep -E '^(error|warning)' | while IFS= read -r l; do emit fail clippy "$l"; done
+    emit fail clippy "clippy failed — fix all warnings (rust-idioms.md, never #[allow] to pass)"
+    return 1
+  fi
+}
+
+# --- Gate: cargo build --workspace --all-targets ----------------------------
+# rust-idioms.md Pre-Commit Validation Protocol step 3.
+gate_rust_build() {
+  if ! have_rust; then emit skip build "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! should_run build; then emit skip build "PATHFINDER_HOOK_SKIP"; return 0; fi
+  local out
+  if out="$(cargo build --workspace --all-targets 2>&1)"; then
+    pass build "cargo build --workspace --all-targets"
+  else
+    printf '%s\n' "$out" | grep -E '^error' | while IFS= read -r l; do emit fail build "$l"; done
+    emit fail build "build failed"
+    return 1
+  fi
+}
+
+# --- Gate: cargo doc ---------------------------------------------------------
+gate_rust_doc() {
+  if ! have_rust; then emit skip rust-doc "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! should_run rust-doc; then emit skip rust-doc "PATHFINDER_HOOK_SKIP"; return 0; fi
+  local out
+  if out="$(RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --document-private-items 2>&1)"; then
+    pass rust-doc "cargo doc --workspace (no doc warnings)"
+  else
+    printf '%s\n' "$out" | grep -E '^(error|warning)' | while IFS= read -r l; do emit fail rust-doc "$l"; done
+    emit fail rust-doc "doc build failed — fix broken links/missing docs (documentation-principles.md)"
+    return 1
+  fi
+}
+
+# --- Gate: cargo test (unit tests only, offline) ----------------------------
+# testing-strategy.md "Never commit broken tests". Unit tests only by
+# default — the `integration` feature suite requires building the
+# test-mock-lsp binary and spawning subprocesses; that runs in pre-push
+# instead (see .githooks/pre-push) to keep commits fast.
+gate_rust_test() {
+  if ! have_rust; then emit skip rust-test "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! should_run rust-test; then emit skip rust-test "PATHFINDER_HOOK_SKIP / FAST"; return 0; fi
+  local out runner
+  if command -v cargo-nextest >/dev/null 2>&1; then
+    runner="cargo nextest run --workspace --exclude test-mock-lsp"
+  else
+    runner="cargo test --workspace --exclude test-mock-lsp"
+  fi
+  if out="$($runner 2>&1)"; then
+    pass rust-test "$runner"
+  else
+    printf '%s\n' "$out" | grep -E '^(error|test result:.*failures: [1-9]|test result:.*[1-9][0-9]* failed|FAIL)' | while IFS= read -r l; do emit fail rust-test "$l"; done
+    emit fail rust-test "tests failed — never commit broken tests (testing-strategy.md)"
+    return 1
+  fi
+}
+
+# --- Gate: cargo machete (unused dependencies) --------------------------------
+gate_rust_machete() {
+  if ! have_rust; then emit skip machete "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! command -v cargo-machete >/dev/null 2>&1; then
+    emit warn machete "cargo-machete not installed — cargo install cargo-machete"
+    return 0
+  fi
+  if ! should_run machete; then emit skip machete "PATHFINDER_HOOK_SKIP"; return 0; fi
+  if cargo machete >/dev/null 2>&1; then
+    pass machete "cargo machete (no unused dependencies)"
+  else
+    emit fail machete "unused dependencies detected — run 'cargo machete' and remove them (dependency-management-principles.md)"
+    return 1
+  fi
+}
+
+# --- Gate: cargo deny (license & dependency policy) --------------------------
+gate_rust_deny() {
+  if ! have_rust; then emit skip cargo-deny "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! command -v cargo-deny >/dev/null 2>&1; then
+    emit warn cargo-deny "cargo-deny not installed — cargo install cargo-deny"
+    return 0
+  fi
+  if ! should_run cargo-deny; then emit skip cargo-deny "PATHFINDER_HOOK_SKIP"; return 0; fi
+  if cargo deny check licenses bans sources >/dev/null 2>&1; then
+    pass cargo-deny "cargo deny check licenses bans sources"
+  else
+    emit fail cargo-deny "license/dependency policy violation — run 'cargo deny check' for details (dependency-management-principles.md)"
+    return 1
+  fi
+}
+
+# --- Gate: cargo audit (RustSec advisory DB) --------------------------------
+# security-mandate.md. Network-dependent; included in FAST skip set.
+gate_rust_audit() {
+  if ! have_rust; then emit skip audit "no workspace Cargo.toml or cargo"; return 0; fi
+  if ! should_run audit; then emit skip audit "PATHFINDER_HOOK_SKIP / FAST"; return 0; fi
+  if ! command -v cargo-audit >/dev/null 2>&1; then
+    emit warn audit "cargo-audit not installed — cargo install cargo-audit (security-mandate.md)"
+    return 0
+  fi
+  local out
+  if out="$(cargo audit 2>&1)"; then
+    pass audit "cargo audit (no known vulnerabilities)"
+  else
+    printf '%s\n' "$out" | grep -iE '^(Crate:|Version:|Advisory:|Title:|Vulnerability|error)' | while IFS= read -r l; do emit fail audit "$l"; done
+    emit fail audit "known vulnerabilities found — update dependencies (security-mandate.md)"
+    return 1
+  fi
+}
+
+# =============================================================================
+# ISOLATION + RUN
+# =============================================================================
+
+isolate_working_tree
+
+gate_secrets                  || true   # security-mandate #1, NON-SKIPPABLE
+gate_structural_suppress      || true   # rust-idioms §3, code-idioms-and-conventions
+gate_unsafe_unwrap_suppress   || true   # rust-idioms.md unsafe/unwrap policy (warn-only)
+gate_debug                    || true   # rugged-software-constitution, git-workflow
+gate_conflict_whitespace      || true   # git-workflow-principles
+gate_largefile                || true   # hygiene
+gate_lockfile                 || true   # dependency-management-principles
+gate_agents                   || true   # .agents/ product integrity
+gate_bench_ruff                || true  # code-idioms-and-conventions (Python pocket)
+gate_typos                    || true   # code-idioms-and-conventions
+gate_gitleaks                 || true   # security-mandate (deep secret scan)
+
+gate_rust_fmt                 || true
+gate_rust_clippy              || true
+gate_rust_build               || true
+gate_rust_doc                 || true
+gate_rust_machete             || true
+gate_rust_deny                || true
+gate_rust_test                || true
+gate_rust_audit               || true
+
+gate_semgrep                  || true   # SAST, skippable but non-trivial to bypass
+
+# --- summary ----------------------------------------------------------------
+_fail=${#FAILED_GATES[@]}
+printf '\n%s── summary%s  %s%d gate(s) failed%s · %s%d warnings%s · %s%d skipped%s\n' \
+  "$C_CYN" "$C_RST" "$C_RED" "$_fail" "$C_RST" "$C_YEL" "$WARNED" "$C_RST" "$C_DIM" "$SKIPPED" "$C_RST"
+
+if (( _fail > 0 )); then
+  printf '%sCommit blocked.%s Fix the failures above (%s).\n' "$C_RED" "$C_RST" "${!FAILED_GATES[*]}" >&2
+  printf '  Bypass only the skippable gates with: %sPATHFINDER_HOOK_SKIP=<ids> git commit ...%s\n' "$C_DIM" "$C_RST" >&2
+  printf '  (secrets and new-suppression checks are non-skippable — security-mandate.md always wins)\n' >&2
+  exit 1
+fi
+
+printf '%sAll gates passed.%s\n' "$C_GRN" "$C_RST"
+exit 0

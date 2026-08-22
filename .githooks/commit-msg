@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Validates commit messages against Conventional Commits, per
+# .agents/rules/git-workflow-principles.md and release-plz.toml (which
+# requires Conventional Commit types to decide version bumps — a malformed
+# message here silently breaks automated releases in CI, not just style).
+#
+# Format:   <type>(<scope>): <description>
+# Types:    feat fix docs style refactor test chore perf ci
+# Scope:    optional, e.g. feat(search): ...
+#
+# Skips merge commits and `Revert "..."` messages, which don't follow this
+# format by convention. Advisory-only for the 72-char description length
+# (git-workflow-principles.md recommends it but doesn't mandate a hard cap).
+#
+# Bypass (emergencies only): git commit --no-verify. Per
+# git-workflow-principles.md this should not be routine practice.
+
+set -uo pipefail
+
+MSG_FILE="$1"
+FIRST_LINE="$(head -n1 "$MSG_FILE")"
+
+if [[ ! -t 1 ]] || [[ "${PATHFINDER_HOOK_NO_COLOR:-0}" == "1" ]]; then
+  C_RED=""; C_YEL=""; C_GRN=""; C_DIM=""; C_RST=""
+else
+  C_RED=$'\033[31m'; C_YEL=$'\033[33m'; C_GRN=$'\033[32m'; C_DIM=$'\033[2m'; C_RST=$'\033[0m'
+fi
+
+# Merge commits and reverts follow their own git-generated format.
+case "$FIRST_LINE" in
+  "Merge "*|"Revert \""*)
+    exit 0 ;;
+esac
+
+TYPES='feat|fix|docs|style|refactor|test|chore|perf|ci'
+# <type>(<scope>): <description>  — scope is optional.
+PATTERN="^(${TYPES})(\([a-z0-9._-]+\))?: .+"
+
+if [[ ! "$FIRST_LINE" =~ $PATTERN ]]; then
+  printf '%s[FAIL]%s commit-msg — not a Conventional Commit\n' "$C_RED" "$C_RST" >&2
+  printf '  Got:      %s\n' "$FIRST_LINE" >&2
+  printf '  Expected: %s<type>(<scope>): <description>%s\n' "$C_DIM" "$C_RST" >&2
+  printf '  Types:    %s\n' "$TYPES" >&2
+  printf '  Example:  feat(search): add regex mode to symbol search\n' >&2
+  printf '\n  release-plz.toml uses this format to decide version bumps —\n' >&2
+  printf '  a malformed message breaks automated releases, not just style.\n' >&2
+  printf '  Bypass (emergencies only): git commit --no-verify\n' >&2
+  exit 1
+fi
+
+DESC_LEN=${#FIRST_LINE}
+if (( DESC_LEN > 72 )); then
+  printf '%s[WARN]%s commit-msg — first line is %d chars (git-workflow-principles.md recommends <=72)\n' \
+    "$C_YEL" "$C_RST" "$DESC_LEN" >&2
+fi
+
+printf '%s[ok]%s  commit-msg — Conventional Commit format\n' "$C_GRN" "$C_RST"
+exit 0

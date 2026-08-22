@@ -1,0 +1,11 @@
+# Ratchet baseline for the structural-suppress gate (Layer 2).
+# Format: <count>\t<file>. Regenerate with update-suppression-baseline.sh.
+# Do NOT hand-edit counts upward — that defeats the ratchet.
+2	crates/pathfinder-lsp/src/client/capabilities.rs
+2	crates/pathfinder-lsp/src/client/detect.rs
+1	crates/pathfinder-lsp/src/client/lifecycle.rs
+1	crates/pathfinder-lsp/src/client/mod.rs
+1	crates/pathfinder/src/server/tools/navigation/health.rs
+1	crates/pathfinder/src/server/tools/navigation/references.rs
+1	crates/pathfinder/src/server/tools/search.rs
+1	crates/pathfinder-treesitter/src/cache.rs

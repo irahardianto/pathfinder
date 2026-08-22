@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Pathfinder pre-push gate — runs the slower integration test suite once per
+# push instead of on every commit (testing-strategy.md "Never commit broken
+# tests" extended to the full suite before it reaches CI/a shared branch).
+#
+# Mirrors .github/workflows/ci.yml's "Integration Tests" job: builds the
+# test-mock-lsp fixture binary (nextest only builds test targets, not
+# production binaries — see ci.yml's comment on this), then runs the
+# `--features integration` suite which spawns real subprocesses (mock LSP,
+# git, file watcher).
+#
+# Skip (emergencies only): PATHFINDER_HOOK_SKIP_PUSH=1 git push ...
+# Per git-workflow-principles.md this should not be routine practice.
+
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+if [[ ! -t 1 ]] || [[ "${PATHFINDER_HOOK_NO_COLOR:-0}" == "1" ]]; then
+  C_RED=""; C_YEL=""; C_GRN=""; C_CYN=""; C_DIM=""; C_RST=""
+else
+  C_RED=$'\033[31m'; C_YEL=$'\033[33m'; C_GRN=$'\033[32m'
+  C_CYN=$'\033[36m'; C_DIM=$'\033[2m'; C_RST=$'\033[0m'
+fi
+
+printf '%sPathfinder pre-push gate%s\n' "$C_CYN" "$C_RST"
+
+if [[ "${PATHFINDER_HOOK_SKIP_PUSH:-0}" == "1" ]]; then
+  printf '%s[SKIP]%s integration-tests — PATHFINDER_HOOK_SKIP_PUSH=1\n' "$C_DIM" "$C_RST"
+  exit 0
+fi
+
+if [[ ! -f Cargo.toml ]] || ! command -v cargo >/dev/null 2>&1; then
+  printf '%s[SKIP]%s integration-tests — no workspace Cargo.toml or cargo\n' "$C_DIM" "$C_RST"
+  exit 0
+fi
+
+printf '  Building test-mock-lsp fixture binary...\n'
+if ! cargo build -p test-mock-lsp 2>&1 | tail -20; then
+  printf '%s[FAIL]%s integration-tests — failed to build test-mock-lsp\n' "$C_RED" "$C_RST" >&2
+  exit 1
+fi
+
+if command -v cargo-nextest >/dev/null 2>&1; then
+  RUNNER="cargo nextest run --workspace --features integration --test-threads 4"
+else
+  printf '%s[WARN]%s cargo-nextest not installed — falling back to cargo test (slower, less parallel)\n' "$C_YEL" "$C_RST"
+  RUNNER="cargo test --workspace --features integration"
+fi
+
+printf '  Running: %s\n' "$RUNNER"
+if $RUNNER; then
+  printf '%s[ok]%s  integration-tests — %s\n' "$C_GRN" "$C_RST" "$RUNNER"
+  printf '%sAll gates passed.%s\n' "$C_GRN" "$C_RST"
+  exit 0
+fi
+
+printf '%s[FAIL]%s integration-tests — never push broken tests (testing-strategy.md)\n' "$C_RED" "$C_RST" >&2
+printf '  Bypass (emergencies only): PATHFINDER_HOOK_SKIP_PUSH=1 git push ...\n' >&2
+exit 1

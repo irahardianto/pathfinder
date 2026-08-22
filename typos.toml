@@ -1,0 +1,32 @@
+# typos-cli configuration — https://github.com/crate-ci/typos
+#
+# Scope: source code, config, and *current* documentation. Historical/frozen
+# records (dated audit reports, superseded patch specs, raw benchmark run
+# logs) are excluded rather than "fixed", since editing them would falsify
+# the historical record they exist to preserve.
+
+[files]
+extend-exclude = [
+  # Point-in-time audit/QA snapshots — frozen historical records, not live docs.
+  "docs/audits/**",
+  # Dated implementation patch specs — frozen once the patch ships; some
+  # intentionally quote typo examples (e.g. did-you-mean test scenarios).
+  "docs/requirements/patches/**",
+  # Raw benchmark run logs (JSONL) — session IDs are random strings that
+  # occasionally collide with typo patterns (e.g. "ba", "Tje" substrings).
+  "bench/results/**",
+]
+
+[default.extend-words]
+# Ticket/spec ID prefix (e.g. THR-001-A), not the word "the".
+THR = "THR"
+# Short local variable name in bench/harness/mechanics.py (not "much").
+mch = "mch"
+# Substring split by an escaped quote in a raw-string JSON test fixture
+# (`"val\"ue"`), not the word "use"/"due" — see detect_test.rs.
+ue = "ue"
+
+[default.extend-identifiers]
+# Valid alternate spelling of "unparsable" used throughout the codebase.
+unparseable = "unparseable"
+Unparseable = "Unparseable"
