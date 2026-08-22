@@ -97,6 +97,16 @@ cargo build --release
 pathfinder-mcp --help
 ```
 
+**Contributing from source? Enable the git hooks (one-time):**
+
+```sh
+git config core.hooksPath .githooks
+```
+
+This activates `pre-commit` (fmt/clippy/build/doc/test/security gates), `commit-msg`
+(Conventional Commits validation), and `pre-push` (integration test suite). See
+[Contributing](#contributing) for details and environment variable overrides.
+
 ### Configuration
 
 #### MCP Client Configuration
@@ -435,8 +445,8 @@ Contributions are welcome! Pathfinder follows strict engineering practices:
 # Run tests
 cargo test --workspace
 
-# Run with clippy (pedantic + deny unwrap)
-cargo clippy --workspace --all-targets
+# Run with clippy (pedantic + all-features, matches the pre-commit gate)
+cargo clippy --workspace --all-targets --all-features
 
 # Format
 cargo fmt --all --check
@@ -445,7 +455,60 @@ cargo fmt --all --check
 cargo deny check
 ```
 
-> The workspace enforces `clippy::pedantic`, `deny(unwrap_used)`, `warn(expect_used)`, and `deny(unsafe_code)`.
+> The workspace enforces `clippy::pedantic`, `warn(unwrap_used)`, `warn(expect_used)`,
+> `warn(missing_docs)`, and `deny(unsafe_code)`. Six structural lints —
+> `too_many_lines`, `cognitive_complexity`, `too_many_arguments`,
+> `type_complexity`, `struct_excessive_bools`, `large_enum_variant` — are
+> `deny`d at `priority = 1`: a new, unattributed violation fails the build on
+> its own. `deny` (not `forbid`) is deliberate — `forbid` conflicts with
+> proc-macros (`clap::Parser`, `async_trait`) that emit group-level
+> `#[allow(clippy::pedantic)]`/`#[allow(clippy::complexity)]` in their macro
+> expansions, which would otherwise hard-error with `E0453` workspace-wide.
+> This is defense-in-depth alongside the pre-commit hook's structural-suppress
+> gate (see below) and the no-`--no-verify` policy in
+> [git-workflow-principles.md](.agents/rules/git-workflow-principles.md).
+
+### Git Hooks
+
+Pathfinder ships versioned git hooks in `.githooks/` (not `.git/hooks/`, which
+is local-only and untracked). Enable them once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+| Hook | Runs on | What it checks |
+|---|---|---|
+| `pre-commit` | every commit | secrets, structural-suppress ratchet, debug code, conflict markers, large files, lockfile discipline, `.agents/` integrity, typos, gitleaks, semgrep, `cargo fmt`/`clippy`/`build`/`doc`/`machete`/`deny`/`test`/`audit` |
+| `commit-msg` | every commit | [Conventional Commits](.agents/rules/git-workflow-principles.md) format (required by `release-plz.toml` for automated version bumps) |
+| `pre-push` | every push | the `--features integration` test suite (mock LSP subprocess, file watcher) — kept out of `pre-commit` to keep commits fast |
+
+All gates degrade gracefully: a gate whose toolchain isn't installed reports
+`SKIP`, never a false `FAIL`, so the hooks work on any contributor's machine
+from day one. Only the secrets scan and the staged-diff half of the
+structural-suppress gate are non-skippable — security-mandate.md always wins.
+
+**Environment variable overrides** (all optional):
+
+| Variable | Effect |
+|---|---|
+| `PATHFINDER_HOOK_SKIP=id1,id2` | Skip specific gates by id (e.g. `PATHFINDER_HOOK_SKIP=audit,semgrep`) |
+| `PATHFINDER_HOOK_FAST=1` | Skip the slow/networked gates (`rust-test`, `audit`) for large refactor branches |
+| `PATHFINDER_HOOK_RUN_ALL=1` | Ignore all skip flags — force every gate to run |
+| `PATHFINDER_HOOK_NO_COLOR=1` | Disable ANSI color output (CI / non-interactive shells) |
+| `PATHFINDER_HOOK_NO_ISOLATE=1` | Disable working-tree isolation (only if isolation itself misbehaves) |
+| `PATHFINDER_HOOK_SKIP_PUSH=1` | Skip the `pre-push` integration test suite |
+
+Bypassing with `git commit --no-verify` / `git push --no-verify` should not be
+routine practice (git-workflow-principles.md). The **structural-suppress**
+gate ratchets pre-existing `#[allow]`/`#[expect]` overrides on the six
+structural lints above against `.githooks/suppression-baseline.txt`: new
+suppressions are always rejected, and paying down existing debt is locked in
+by re-running:
+
+```sh
+.githooks/update-suppression-baseline.sh
+```
 
 <!-- LICENSE -->
 ## License
