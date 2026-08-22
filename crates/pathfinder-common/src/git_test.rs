@@ -21,15 +21,15 @@ impl FakeGitRunner {
 }
 
 impl GitRunner for FakeGitRunner {
-    async fn diff_name_only(
-        &self,
-        _workspace_root: &Path,
-        _target: &str,
-    ) -> Result<Vec<u8>, std::io::Error> {
-        match &self.stdout {
+    fn diff_name_only<'a>(
+        &'a self,
+        _workspace_root: &'a Path,
+        _target: &'a str,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, std::io::Error>> + Send + 'a {
+        std::future::ready(match &self.stdout {
             Ok(bytes) => Ok(bytes.clone()),
             Err(kind) => Err(std::io::Error::new(*kind, "simulated error")),
-        }
+        })
     }
 }
 

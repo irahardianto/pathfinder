@@ -403,6 +403,7 @@ Example: `health(language=\"rust\", force_probe=true)`"
 
 // ── ServerHandler trait impl ────────────────────────────────────────
 
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler]
 impl ServerHandler for PathfinderServer {
     fn get_info(&self) -> ServerInfo {
