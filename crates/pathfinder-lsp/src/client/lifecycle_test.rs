@@ -3074,7 +3074,12 @@ fn test_detect_concurrent_lsp_linux_detailed_paths() {
         })
         .or_else(|_| which::which("/bin/sleep").map(|_| std::path::PathBuf::from("/bin/sleep")))
         .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/sleep"));
-    let unique_sleep = temp_dir.path().join("unique_sleep_bin");
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sleep_name = format!("unique_sleep_{unique_id}");
+    let unique_sleep = temp_dir.path().join(&sleep_name);
     std::fs::copy(&sleep_bin, &unique_sleep).expect("copy sleep");
 
     let true_bin = which::which("true")
@@ -3083,7 +3088,8 @@ fn test_detect_concurrent_lsp_linux_detailed_paths() {
         })
         .or_else(|_| which::which("/bin/true").map(|_| std::path::PathBuf::from("/bin/true")))
         .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/true"));
-    let unique_true = temp_dir.path().join("unique_true_bin");
+    let true_name = format!("unique_true_{unique_id}");
+    let unique_true = temp_dir.path().join(&true_name);
     std::fs::copy(&true_bin, &unique_true).expect("copy true");
 
     // 1. Own child process (should be skipped)
@@ -3092,12 +3098,12 @@ fn test_detect_concurrent_lsp_linux_detailed_paths() {
         .spawn()
         .unwrap();
 
-    let found_child = LspClient::detect_concurrent_lsp_linux("rust", "unique_sleep_bin");
+    let found_child = LspClient::detect_concurrent_lsp_linux("rust", &sleep_name);
 
     // 2. Zombie child process (should be skipped)
     let mut zombie = std::process::Command::new(&unique_true).spawn().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let found_zombie = LspClient::detect_concurrent_lsp_linux("rust", "unique_true_bin");
+    let found_zombie = LspClient::detect_concurrent_lsp_linux("rust", &true_name);
 
     let mut orphaned_shell = std::process::Command::new("sh")
         .arg("-c")
@@ -3107,7 +3113,7 @@ fn test_detect_concurrent_lsp_linux_detailed_paths() {
     let _ = orphaned_shell.wait();
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    let found_external = LspClient::detect_concurrent_lsp_linux("rust", "unique_sleep_bin");
+    let found_external = LspClient::detect_concurrent_lsp_linux("rust", &sleep_name);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -3129,7 +3135,12 @@ fn test_detect_concurrent_lsp_macos_detailed_paths() {
         })
         .or_else(|_| which::which("/bin/sleep").map(|_| std::path::PathBuf::from("/bin/sleep")))
         .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/sleep"));
-    let unique_sleep = temp_dir.path().join("unique_sleep_bin");
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sleep_name = format!("unique_sleep_{unique_id}");
+    let unique_sleep = temp_dir.path().join(&sleep_name);
     std::fs::copy(&sleep_bin, &unique_sleep).expect("copy sleep");
 
     let true_bin = which::which("true")
@@ -3138,7 +3149,8 @@ fn test_detect_concurrent_lsp_macos_detailed_paths() {
         })
         .or_else(|_| which::which("/bin/true").map(|_| std::path::PathBuf::from("/bin/true")))
         .unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/true"));
-    let unique_true = temp_dir.path().join("unique_true_bin");
+    let true_name = format!("unique_true_{unique_id}");
+    let unique_true = temp_dir.path().join(&true_name);
     std::fs::copy(&true_bin, &unique_true).expect("copy true");
 
     // 1. Own child process (should be skipped)
@@ -3147,12 +3159,12 @@ fn test_detect_concurrent_lsp_macos_detailed_paths() {
         .spawn()
         .unwrap();
 
-    let found_child = LspClient::detect_concurrent_lsp_macos("rust", "unique_sleep_bin");
+    let found_child = LspClient::detect_concurrent_lsp_macos("rust", &sleep_name);
 
     // 2. Zombie child process (should be skipped)
     let mut zombie = std::process::Command::new(&unique_true).spawn().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let found_zombie = LspClient::detect_concurrent_lsp_macos("rust", "unique_true_bin");
+    let found_zombie = LspClient::detect_concurrent_lsp_macos("rust", &true_name);
 
     let mut orphaned_shell = std::process::Command::new("sh")
         .arg("-c")
@@ -3162,7 +3174,7 @@ fn test_detect_concurrent_lsp_macos_detailed_paths() {
     let _ = orphaned_shell.wait();
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    let found_external = LspClient::detect_concurrent_lsp_macos("rust", "unique_sleep_bin");
+    let found_external = LspClient::detect_concurrent_lsp_macos("rust", &sleep_name);
 
     let _ = child.kill();
     let _ = child.wait();

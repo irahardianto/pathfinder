@@ -46,21 +46,65 @@ use tempfile::TempDir;
 /// via `cargo test --workspace --features integration` so the full workspace
 /// (including `test-mock-lsp`) is built before the tests execute.
 pub fn mock_binary() -> PathBuf {
-    // Walk up from the test exe to the profile output directory.
-    let mut dir = std::env::current_exe().expect("current_exe failed");
-    dir.pop(); // remove test binary filename
-    if dir.file_name().is_some_and(|n| n == "deps") {
-        dir.pop(); // step out of deps/ into target/debug/ (or target/release/)
+    let binary_name = if cfg!(windows) {
+        "test-mock-lsp.exe"
+    } else {
+        "test-mock-lsp"
+    };
+
+    let mut searched_paths = Vec::new();
+
+    // 1. Direct path relative to current running test executable
+    if let Ok(mut dir) = std::env::current_exe() {
+        dir.pop(); // remove test binary filename
+        if dir.file_name().is_some_and(|n| n == "deps") {
+            dir.pop(); // step out of deps/ into target/debug/ (or target/release/)
+        }
+        let mock_bin = dir.join(binary_name);
+        if mock_bin.exists() {
+            return mock_bin;
+        }
+        searched_paths.push(mock_bin);
     }
-    let mock_bin = dir.join("test-mock-lsp");
-    assert!(
-        mock_bin.exists(),
-        "Mock binary not found at {}. \
+
+    // 2. Check CARGO_TARGET_DIR environment variable
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        let base = PathBuf::from(target_dir);
+        for profile in &["debug", "release"] {
+            let candidate = base.join(profile).join(binary_name);
+            if candidate.exists() {
+                return candidate;
+            }
+            searched_paths.push(candidate);
+        }
+    }
+
+    // 3. Search target directories relative to workspace root (via CARGO_MANIFEST_DIR ancestors)
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        for target_folder in &["target", "target/llvm-cov-target"] {
+            for profile in &["debug", "release"] {
+                let candidate = ancestor.join(target_folder).join(profile).join(binary_name);
+                if candidate.exists() {
+                    return candidate;
+                }
+                searched_paths.push(candidate);
+            }
+        }
+    }
+
+    let paths_formatted = searched_paths
+        .iter()
+        .map(|p| format!("  - {}", p.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    panic!(
+        "Mock binary not found. Searched locations:\n{}\n\
          Run `cargo build -p test-mock-lsp` first, or use \
          `cargo test --workspace --features integration` to build everything together.",
-        mock_bin.display()
+        paths_formatted
     );
-    mock_bin
 }
 
 /// Create a minimal Rust workspace in a temporary directory.

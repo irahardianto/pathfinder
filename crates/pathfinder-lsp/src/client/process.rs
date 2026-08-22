@@ -369,28 +369,42 @@ pub(super) async fn spawn_and_initialize(
 
 #[allow(unsafe_code)]
 fn is_process_alive(pid: i32) -> bool {
-    // On Linux, checking if /proc/{pid} exists is a safe way to check process liveness
-    // without using unsafe blocks.
+    if pid <= 0 {
+        return false;
+    }
+    if let Ok(p) = u32::try_from(pid) {
+        if p == std::process::id() {
+            return true;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(pid, 0) is a safe syscall — it sends no signal and
+        // only checks process existence. It cannot affect any process state.
+        // Returns 0 if process exists, or -1 with EPERM if exists under different user.
+        let ret = unsafe { libc::kill(pid, 0) };
+        if ret == 0 {
+            return true;
+        }
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+            return true;
+        }
+    }
+
+    // Fallback: check /proc/{pid} if procfs is available
     let proc_path = std::path::Path::new("/proc");
     if proc_path.exists() {
-        proc_path.join(pid.to_string()).exists()
-    } else {
-        // On macOS/BSD and other non-procfs Unix systems, use kill(pid, 0).
-        // Signal 0 is never delivered — it only checks if the process exists.
-        // Returns 0 on success (alive), -1 with errno=ESRCH if process is gone.
-        // libc is already in Cargo.toml as a direct dependency.
-        #[cfg(unix)]
-        {
-            // SAFETY: kill(pid, 0) is a safe syscall — it sends no signal and
-            // only checks process existence. It cannot affect any process state.
-            let ret = unsafe { libc::kill(pid, 0) };
-            ret == 0
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = pid;
-            true
-        }
+        return proc_path.join(pid.to_string()).exists();
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+    #[cfg(unix)]
+    {
+        false
     }
 }
 

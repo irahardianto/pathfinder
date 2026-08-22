@@ -812,6 +812,17 @@ impl super::LspClient {
     #[cfg(target_os = "linux")]
     fn detect_concurrent_lsp_linux(language_id: &str, binary_name: &str) -> bool {
         let our_pid = std::process::id();
+        let our_proc_pid: u32 = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .as_deref()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|l| l.starts_with("Pid:"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(our_pid);
 
         if let Ok(entries) = std::fs::read_dir("/proc") {
             let mut external_count = 0;
@@ -823,6 +834,16 @@ impl super::LspClient {
                     .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
                 if !is_numeric {
                     continue;
+                }
+
+                if let Some(pid) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    if pid == our_pid || pid == our_proc_pid {
+                        continue;
+                    }
                 }
 
                 let cmdline_path = path.join("cmdline");
@@ -865,7 +886,7 @@ impl super::LspClient {
                     continue;
                 }
 
-                if parent_pid == our_pid {
+                if parent_pid == our_pid || parent_pid == our_proc_pid {
                     tracing::trace!(
                         binary = binary_name,
                         "detect_concurrent_lsp: skipping own child process"
