@@ -15,41 +15,317 @@ use rmcp::model::ErrorData;
 use super::definition_patterns;
 
 impl PathfinderServer {
-    /// Core logic for the `get_definition` tool.
-    ///
-    /// Resolves the semantic path to a file position, queries the LSP for the
-    /// definition location, and returns the result.
-    ///
-    /// **Degraded mode:** Returns a `LSP_REQUIRED` error when no LSP is configured.
-    // This function coordinates Tree-sitter (position resolution), LSP (goto_definition),
-    // and Ripgrep (degraded fallback). It has multiple outcome paths:
-    // 1. Happy path: LSP returns Some(def)
-    // 2. Warmup path: LSP returns None → 1s wait → retry → grep fallback
-    // 3. Degraded path: NoLspAvailable → grep fallback
-    // 4. Error path: Other LspError
-    // The linear structure makes the orchestration easier to understand.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequential pipeline: parse → sandbox → TS → LSP (with warmup retry) → grep fallback. Extraction done at helper level; remaining orchestration is linear."
-    )]
-    pub(crate) async fn get_definition_impl(
+    /// Applies a context-specific [`DegradedReason`] override to a grep-fallback
+    /// response, preserving strategy-specific reasons (e.g.
+    /// `GrepFallbackImplScoped`) already set by [`Self::fallback_definition_grep`],
+    /// and stamps the final `duration_ms`.
+    fn apply_fallback_reason(
+        def: &mut GetDefinitionResponse,
+        reason: DegradedReason,
+        start: std::time::Instant,
+        force_degraded: bool,
+    ) {
+        if !matches!(
+            def.degraded_reason,
+            Some(DegradedReason::GrepFallbackImplScoped)
+        ) {
+            def.degraded_reason = Some(reason);
+        }
+        if force_degraded {
+            def.degraded = true;
+        }
+        def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
+    }
+
+    /// Handles the `Ok(None)` LSP outcome: retries once after a brief warmup
+    /// wait, then falls back to grep, then to a `SymbolNotFound` error with
+    /// "did you mean" suggestions.
+    async fn resolve_lsp_definition_none(
         &self,
-        params: LocateParams,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        semantic_path_str: String,
+        symbol_scope: &pathfinder_common::types::SymbolScope,
+        start: std::time::Instant,
+        tree_sitter_ms: u128,
+        lsp_ms: u128,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let start = std::time::Instant::now();
-        let semantic_path_str = params.semantic_path.clone().unwrap_or_default();
+        // Symbol has no definition (e.g., built-in, external) or LSP is still warming up.
+        //
+        // Retry once after a brief wait: if the LSP just finished indexing
+        // between our did_open and the query, a second attempt often succeeds.
+        // 1s is sufficient — if LSP still isn't ready, grep fallback handles it.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let retry_lsp_result = self
+            .lawyer
+            .goto_definition(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
+                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
+            )
+            .await;
+
+        if let Ok(Some(def)) = retry_lsp_result {
+            tracing::info!(
+                tool = "get_definition",
+                file = %def.file,
+                definition_line = def.line,
+                tree_sitter_ms,
+                lsp_ms,
+                duration_ms = start.elapsed().as_millis(),
+                engines_used = ?["tree-sitter", "lsp"],
+                "get_definition: complete (succeeded on retry after warmup wait)"
+            );
+            return Ok(Self::get_def_to_call_result(&GetDefinitionResponse {
+                file: def.file,
+                line: def.line,
+                column: def.column,
+                preview: def.preview,
+                degraded: false,
+                degraded_reason: None,
+                actionable_guidance: None,
+                lsp_readiness: Some("warming_up".to_owned()),
+                warm_start_in_progress: Some(true),
+                duration_ms: Some(millis_to_u64(start.elapsed().as_millis())),
+                resolution_strategy: Some("lsp_retry".to_owned()),
+            }));
+        }
+
+        // Re-capture duration after the 1s sleep + retry attempt
+        // so downstream logs reflect the full elapsed time.
+        let duration_ms = start.elapsed().as_millis();
 
         tracing::info!(
             tool = "get_definition",
             semantic_path = %semantic_path_str,
-            "get_definition: start"
+            tree_sitter_ms,
+            lsp_ms,
+            duration_ms,
+            "get_definition: no definition found via LSP — attempting grep-based fallback"
         );
 
-        // Parse and validate the semantic path
-        let semantic_path = parse_semantic_path(&semantic_path_str)?;
-        require_symbol_target(&semantic_path, &semantic_path_str)?;
+        if let Some(mut def) = self.fallback_definition_grep(semantic_path).await {
+            Self::apply_fallback_reason(
+                &mut def,
+                DegradedReason::LspWarmupGrepFallback,
+                start,
+                false,
+            );
+            let duration_ms = def.duration_ms.unwrap_or(0);
+            tracing::info!(
+                tool = "get_definition",
+                file = %def.file,
+                line = def.line,
+                duration_ms,
+                degraded = true,
+                degraded_reason = "lsp_warmup_grep_fallback",
+                engines_used = ?["tree-sitter", "lsp", "ripgrep"],
+                "get_definition: degraded complete (grep fallback after LSP None)"
+            );
+            return Ok(Self::get_def_to_call_result(&def));
+        }
 
-        // Sandbox check
+        tracing::info!(
+            tool = "get_definition",
+            semantic_path = %semantic_path_str,
+            tree_sitter_ms,
+            lsp_ms,
+            duration_ms,
+            "get_definition: no definition found (LSP None, grep empty)"
+        );
+        let did_you_mean_suggestions = self.compute_did_you_mean(semantic_path).await;
+
+        // Spec 2.4: Check if LSP is still warming up and suggest retry delay
+        let retry_after = if self.lawyer.is_warm_start_complete() {
+            None
+        } else {
+            Some(10u32) // 10 seconds when warmup is in progress
+        };
+
+        Err(pathfinder_to_error_data(&PathfinderError::SymbolNotFound {
+            semantic_path: semantic_path_str,
+            did_you_mean: did_you_mean_suggestions,
+            retry_after_seconds: retry_after,
+        }))
+    }
+
+    /// Handles `LspError::NoLspAvailable`: attempts a grep-based fallback,
+    /// falling back to the original `NoLspAvailable` error when grep also
+    /// finds nothing.
+    async fn handle_no_lsp_available(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        language: String,
+        start: std::time::Instant,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        // Degraded mode — LSP not available. Use a grep-based heuristic to
+        // find a likely definition location. This is not LSP-accurate but
+        // gives the agent a starting point without requiring a full
+        // `search_codebase` call.
+        tracing::info!(
+            tool = "get_definition",
+            symbol = %semantic_path,
+            "get_definition: no LSP — attempting grep-based fallback"
+        );
+
+        if let Some(mut def) = self.fallback_definition_grep(semantic_path).await {
+            Self::apply_fallback_reason(&mut def, DegradedReason::NoLspGrepFallback, start, false);
+            let duration_ms = def.duration_ms.unwrap_or(0);
+            tracing::info!(
+                tool = "get_definition",
+                file = %def.file,
+                line = def.line,
+                duration_ms,
+                degraded = true,
+                degraded_reason = "no_lsp_grep_fallback",
+                engines_used = ?["tree-sitter", "ripgrep"],
+                "get_definition: degraded complete (grep fallback)"
+            );
+            return Ok(Self::get_def_to_call_result(&def));
+        }
+
+        // No grep match either — return the original LSP error
+        let duration_ms = start.elapsed().as_millis();
+        tracing::info!(
+            tool = "get_definition",
+            duration_ms,
+            degraded = true,
+            degraded_reason = "no_lsp",
+            engines_used = ?["none"],
+            "get_definition: degraded (no LSP, grep fallback also empty)"
+        );
+        Err(pathfinder_to_error_data(&PathfinderError::NoLspAvailable {
+            language,
+        }))
+    }
+
+    /// Handles `LspError::Timeout`: attempts a grep-based fallback, falling
+    /// back to a generic `LspError` when grep also finds nothing.
+    async fn handle_lsp_timeout(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        semantic_path_str: String,
+        start: std::time::Instant,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        // LSP timed out — attempt grep-based fallback
+        tracing::info!(
+            tool = "get_definition",
+            semantic_path = %semantic_path_str,
+            "get_definition: LSP timed out — attempting grep-based fallback"
+        );
+
+        if let Some(mut def) = self.fallback_definition_grep(semantic_path).await {
+            Self::apply_fallback_reason(
+                &mut def,
+                DegradedReason::LspTimeoutGrepFallback,
+                start,
+                false,
+            );
+            let duration_ms = def.duration_ms.unwrap_or(0);
+            tracing::info!(
+                tool = "get_definition",
+                file = %def.file,
+                line = def.line,
+                duration_ms,
+                degraded = true,
+                degraded_reason = "lsp_timeout_grep_fallback",
+                engines_used = ?["tree-sitter", "lsp", "ripgrep"],
+                "get_definition: degraded complete (grep fallback after timeout)"
+            );
+            return Ok(Self::get_def_to_call_result(&def));
+        }
+
+        tracing::warn!(
+            tool = "get_definition",
+            semantic_path = %semantic_path_str,
+            "get_definition: LSP timed out and grep fallback found no match"
+        );
+        Err(pathfinder_to_error_data(&PathfinderError::LspError {
+            message: "LSP timed out and grep fallback found no match".to_owned(),
+        }))
+    }
+
+    /// Handles any other `LspError` (connection resets, protocol errors,
+    /// etc.): attempts a grep-based fallback before giving up. Prevents agent
+    /// stalls when an unexpected LSP failure occurs mid-session.
+    async fn handle_lsp_generic_error(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        e: LspError,
+        start: std::time::Instant,
+        tree_sitter_ms: u128,
+        lsp_ms: u128,
+        duration_ms: u128,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        tracing::warn!(
+            tool = "get_definition",
+            error = %e,
+            tree_sitter_ms,
+            lsp_ms,
+            duration_ms,
+            engines_used = ?["lsp"],
+            "get_definition: LSP error — attempting grep fallback"
+        );
+
+        if let Some(mut def) = self.fallback_definition_grep(semantic_path).await {
+            // Preserve strategy-specific reasons (e.g., GrepFallbackImplScoped)
+            // but override the generic GrepFallbackFileScoped with the
+            // context-specific reason from the LSP error path.
+            Self::apply_fallback_reason(
+                &mut def,
+                DegradedReason::LspErrorGrepFallback,
+                start,
+                true,
+            );
+            let duration_ms = def.duration_ms.unwrap_or(0);
+            tracing::info!(
+                tool = "get_definition",
+                file = %def.file,
+                line = def.line,
+                duration_ms,
+                degraded = true,
+                degraded_reason = "lsp_error_grep_fallback",
+                engines_used = ?["tree-sitter", "lsp", "ripgrep"],
+                "get_definition: degraded complete (grep fallback after LSP error)"
+            );
+            return Ok(Self::get_def_to_call_result(&def));
+        }
+
+        let duration_ms = start.elapsed().as_millis();
+        tracing::warn!(
+            tool = "get_definition",
+            error = %e,
+            duration_ms,
+            "get_definition: LSP error and grep fallback found no match"
+        );
+        Err(pathfinder_to_error_data(&PathfinderError::LspError {
+            message: e.to_string(),
+        }))
+    }
+
+    /// Parses/validates `semantic_path_str`, enforces the sandbox and
+    /// file-existence checks, and resolves the symbol's position via
+    /// Tree-sitter.
+    ///
+    /// Returns the parsed [`SemanticPath`](pathfinder_common::types::SemanticPath),
+    /// its [`SymbolScope`](pathfinder_common::types::SymbolScope), and how
+    /// long the Tree-sitter resolution took (in ms).
+    async fn locate_symbol_for_definition(
+        &self,
+        semantic_path_str: &str,
+        start: std::time::Instant,
+    ) -> Result<
+        (
+            pathfinder_common::types::SemanticPath,
+            pathfinder_common::types::SymbolScope,
+            u128,
+        ),
+        ErrorData,
+    > {
+        let semantic_path = parse_semantic_path(semantic_path_str)?;
+        require_symbol_target(&semantic_path, semantic_path_str)?;
+
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
             let duration_ms = start.elapsed().as_millis();
             tracing::warn!(
@@ -84,10 +360,20 @@ impl PathfinderServer {
             .map_err(treesitter_error_to_error_data)?;
         let tree_sitter_ms = ts_start.elapsed().as_millis();
 
-        // IW-3 (DS-1 gap fix): Open the file via RAII guard so did_close is
-        // guaranteed on all exit paths (success, error, early return).
-        // rust-analyzer requires files to be in its document buffer to resolve
-        // definitions. Without this, it returns null for all navigation.
+        Ok((semantic_path, symbol_scope, tree_sitter_ms))
+    }
+
+    /// Opens `semantic_path`'s file in the LSP's document buffer via an RAII
+    /// guard, so `did_close` fires automatically when the guard drops.
+    ///
+    /// rust-analyzer (and similar servers) require files to be open in their
+    /// document buffer to resolve definitions — without this, `goto_definition`
+    /// returns null for all navigation. Returns `None` (degraded) when the
+    /// file can't be read or the LSP rejects the open.
+    async fn open_document_for_definition(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+    ) -> Option<Box<dyn pathfinder_lsp::lawyer::DocumentLease>> {
         let file_path = self.workspace_root.path().join(&semantic_path.file_path);
         let file_content = match tokio::fs::read_to_string(&file_path).await {
             Ok(content) => content,
@@ -101,8 +387,7 @@ impl PathfinderServer {
                 String::new()
             }
         };
-        // `_doc_guard` is held until the end of this function; dropping it fires did_close.
-        let _doc_guard = match self
+        match self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
@@ -121,7 +406,44 @@ impl PathfinderServer {
                 );
                 None
             }
-        };
+        }
+    }
+
+    /// Core logic for the `get_definition` tool.
+    ///
+    /// Resolves the semantic path to a file position, queries the LSP for the
+    /// definition location, and returns the result.
+    ///
+    /// **Degraded mode:** Returns a `LSP_REQUIRED` error when no LSP is configured.
+    // This function coordinates Tree-sitter (position resolution), LSP (goto_definition),
+    // and Ripgrep (degraded fallback). It has multiple outcome paths, each
+    // delegated to its own handler:
+    // 1. Happy path: LSP returns Some(def) — handled inline
+    // 2. Warmup path: LSP returns None → resolve_lsp_definition_none
+    // 3. Degraded path: NoLspAvailable → handle_no_lsp_available
+    // 4. Timeout path: LspError::Timeout → handle_lsp_timeout
+    // 5. Error path: any other LspError → handle_lsp_generic_error
+    pub(crate) async fn get_definition_impl(
+        &self,
+        params: LocateParams,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let semantic_path_str = params.semantic_path.clone().unwrap_or_default();
+
+        tracing::info!(
+            tool = "get_definition",
+            semantic_path = %semantic_path_str,
+            "get_definition: start"
+        );
+
+        let (semantic_path, symbol_scope, tree_sitter_ms) = self
+            .locate_symbol_for_definition(&semantic_path_str, start)
+            .await?;
+
+        // IW-3 (DS-1 gap fix): `_doc_guard` is held until the end of this
+        // function; dropping it fires did_close on all exit paths (success,
+        // error, early return).
+        let _doc_guard = self.open_document_for_definition(&semantic_path).await;
 
         // Query LSP for the definition location at the symbol's start line
         let lsp_start = std::time::Instant::now();
@@ -169,244 +491,34 @@ impl PathfinderServer {
                 }))
             }
             Ok(None) => {
-                // Symbol has no definition (e.g., built-in, external) or LSP is still warming up.
-                //
-                // Retry once after a brief wait: if the LSP just finished indexing
-                // between our did_open and the query, a second attempt often succeeds.
-                // 1s is sufficient — if LSP still isn't ready, grep fallback handles it.
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-                let retry_lsp_result = self
-                    .lawyer
-                    .goto_definition(
-                        self.workspace_root.path(),
-                        &semantic_path.file_path,
-                        u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
-                        u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
-                    )
-                    .await;
-
-                if let Ok(Some(def)) = retry_lsp_result {
-                    tracing::info!(
-                        tool = "get_definition",
-                        file = %def.file,
-                        definition_line = def.line,
-                        tree_sitter_ms,
-                        lsp_ms,
-                        duration_ms = start.elapsed().as_millis(),
-                        engines_used = ?["tree-sitter", "lsp"],
-                        "get_definition: complete (succeeded on retry after warmup wait)"
-                    );
-                    return Ok(Self::get_def_to_call_result(&GetDefinitionResponse {
-                        file: def.file,
-                        line: def.line,
-                        column: def.column,
-                        preview: def.preview,
-                        degraded: false,
-                        degraded_reason: None,
-                        actionable_guidance: None,
-                        lsp_readiness: Some("warming_up".to_owned()),
-                        warm_start_in_progress: Some(true),
-                        duration_ms: Some(millis_to_u64(start.elapsed().as_millis())),
-                        resolution_strategy: Some("lsp_retry".to_owned()),
-                    }));
-                }
-
-                // Re-capture duration after the 1s sleep + retry attempt
-                // so downstream logs reflect the full elapsed time.
-                let duration_ms = start.elapsed().as_millis();
-
-                tracing::info!(
-                    tool = "get_definition",
-                    semantic_path = %semantic_path_str,
+                self.resolve_lsp_definition_none(
+                    &semantic_path,
+                    semantic_path_str,
+                    &symbol_scope,
+                    start,
                     tree_sitter_ms,
                     lsp_ms,
-                    duration_ms,
-                    "get_definition: no definition found via LSP — attempting grep-based fallback"
-                );
-
-                if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    if !matches!(
-                        def.degraded_reason,
-                        Some(DegradedReason::GrepFallbackImplScoped)
-                    ) {
-                        def.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-                    }
-                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
-                    let duration_ms = def.duration_ms.unwrap_or(0);
-                    tracing::info!(
-                        tool = "get_definition",
-                        file = %def.file,
-                        line = def.line,
-                        duration_ms,
-                        degraded = true,
-                        degraded_reason = "lsp_warmup_grep_fallback",
-                        engines_used = ?["tree-sitter", "lsp", "ripgrep"],
-                        "get_definition: degraded complete (grep fallback after LSP None)"
-                    );
-                    return Ok(Self::get_def_to_call_result(&def));
-                }
-
-                tracing::info!(
-                    tool = "get_definition",
-                    semantic_path = %semantic_path_str,
-                    tree_sitter_ms,
-                    lsp_ms,
-                    duration_ms,
-                    "get_definition: no definition found (LSP None, grep empty)"
-                );
-                let did_you_mean_suggestions = self.compute_did_you_mean(&semantic_path).await;
-
-                // Spec 2.4: Check if LSP is still warming up and suggest retry delay
-                let retry_after = if self.lawyer.is_warm_start_complete() {
-                    None
-                } else {
-                    Some(10u32) // 10 seconds when warmup is in progress
-                };
-
-                Err(pathfinder_to_error_data(&PathfinderError::SymbolNotFound {
-                    semantic_path: semantic_path_str,
-                    did_you_mean: did_you_mean_suggestions,
-                    retry_after_seconds: retry_after,
-                }))
+                )
+                .await
             }
             Err(LspError::NoLspAvailable) => {
-                // Degraded mode — LSP not available. Use a grep-based heuristic to
-                // find a likely definition location. This is not LSP-accurate but
-                // gives the agent a starting point without requiring a full
-                // `search_codebase` call.
-                tracing::info!(
-                    tool = "get_definition",
-                    symbol = %semantic_path,
-                    "get_definition: no LSP — attempting grep-based fallback"
-                );
-
-                if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    if !matches!(
-                        def.degraded_reason,
-                        Some(DegradedReason::GrepFallbackImplScoped)
-                    ) {
-                        def.degraded_reason = Some(DegradedReason::NoLspGrepFallback);
-                    }
-                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
-                    let duration_ms = def.duration_ms.unwrap_or(0);
-                    tracing::info!(
-                        tool = "get_definition",
-                        file = %def.file,
-                        line = def.line,
-                        duration_ms,
-                        degraded = true,
-                        degraded_reason = "no_lsp_grep_fallback",
-                        engines_used = ?["tree-sitter", "ripgrep"],
-                        "get_definition: degraded complete (grep fallback)"
-                    );
-                    return Ok(Self::get_def_to_call_result(&def));
-                }
-
-                // No grep match either — return the original LSP error
-                let duration_ms = start.elapsed().as_millis();
-                tracing::info!(
-                    tool = "get_definition",
-                    duration_ms,
-                    degraded = true,
-                    degraded_reason = "no_lsp",
-                    engines_used = ?["none"],
-                    "get_definition: degraded (no LSP, grep fallback also empty)"
-                );
-                Err(pathfinder_to_error_data(&PathfinderError::NoLspAvailable {
-                    language: symbol_scope.language,
-                }))
+                self.handle_no_lsp_available(&semantic_path, symbol_scope.language, start)
+                    .await
             }
             Err(LspError::Timeout { .. }) => {
-                // LSP timed out — attempt grep-based fallback
-                tracing::info!(
-                    tool = "get_definition",
-                    semantic_path = %semantic_path_str,
-                    "get_definition: LSP timed out — attempting grep-based fallback"
-                );
-
-                if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    if !matches!(
-                        def.degraded_reason,
-                        Some(DegradedReason::GrepFallbackImplScoped)
-                    ) {
-                        def.degraded_reason = Some(DegradedReason::LspTimeoutGrepFallback);
-                    }
-                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
-                    let duration_ms = def.duration_ms.unwrap_or(0);
-                    tracing::info!(
-                        tool = "get_definition",
-                        file = %def.file,
-                        line = def.line,
-                        duration_ms,
-                        degraded = true,
-                        degraded_reason = "lsp_timeout_grep_fallback",
-                        engines_used = ?["tree-sitter", "lsp", "ripgrep"],
-                        "get_definition: degraded complete (grep fallback after timeout)"
-                    );
-                    return Ok(Self::get_def_to_call_result(&def));
-                }
-
-                tracing::warn!(
-                    tool = "get_definition",
-                    semantic_path = %semantic_path_str,
-                    "get_definition: LSP timed out and grep fallback found no match"
-                );
-                Err(pathfinder_to_error_data(&PathfinderError::LspError {
-                    message: "LSP timed out and grep fallback found no match".to_owned(),
-                }))
+                self.handle_lsp_timeout(&semantic_path, semantic_path_str, start)
+                    .await
             }
             Err(e) => {
-                // Generic LSP error — attempt grep fallback before giving up.
-                // Covers connection resets, protocol errors, and any other LspError variants
-                // not handled by the specific arms above. This prevents agent stalls when
-                // an unexpected LSP failure occurs mid-session.
-                tracing::warn!(
-                    tool = "get_definition",
-                    error = %e,
+                self.handle_lsp_generic_error(
+                    &semantic_path,
+                    e,
+                    start,
                     tree_sitter_ms,
                     lsp_ms,
                     duration_ms,
-                    engines_used = ?["lsp"],
-                    "get_definition: LSP error — attempting grep fallback"
-                );
-
-                if let Some(mut def) = self.fallback_definition_grep(&semantic_path).await {
-                    // Preserve strategy-specific reasons (e.g., GrepFallbackImplScoped)
-                    // but override the generic GrepFallbackFileScoped with the
-                    // context-specific reason from the LSP error path.
-                    if !matches!(
-                        def.degraded_reason,
-                        Some(DegradedReason::GrepFallbackImplScoped)
-                    ) {
-                        def.degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
-                    }
-                    def.degraded = true;
-                    def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
-                    let duration_ms = def.duration_ms.unwrap_or(0);
-                    tracing::info!(
-                        tool = "get_definition",
-                        file = %def.file,
-                        line = def.line,
-                        duration_ms,
-                        degraded = true,
-                        degraded_reason = "lsp_error_grep_fallback",
-                        engines_used = ?["tree-sitter", "lsp", "ripgrep"],
-                        "get_definition: degraded complete (grep fallback after LSP error)"
-                    );
-                    return Ok(Self::get_def_to_call_result(&def));
-                }
-
-                let duration_ms = start.elapsed().as_millis();
-                tracing::warn!(
-                    tool = "get_definition",
-                    error = %e,
-                    duration_ms,
-                    "get_definition: LSP error and grep fallback found no match"
-                );
-                Err(pathfinder_to_error_data(&PathfinderError::LspError {
-                    message: e.to_string(),
-                }))
+                )
+                .await
             }
         }
     }
