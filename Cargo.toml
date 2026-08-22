@@ -14,10 +14,24 @@ resolver = "2"
 [workspace.package]
 license = "MIT"
 
-[workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "warn"
-
 [workspace.lints.rust]
 unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+# Structural lints at deny level — fail the build for any unattributed violation.
+# Why deny and not forbid: forbid conflicts with proc-macros (clap Parser/
+# Subcommand, async_trait) that emit group-level #[allow(clippy::pedantic/
+# clippy::complexity)] in their macro expansions, causing E0453 workspace-wide.
+# Defense-in-depth: deny here + pre-commit structural guard (Layer 1 staged diff
+# + Layer 2 full-codebase scan) + git-workflow-principles.md --no-verify ban.
+# See rust-idioms.md §3 and code-idioms-and-conventions.md.
+too_many_lines = { level = "deny", priority = 1 }
+too_many_arguments = { level = "deny", priority = 1 }
+cognitive_complexity = { level = "deny", priority = 1 }
+type_complexity = { level = "deny", priority = 1 }
+struct_excessive_bools = { level = "deny", priority = 1 }
+large_enum_variant = { level = "deny", priority = 1 }
