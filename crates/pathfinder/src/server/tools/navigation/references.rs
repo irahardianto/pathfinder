@@ -85,40 +85,44 @@ impl PathfinderServer {
         // definition_scope.start_line is 0-indexed, convert to 1-indexed for comparison with search results
         let definition_line_1indexed = (definition_scope.start_line + 1) as u64;
 
-        let search_params = crate::server::types::SearchParams {
+        let search_params = pathfinder_search::SearchParams {
+            workspace_root: self.workspace_root.path().to_path_buf(),
             query,
-            mode: crate::server::types::SearchMode::Regex,
+            is_regex: true,
             path_glob: "**/*".to_string(),
-            max_results: params.max_references,
+            max_results: params.max_references as usize,
             context_lines: 0,
-            known_files: vec![],
-            offset: params.offset,
-            kind: None,
+            exclude_glob: vec![],
+            offset: params.offset as usize,
             ..Default::default()
         };
 
-        let result = match self.search_codebase_impl(search_params).await {
+        let result = match self
+            .grep_candidates(
+                &search_params,
+                pathfinder_common::types::FilterMode::CodeOnly,
+            )
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
                     tool = "grep_references_fallback",
                     symbol = %symbol_name,
                     error = %e,
-                    "search_codebase_impl failed during grep fallback"
+                    "grep_candidates failed during grep fallback"
                 );
                 return None;
             }
         };
 
-        if result.0.matches.is_empty() {
+        if result.is_empty() {
             return None;
         }
 
         let mut files_referenced = std::collections::HashSet::new();
 
         let references: Vec<crate::server::types::ReferenceLocation> = result
-            .0
-            .matches
             .into_iter()
             .filter(|m| {
                 // Filter 1: must be a source file
@@ -186,6 +190,7 @@ impl PathfinderServer {
                     line,
                     column,
                     snippet: m.content,
+                    confidence: pathfinder_common::types::Confidence::Heuristic,
                 }
             })
             .collect();
@@ -221,6 +226,13 @@ impl PathfinderServer {
             semantic_path = %params.semantic_path,
             "find_all_references: start"
         );
+
+        if params.max_depth > 2 {
+            return Err(crate::server::helpers::invalid_params_error(format!(
+                "max_depth exceeds maximum allowed depth of 2 (requested: {}). Hint: For deep dependency traversal beyond depth 2, delegate to subagents or issue follow-up trace calls at each boundary.",
+                params.max_depth
+            )));
+        }
 
         let semantic_path = parse_semantic_path(&params.semantic_path)?;
         require_symbol_target(&semantic_path, &params.semantic_path)?;
@@ -324,7 +336,8 @@ impl PathfinderServer {
                                 file: def.file,
                                 line: def.line,
                                 column: def.column,
-                                snippet: def.preview,
+                                snippet: String::new(),
+                                confidence: pathfinder_common::types::Confidence::Verified,
                             })
                             .collect(),
                         Err(e) => {
@@ -350,7 +363,8 @@ impl PathfinderServer {
                         file: l.file,
                         line: l.line,
                         column: l.column,
-                        snippet: l.snippet,
+                        snippet: String::new(),
+                        confidence: pathfinder_common::types::Confidence::Verified,
                     })
                     .collect();
 
@@ -441,10 +455,40 @@ impl PathfinderServer {
                             String::new()
                         };
 
+                        let next_offset = if truncated {
+                            Some(
+                                u32::try_from(offset.saturating_add(max_results))
+                                    .unwrap_or(u32::MAX),
+                            )
+                        } else {
+                            None
+                        };
+
+                        let status = pathfinder_common::types::ToolStatus::NotReady {
+                            elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                            retry_after_secs: 15,
+                            eta_secs: None,
+                            phase: "indexing".to_string(),
+                            attempt: params.retry_attempt,
+                            max_attempts: 3,
+                        };
+
+                        let evidence = if paginated_refs.is_empty() {
+                            None
+                        } else {
+                            Some(pathfinder_common::types::Evidence::heuristic(
+                                paginated_refs,
+                            ))
+                        };
+
+                        crate::server::helpers::validate_evidence(&status, evidence.as_ref());
+
                         let metadata = crate::server::types::FindAllReferencesMetadata {
-                            references: Some(paginated_refs),
+                            status,
+                            references: evidence,
                             total_references: Some(total_references),
                             truncated,
+                            next_offset,
                             files_referenced,
                             degraded: true,
                             degraded_reason: Some(DegradedReason::LspWarmupGrepFallback),
@@ -518,27 +562,37 @@ impl PathfinderServer {
                             };
 
                         let truncated = total_references > offset.saturating_add(max_results);
+                        let next_offset = if truncated {
+                            Some(
+                                u32::try_from(offset.saturating_add(max_results))
+                                    .unwrap_or(u32::MAX),
+                            )
+                        } else {
+                            None
+                        };
                         let paginated_len = paginated_refs.len();
 
                         let references_text = if paginated_refs.is_empty() {
                             String::new()
                         } else {
-                            let header = format!("References: {total_references} found\n");
+                            let header = format!(
+                                "References: {total_references} found (heuristic candidates)\n"
+                            );
                             let items: Vec<_> = paginated_refs
                                 .iter()
                                 .map(|r| {
-                                    format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet)
+                                    format!(
+                                        "{}:{}:{}: {} [HEURISTIC]",
+                                        r.file, r.line, r.column, r.snippet
+                                    )
                                 })
                                 .collect();
                             format!("{}{}", header, items.join("\n"))
                         };
 
-                        let pagination_note = if truncated {
+                        let pagination_note = if let Some(next) = next_offset {
                             format!(
-                                "\n[showing {} of {} total — use offset={} for next page]\n",
-                                paginated_len,
-                                total_references,
-                                offset.saturating_add(max_results),
+                                "\nShowing {paginated_len} of {total_references} total. Reissue with offset={next} for the rest.\n"
                             )
                         } else {
                             String::new()
@@ -547,16 +601,36 @@ impl PathfinderServer {
                         let summary = if total_references > 0 {
                             format!("Found {total_references} references across {files_referenced} files (grep fallback, LSP still warming up).\n\n")
                         } else {
-                            "LSP result unverified: zero references returned but LSP is still indexing. \
-                             Use search to find usages, or retry after lsp_health reports ready.\n"
+                            "References: UNKNOWN (not verified — do NOT treat as zero). LSP is still indexing. \
+                             Use your host's grep tool to find usages manually, or retry after LSP readiness reports ready.\n"
                                 .to_string()
                         };
 
                         let degraded_reason = DegradedReason::LspWarmupEmptyUnverified;
+                        let status = pathfinder_common::types::ToolStatus::NotReady {
+                            elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                            retry_after_secs: 15,
+                            eta_secs: None,
+                            phase: "indexing".to_string(),
+                            attempt: params.retry_attempt,
+                            max_attempts: 3,
+                        };
+                        let evidence = if paginated_len == 0 {
+                            None
+                        } else {
+                            Some(pathfinder_common::types::Evidence::heuristic(
+                                paginated_refs,
+                            ))
+                        };
+
+                        crate::server::helpers::validate_evidence(&status, evidence.as_ref());
+
                         let metadata = crate::server::types::FindAllReferencesMetadata {
-                            references: Some(paginated_refs),
+                            status: status.clone(),
+                            references: evidence,
                             total_references: Some(total_references),
                             truncated,
+                            next_offset,
                             files_referenced,
                             degraded: true,
                             degraded_reason: Some(degraded_reason),
@@ -568,15 +642,19 @@ impl PathfinderServer {
                             hint: None,
                         };
 
+                        let mut text_parts = Vec::new();
+                        if let Some(header) =
+                            crate::server::helpers::format_tool_status_header(&status)
+                        {
+                            text_parts.push(header);
+                        } else {
+                            text_parts.push(format_degraded_notice(&degraded_reason));
+                        }
+                        text_parts.push(format!("{summary}{references_text}{pagination_note}\n[completed in {duration_ms}ms]"));
+
                         let mut result =
                             rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                                format!(
-                                    "{}\n{}{}{}\n[completed in {duration_ms}ms]",
-                                    format_degraded_notice(&degraded_reason),
-                                    summary,
-                                    references_text,
-                                    pagination_note
-                                ),
+                                text_parts.join("\n"),
                             )]);
                         result.structured_content = serialize_metadata(&metadata);
                         return Ok(result);
@@ -589,10 +667,52 @@ impl PathfinderServer {
                 // Item 4: Guard against max_results=0 which causes infinite pagination loops.
                 let max_results = usize::try_from(params.max_references).unwrap_or(50).max(1);
                 let truncated = total_references > offset.saturating_add(max_results);
+                let next_offset = if truncated {
+                    Some(u32::try_from(offset.saturating_add(max_results)).unwrap_or(u32::MAX))
+                } else {
+                    None
+                };
 
                 // Paginate implementations first, then references (matches display order)
                 let impl_count = implementations.len();
                 let ref_count = references.len();
+
+                // Build resolution block before moving implementations
+                let resolution_block = if implementations.is_empty() {
+                    String::new()
+                } else {
+                    let sym_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+                    let queried = if let Some(parent) = &symbol_scope.parent_name {
+                        if sym_name == *parent {
+                            parent.clone()
+                        } else {
+                            format!("{parent}.{sym_name}")
+                        }
+                    } else {
+                        sym_name.clone()
+                    };
+                    let declared = format!(
+                        "{}:{}",
+                        semantic_path.file_path.display(),
+                        symbol_scope.start_line + 1
+                    );
+                    let mut res_lines = vec![
+                        "resolution:".to_string(),
+                        format!("  queried:  {queried}"),
+                        format!("  declared: {declared}"),
+                    ];
+                    for imp in &implementations {
+                        res_lines.push(format!(
+                            "  impl:     {}:{}   <- the runtime type",
+                            imp.file, imp.line
+                        ));
+                    }
+                    res_lines.push(
+                        "  note:     name-matching tools commonly return the declaration site here"
+                            .to_string(),
+                    );
+                    format!("{}\n\n", res_lines.join("\n"))
+                };
 
                 let (paginated_impls, paginated_refs) = if offset >= impl_count {
                     // Past implementations — paginate references only
@@ -629,28 +749,38 @@ impl PathfinderServer {
                     "find_all_references: complete"
                 );
 
-                // Build text output before moving vectors into paginated
                 let implementations_text = if paginated_impls.is_empty() {
                     String::new()
                 } else {
-                    let header =
-                        format!("Implementations (extends/implements): {impl_count} found\n");
+                    let header = format!(
+                        "Implementations (extends/implements): {impl_count} found (verified)\n"
+                    );
                     let items: Vec<_> = paginated_impls
                         .iter()
-                        .map(|imp| {
-                            format!("{}:{}:{}: {}", imp.file, imp.line, imp.column, imp.snippet)
-                        })
+                        .map(|imp| format!("{}:{}", imp.file, imp.line))
                         .collect();
                     format!("{}{}\n", header, items.join("\n"))
                 };
 
                 let references_text = if paginated_refs.is_empty() {
-                    String::new()
+                    if total_references == 0 {
+                        "References: 0 (verified zero)\n".to_string()
+                    } else {
+                        String::new()
+                    }
                 } else {
-                    let header = format!("References: {ref_count} found\n");
+                    let header = format!("References: {ref_count} found (verified)\n");
                     let items: Vec<_> = paginated_refs
                         .iter()
-                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
+                        .map(|r| {
+                            if r.confidence == pathfinder_common::types::Confidence::Heuristic
+                                && !r.snippet.is_empty()
+                            {
+                                format!("{}:{}: {}", r.file, r.line, r.snippet)
+                            } else {
+                                format!("{}:{}", r.file, r.line)
+                            }
+                        })
                         .collect();
                     format!("{}{}", header, items.join("\n"))
                 };
@@ -660,12 +790,9 @@ impl PathfinderServer {
                 paginated.extend(paginated_impls);
                 paginated.extend(paginated_refs);
 
-                let pagination_note = if truncated {
+                let pagination_note = if let Some(next) = next_offset {
                     format!(
-                        "\n[showing {} of {} total — use offset={} for next page]\n",
-                        paginated_len,
-                        total_references,
-                        offset.saturating_add(max_results),
+                        "\nShowing {paginated_len} of {total_references} total. Reissue with offset={next} for the rest.\n"
                     )
                 } else {
                     String::new()
@@ -673,14 +800,14 @@ impl PathfinderServer {
 
                 let summary = if impl_count > 0 && ref_count > 0 {
                     format!(
-                        "Found {ref_count} references + {impl_count} implementations across {files_referenced} files.\n\n"
+                        "Found {ref_count} references + {impl_count} implementations across {files_referenced} files (verified).\n\n"
                     )
                 } else if impl_count > 0 {
                     format!(
-                        "Found {impl_count} implementations across {files_referenced} files.\n\n"
+                        "Found {impl_count} implementations across {files_referenced} files (verified).\n\n"
                     )
                 } else if ref_count > 0 {
-                    format!("Found {ref_count} references across {files_referenced} files.\n\n")
+                    format!("Found {ref_count} references across {files_referenced} files (verified).\n\n")
                 } else {
                     "LSP confirmed: zero references or implementations for this symbol.\n"
                         .to_string()
@@ -697,10 +824,17 @@ impl PathfinderServer {
                     None
                 };
 
+                let status = pathfinder_common::types::ToolStatus::Ok;
+                let evidence = Some(pathfinder_common::types::Evidence::verified(paginated));
+
+                crate::server::helpers::validate_evidence(&status, evidence.as_ref());
+
                 let metadata = crate::server::types::FindAllReferencesMetadata {
-                    references: Some(paginated),
+                    status: status.clone(),
+                    references: evidence,
                     total_references: Some(total_references),
                     truncated,
+                    next_offset,
                     files_referenced,
                     degraded: false,
                     degraded_reason: None,
@@ -712,9 +846,21 @@ impl PathfinderServer {
                     hint,
                 };
 
+                let mut text_parts = Vec::new();
+                if let Some(header) = crate::server::helpers::format_tool_status_header(&status) {
+                    text_parts.push(header);
+                    text_parts.push(String::new());
+                }
+                let hint_str = if let Some(h) = &metadata.hint {
+                    format!("\nHINT: {h}\n")
+                } else {
+                    String::new()
+                };
+                text_parts.push(format!("{resolution_block}{summary}{implementations_text}{references_text}{pagination_note}{hint_str}\n[completed in {duration_ms}ms]"));
+
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                        format!("{summary}{implementations_text}{references_text}{pagination_note}\n[completed in {duration_ms}ms]"),
+                        text_parts.join("\n"),
                     )]);
                 result.structured_content = serialize_metadata(&metadata);
                 Ok(result)
@@ -760,14 +906,19 @@ impl PathfinderServer {
                     let ref_count = refs.len();
                     let items: Vec<_> = refs
                         .iter()
-                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
+                        .map(|r| {
+                            format!(
+                                "{}:{}:{}: {} [HEURISTIC]",
+                                r.file, r.line, r.column, r.snippet
+                            )
+                        })
                         .collect();
                     let text = format!(
                             "Grep fallback: found {} references across {} files (heuristic only).\n\nReferences: {}\n{}\n",
                             ref_count, file_count, ref_count, items.join("\n")
                         );
                     (
-                        Some(refs),
+                        Some(pathfinder_common::types::Evidence::heuristic(refs)),
                         Some(ref_count),
                         file_count,
                         DegradedReason::NoLspGrepFallback,
@@ -777,7 +928,7 @@ impl PathfinderServer {
                 } else {
                     // Fallback unsuccessful - keep original behavior
                     let text = format!(
-                        "References unknown. Use search to manually find usages of `{}`\n",
+                        "References: UNKNOWN (not verified — do NOT treat as zero). Use your host's grep tool to manually find usages of `{}`\n",
                         params.semantic_path
                     );
                     (
@@ -790,10 +941,19 @@ impl PathfinderServer {
                     )
                 };
 
+                let status = pathfinder_common::types::ToolStatus::Degraded {
+                    reason: degraded_reason.to_string(),
+                    retry_after_secs: None,
+                };
+
+                crate::server::helpers::validate_evidence(&status, references.as_ref());
+
                 let metadata = crate::server::types::FindAllReferencesMetadata {
+                    status: status.clone(),
                     references,
                     total_references,
                     truncated: false,
+                    next_offset: None,
                     files_referenced,
                     degraded: true,
                     degraded_reason: Some(degraded_reason),
@@ -805,13 +965,17 @@ impl PathfinderServer {
                     hint: None,
                 };
 
+                let mut text_parts = Vec::new();
+                if let Some(header) = crate::server::helpers::format_tool_status_header(&status) {
+                    text_parts.push(header);
+                } else {
+                    text_parts.push(format_degraded_notice(&degraded_reason));
+                }
+                text_parts.push(format!("{text_body}[completed in {duration_ms}ms]"));
+
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                        format!(
-                            "{}\n{}[completed in {duration_ms}ms]",
-                            format_degraded_notice(&degraded_reason),
-                            text_body
-                        ),
+                        text_parts.join("\n"),
                     )]);
                 result.structured_content = serialize_metadata(&metadata);
                 Ok(result)
@@ -878,7 +1042,7 @@ impl PathfinderServer {
                         ref_count, file_count, ref_count, items.join("\n")
                     );
                     (
-                        Some(refs),
+                        Some(pathfinder_common::types::Evidence::heuristic(refs)),
                         Some(ref_count),
                         file_count,
                         default_degraded_reason,
@@ -888,7 +1052,7 @@ impl PathfinderServer {
                 } else {
                     // Fallback unsuccessful - keep original behavior
                     let text = format!(
-                        "References unknown. Use search to manually find usages of `{}`\n",
+                        "References: UNKNOWN (not verified — do NOT treat as zero). Use your host's grep tool to manually find usages of `{}`\n",
                         params.semantic_path
                     );
                     (
@@ -901,10 +1065,30 @@ impl PathfinderServer {
                     )
                 };
 
+                let status = if is_timeout {
+                    pathfinder_common::types::ToolStatus::NotReady {
+                        elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                        retry_after_secs: 15,
+                        eta_secs: None,
+                        phase: "indexing".to_string(),
+                        attempt: params.retry_attempt,
+                        max_attempts: 3,
+                    }
+                } else {
+                    pathfinder_common::types::ToolStatus::Degraded {
+                        reason: degraded_reason.to_string(),
+                        retry_after_secs: None,
+                    }
+                };
+
+                crate::server::helpers::validate_evidence(&status, references.as_ref());
+
                 let metadata = crate::server::types::FindAllReferencesMetadata {
+                    status: status.clone(),
                     references,
                     total_references,
                     truncated: false,
+                    next_offset: None,
                     files_referenced,
                     degraded: true,
                     degraded_reason: Some(degraded_reason),
@@ -916,13 +1100,17 @@ impl PathfinderServer {
                     hint: None,
                 };
 
+                let mut text_parts = Vec::new();
+                if let Some(header) = crate::server::helpers::format_tool_status_header(&status) {
+                    text_parts.push(header);
+                } else {
+                    text_parts.push(format_degraded_notice(&degraded_reason));
+                }
+                text_parts.push(format!("{text_body}[completed in {duration_ms}ms]"));
+
                 let mut result =
                     rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                        format!(
-                            "{}\n{}[completed in {duration_ms}ms]",
-                            format_degraded_notice(&degraded_reason),
-                            text_body
-                        ),
+                        text_parts.join("\n"),
                     )]);
                 result.structured_content = serialize_metadata(&metadata);
                 Ok(result)

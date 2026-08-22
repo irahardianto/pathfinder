@@ -4,7 +4,7 @@
 //! - The `initialize` handshake with a configurable timeout (PRD §6.1)
 //! - A background reader task that dispatches JSON-RPC responses
 //! - Crash detection (non-zero exit or broken pipe)
-//! - Idle `last_used` tracking for auto-termination (PRD §6.2)
+//! - Activity timestamp and in-flight request tracking
 //!
 //! # Spawn reliability
 //!
@@ -43,9 +43,7 @@ use async_trait::async_trait;
 use command_group::AsyncCommandGroup as _;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
@@ -66,15 +64,6 @@ pub(crate) trait LspTransport: Send + Sync {
 
     /// Check if the transport is alive (process still running).
     fn is_alive(&self) -> bool;
-
-    /// Get the last-used timestamp.
-    fn last_used(&self) -> Instant;
-
-    /// Set the last-used timestamp.
-    fn set_last_used(&self, when: Instant);
-
-    /// Get the in-flight request counter.
-    fn in_flight(&self) -> &Arc<AtomicU32>;
 
     /// Get a snapshot of the detected capabilities.
     #[allow(dead_code)] // Will be used in Phase 3C/3D tests
@@ -138,13 +127,6 @@ pub(super) struct ManagedProcess {
     pub(super) stdin: Arc<Mutex<tokio::io::BufWriter<ChildStdin>>>,
     /// Capabilities negotiated during `initialize`.
     pub(super) capabilities: DetectedCapabilities,
-    /// Last time this process was used (for idle-timeout tracking).
-    ///
-    /// Wrapped in `Mutex` for interior mutability through `LspTransport` trait
-    /// (`&self` methods). The lock is never contended.
-    pub(super) last_used: parking_lot::Mutex<Instant>,
-    /// Number of in-flight requests (prevents idle timeout during active ops).
-    pub(super) in_flight: Arc<AtomicU32>,
     /// Advisory lock on the jdtls data directory (Java only).
     ///
     /// Held for the lifetime of the jdtls process to prevent concurrent
@@ -157,7 +139,7 @@ impl ManagedProcess {
     /// Get a shared handle to the child process for lifecycle management.
     ///
     /// Used by `start_process` to create `ProcessLifecycle` alongside the
-    /// transport, so that `reader_supervisor_task` and `idle_timeout_task`
+    /// transport, so that `reader_supervisor_task` and the process supervisor
     /// can reap the OS zombie via `child.wait()`.
     pub(super) fn child_handle(&self) -> Arc<tokio::sync::Mutex<Child>> {
         Arc::clone(&self.child)
@@ -192,7 +174,7 @@ impl LspTransport for ManagedProcess {
     fn is_alive(&self) -> bool {
         let Ok(mut child) = self.child.try_lock() else {
             // Lock contended (supervisor is reaping) — conservatively report not-alive.
-            // This avoids delaying zombie detection by an idle timeout interval.
+            // This avoids delaying zombie detection by a supervisor check interval.
             // If the process IS alive, the next check will confirm it.
             return false;
         };
@@ -214,18 +196,6 @@ impl LspTransport for ManagedProcess {
                 false
             }
         }
-    }
-
-    fn last_used(&self) -> Instant {
-        *self.last_used.lock()
-    }
-
-    fn set_last_used(&self, when: Instant) {
-        *self.last_used.lock() = when;
-    }
-
-    fn in_flight(&self) -> &Arc<AtomicU32> {
-        &self.in_flight
     }
 
     fn capabilities(&self) -> DetectedCapabilities {
@@ -359,8 +329,6 @@ pub(super) async fn spawn_and_initialize(
         child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin: Arc::new(Mutex::new(writer)),
         capabilities,
-        last_used: parking_lot::Mutex::new(Instant::now()),
-        in_flight: Arc::new(AtomicU32::new(0)),
         _jdtls_lock: jdtls_lock,
     };
 
@@ -857,16 +825,31 @@ async fn build_initialize_request(
             "capabilities": {
                 "textDocument": {
                     "definition": { "dynamicRegistration": false, "linkSupport": false },
-                    "references": { "dynamicRegistration": true },
-                    "callHierarchy": { "dynamicRegistration": true },
+                    "references": { "dynamicRegistration": false },
+                    "callHierarchy": { "dynamicRegistration": false },
+                    "implementation": { "dynamicRegistration": false, "linkSupport": false },
+                    "synchronization": {
+                        "dynamicRegistration": false,
+                        "willSave": false,
+                        "willSaveWaitUntil": false,
+                        "didSave": false
+                    },
                     "publishDiagnostics": { "relatedInformation": false }
                 },
-                "workspace": { "workspaceFolders": true, "diagnostics": {} },
+                "workspace": {
+                    "workspaceFolders": true,
+                    "configuration": true,
+                    "didChangeWatchedFiles": { "dynamicRegistration": true },
+                    "diagnostics": {}
+                },
                 // Opt into work done progress so LSPs like rust-analyzer send
                 // $/progress notifications during initial workspace indexing.
                 // Without this, the progress_watcher_task never sees WorkDoneProgressEnd
                 // and indexing_complete stays false forever.
-                "window": { "workDoneProgress": true }
+                "window": { "workDoneProgress": true },
+                "general": {
+                    "positionEncodings": ["utf-8", "utf-16"]
+                }
             }
         }),
     ))
@@ -1061,8 +1044,8 @@ async fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
 // - This runs in the child process between fork() and exec(), so it doesn't affect
 //   the parent process state.
 // - Failure is ignored (`let _ =`) as this is a best-effort hardening measure; the
-//   worst case is the child survives as an orphan (which the idle timeout task will
-//   eventually clean up).
+//   worst case is the child survives as an orphan (which the process supervisor
+//   task will eventually clean up).
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn apply_linux_process_hardening(cmd: &mut tokio::process::Command) {

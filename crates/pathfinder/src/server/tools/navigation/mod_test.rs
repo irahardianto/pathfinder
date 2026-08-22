@@ -1061,10 +1061,6 @@ async fn test_enrich_did_you_mean_all_cases() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Enclosing symbol calls: we need to push Ok(None) to mock_surgeon enclosing_symbol_detail_results.
@@ -1137,10 +1133,6 @@ async fn test_enrich_did_you_mean_cross_file_when_only_parent_match() {
         total_matches: 1,
         truncated: false,
         files_searched: 5,
-        files_in_scope: 5,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     });
     mock_scout.set_results(vec![cross_file_result; 100]);
 
@@ -1221,10 +1213,6 @@ async fn test_enrich_did_you_mean_no_cross_file_when_qualified_match_exists() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     for _ in 0..100 {
@@ -2295,4 +2283,30 @@ async fn test_locate_batch_empty_returns_error() {
         result.unwrap_err().code,
         rmcp::model::ErrorCode::INVALID_PARAMS
     );
+}
+
+#[test]
+fn test_grep_fallback_budget_limits() {
+    let budget = super::GrepFallbackBudget::with_budget(std::time::Duration::from_secs(10), 3);
+    assert_eq!(budget.searches_performed(), 0);
+    assert!(budget.deadline() > std::time::Instant::now());
+
+    assert!(budget.acquire_search().is_some());
+    assert_eq!(budget.searches_performed(), 1);
+
+    assert!(budget.acquire_search().is_some());
+    assert_eq!(budget.searches_performed(), 2);
+
+    assert!(budget.acquire_search().is_some());
+    assert_eq!(budget.searches_performed(), 3);
+
+    // Exceeded max_searches (3)
+    assert!(budget.acquire_search().is_none());
+}
+
+#[test]
+fn test_grep_fallback_budget_timeout() {
+    let budget = super::GrepFallbackBudget::with_budget(std::time::Duration::from_millis(1), 5);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert!(budget.acquire_search().is_none());
 }

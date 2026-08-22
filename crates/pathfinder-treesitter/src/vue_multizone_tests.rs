@@ -60,7 +60,7 @@ fn test_extract_multizone_template_component_child() {
         my_button.unwrap().kind,
         crate::surgeon::SymbolKind::Component
     );
-    assert_eq!(my_button.unwrap().semantic_path, "template::MyButton");
+    assert_eq!(my_button.unwrap().semantic_path, "template.MyButton");
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn test_extract_multizone_style_class_selector() {
         class_sel.unwrap().kind,
         crate::surgeon::SymbolKind::CssSelector
     );
-    assert_eq!(class_sel.unwrap().semantic_path, "style::.app");
+    assert_eq!(class_sel.unwrap().semantic_path, "style..app");
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn test_extract_multizone_style_id_selector() {
     let style_sym = syms.iter().find(|s| s.name == "style").unwrap();
     let id_sel = style_sym.children.iter().find(|c| c.name == "#main");
     assert!(id_sel.is_some(), "#main CSS id should be extracted");
-    assert_eq!(id_sel.unwrap().semantic_path, "style::#main");
+    assert_eq!(id_sel.unwrap().semantic_path, "style.#main");
 }
 
 #[test]
@@ -180,17 +180,17 @@ fn test_vue_template_depth_cap() {
     // Check div at depth 0
     let div = template_sym.children.iter().find(|c| c.name == "div");
     assert!(div.is_some(), "div at depth 0 should exist");
-    assert_eq!(div.unwrap().semantic_path, "template::div");
+    assert_eq!(div.unwrap().semantic_path, "template.div");
 
     // Check span at depth 1
     let span = template_sym.children.iter().find(|c| c.name == "span");
     assert!(span.is_some(), "span at depth 1 should exist");
-    assert_eq!(span.unwrap().semantic_path, "template::div::span");
+    assert_eq!(span.unwrap().semantic_path, "template.span");
 
     // Check p at depth 2
     let p = template_sym.children.iter().find(|c| c.name == "p");
     assert!(p.is_some(), "p at depth 2 should exist");
-    assert_eq!(p.unwrap().semantic_path, "template::div::span::p");
+    assert_eq!(p.unwrap().semantic_path, "template.p");
 
     // Check a at depth 3 (native html, depth >= 3) -> should not exist
     let a = template_sym.children.iter().find(|c| c.name == "a");
@@ -202,5 +202,5 @@ fn test_vue_template_depth_cap() {
         .iter()
         .find(|c| c.name == "MyComponent");
     assert!(comp.is_some(), "MyComponent should exist even at depth 3");
-    assert_eq!(comp.unwrap().semantic_path, "template::MyComponent");
+    assert_eq!(comp.unwrap().semantic_path, "template.MyComponent");
 }

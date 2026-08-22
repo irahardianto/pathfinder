@@ -87,47 +87,46 @@ impl LspError {
         match self {
             Self::NoLspAvailable => Some(
                 "No LSP available for this file type. \
-                 Call lsp_health to see install instructions and check which languages are configured."
+                 Ensure the language server binary is installed and in PATH. \
+                 Use locate and inspect with tree-sitter fallbacks."
                     .to_owned(),
             ),
-            Self::Timeout { operation, timeout_ms } => Some(format!(
+            Self::Timeout {
+                operation,
+                timeout_ms,
+            } => Some(format!(
                 "LSP request '{operation}' timed out after {timeout_ms}ms. \
                  The language server may still be indexing or under memory pressure. \
-                 (1) Call lsp_health to check server status and indexing progress. \
-                 (2) If status is 'warming_up', retry in 30s. \
-                 (3) Use search_codebase + read_symbol_scope as tree-sitter fallbacks."
+                 Reissue the query with retry_attempt or use host search tools."
             )),
             Self::ConnectionLost => Some(
-                "LSP connection lost — the language server may have crashed. \
-                 Call lsp_health(action='restart') to recover the server. \
-                 Use read_source_file and search_codebase as fallbacks while it restarts."
+                "LSP connection lost — the language server process terminated. \
+                 The supervisor will restart it on the next query. \
+                 Use inspect and host search tools as fallbacks."
                     .to_owned(),
             ),
             Self::Protocol(msg) => Some(format!(
                 "LSP protocol error: {msg}. \
-                 Call lsp_health to check server health. \
-                 Use search_codebase for text-based navigation in the meantime."
+                 Use inspect and host search tools for navigation in the meantime."
             )),
             Self::ServerError { code, message, .. } => Some(format!(
                 "LSP server returned error [{code}]: {message}. \
-                 Call lsp_health to check server health. \
-                 Use search_codebase for text-based navigation in the meantime."
+                 Use inspect and host search tools for navigation in the meantime."
             )),
             Self::UnsupportedCapability { capability } => Some(format!(
                 "The LSP server does not support '{capability}'. \
-                 This is a server limitation — validation is skipped for this file type. \
-                 Use search_codebase + read_symbol_scope for navigation."
+                 This is a server limitation. \
+                 Use inspect and host search tools for navigation."
             )),
             Self::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => Some(
                 "LSP binary not found. \
-                 Ensure the language server is installed and available in PATH. \
-                 Call lsp_health for install instructions."
+                 Ensure the language server binary is installed and available in PATH."
                     .to_owned(),
             ),
             Self::Io(io_err) => Some(format!(
                 "LSP I/O error: {io_err}. \
                  The language server process failed to start. \
-                 Call lsp_health to check server status."
+                 Check process permissions and configuration."
             )),
         }
     }

@@ -127,10 +127,6 @@ pub struct LspConfig {
     #[serde(default)]
     pub args: Vec<String>,
 
-    /// Idle timeout in minutes before auto-termination.
-    #[serde(default = "default_idle_timeout")]
-    pub idle_timeout_minutes: u64,
-
     /// Additional LSP settings (workspace/didChangeConfiguration).
     #[serde(default)]
     pub settings: serde_json::Value,
@@ -251,10 +247,6 @@ pub enum ConfigError {
 
 fn default_log_level() -> String {
     "info".to_owned()
-}
-
-const fn default_idle_timeout() -> u64 {
-    15
 }
 
 const fn default_max_results() -> usize {

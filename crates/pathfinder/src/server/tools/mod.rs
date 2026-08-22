@@ -4,12 +4,6 @@
 //! The `impl PathfinderServer` in `server.rs` delegates to these functions,
 //! keeping the macro-decorated handler stubs thin and the logic testable.
 
-pub(super) mod file_ops;
-pub(super) mod find_symbol;
+pub(super) mod inspect;
 pub(super) mod navigation;
-pub(super) mod read_files;
-pub(super) mod repo_map;
-pub(super) mod search;
 pub(super) mod semantic_path;
-pub(super) mod source_file;
-pub(super) mod symbols;

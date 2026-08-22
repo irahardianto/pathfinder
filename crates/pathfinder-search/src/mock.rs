@@ -120,10 +120,6 @@ impl Scout for MockScout {
                 total_matches: 0,
                 truncated: false,
                 files_searched: 0,
-                files_in_scope: 0,
-                binary_skipped: 0,
-                gitignored_skipped: 0,
-                other_skipped: 0,
             }),
         }
     }

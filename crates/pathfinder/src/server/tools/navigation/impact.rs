@@ -65,6 +65,8 @@ struct CallHierarchyState {
     /// values (as opposed to a grep-based heuristic fallback). Used to
     /// compute `incoming_verified` / `outgoing_verified` accurately.
     lsp_bfs_ran: bool,
+    references_truncated: bool,
+    resolution_block: Option<String>,
 }
 
 impl CallHierarchyState {
@@ -80,6 +82,8 @@ impl CallHierarchyState {
             files_referenced: std::collections::HashSet::new(),
             max_depth_reached: 0,
             lsp_bfs_ran: false,
+            references_truncated: false,
+            resolution_block: None,
         }
     }
 }
@@ -102,9 +106,8 @@ struct HintParams<'a> {
     trait_impl_count: usize,
     trait_impl_file_count: usize,
     degraded: bool,
-    incoming: &'a Option<Vec<crate::server::types::ImpactReference>>,
-    outgoing: &'a Option<Vec<crate::server::types::ImpactReference>>,
-    symbol_name: &'a str,
+    incoming: &'a Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+    outgoing: &'a Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
 }
 
 /// Parameters for [`PathfinderServer::finalize_call_hierarchy_result`].
@@ -114,23 +117,45 @@ struct FinalizeCallHierarchyParams {
     used_impl_expansion: bool,
     trait_impl_count: usize,
     trait_impl_file_count: usize,
-    symbol_name: String,
     requested_semantic_path: String,
     tree_sitter_ms: u128,
     lsp_ms: u128,
     duration_ms: u128,
     max_references: u32,
+    offset: u32,
+    retry_attempt: u32,
 }
 
 /// Parameters for [`PathfinderServer::render_callers_callees_text`].
 struct RenderCallersCalleesParams<'a> {
     degraded: bool,
     degraded_reason: Option<DegradedReason>,
-    symbol_name: &'a str,
     inc_count: usize,
     out_count: usize,
+    total_items: usize,
+    resolution_block: Option<String>,
     metadata: &'a crate::server::types::FindCallersCalleesMetadata,
     duration_ms: u128,
+}
+
+struct GrepOutgoingFallbackParams<'a> {
+    scope_content: &'a str,
+    scope_language: &'a str,
+    definition_path: &'a std::path::Path,
+    max_results: u32,
+    project_only: bool,
+    files_referenced: &'a mut std::collections::HashSet<String>,
+    budget: &'a super::GrepFallbackBudget,
+}
+
+struct ResolveGrepCandidatesParams<'a> {
+    candidates: &'a [String],
+    scope_language: &'a str,
+    result: &'a pathfinder_search::SearchResult,
+    definition_path: &'a std::path::Path,
+    project_only: bool,
+    max_deps: usize,
+    files_referenced: &'a mut std::collections::HashSet<String>,
 }
 
 impl PathfinderServer {
@@ -144,45 +169,57 @@ impl PathfinderServer {
     ///
     /// Returns `Some(refs)` if references found, `None` if none found.
     /// Updates `files_referenced` with the files containing matches.
+    /// DELIVERABLE E: Grep-based reference search fallback for `find_callers_callees`.
+    ///
+    /// When LSP is unavailable, search workspace for word-boundary matches of `symbol_name`.
+    ///
+    /// Returns `Some(refs)` if references found, `None` if none found.
+    /// Updates `files_referenced` with the files containing matches.
     async fn grep_reference_fallback(
         &self,
         symbol_name: &str,
         definition_path: &std::path::Path,
         files_referenced: &mut std::collections::HashSet<String>,
+        budget: &super::GrepFallbackBudget,
     ) -> Option<Vec<crate::server::types::ImpactReference>> {
-        let search_params = crate::server::types::SearchParams {
+        let deadline = budget.acquire_search()?;
+
+        let search_params = pathfinder_search::SearchParams {
+            workspace_root: self.workspace_root.path().to_path_buf(),
             query: format!("\\b{}\\b", regex::escape(symbol_name)),
-            mode: crate::server::types::SearchMode::Regex,
+            is_regex: true,
             path_glob: "**/*".to_string(),
             max_results: 20,
-            context_lines: 0,
-            known_files: vec![],
-
             offset: 0,
-            kind: None,
-            ..Default::default()
+            context_lines: 0,
+            exclude_glob: vec![],
+            deadline: Some(deadline),
         };
 
-        let result = match self.search_codebase_impl(search_params).await {
+        let result = match self
+            .grep_candidates(
+                &search_params,
+                pathfinder_common::types::FilterMode::CodeOnly,
+            )
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
                     tool = "grep_reference_fallback",
                     symbol = %symbol_name,
                     error = %e,
-                    "search_codebase_impl failed during grep fallback"
+                    "grep_candidates failed during grep fallback"
                 );
                 return None;
             }
         };
 
-        if result.0.matches.is_empty() {
+        if result.is_empty() {
             return None;
         }
 
         let refs: Vec<crate::server::types::ImpactReference> = result
-            .0
-            .matches
             .into_iter()
             .filter(|m| {
                 let m_path = std::path::Path::new(&m.file);
@@ -202,7 +239,7 @@ impl PathfinderServer {
                     snippet: m.content,
                     direction: "incoming_heuristic".to_string(),
                     depth: 0,
-                    confidence: Some("heuristic".to_owned()),
+                    confidence: pathfinder_common::types::Confidence::Heuristic,
                 }
             })
             .collect();
@@ -217,136 +254,65 @@ impl PathfinderServer {
     /// DELIVERABLE F: Grep-based outgoing dependency discovery for `find_callers_callees`.
     ///
     /// When LSP is unavailable, extract call candidates from the symbol's source code
-    /// and resolve each candidate to its definition using grep search.
-    ///
-    /// Returns `Some(refs)` if outgoing dependencies found, `None` if none found.
-    /// Updates `files_referenced` with the files containing matches.
-    async fn resolve_outgoing_candidate(
+    /// and resolve candidates to their definitions using batch alternation grep search (RSP-A10).
+    async fn grep_outgoing_fallback(
         &self,
-        candidate: &str,
-        scope_language: &str,
-        definition_path: &std::path::Path,
-        project_only: bool,
-        seen: &mut std::collections::HashSet<String>,
-    ) -> Option<crate::server::types::ImpactReference> {
-        let pattern = super::candidate_definition_pattern(scope_language, candidate);
+        params: GrepOutgoingFallbackParams<'_>,
+    ) -> Option<Vec<crate::server::types::ImpactReference>> {
+        let GrepOutgoingFallbackParams {
+            scope_content,
+            scope_language,
+            definition_path,
+            max_results,
+            project_only,
+            files_referenced,
+            budget,
+        } = params;
+        let candidates = super::extract_call_candidates(scope_content, scope_language);
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let deadline = budget.acquire_search()?;
+        let max_deps = usize::try_from(max_results).unwrap_or(usize::MAX);
+
+        let alt = candidates
+            .iter()
+            .map(|c| regex::escape(c))
+            .collect::<Vec<_>>()
+            .join("|");
+        let pattern = super::candidate_definition_pattern(scope_language, &alt);
         let path_glob = super::language_to_file_glob(scope_language);
 
-        let result = self
+        let search_res = self
             .scout
             .search(&pathfinder_search::SearchParams {
                 workspace_root: self.workspace_root.path().to_path_buf(),
                 query: pattern,
                 is_regex: true,
-                max_results: 4,
-                path_glob: path_glob.to_string(),
+                max_results: max_deps.max(50),
+                path_glob,
                 exclude_glob: Vec::new(),
                 context_lines: 0,
                 offset: 0,
+                deadline: Some(deadline),
             })
             .await;
 
-        match result {
-            Ok(search_result) => {
-                for m in &search_result.matches {
-                    if project_only
-                        && (!super::is_source_file(&m.file) || !super::is_workspace_file(&m.file))
-                    {
-                        continue;
-                    }
-
-                    let m_path = std::path::Path::new(&m.file);
-                    if m_path == definition_path {
-                        continue;
-                    }
-
-                    let semantic_path = self
-                        .enrich_semantic_path(
-                            &m.file,
-                            u32::try_from(m.line).unwrap_or(0),
-                            candidate,
-                        )
-                        .await;
-
-                    if seen.contains(&semantic_path) {
-                        continue;
-                    }
-                    seen.insert(semantic_path.clone());
-
-                    return Some(crate::server::types::ImpactReference {
-                        semantic_path,
-                        file: m.file.clone(),
-                        line: usize::try_from(m.line).unwrap_or(usize::MAX),
-                        snippet: m.content.clone(),
-                        direction: "outgoing_heuristic".to_string(),
-                        depth: 0,
-                        confidence: Some("heuristic".to_owned()),
-                    });
-                }
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tool = "grep_outgoing_fallback",
-                    candidate = %candidate,
-                    error = %e,
-                    "search failed for candidate"
-                );
-                None
-            }
-        }
-    }
-    async fn grep_outgoing_fallback(
-        &self,
-        scope_content: &str,
-        scope_language: &str,
-        definition_path: &std::path::Path,
-        max_results: u32,
-        project_only: bool,
-        files_referenced: &mut std::collections::HashSet<String>,
-    ) -> Option<Vec<crate::server::types::ImpactReference>> {
-        let candidates = super::extract_call_candidates(scope_content, scope_language);
-
-        if candidates.is_empty() {
-            tracing::info!(
-                tool = "grep_outgoing_fallback",
-                language = %scope_language,
-                "no call candidates found in symbol body"
-            );
-            return None;
-        }
-
-        tracing::info!(
-            tool = "grep_outgoing_fallback",
-            candidate_count = candidates.len(),
-            language = %scope_language,
-            "resolving {} outgoing candidates",
-            candidates.len()
-        );
-
-        let max_deps = usize::try_from(max_results).unwrap_or(usize::MAX);
-        let mut refs = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        for candidate in candidates {
-            if refs.len() >= max_deps {
-                break;
-            }
-
-            if let Some(reference) = self
-                .resolve_outgoing_candidate(
-                    &candidate,
-                    scope_language,
-                    definition_path,
-                    project_only,
-                    &mut seen,
-                )
-                .await
-            {
-                files_referenced.insert(reference.file.clone());
-                refs.push(reference);
-            }
-        }
+        let refs = if let Ok(result) = search_res {
+            self.resolve_grep_candidates(ResolveGrepCandidatesParams {
+                candidates: &candidates,
+                scope_language,
+                result: &result,
+                definition_path,
+                project_only,
+                max_deps,
+                files_referenced,
+            })
+            .await
+        } else {
+            Vec::new()
+        };
 
         if refs.is_empty() {
             None
@@ -361,6 +327,75 @@ impl PathfinderServer {
         }
     }
 
+    async fn resolve_grep_candidates(
+        &self,
+        params: ResolveGrepCandidatesParams<'_>,
+    ) -> Vec<crate::server::types::ImpactReference> {
+        let ResolveGrepCandidatesParams {
+            candidates,
+            scope_language,
+            result,
+            definition_path,
+            project_only,
+            max_deps,
+            files_referenced,
+        } = params;
+        let mut refs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for candidate in candidates {
+            if refs.len() >= max_deps {
+                break;
+            }
+
+            let cand_pat = super::candidate_definition_pattern(scope_language, candidate);
+            let cand_re = regex::Regex::new(&cand_pat).ok();
+
+            for m in &result.matches {
+                if refs.len() >= max_deps {
+                    break;
+                }
+
+                if !cand_re.as_ref().is_some_and(|re| re.is_match(&m.content)) {
+                    continue;
+                }
+
+                if project_only
+                    && (!super::is_source_file(&m.file) || !super::is_workspace_file(&m.file))
+                {
+                    continue;
+                }
+
+                let m_path = std::path::Path::new(&m.file);
+                if m_path == definition_path {
+                    continue;
+                }
+
+                let semantic_path = self
+                    .enrich_semantic_path(&m.file, u32::try_from(m.line).unwrap_or(0), candidate)
+                    .await;
+
+                if seen.contains(&semantic_path) {
+                    continue;
+                }
+                seen.insert(semantic_path.clone());
+                files_referenced.insert(m.file.clone());
+
+                refs.push(crate::server::types::ImpactReference {
+                    semantic_path,
+                    file: m.file.clone(),
+                    line: usize::try_from(m.line).unwrap_or(usize::MAX),
+                    snippet: m.content.clone(),
+                    direction: "outgoing_heuristic".to_string(),
+                    depth: 0,
+                    confidence: pathfinder_common::types::Confidence::Heuristic,
+                });
+                break;
+            }
+        }
+        refs
+    }
+
     /// Runs sequential grep reference fallback and grep outgoing fallback.
     async fn run_grep_fallbacks(
         &self,
@@ -370,19 +405,26 @@ impl PathfinderServer {
         Option<Vec<crate::server::types::ImpactReference>>,
         Option<Vec<crate::server::types::ImpactReference>>,
     ) {
+        let budget = super::GrepFallbackBudget::new();
         let incoming = self
-            .grep_reference_fallback(params.symbol_name, params.definition_path, files_referenced)
+            .grep_reference_fallback(
+                params.symbol_name,
+                params.definition_path,
+                files_referenced,
+                &budget,
+            )
             .await;
 
         let outgoing = self
-            .grep_outgoing_fallback(
-                params.scope_content,
-                params.scope_language,
-                params.definition_path,
-                params.remaining_outgoing,
-                params.project_only,
+            .grep_outgoing_fallback(GrepOutgoingFallbackParams {
+                scope_content: params.scope_content,
+                scope_language: params.scope_language,
+                definition_path: params.definition_path,
+                max_results: params.remaining_outgoing,
+                project_only: params.project_only,
                 files_referenced,
-            )
+                budget: &budget,
+            })
             .await;
 
         (incoming, outgoing)
@@ -451,16 +493,13 @@ impl PathfinderServer {
             semantic_path,
             file: referenced_item.file.clone(),
             line: usize::try_from(referenced_item.line).unwrap_or(usize::MAX),
-            snippet: referenced_item
-                .detail
-                .clone()
-                .unwrap_or_else(|| referenced_item.name.clone()),
+            snippet: String::new(),
             direction: match direction {
                 CallDirection::Incoming => "incoming".to_owned(),
                 CallDirection::Outgoing => "outgoing".to_owned(),
             },
             depth: usize::try_from(current_depth).unwrap_or(0),
-            confidence: Some("lsp".to_owned()),
+            confidence: pathfinder_common::types::Confidence::Verified,
         }
     }
     async fn fetch_call_hierarchy(
@@ -481,15 +520,48 @@ impl PathfinderServer {
             }
         }
     }
+}
 
+struct BfsTraverseState<'a> {
+    files_referenced: &'a mut std::collections::HashSet<String>,
+    project_only: bool,
+    remaining_references: &'a mut u32,
+    truncated: &'a mut bool,
+}
+
+struct CallHierarchyPagination {
+    paginated_inc:
+        Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+    paginated_out:
+        Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+    inc_count: usize,
+    out_count: usize,
+    total_items: usize,
+    truncated: bool,
+    next_offset: Option<u32>,
+}
+
+struct CallersCalleesMetaParams<'a> {
+    status: pathfinder_common::types::ToolStatus,
+    pagination: &'a CallHierarchyPagination,
+    max_depth_reached: u32,
+    files_referenced_len: usize,
+    degraded: bool,
+    degraded_reason: Option<DegradedReason>,
+    lsp_readiness: Option<String>,
+    warm_start_in_progress: Option<bool>,
+    resolution_strategy: Option<String>,
+    duration_ms: u128,
+    hint: Option<String>,
+}
+
+impl PathfinderServer {
     async fn bfs_call_hierarchy(
         &self,
         initial_item: &pathfinder_lsp::types::CallHierarchyItem,
         direction: CallDirection,
         max_depth: u32,
-        files_referenced: &mut std::collections::HashSet<String>,
-        project_only: bool,
-        remaining_references: &mut u32,
+        state: &mut BfsTraverseState<'_>,
     ) -> (Vec<crate::server::types::ImpactReference>, u32) {
         let timeout = tokio::time::Duration::from_secs(BFS_TIMEOUT_SECS);
         let deadline = tokio::time::Instant::now() + timeout;
@@ -502,7 +574,7 @@ impl PathfinderServer {
             initial_item.line,
             initial_item.name.clone(),
         ));
-        files_referenced.insert(initial_item.file.clone());
+        state.files_referenced.insert(initial_item.file.clone());
 
         let mut references = Vec::new();
         let mut max_depth_reached = 0;
@@ -513,7 +585,8 @@ impl PathfinderServer {
             if current_depth >= max_depth {
                 continue;
             }
-            if *remaining_references == 0 {
+            if *state.remaining_references == 0 {
+                *state.truncated = true;
                 break;
             }
 
@@ -524,6 +597,7 @@ impl PathfinderServer {
                     timeout_secs = BFS_TIMEOUT_SECS,
                     "BFS traversal exceeded wall-clock timeout, returning partial results"
                 );
+                *state.truncated = true;
                 break;
             }
 
@@ -535,6 +609,7 @@ impl PathfinderServer {
                     limit = BFS_CONSECUTIVE_FAILURE_LIMIT,
                     "BFS aborted: too many consecutive LSP failures, returning partial results"
                 );
+                *state.truncated = true;
                 break;
             }
 
@@ -544,7 +619,8 @@ impl PathfinderServer {
                 Ok(calls) => {
                     consecutive_failures = 0;
                     for call in calls {
-                        if *remaining_references == 0 {
+                        if *state.remaining_references == 0 {
+                            *state.truncated = true;
                             break;
                         }
 
@@ -554,14 +630,14 @@ impl PathfinderServer {
                         // - Must have a source code extension
                         // - Must be a relative path (not absolute like stdlib/SDK paths)
                         // - Must not be in node_modules/ or vendor/
-                        if project_only
+                        if state.project_only
                             && (!super::is_source_file(&referenced_item.file)
                                 || !super::is_workspace_file(&referenced_item.file))
                         {
                             continue;
                         }
 
-                        files_referenced.insert(referenced_item.file.clone());
+                        state.files_referenced.insert(referenced_item.file.clone());
 
                         let key = (
                             referenced_item.file.clone(),
@@ -575,7 +651,7 @@ impl PathfinderServer {
                                 .build_impact_reference(&referenced_item, &direction, current_depth)
                                 .await;
                             references.push(reference);
-                            *remaining_references -= 1;
+                            *state.remaining_references -= 1;
                         }
                     }
                 }
@@ -611,6 +687,108 @@ impl PathfinderServer {
     /// `degraded_override` is set when `goto_implementation` itself failed,
     /// so the caller can OR it into the final degraded state even if the
     /// subsequent normal-flow fallback succeeds.
+    async fn traverse_trait_impl_locations(
+        &self,
+        ctx: &CallerCalleeContext<'_>,
+        impl_locations: &[pathfinder_lsp::types::DefinitionLocation],
+        remaining_incoming: &mut u32,
+        remaining_outgoing: &mut u32,
+        state: &mut CallHierarchyState,
+    ) -> (
+        Vec<crate::server::types::ImpactReference>,
+        Vec<crate::server::types::ImpactReference>,
+    ) {
+        let mut all_incoming = Vec::new();
+        let mut all_outgoing = Vec::new();
+
+        for impl_loc in impl_locations {
+            state.files_referenced.insert(impl_loc.file.clone());
+
+            let Ok(items) = self
+                .lawyer
+                .call_hierarchy_prepare(
+                    self.workspace_root.path(),
+                    std::path::Path::new(&impl_loc.file),
+                    impl_loc.line,
+                    impl_loc.column,
+                )
+                .await
+            else {
+                continue;
+            };
+            let Some(item) = items.first() else {
+                continue;
+            };
+            state.files_referenced.insert(item.file.clone());
+
+            let mut in_state = BfsTraverseState {
+                files_referenced: &mut state.files_referenced,
+                project_only: ctx.project_only,
+                remaining_references: remaining_incoming,
+                truncated: &mut state.references_truncated,
+            };
+            let (incoming_refs, depth_in) = self
+                .bfs_call_hierarchy(item, CallDirection::Incoming, ctx.max_depth, &mut in_state)
+                .await;
+            all_incoming.extend(incoming_refs);
+            state.max_depth_reached = state.max_depth_reached.max(depth_in);
+
+            let mut out_state = BfsTraverseState {
+                files_referenced: &mut state.files_referenced,
+                project_only: ctx.project_only,
+                remaining_references: remaining_outgoing,
+                truncated: &mut state.references_truncated,
+            };
+            let (outgoing_refs, depth_out) = self
+                .bfs_call_hierarchy(item, CallDirection::Outgoing, ctx.max_depth, &mut out_state)
+                .await;
+            all_outgoing.extend(outgoing_refs);
+            state.max_depth_reached = state.max_depth_reached.max(depth_out);
+        }
+
+        all_incoming.sort_by(|a, b| a.semantic_path.cmp(&b.semantic_path));
+        all_incoming.dedup_by(|a, b| a.semantic_path == b.semantic_path);
+        all_outgoing.sort_by(|a, b| a.semantic_path.cmp(&b.semantic_path));
+        all_outgoing.dedup_by(|a, b| a.semantic_path == b.semantic_path);
+
+        (all_incoming, all_outgoing)
+    }
+
+    fn format_trait_resolution_block(
+        ctx: &CallerCalleeContext<'_>,
+        impl_locations: &[pathfinder_lsp::types::DefinitionLocation],
+    ) -> String {
+        let queried = if let Some(parent) = &ctx.scope.parent_name {
+            if ctx.symbol_name == parent {
+                parent.clone()
+            } else {
+                format!("{parent}.{}", ctx.symbol_name)
+            }
+        } else {
+            ctx.symbol_name.to_string()
+        };
+        let declared = format!(
+            "{}:{}",
+            ctx.semantic_path.file_path.display(),
+            ctx.scope.start_line + 1
+        );
+        let mut res_lines = vec![
+            "resolution:".to_string(),
+            format!("  queried:  {queried}"),
+            format!("  declared: {declared}"),
+        ];
+        for impl_loc in impl_locations {
+            res_lines.push(format!(
+                "  impl:     {}:{}   <- the runtime type",
+                impl_loc.file, impl_loc.line
+            ));
+        }
+        res_lines.push(
+            "  note:     name-matching tools commonly return the declaration site here".to_string(),
+        );
+        res_lines.join("\n")
+    }
+
     async fn try_trait_method_expansion(
         &self,
         ctx: &CallerCalleeContext<'_>,
@@ -639,69 +817,21 @@ impl PathfinderServer {
                     .collect::<std::collections::HashSet<_>>()
                     .len();
 
-                let mut all_incoming = Vec::new();
-                let mut all_outgoing = Vec::new();
-
-                for impl_loc in &impl_locations {
-                    state.files_referenced.insert(impl_loc.file.clone());
-
-                    let Ok(items) = self
-                        .lawyer
-                        .call_hierarchy_prepare(
-                            self.workspace_root.path(),
-                            std::path::Path::new(&impl_loc.file),
-                            impl_loc.line,
-                            impl_loc.column,
-                        )
-                        .await
-                    else {
-                        continue;
-                    };
-                    let Some(item) = items.first() else {
-                        continue;
-                    };
-                    state.files_referenced.insert(item.file.clone());
-
-                    let (incoming_refs, depth_in) = self
-                        .bfs_call_hierarchy(
-                            item,
-                            CallDirection::Incoming,
-                            ctx.max_depth,
-                            &mut state.files_referenced,
-                            ctx.project_only,
-                            remaining_incoming,
-                        )
-                        .await;
-                    all_incoming.extend(incoming_refs);
-                    state.max_depth_reached = state.max_depth_reached.max(depth_in);
-
-                    let (outgoing_refs, depth_out) = self
-                        .bfs_call_hierarchy(
-                            item,
-                            CallDirection::Outgoing,
-                            ctx.max_depth,
-                            &mut state.files_referenced,
-                            ctx.project_only,
-                            remaining_outgoing,
-                        )
-                        .await;
-                    all_outgoing.extend(outgoing_refs);
-                    state.max_depth_reached = state.max_depth_reached.max(depth_out);
-                }
-
-                // Dedup by semantic_path to avoid duplicates across multiple impls
-                all_incoming.sort_by(|a, b| a.semantic_path.cmp(&b.semantic_path));
-                all_incoming.dedup_by(|a, b| a.semantic_path == b.semantic_path);
-                all_outgoing.sort_by(|a, b| a.semantic_path.cmp(&b.semantic_path));
-                all_outgoing.dedup_by(|a, b| a.semantic_path == b.semantic_path);
+                let (all_incoming, all_outgoing) = self
+                    .traverse_trait_impl_locations(
+                        ctx,
+                        &impl_locations,
+                        remaining_incoming,
+                        remaining_outgoing,
+                        state,
+                    )
+                    .await;
 
                 state.incoming = Some(all_incoming);
                 state.outgoing = Some(all_outgoing);
-                // PATCH-003: BFS ran for each impl and produced the merged
-                // results. Mark as BFS-verified so incoming_verified /
-                // outgoing_verified reflect this even if `degraded` is later
-                // flipped to true by `trait_method_degraded`.
                 state.lsp_bfs_ran = true;
+                state.resolution_block =
+                    Some(Self::format_trait_resolution_block(ctx, &impl_locations));
 
                 (true, impl_count, impl_file_count, None)
             }
@@ -755,35 +885,40 @@ impl PathfinderServer {
         state.files_referenced.insert(initial_item.file.clone());
 
         // --- INCOMING BFS ---
+        let mut in_state = BfsTraverseState {
+            files_referenced: &mut state.files_referenced,
+            project_only: ctx.project_only,
+            remaining_references: remaining_incoming,
+            truncated: &mut state.references_truncated,
+        };
         let (incoming_refs, depth_in) = self
             .bfs_call_hierarchy(
                 initial_item,
                 CallDirection::Incoming,
                 ctx.max_depth,
-                &mut state.files_referenced,
-                ctx.project_only,
-                remaining_incoming,
+                &mut in_state,
             )
             .await;
         state.incoming = Some(incoming_refs);
         state.max_depth_reached = state.max_depth_reached.max(depth_in);
 
         // --- OUTGOING BFS ---
+        let mut out_state = BfsTraverseState {
+            files_referenced: &mut state.files_referenced,
+            project_only: ctx.project_only,
+            remaining_references: remaining_outgoing,
+            truncated: &mut state.references_truncated,
+        };
         let (outgoing_refs, depth_out) = self
             .bfs_call_hierarchy(
                 initial_item,
                 CallDirection::Outgoing,
                 ctx.max_depth,
-                &mut state.files_referenced,
-                ctx.project_only,
-                remaining_outgoing,
+                &mut out_state,
             )
             .await;
         state.outgoing = Some(outgoing_refs);
         state.max_depth_reached = state.max_depth_reached.max(depth_out);
-        // PATCH-003: track that the BFS actually produced the current
-        // incoming/outgoing values, so incoming_verified/outgoing_verified
-        // are computed accurately downstream.
         state.lsp_bfs_ran = true;
 
         // Check for false negatives when BFS call hierarchy traversal returns 0 callers/callees
@@ -804,18 +939,17 @@ impl PathfinderServer {
                 )
                 .await;
 
-            state.degraded = true;
-            state.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
-            if grep_in.is_some() {
-                // PATCH-003: BFS data was replaced by heuristic grep
-                // results. The flag must reflect this so `incoming_verified`
-                // correctly returns false.
-                state.lsp_bfs_ran = false;
-                state.incoming = grep_in;
-            }
-            if grep_out.is_some() {
-                state.lsp_bfs_ran = false;
-                state.outgoing = grep_out;
+            if grep_in.is_some() || grep_out.is_some() {
+                state.degraded = true;
+                state.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+                if grep_in.is_some() {
+                    state.lsp_bfs_ran = false;
+                    state.incoming = grep_in;
+                }
+                if grep_out.is_some() {
+                    state.lsp_bfs_ran = false;
+                    state.outgoing = grep_out;
+                }
             }
         }
     }
@@ -1122,57 +1256,9 @@ impl PathfinderServer {
         "treesitter_direct".to_owned()
     }
 
-    /// Derives the per-field `(incoming_verified, outgoing_verified)` flags.
-    ///
-    /// Semantics:
-    /// - `Some(true)`  = list is verified by the LSP (BFS returned data).
-    /// - `Some(false)` = list is UNKNOWN or heuristic (either `None` with no
-    ///   heuristic fallback, or heuristic grep results that may include
-    ///   false positives).
-    /// - `None`        = field not applicable for this scope.
-    ///
-    /// `lsp_bfs_ran` distinguishes "BFS ran and confirmed empty" from "grep
-    /// fallback produced candidates" — both leave the field as `Some(vec)`
-    /// but only the first is LSP-verified.
-    fn compute_verified_flags(
-        incoming: Option<&Vec<crate::server::types::ImpactReference>>,
-        outgoing: Option<&Vec<crate::server::types::ImpactReference>>,
-        degraded: bool,
-        lsp_bfs_ran: bool,
-    ) -> (Option<bool>, Option<bool>) {
-        let verify = |field: Option<&Vec<crate::server::types::ImpactReference>>| match (
-            field,
-            degraded,
-            lsp_bfs_ran,
-        ) {
-            (Some(_), false, _) | (Some(_), true, true) => Some(true),
-            (Some(_), true, false) | (None, true, _) => Some(false),
-            (None, false, _) => None,
-        };
-        (verify(incoming), verify(outgoing))
-    }
-
     /// Generates the agent-facing `hint` field.
-    ///
-    /// P2-7: hints when zero incoming callers and not degraded (possible
-    /// entry point/unused code/dynamic dispatch). PATCH-002 §B.4: hints when
-    /// impl expansion was used. PATCH-003 Deliverable A: spells out the
-    /// "UNKNOWN, not zero" warning explicitly for prose-reading consumers
-    /// that ignore the per-field verified flags.
-    ///
-    /// NOTE: The "both incoming AND outgoing empty" case is always degraded
-    /// (the grep fallback sets `degraded=true` when both BFS results are
-    /// empty, to guard against false negatives). So we only hint on
-    /// "incoming empty, outgoing non-empty" here.
     fn compute_callers_callees_hint(params: &HintParams<'_>) -> Option<String> {
-        let unknown_search_hint = if params.symbol_name.is_empty() {
-            "Use search(query='<symbol>') to find usages manually.".to_owned()
-        } else {
-            format!(
-                "Use search(query=\"{}\") to find usages manually.",
-                params.symbol_name
-            )
-        };
+        let unknown_search_hint = "Use your host's grep tool to find usages manually.".to_owned();
         if params.used_impl_expansion {
             return Some(format!(
                 "Symbol is a trait/interface method. Results include callers of all \
@@ -1182,7 +1268,6 @@ impl PathfinderServer {
             ));
         }
         if params.degraded && params.incoming.is_none() && params.outgoing.is_none() {
-            // Catastrophic footgun: both fields UNKNOWN. Spell it out.
             return Some(format!(
                 "Callers AND callees are UNKNOWN — LSP unavailable and no heuristic \
                  fallback matched. Do NOT treat null as zero callers/callees. \
@@ -1204,14 +1289,17 @@ impl PathfinderServer {
             ));
         }
         if params.degraded {
-            // Heuristic results — degraded but we have candidate refs.
             return Some(format!(
                 "Results are heuristic grep-based candidates (LSP unavailable). \
                  Each reference may be a false positive (dynamic dispatch, \
                  same-name symbols). {unknown_search_hint}"
             ));
         }
-        if params.incoming.as_ref().is_some_and(Vec::is_empty) {
+        if params
+            .incoming
+            .as_ref()
+            .is_some_and(|ev| ev.items.is_empty())
+        {
             return Some(
                 "LSP confirmed zero incoming callers. This symbol may be an entry point, \
                  unused, or only called via dynamic dispatch/reflection."
@@ -1221,11 +1309,68 @@ impl PathfinderServer {
         None
     }
 
-    /// Builds the honest, human-readable text summary listing every
-    /// reference so agents can act without parsing `structured_content`.
-    fn render_callers_callees_text(params: &RenderCallersCalleesParams<'_>) -> String {
-        let mut text_parts = Vec::new();
-        if params.degraded {
+    fn format_impact_reference_path(r: &crate::server::types::ImpactReference) -> String {
+        if r.semantic_path.contains("::") {
+            format!("{}:L{}", r.semantic_path, r.line)
+        } else if r.semantic_path.is_empty() || r.semantic_path == r.file {
+            format!("{}:L{}", r.file, r.line)
+        } else {
+            format!("{}::{}:L{}", r.file, r.semantic_path, r.line)
+        }
+    }
+
+    fn render_evidence_section(
+        label: &str,
+        evidence: Option<
+            &pathfinder_common::types::Evidence<crate::server::types::ImpactReference>,
+        >,
+        text_parts: &mut Vec<String>,
+    ) {
+        match evidence {
+            None => {
+                text_parts.push(format!(
+                    "{label}: UNKNOWN (not verified — do NOT treat as zero)"
+                ));
+            }
+            Some(ev)
+                if ev.confidence == pathfinder_common::types::Confidence::Verified
+                    && ev.items.is_empty() =>
+            {
+                text_parts.push(format!("{label}: 0 (verified zero)"));
+            }
+            Some(ev) if ev.confidence == pathfinder_common::types::Confidence::Verified => {
+                text_parts.push(format!("{label}: {} direct (verified)", ev.items.len()));
+                for r in &ev.items {
+                    let path = Self::format_impact_reference_path(r);
+                    text_parts.push(format!("  [depth={}] {}", r.depth, path));
+                }
+            }
+            Some(ev) => {
+                text_parts.push(format!(
+                    "{label}: {} CANDIDATES (heuristic, unverified)",
+                    ev.items.len()
+                ));
+                for r in &ev.items {
+                    let path = Self::format_impact_reference_path(r);
+                    text_parts.push(format!("  [depth={}] {} [HEURISTIC]", r.depth, path));
+                    if !r.snippet.is_empty() {
+                        text_parts.push(format!("    > {}", r.snippet.trim()));
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_callers_callees_header(
+        params: &RenderCallersCalleesParams<'_>,
+        text_parts: &mut Vec<String>,
+    ) {
+        if let Some(header) =
+            crate::server::helpers::format_tool_status_header(&params.metadata.status)
+        {
+            text_parts.push(header);
+            text_parts.push(String::new());
+        } else if params.degraded {
             let notice = params
                 .degraded_reason
                 .as_ref()
@@ -1241,14 +1386,9 @@ impl PathfinderServer {
             );
             text_parts.push("   - LSP still warming up (wait 30s, try again)".to_owned());
             text_parts.push(String::new());
-            if params.symbol_name.is_empty() {
-                text_parts.push("   Workaround: Use search to find usages manually.".to_owned());
-            } else {
-                text_parts.push(format!(
-                    "   Workaround: Use search(query=\"{}\") to find usages manually.",
-                    params.symbol_name
-                ));
-            }
+            text_parts.push(
+                "   Workaround: Use your host's grep tool to find usages manually.".to_owned(),
+            );
             text_parts.push("   Reference counts below are heuristic only:".to_owned());
             text_parts.push(String::new());
         } else if params.inc_count == 0 && params.out_count == 0 {
@@ -1260,31 +1400,36 @@ impl PathfinderServer {
             text_parts
                 .push("LSP confirmed: zero outgoing callees (callers found below).".to_string());
         }
-        // Incoming
-        text_parts.push(format!("Incoming references: {}", params.inc_count));
-        if let Some(refs) = &params.metadata.incoming {
-            for r in refs {
-                text_parts.push(format!(
-                    "  [depth={}] {} ({}:L{})",
-                    r.depth, r.semantic_path, r.file, r.line
-                ));
-                if !r.snippet.is_empty() {
-                    text_parts.push(format!("    > {}", r.snippet.trim()));
-                }
-            }
+
+        if let Some(res) = &params.resolution_block {
+            text_parts.push(res.clone());
+            text_parts.push(String::new());
         }
-        // Outgoing
-        text_parts.push(format!("Outgoing references: {}", params.out_count));
-        if let Some(refs) = &params.metadata.outgoing {
-            for r in refs {
-                text_parts.push(format!(
-                    "  [depth={}] {} ({}:L{})",
-                    r.depth, r.semantic_path, r.file, r.line
-                ));
-                if !r.snippet.is_empty() {
-                    text_parts.push(format!("    > {}", r.snippet.trim()));
-                }
-            }
+    }
+
+    /// Builds the honest, human-readable text summary listing every
+    /// reference so agents can act without parsing `structured_content`.
+    fn render_callers_callees_text(params: &RenderCallersCalleesParams<'_>) -> String {
+        let mut text_parts = Vec::new();
+        Self::render_callers_callees_header(params, &mut text_parts);
+
+        Self::render_evidence_section(
+            "Incoming callers",
+            params.metadata.incoming.as_ref(),
+            &mut text_parts,
+        );
+        Self::render_evidence_section(
+            "Outgoing callees",
+            params.metadata.outgoing.as_ref(),
+            &mut text_parts,
+        );
+
+        if let Some(next) = params.metadata.next_offset {
+            let returned_count = params.inc_count + params.out_count;
+            text_parts.push(format!(
+                "\nShowing {returned_count} of {} total. Reissue with offset={next} for the rest.\n",
+                params.total_items
+            ));
         }
 
         // Spec 4.2: Test coverage section
@@ -1296,10 +1441,14 @@ impl PathfinderServer {
                     test_refs.len()
                 ));
                 for r in test_refs {
-                    text_parts.push(format!(
-                        "  - {}::{} ({}:L{})",
-                        r.file, r.semantic_path, r.file, r.line
-                    ));
+                    let path = if r.semantic_path.contains("::") {
+                        format!("{}:L{}", r.semantic_path, r.line)
+                    } else if r.semantic_path.is_empty() || r.semantic_path == r.file {
+                        format!("{}:L{}", r.file, r.line)
+                    } else {
+                        format!("{}::{}:L{}", r.file, r.semantic_path, r.line)
+                    };
+                    text_parts.push(format!("  - {path}"));
                 }
             }
         } else if let Some(status) = &params.metadata.test_coverage_status {
@@ -1310,6 +1459,13 @@ impl PathfinderServer {
             } else if status == "unknown_degraded" {
                 text_parts.push(String::new());
                 text_parts.push("TEST COVERAGE: unknown (search degraded)".to_owned());
+            }
+        }
+
+        if let Some(hint) = &params.metadata.hint {
+            if !hint.is_empty() {
+                text_parts.push(String::new());
+                text_parts.push(format!("HINT: {hint}"));
             }
         }
 
@@ -1482,6 +1638,165 @@ impl PathfinderServer {
         )
     }
 
+    fn compute_raw_evidence(
+        incoming: Option<Vec<crate::server::types::ImpactReference>>,
+        outgoing: Option<Vec<crate::server::types::ImpactReference>>,
+        lsp_bfs_ran: bool,
+        degraded: bool,
+    ) -> (
+        Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+        Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+    ) {
+        match (incoming, outgoing, lsp_bfs_ran, degraded) {
+            (Some(inc), Some(out), true, false) => (
+                Some(pathfinder_common::types::Evidence::verified(inc)),
+                Some(pathfinder_common::types::Evidence::verified(out)),
+            ),
+            (inc_opt, out_opt, _, true) => {
+                let inc = inc_opt.and_then(|v| {
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(pathfinder_common::types::Evidence::heuristic(v))
+                    }
+                });
+                let out = out_opt.and_then(|v| {
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(pathfinder_common::types::Evidence::heuristic(v))
+                    }
+                });
+                (inc, out)
+            }
+            (inc_opt, out_opt, _, _) => (
+                inc_opt.map(pathfinder_common::types::Evidence::verified),
+                out_opt.map(pathfinder_common::types::Evidence::verified),
+            ),
+        }
+    }
+
+    fn paginate_call_hierarchy_evidence(
+        raw_inc: Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+        raw_out: Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+        offset_usize: usize,
+        max_refs_usize: usize,
+        total_inc: usize,
+    ) -> (
+        Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+        Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+    ) {
+        if offset_usize >= total_inc {
+            let out_offset = offset_usize - total_inc;
+            let inc = raw_inc.map(|ev| pathfinder_common::types::Evidence {
+                confidence: ev.confidence,
+                items: Vec::new(),
+            });
+            let out = raw_out.map(|ev| pathfinder_common::types::Evidence {
+                confidence: ev.confidence,
+                items: ev
+                    .items
+                    .into_iter()
+                    .skip(out_offset)
+                    .take(max_refs_usize)
+                    .collect(),
+            });
+            (inc, out)
+        } else {
+            let inc_items: Vec<_> = raw_inc.as_ref().map_or_else(Vec::new, |ev| {
+                ev.items
+                    .iter()
+                    .skip(offset_usize)
+                    .take(max_refs_usize)
+                    .cloned()
+                    .collect()
+            });
+            let inc_kept = inc_items.len();
+            let rem_budget = max_refs_usize.saturating_sub(inc_kept);
+
+            let inc = raw_inc.map(|ev| pathfinder_common::types::Evidence {
+                confidence: ev.confidence,
+                items: inc_items,
+            });
+            let out = raw_out.map(|ev| pathfinder_common::types::Evidence {
+                confidence: ev.confidence,
+                items: ev.items.into_iter().take(rem_budget).collect(),
+            });
+            (inc, out)
+        }
+    }
+
+    fn compute_call_hierarchy_status(
+        degraded: bool,
+        warm_start_in_progress: Option<bool>,
+        duration_ms: u128,
+        retry_attempt: u32,
+        degraded_reason_str: Option<&str>,
+    ) -> pathfinder_common::types::ToolStatus {
+        if degraded {
+            if warm_start_in_progress == Some(true) {
+                pathfinder_common::types::ToolStatus::NotReady {
+                    elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                    retry_after_secs: 15,
+                    eta_secs: None,
+                    phase: "indexing".to_string(),
+                    attempt: retry_attempt,
+                    max_attempts: 3,
+                }
+            } else {
+                pathfinder_common::types::ToolStatus::Degraded {
+                    reason: degraded_reason_str.unwrap_or("degraded").into(),
+                    retry_after_secs: None,
+                }
+            }
+        } else {
+            pathfinder_common::types::ToolStatus::Ok
+        }
+    }
+
+    fn process_call_hierarchy_pagination(
+        raw_inc: Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+        raw_out: Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
+        offset: u32,
+        max_references: u32,
+        references_truncated: bool,
+    ) -> CallHierarchyPagination {
+        let total_inc = raw_inc.as_ref().map_or(0, |ev| ev.items.len());
+        let total_out = raw_out.as_ref().map_or(0, |ev| ev.items.len());
+        let total_items = total_inc + total_out;
+
+        let offset_usize = usize::try_from(offset).unwrap_or(0);
+        let max_refs_usize = usize::try_from(max_references).unwrap_or(50).max(1);
+        let truncated =
+            references_truncated || total_items > offset_usize.saturating_add(max_refs_usize);
+        let next_offset = if truncated {
+            Some(u32::try_from(offset_usize.saturating_add(max_refs_usize)).unwrap_or(u32::MAX))
+        } else {
+            None
+        };
+
+        let (paginated_inc, paginated_out) = Self::paginate_call_hierarchy_evidence(
+            raw_inc,
+            raw_out,
+            offset_usize,
+            max_refs_usize,
+            total_inc,
+        );
+
+        let inc_count = paginated_inc.as_ref().map_or(0, |ev| ev.items.len());
+        let out_count = paginated_out.as_ref().map_or(0, |ev| ev.items.len());
+
+        CallHierarchyPagination {
+            paginated_inc,
+            paginated_out,
+            inc_count,
+            out_count,
+            total_items,
+            truncated,
+            next_offset,
+        }
+    }
+
     /// Assembles the final [`crate::server::types::FindCallersCalleesMetadata`]
     /// and human-readable text summary from the accumulated resolution state.
     fn finalize_call_hierarchy_result(
@@ -1493,12 +1808,13 @@ impl PathfinderServer {
             used_impl_expansion,
             trait_impl_count,
             trait_impl_file_count,
-            symbol_name,
             requested_semantic_path,
             tree_sitter_ms,
             lsp_ms,
             duration_ms,
             max_references,
+            offset,
+            retry_attempt,
         } = params;
 
         let CallHierarchyState {
@@ -1510,13 +1826,10 @@ impl PathfinderServer {
             files_referenced,
             max_depth_reached,
             lsp_bfs_ran,
+            references_truncated,
+            resolution_block,
         } = state;
 
-        let inc_count = incoming.as_ref().map_or(0, Vec::len);
-        let out_count = outgoing.as_ref().map_or(0, Vec::len);
-        // PATCH-002 Fix 2: If goto_implementation errored, the normal flow's success
-        // path may have reset `degraded` to false. Re-apply the trait-method error
-        // to ensure the agent sees a partial result warning.
         let degraded_reason = trait_method_degraded.or(degraded_reason);
         let degraded = degraded || trait_method_degraded.is_some();
         let degraded_reason_cloned = degraded_reason;
@@ -1525,6 +1838,14 @@ impl PathfinderServer {
         let (lsp_readiness, warm_start_in_progress) =
             Self::compute_lsp_readiness(degraded, degraded_reason_cloned);
 
+        let status = Self::compute_call_hierarchy_status(
+            degraded,
+            warm_start_in_progress,
+            duration_ms,
+            retry_attempt,
+            degraded_reason_str.as_deref(),
+        );
+
         tracing::info!(
             tool = "find_callers_callees",
             semantic_path = %requested_semantic_path,
@@ -1532,15 +1853,23 @@ impl PathfinderServer {
             lsp_ms,
             duration_ms,
             degraded,
-            degraded_reason = ?degraded_reason_str,
             engines_used = ?engines,
             "find_callers_callees: complete"
         );
-        // Item 2: Report truncation only when the total budget was actually exhausted,
-        // not when a single direction hits its cap. Check total returned vs total budget.
-        let total_returned = inc_count + out_count;
-        let max_refs_usize = usize::try_from(max_references).unwrap_or(usize::MAX);
-        let references_truncated = max_references > 0 && total_returned >= max_refs_usize;
+
+        let (raw_inc, raw_out) =
+            Self::compute_raw_evidence(incoming, outgoing, lsp_bfs_ran, degraded);
+
+        let pagination = Self::process_call_hierarchy_pagination(
+            raw_inc,
+            raw_out,
+            offset,
+            max_references,
+            references_truncated,
+        );
+
+        crate::server::helpers::validate_evidence(&status, pagination.paginated_inc.as_ref());
+        crate::server::helpers::validate_evidence(&status, pagination.paginated_out.as_ref());
 
         let resolution_strategy = Some(Self::compute_resolution_strategy(
             used_impl_expansion,
@@ -1549,57 +1878,83 @@ impl PathfinderServer {
             degraded_reason.as_ref(),
         ));
 
-        // Spec 4.2: Test coverage search (deactivated, keeping fields None for backwards compatibility)
-        let (test_callers, test_coverage_status) = (None, None);
-
-        // P2-7 / PATCH-002 §B.4 / PATCH-003 Deliverable A: see
-        // `compute_callers_callees_hint` doc comment for the hint policy.
         let hint = Self::compute_callers_callees_hint(&HintParams {
             used_impl_expansion,
             trait_impl_count,
             trait_impl_file_count,
             degraded,
-            incoming: &incoming,
-            outgoing: &outgoing,
-            symbol_name: &symbol_name,
+            incoming: &pagination.paginated_inc,
+            outgoing: &pagination.paginated_out,
         });
 
-        // PATCH-003 DELIVERABLE B: Per-field verification flags.
-        let (incoming_verified, outgoing_verified) = Self::compute_verified_flags(
-            incoming.as_ref(),
-            outgoing.as_ref(),
-            degraded,
-            lsp_bfs_ran,
-        );
-
-        let metadata = crate::server::types::FindCallersCalleesMetadata {
-            incoming,
-            outgoing,
-            incoming_verified,
-            outgoing_verified,
-            depth_reached: max_depth_reached,
-            files_referenced: files_referenced.len(),
+        let metadata = Self::build_callers_callees_metadata(CallersCalleesMetaParams {
+            status,
+            pagination: &pagination,
+            max_depth_reached,
+            files_referenced_len: files_referenced.len(),
             degraded,
             degraded_reason,
-            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
             warm_start_in_progress,
-            references_truncated,
             resolution_strategy,
-            test_callers,
-            test_coverage_status,
-            duration_ms: Some(millis_to_u64(duration_ms)),
+            duration_ms,
             hint,
-        };
+        });
 
-        // Build honest text output based on actual results listing every
-        // reference so agents can act without parsing structured_content.
+        Self::render_final_call_hierarchy(
+            metadata,
+            pagination.inc_count,
+            pagination.out_count,
+            pagination.total_items,
+            resolution_block,
+            degraded_reason_cloned,
+            duration_ms,
+        )
+    }
+
+    fn build_callers_callees_metadata(
+        params: CallersCalleesMetaParams<'_>,
+    ) -> crate::server::types::FindCallersCalleesMetadata {
+        crate::server::types::FindCallersCalleesMetadata {
+            status: params.status,
+            incoming: params.pagination.paginated_inc.clone(),
+            outgoing: params.pagination.paginated_out.clone(),
+            depth_reached: params.max_depth_reached,
+            files_referenced: params.files_referenced_len,
+            degraded: params.degraded,
+            degraded_reason: params.degraded_reason,
+            actionable_guidance: params
+                .degraded_reason
+                .as_ref()
+                .map(DegradedReason::guidance),
+            lsp_readiness: params.lsp_readiness,
+            warm_start_in_progress: params.warm_start_in_progress,
+            references_truncated: params.pagination.truncated,
+            next_offset: params.pagination.next_offset,
+            resolution_strategy: params.resolution_strategy,
+            test_callers: None,
+            test_coverage_status: None,
+            duration_ms: Some(millis_to_u64(params.duration_ms)),
+            hint: params.hint,
+        }
+    }
+
+    fn render_final_call_hierarchy(
+        metadata: crate::server::types::FindCallersCalleesMetadata,
+        inc_count: usize,
+        out_count: usize,
+        total_items: usize,
+        resolution_block: Option<String>,
+        degraded_reason_cloned: Option<DegradedReason>,
+        duration_ms: u128,
+    ) -> (crate::server::types::FindCallersCalleesMetadata, String) {
         let text = Self::render_callers_callees_text(&RenderCallersCalleesParams {
-            degraded,
+            degraded: metadata.degraded,
             degraded_reason: degraded_reason_cloned,
-            symbol_name: &symbol_name,
             inc_count,
             out_count,
+            total_items,
+            resolution_block,
             metadata: &metadata,
             duration_ms,
         });
@@ -1617,13 +1972,19 @@ impl PathfinderServer {
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
 
-        // Cap max_depth to prevent unbounded BFS traversal (PRD §5.1 maximum).
-        // Also floor at 1 to guarantee at least one level of traversal.
-        let max_depth = params.max_depth.clamp(1, 5);
+        if params.max_depth > 2 {
+            return Err(crate::server::helpers::invalid_params_error(format!(
+                "max_depth exceeds maximum allowed depth of 2 (requested: {}). Hint: For deep dependency traversal beyond depth 2, delegate to subagents or issue follow-up trace calls at each boundary.",
+                params.max_depth
+            )));
+        }
+        let max_depth = params.max_depth.max(1);
         let project_only = true;
-        // Clamp max_references to [1, 500] to prevent unbounded memory growth and LSP calls.
-        // Floor at 1 prevents silently empty results; ceiling at 500 bounds BFS traversal.
-        let max_references = params.max_references.clamp(1, 500);
+        let max_references = if params.max_references == 0 {
+            20
+        } else {
+            params.max_references.clamp(1, 500)
+        };
         // Split budget between incoming and outgoing. Give any odd slot to incoming.
         let half = max_references / 2;
         let mut remaining_incoming = half + max_references % 2;
@@ -1676,12 +2037,13 @@ impl PathfinderServer {
             used_impl_expansion,
             trait_impl_count,
             trait_impl_file_count,
-            symbol_name,
             requested_semantic_path: params.semantic_path,
             tree_sitter_ms,
             lsp_ms,
             duration_ms,
             max_references,
+            offset: params.offset,
+            retry_attempt: params.retry_attempt,
         });
 
         let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);

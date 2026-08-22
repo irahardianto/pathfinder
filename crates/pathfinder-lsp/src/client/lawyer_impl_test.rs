@@ -441,8 +441,8 @@ async fn test_capability_status_unknown_language() {
 }
 
 #[tokio::test]
-async fn test_capability_status_lazy_start_entry() {
-    // A client with descriptors but no running process should report "lazy start".
+async fn test_capability_status_eager_start_entry() {
+    // A client with descriptors but no running process should report "eager start / reprobe".
     use crate::client::tests::client_with_descriptors;
     use std::collections::HashMap;
 
@@ -454,11 +454,13 @@ async fn test_capability_status_lazy_start_entry() {
     let go_status = &status["go"];
     assert!(
         go_status.validation,
-        "lazy start should report validation=true"
+        "unstarted process should report validation=true"
     );
     assert!(
-        go_status.reason.contains("available (lazy start)"),
-        "reason should mention lazy start, got: {}",
+        go_status
+            .reason
+            .contains("available (eager start / reprobe)"),
+        "reason should mention eager start / reprobe, got: {}",
         go_status.reason
     );
 }
@@ -498,6 +500,7 @@ async fn test_missing_languages_returns_populated_entries() {
         spawner: std::sync::Arc::new(
             crate::client::process::test_mocks::MockProcessSpawner::failing(),
         ),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     let result = client.missing_languages();

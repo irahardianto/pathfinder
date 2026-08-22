@@ -47,7 +47,7 @@ async fn test_read_symbol_scope_not_found() {
         .unwrap_err();
     match err {
         SurgeonError::SymbolNotFound { did_you_mean, .. } => {
-            assert_eq!(did_you_mean, vec!["Login"]);
+            assert_eq!(did_you_mean, vec![format!("{}::Login", relative.display())]);
         }
         _ => panic!("Expected SymbolNotFound"),
     }
@@ -216,8 +216,8 @@ async fn test_extract_go_method_with_receiver_as_top_level() {
     let workspace_root = PathBuf::from("/");
     let relative = path.strip_prefix("/").unwrap();
 
-    // Go methods with receivers are extracted as top-level functions
-    let sp = SemanticPath::parse(&format!("{}::Handle", relative.display())).unwrap();
+    // Go methods with receivers are bound to the receiver type name (TS-A6)
+    let sp = SemanticPath::parse(&format!("{}::Server.Handle", relative.display())).unwrap();
 
     let scope = surgeon
         .read_symbol_scope(&workspace_root, &sp)

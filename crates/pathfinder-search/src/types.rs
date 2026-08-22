@@ -25,6 +25,9 @@ pub struct SearchParams {
     pub offset: usize,
     /// Lines of surrounding context to include above and below each match.
     pub context_lines: usize,
+    /// Optional wall-clock deadline for the search. If elapsed while searching across files,
+    /// the search stops early and returns `truncated: true`.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for SearchParams {
@@ -38,6 +41,7 @@ impl Default for SearchParams {
             max_results: 50,
             offset: 0,
             context_lines: 2,
+            deadline: None,
         }
     }
 }
@@ -93,7 +97,7 @@ pub struct SearchMatch {
 }
 
 /// The result of a `search` call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SearchResult {
     /// All matches found, up to `max_results`.
     pub matches: Vec<SearchMatch>,
@@ -103,17 +107,6 @@ pub struct SearchResult {
     pub truncated: bool,
     /// Number of files that were actually searched.
     pub files_searched: usize,
-    /// Number of searchable files that matched the `path_glob` (excludes binary and gitignored).
-    /// When `files_searched < files_in_scope`, some files were skipped
-    /// due to permission issues or I/O errors.
-    pub files_in_scope: usize,
-    /// Files skipped because they matched known binary extensions
-    /// (e.g. `.png`, `.exe`, `.so`).
-    pub binary_skipped: usize,
-    /// Files skipped because they were excluded by `.gitignore` rules.
-    pub gitignored_skipped: usize,
-    /// Files skipped for other reasons (permission denied, I/O error, etc.).
-    pub other_skipped: usize,
 }
 
 #[cfg(test)]

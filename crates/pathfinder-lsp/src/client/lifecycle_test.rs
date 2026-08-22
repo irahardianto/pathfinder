@@ -136,12 +136,12 @@ async fn test_handle_shutdown_abort_cleanup() {
     client
         .handle_shutdown_abort_cleanup(
             "rust",
-            (
+            &[
                 progress_handle,
                 registration_handle,
                 supervisor_handle,
                 indexing_timeout_handle,
-            ),
+            ],
             transport,
             &lifecycle,
         )
@@ -185,6 +185,7 @@ async fn test_ensure_process_unavailable_cooldown_not_elapsed() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     )]);
     let client = client_with_descriptors(vec!["rust"], processes);
@@ -202,6 +203,7 @@ async fn test_ensure_process_unavailable_cooldown_elapsed_attempts_start() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now().checked_sub(Duration::from_mins(10)).unwrap(),
+            reason: None,
         }),
     )]);
     let client = client_with_descriptors(vec!["rust"], processes);
@@ -248,6 +250,7 @@ async fn test_request_unavailable_process_returns_no_lsp() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     )]);
     let client = client_with_descriptors(vec!["rust"], processes);
@@ -278,6 +281,7 @@ async fn test_notify_unavailable_process_returns_no_lsp() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     )]);
     let client = client_with_descriptors(vec!["rust"], processes);
@@ -301,6 +305,7 @@ async fn test_capabilities_for_unavailable_returns_no_lsp() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     )]);
     let client = client_with_descriptors(vec!["rust"], processes);
@@ -309,12 +314,12 @@ async fn test_capabilities_for_unavailable_returns_no_lsp() {
 }
 
 #[tokio::test]
-async fn test_capability_status_no_processes_lazy_start() {
+async fn test_capability_status_no_processes_eager_start() {
     let client = client_with_descriptors(vec!["rust", "go"], HashMap::new());
     let status = client.capability_status().await;
     assert_eq!(status.len(), 2);
-    assert!(status["rust"].reason.contains("lazy start"));
-    assert!(status["go"].reason.contains("lazy start"));
+    assert!(status["rust"].reason.contains("eager start / reprobe"));
+    assert!(status["go"].reason.contains("eager start / reprobe"));
 }
 
 #[tokio::test]
@@ -324,6 +329,7 @@ async fn test_capability_status_unavailable_shows_failure() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     )]);
     let client = client_with_descriptors(vec!["go"], processes);
@@ -337,44 +343,6 @@ async fn test_capability_status_no_descriptors_empty() {
     let client = client_no_languages();
     let status = client.capability_status().await;
     assert!(status.is_empty());
-}
-
-#[tokio::test]
-async fn test_touch_no_process_is_noop() {
-    let client = client_no_languages();
-    client.touch("rust");
-}
-
-#[tokio::test]
-async fn test_touch_updates_last_used_timestamp() {
-    let (client, _fake) = make_running_client("rust");
-
-    let initial_last_used = {
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            state.transport.last_used()
-        } else {
-            panic!("expected Running entry");
-        }
-    };
-
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    client.touch("rust");
-
-    let updated_last_used = {
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            state.transport.last_used()
-        } else {
-            panic!("expected Running entry");
-        }
-    };
-
-    assert!(
-        updated_last_used > initial_last_used,
-        "last_used should be updated after touch"
-    );
 }
 
 #[tokio::test]
@@ -408,87 +376,6 @@ async fn test_capabilities_for_running_process_returns_caps() {
     assert!(
         caps.flags.call_hierarchy_provider,
         "call_hierarchy_provider should be true"
-    );
-}
-
-#[tokio::test]
-async fn test_wait_for_capability_immediate_success() {
-    let (client, _fake) = make_running_client("rust");
-    // rust has grace period 0. If we set capability to true, it succeeds immediately.
-    if let Some(entry) = client.processes.get("rust") {
-        if let ProcessEntry::Running(state) = entry.value() {
-            let mut live_caps = state.live_capabilities.write();
-            live_caps.flags.definition_provider = true;
-        }
-    }
-    let result = client
-        .wait_for_capability(
-            "rust",
-            |caps| caps.flags.definition_provider,
-            "definitionProvider",
-        )
-        .await;
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_wait_for_capability_immediate_failure_static() {
-    let (client, _fake) = make_running_client("rust");
-    // rust has grace period 0. Force capability to false.
-    if let Some(entry) = client.processes.get("rust") {
-        if let ProcessEntry::Running(state) = entry.value() {
-            let mut live_caps = state.live_capabilities.write();
-            live_caps.flags.definition_provider = false;
-        }
-    }
-    let result = client
-        .wait_for_capability(
-            "rust",
-            |caps| caps.flags.definition_provider,
-            "definitionProvider",
-        )
-        .await;
-    assert!(matches!(
-        result,
-        Err(LspError::UnsupportedCapability { .. })
-    ));
-}
-
-#[tokio::test]
-async fn test_wait_for_capability_delayed_success() {
-    let (client, _fake) = make_running_client("java");
-    // java has grace period 15s. Force capability to false initially.
-    if let Some(entry) = client.processes.get("java") {
-        if let ProcessEntry::Running(state) = entry.value() {
-            let mut live_caps = state.live_capabilities.write();
-            live_caps.flags.definition_provider = false;
-        }
-    }
-
-    let client_clone = client.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        if let Some(entry) = client_clone.processes.get("java") {
-            if let ProcessEntry::Running(state) = entry.value() {
-                let mut live_caps = state.live_capabilities.write();
-                live_caps.flags.definition_provider = true;
-            }
-        }
-    });
-
-    let start = Instant::now();
-    let result = client
-        .wait_for_capability(
-            "java",
-            |caps| caps.flags.definition_provider,
-            "definitionProvider",
-        )
-        .await;
-
-    assert!(result.is_ok(), "should succeed eventually: {result:?}");
-    assert!(
-        start.elapsed() >= Duration::from_millis(200),
-        "should have waited at least 200ms"
     );
 }
 
@@ -577,42 +464,6 @@ async fn test_request_with_dead_reader_removes_entry() {
 }
 
 #[tokio::test]
-async fn test_request_in_flight_guard_on_running_process() {
-    let (client, fake) = make_running_client("rust");
-
-    fake.set_response(
-        "textDocument/definition",
-        serde_json::json!({"uri": "file:///test.rs"}),
-    );
-
-    let entry = client.processes.get("rust").unwrap();
-    let in_flight = if let ProcessEntry::Running(state) = entry.value() {
-        state.transport.in_flight().load(Ordering::Relaxed)
-    } else {
-        panic!("expected Running entry");
-    };
-    assert_eq!(in_flight, 0, "in-flight should be 0 before request");
-    drop(entry);
-
-    let _ = client
-        .request(
-            "rust",
-            "textDocument/definition",
-            json!({}),
-            Duration::from_secs(5),
-        )
-        .await;
-
-    let entry = client.processes.get("rust").unwrap();
-    let in_flight = if let ProcessEntry::Running(state) = entry.value() {
-        state.transport.in_flight().load(Ordering::Relaxed)
-    } else {
-        panic!("expected Running entry");
-    };
-    assert_eq!(in_flight, 0, "in-flight should be 0 after request");
-}
-
-#[tokio::test]
 async fn test_notify_with_running_process_records_notification() {
     let (client, fake) = make_running_client("rust");
 
@@ -651,6 +502,7 @@ async fn test_force_respawn_unavailable_entry_removed_directly() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     );
 
@@ -730,86 +582,6 @@ async fn test_ensure_process_unavailable_state_after_failed_start() {
             "should be Unavailable after failed start"
         );
     }
-}
-
-#[tokio::test]
-async fn test_idle_timeout_removes_process_after_timeout() {
-    use crate::client::background::collect_idle_languages;
-
-    let (client, _fake) = make_running_client("rust");
-
-    if let Some(entry) = client.processes.get("rust") {
-        if let ProcessEntry::Running(state) = entry.value() {
-            state
-                .transport
-                .set_last_used(Instant::now().checked_sub(Duration::from_mins(20)).unwrap());
-        }
-    }
-
-    let candidates = collect_idle_languages(&client.processes);
-    assert_eq!(
-        candidates,
-        vec!["rust"],
-        "idle process should be a candidate for removal"
-    );
-
-    let removed = client.processes.remove_if("rust", |_, v| {
-        if let ProcessEntry::Running(state) = v {
-            state.transport.last_used().elapsed() > Duration::from_mins(15)
-                && state.transport.in_flight().load(Ordering::Acquire) == 0
-        } else {
-            false
-        }
-    });
-
-    assert!(
-        removed.is_some(),
-        "idle process with no in-flight requests should be removed"
-    );
-    assert!(
-        client.processes.get("rust").is_none(),
-        "process entry should be gone after idle timeout removal"
-    );
-}
-
-#[tokio::test]
-async fn test_idle_timeout_does_not_remove_process_with_in_flight() {
-    use crate::client::background::collect_idle_languages;
-
-    let (client, _fake) = make_running_client("rust");
-
-    if let Some(entry) = client.processes.get("rust") {
-        if let ProcessEntry::Running(state) = entry.value() {
-            state
-                .transport
-                .set_last_used(Instant::now().checked_sub(Duration::from_mins(20)).unwrap());
-            state.transport.in_flight().store(1, Ordering::Relaxed);
-        }
-    }
-
-    let candidates = collect_idle_languages(&client.processes);
-    assert!(
-        candidates.is_empty(),
-        "process with in-flight requests should NOT be a candidate for removal"
-    );
-
-    assert!(
-        client.processes.get("rust").is_some(),
-        "process should still exist when in-flight > 0"
-    );
-}
-
-#[tokio::test]
-async fn test_idle_timeout_shutdown_terminates_all_processes() {
-    let (client, _fake) = make_running_client("rust");
-
-    assert!(client.processes.get("rust").is_some());
-
-    client.shutdown();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Shutdown signal was already consumed by idle_timeout_task
 }
 
 #[test]
@@ -913,6 +685,7 @@ async fn test_backoff_recovery_failure_reinserts_unavailable() {
             unavailable_since: Instant::now()
                 .checked_sub(Duration::from_secs(100))
                 .unwrap(),
+            reason: None,
         }),
     );
 
@@ -956,6 +729,7 @@ fn test_missing_languages_returns_configured_list() {
         spawner: std::sync::Arc::new(
             crate::client::process::test_mocks::MockProcessSpawner::failing(),
         ),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     let result = client.missing_languages.clone();
@@ -1489,15 +1263,27 @@ async fn test_clear_doc_versions_for_language() {
 
     client.doc_versions.insert(
         "file:///workspace/src/main.rs".to_owned(),
-        ("rust".to_owned(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "rust".to_owned(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
     client.doc_versions.insert(
         "file:///workspace/src/lib.rs".to_owned(),
-        ("rust".to_owned(), std::sync::atomic::AtomicI32::new(2)),
+        crate::client::DocumentEntry {
+            language_id: "rust".to_owned(),
+            version: std::sync::atomic::AtomicI32::new(2),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
     client.doc_versions.insert(
         "file:///workspace/main.go".to_owned(),
-        ("go".to_owned(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "go".to_owned(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
 
     assert_eq!(client.doc_versions.len(), 3);
@@ -1558,7 +1344,11 @@ async fn test_ensure_process_clears_doc_versions_on_recovery() {
 
     client.doc_versions.insert(
         "file:///workspace/src/main.rs".to_owned(),
-        ("rust".to_owned(), std::sync::atomic::AtomicI32::new(3)),
+        crate::client::DocumentEntry {
+            language_id: "rust".to_owned(),
+            version: std::sync::atomic::AtomicI32::new(3),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
     assert_eq!(client.doc_versions.len(), 1);
 
@@ -1569,6 +1359,7 @@ async fn test_ensure_process_clears_doc_versions_on_recovery() {
             unavailable_since: Instant::now()
                 .checked_sub(Duration::from_secs(100))
                 .unwrap(),
+            reason: None,
         }),
     );
 
@@ -1784,11 +1575,19 @@ async fn test_force_respawn_clears_doc_versions_for_language() {
 
     client.doc_versions.insert(
         "file:///workspace/src/main.rs".to_owned(),
-        ("rust".to_owned(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "rust".to_owned(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
     client.doc_versions.insert(
         "file:///workspace/main.go".to_owned(),
-        ("go".to_owned(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "go".to_owned(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
     assert_eq!(client.doc_versions.len(), 2);
 
@@ -1845,6 +1644,10 @@ async fn test_force_respawn_with_lifecycle_kills_old_process() {
         std::future::pending::<()>().await;
     });
 
+    let (readiness_tx, readiness_rx) = tokio::sync::watch::channel(
+        crate::client::ReadinessState::Ready(crate::types::CapabilityReadiness::all()),
+    );
+
     let entry = ProcessEntry::Running(Box::new(LanguageState {
         transport: Arc::clone(&fake) as Arc<dyn LspTransport>,
         lifecycle: Some(lifecycle),
@@ -1859,6 +1662,10 @@ async fn test_force_respawn_with_lifecycle_kills_old_process() {
         live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities::default())),
         in_coexistence_mode: false,
         watcher_handles: vec![],
+        probe_handle: None,
+        readiness_tx: Arc::new(readiness_tx),
+        readiness_rx,
+        workspace_root: std::env::temp_dir(),
     }));
 
     client.processes.insert("rust".to_owned(), entry);
@@ -1880,28 +1687,6 @@ async fn test_force_respawn_with_lifecycle_kills_old_process() {
     );
 }
 
-#[tokio::test]
-async fn test_touch_on_unavailable_entry_is_noop() {
-    let client = client_with_descriptors(
-        vec!["rust"],
-        HashMap::from([(
-            "rust".to_owned(),
-            ProcessEntry::Unavailable(UnavailableState {
-                backoff_attempt: 0,
-                unavailable_since: Instant::now(),
-            }),
-        )]),
-    );
-
-    client.touch("rust");
-
-    let entry = client.processes.get("rust").unwrap();
-    assert!(
-        matches!(entry.value(), ProcessEntry::Unavailable(_)),
-        "touch on Unavailable should be no-op"
-    );
-}
-
 // D-2: LspClient::new() integration tests with filesystem fixtures
 //
 // These tests use config command overrides to provide known binary names,
@@ -1912,7 +1697,6 @@ fn lsp_config_with_command(command: &str) -> pathfinder_common::config::LspConfi
     pathfinder_common::config::LspConfig {
         command: command.to_owned(),
         args: vec![],
-        idle_timeout_minutes: 30,
         settings: serde_json::Value::Null,
         root_override: None,
         typescript_plugins: vec![],
@@ -2345,6 +2129,9 @@ fn make_multi_lang_entry(fake: Arc<crate::client::fake_transport::FakeTransport>
     let reader_handle = tokio::spawn(async {
         std::future::pending::<()>().await;
     });
+    let (readiness_tx, readiness_rx) = tokio::sync::watch::channel(
+        crate::client::ReadinessState::Ready(crate::types::CapabilityReadiness::all()),
+    );
     ProcessEntry::Running(Box::new(LanguageState {
         transport: fake as Arc<dyn LspTransport>,
         lifecycle: None,
@@ -2367,6 +2154,10 @@ fn make_multi_lang_entry(fake: Arc<crate::client::fake_transport::FakeTransport>
         })),
         in_coexistence_mode: false,
         watcher_handles: vec![],
+        probe_handle: None,
+        readiness_tx: Arc::new(readiness_tx),
+        readiness_rx,
+        workspace_root: std::env::temp_dir(),
     }))
 }
 
@@ -2457,6 +2248,7 @@ async fn test_multi_language_requests_route_to_correct_transport() {
         spawner: std::sync::Arc::new(
             crate::client::process::test_mocks::MockProcessSpawner::failing(),
         ),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     assert_client_request(&client, "rust", "file:///rust-result.rs").await;
@@ -2643,76 +2435,6 @@ async fn test_call_hierarchy_request_transport_error() {
     assert!(result.is_err(), "transport error should propagate");
 }
 
-// ── Coverage: wait_for_capability timeout after grace period ─────
-
-#[tokio::test]
-async fn test_wait_for_capability_timeout_after_grace() {
-    // Use typescript (5s grace) but with tokio::time::pause for instant advance.
-    tokio::time::pause();
-
-    let (client, _fake) = make_running_client("typescript");
-    // Force capability to false.
-    if let Some(entry) = client.processes.get("typescript") {
-        if let ProcessEntry::Running(state) = entry.value() {
-            let mut live_caps = state.live_capabilities.write();
-            live_caps.flags.call_hierarchy_provider = false;
-        }
-    }
-
-    let result = client
-        .wait_for_capability(
-            "typescript",
-            |caps| caps.flags.call_hierarchy_provider,
-            "callHierarchyProvider",
-        )
-        .await;
-
-    assert!(
-        matches!(result, Err(LspError::UnsupportedCapability { .. })),
-        "should fail after grace period: {result:?}"
-    );
-}
-
-// ── Coverage: wait_for_capability Unavailable during loop ────────
-
-#[tokio::test]
-async fn test_wait_for_capability_unavailable_during_loop() {
-    // java has 15s grace. Start with Running, then switch to Unavailable.
-    let (client, _fake) = make_running_client("java");
-    if let Some(entry) = client.processes.get("java") {
-        if let ProcessEntry::Running(state) = entry.value() {
-            let mut live_caps = state.live_capabilities.write();
-            live_caps.flags.call_hierarchy_provider = false;
-        }
-    }
-
-    // Spawn a task that switches the process to Unavailable after 50ms.
-    let client_clone = client.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        client_clone.processes.insert(
-            "java".to_owned(),
-            ProcessEntry::Unavailable(UnavailableState {
-                backoff_attempt: 0,
-                unavailable_since: Instant::now(),
-            }),
-        );
-    });
-
-    let result = client
-        .wait_for_capability(
-            "java",
-            |caps| caps.flags.call_hierarchy_provider,
-            "callHierarchyProvider",
-        )
-        .await;
-
-    assert!(
-        matches!(result, Err(LspError::NoLspAvailable)),
-        "should return NoLspAvailable when process becomes Unavailable: {result:?}"
-    );
-}
-
 // ── Coverage: capabilities_for with Running ──────────────────────
 
 #[tokio::test]
@@ -2723,46 +2445,6 @@ async fn test_capabilities_for_running_returns_caps() {
     let caps = result.expect("checked");
     // make_running_client sets definition_provider = true
     assert!(caps.flags.definition_provider);
-}
-
-// ── Coverage: touch on running process ───────────────────────────
-
-#[tokio::test]
-async fn test_touch_updates_last_used_on_running() {
-    let (client, _fake) = make_running_client("rust");
-
-    // Record time before touch
-    let before = {
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            state.transport.last_used()
-        } else {
-            panic!("expected Running");
-        }
-    };
-
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    client.touch("rust");
-
-    let after = {
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            state.transport.last_used()
-        } else {
-            panic!("expected Running");
-        }
-    };
-
-    assert!(after > before, "touch should update last_used timestamp");
-}
-
-// ── Coverage: touch on nonexistent language is noop ──────────────
-
-#[tokio::test]
-async fn test_touch_nonexistent_language_is_noop() {
-    let client = client_no_languages();
-    // Should not panic
-    client.touch("nonexistent");
 }
 
 // ── Coverage: shutdown idempotency (second call) ─────────────────
@@ -2817,6 +2499,7 @@ async fn test_force_respawn_with_unavailable_entry() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 3,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     )]);
     let client = client_with_descriptors(vec!["rust"], processes);
@@ -2836,11 +2519,6 @@ async fn test_force_respawn_with_unavailable_entry() {
 async fn test_ensure_process_post_lock_unavailable_not_elapsed() {
     // This covers line 390 in lifecycle.rs: the post-lock check where
     // backoff has NOT elapsed (returns NoLspAvailable from inside the lock).
-    //
-    // Scenario: Two concurrent ensure_process calls. The first acquires the
-    // lock and fails start_process (inserting Unavailable with fresh timestamp).
-    // The second waits for the lock, then finds the fresh Unavailable entry
-    // with backoff not elapsed.
     let client = client_with_descriptors(vec!["rust"], HashMap::new());
 
     // Pre-populate with Unavailable that has backoff NOT elapsed.
@@ -2850,11 +2528,10 @@ async fn test_ensure_process_post_lock_unavailable_not_elapsed() {
         ProcessEntry::Unavailable(UnavailableState {
             backoff_attempt: 0,
             unavailable_since: Instant::now(),
+            reason: None,
         }),
     );
 
-    // First call: pre-lock check sees elapsed (we'll skip this with a fresh entry).
-    // Actually, the pre-lock check will also see it as not elapsed.
     let result = client.ensure_process("rust").await;
     assert!(
         matches!(result, Err(LspError::NoLspAvailable)),
@@ -2879,37 +2556,6 @@ async fn test_notify_running_process_succeeds() {
     assert!(
         result.is_ok(),
         "notify on running process should succeed: {result:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_touch_language_updates_last_used_on_running() {
-    let (client, _fake) = make_running_client("rust");
-
-    let before = {
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            state.transport.last_used()
-        } else {
-            panic!("expected Running");
-        }
-    };
-
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    client.touch_language("rust");
-
-    let after = {
-        let entry = client.processes.get("rust").unwrap();
-        if let ProcessEntry::Running(state) = entry.value() {
-            state.transport.last_used()
-        } else {
-            panic!("expected Running");
-        }
-    };
-
-    assert!(
-        after > before,
-        "touch_language should update last_used timestamp"
     );
 }
 
@@ -3001,6 +2647,7 @@ async fn test_start_process_success_path_with_python_lsp() {
         doc_versions: Arc::new(DashMap::new()),
         warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     let result = client.start_process(descriptor, 0).await;
@@ -3046,6 +2693,7 @@ async fn test_start_process_shutdown_during_init() {
         doc_versions: Arc::new(DashMap::new()),
         warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     let client_clone = client.clone();
@@ -3198,11 +2846,19 @@ async fn test_client_lifecycle_reader_crash_cleanup() {
     // Insert doc version
     client.doc_versions.insert(
         "file:///foo.rs".to_string(),
-        ("rust".to_string(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "rust".to_string(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
     client.doc_versions.insert(
         "file:///bar.go".to_string(),
-        ("go".to_string(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "go".to_string(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
 
     // Register a pending request in the dispatcher
@@ -3218,6 +2874,10 @@ async fn test_client_lifecycle_reader_crash_cleanup() {
         panic!("simulated reader task crash!");
     });
 
+    let (readiness_tx, readiness_rx) = tokio::sync::watch::channel(
+        crate::client::ReadinessState::Ready(crate::types::CapabilityReadiness::all()),
+    );
+
     let entry = ProcessEntry::Running(Box::new(LanguageState {
         transport: fake_transport as Arc<dyn LspTransport>,
         lifecycle: None,
@@ -3232,6 +2892,10 @@ async fn test_client_lifecycle_reader_crash_cleanup() {
         live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities::default())),
         in_coexistence_mode: false,
         watcher_handles: vec![],
+        probe_handle: None,
+        readiness_tx: Arc::new(readiness_tx),
+        readiness_rx,
+        workspace_root: std::env::temp_dir(),
     }));
 
     client.processes.insert("rust".to_owned(), entry);
@@ -3263,4 +2927,82 @@ async fn test_client_lifecycle_reader_crash_cleanup() {
         entry_rust.unwrap().value(),
         ProcessEntry::Unavailable(_)
     ));
+}
+
+#[tokio::test]
+async fn test_ensure_ready_for_ready_process() {
+    let (client, _fake) = make_running_client("rust");
+    let readiness = client
+        .ensure_ready("rust", Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(readiness.is_ready());
+    if let crate::types::Readiness::Ready(caps) = readiness {
+        assert!(caps.definition);
+        assert!(caps.call_hierarchy());
+        assert!(caps.references);
+        assert!(caps.implementation());
+    } else {
+        panic!("expected Readiness::Ready, got {readiness:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_ensure_ready_for_missing_language() {
+    let client = client_no_languages();
+    let readiness = client
+        .ensure_ready("rust", Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(!readiness.is_ready());
+    assert!(
+        matches!(readiness, crate::types::Readiness::Unavailable { ref language, .. } if language == "rust")
+    );
+}
+
+#[tokio::test]
+async fn test_ensure_ready_for_degraded_probe() {
+    let (client, _fake) = make_running_client("rust");
+    if let Some(entry) = client.processes.get("rust") {
+        if let ProcessEntry::Running(state) = entry.value() {
+            let _ = state
+                .readiness_tx
+                .send(crate::client::ReadinessState::Degraded {
+                    reason: "probe definition failed with timeout".to_string(),
+                });
+        }
+    }
+
+    let readiness = client
+        .ensure_ready("rust", Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(!readiness.is_ready());
+    assert!(
+        matches!(readiness, crate::types::Readiness::Degraded { ref reason, .. } if reason == "probe definition failed with timeout")
+    );
+}
+
+#[tokio::test]
+async fn test_ensure_ready_timeout_returns_not_ready_probing() {
+    let (client, _fake) = make_running_client("rust");
+    if let Some(entry) = client.processes.get("rust") {
+        if let ProcessEntry::Running(state) = entry.value() {
+            let _ = state
+                .readiness_tx
+                .send(crate::client::ReadinessState::Probing {
+                    started_at: tokio::time::Instant::now(),
+                });
+        }
+    }
+
+    let readiness = client
+        .ensure_ready("rust", Duration::from_millis(50))
+        .await
+        .unwrap();
+    assert!(!readiness.is_ready());
+    assert!(
+        matches!(readiness, crate::types::Readiness::NotReady { ref phase, .. } if phase == "probing"),
+        "expected NotReady probing, got: {readiness:?}"
+    );
 }

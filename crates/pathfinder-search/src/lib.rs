@@ -1,8 +1,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-//! Pathfinder Search — The Scout Engine.
+//! Pathfinder Search — Internal Search Engine.
 //!
-//! Provides Ripgrep-powered text search for the `search` MCP tool.
+//! Provides Ripgrep-powered text search for internal fallback and symbol resolution.
 //!
 //! # Architecture
 //!

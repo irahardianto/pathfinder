@@ -83,10 +83,6 @@ fn test_search_result_serde_roundtrip() {
         total_matches: 1,
         truncated: false,
         files_searched: 5,
-        files_in_scope: 10,
-        binary_skipped: 2,
-        gitignored_skipped: 3,
-        other_skipped: 0,
     };
     let json = serde_json::to_string(&original).expect("serialize");
     let deserialized: SearchResult = serde_json::from_str(&json).expect("deserialize");
@@ -94,10 +90,6 @@ fn test_search_result_serde_roundtrip() {
     assert_eq!(deserialized.total_matches, original.total_matches);
     assert_eq!(deserialized.truncated, original.truncated);
     assert_eq!(deserialized.files_searched, original.files_searched);
-    assert_eq!(deserialized.files_in_scope, original.files_in_scope);
-    assert_eq!(deserialized.binary_skipped, original.binary_skipped);
-    assert_eq!(deserialized.gitignored_skipped, original.gitignored_skipped);
-    assert_eq!(deserialized.other_skipped, original.other_skipped);
     assert_eq!(deserialized.matches.len(), 1);
     assert_eq!(deserialized.matches[0], original.matches[0]);
 }

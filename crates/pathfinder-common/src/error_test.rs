@@ -39,8 +39,10 @@ fn test_hint_bare_file_suggests_alternatives() {
         issue: "this tool requires a symbol target — use 'file.rs::symbol' format".into(),
     };
     let hint = err.hint().expect("should have hint");
-    assert!(hint.contains("read"), "hint should suggest read: {hint}");
-    assert!(hint.contains("read"), "hint should suggest read: {hint}");
+    assert!(
+        hint.contains("locate") || hint.contains("inspect"),
+        "hint should suggest surviving tools: {hint}"
+    );
 }
 
 // ── GAP-008: LSP error hints ────────────────────────────────────
@@ -52,8 +54,8 @@ fn test_lsp_error_hint_timeout_includes_workaround() {
     };
     let hint = err.hint().expect("LspError should have a hint");
     assert!(
-        hint.contains("search"),
-        "hint should mention search: {hint}"
+        hint.contains("host grep") || hint.contains("inspect"),
+        "hint should mention host grep or inspect: {hint}"
     );
     assert!(
         hint.contains("tree-sitter"),
@@ -72,7 +74,7 @@ fn test_lsp_error_hint_connection_lost() {
         "hint should mention crash: {hint}"
     );
     assert!(
-        hint.contains("read"),
+        hint.contains("inspect") || hint.contains("host grep"),
         "hint should mention tree-sitter tools: {hint}"
     );
 }
@@ -84,12 +86,8 @@ fn test_lsp_error_hint_generic() {
     };
     let hint = err.hint().expect("LspError should have a hint");
     assert!(
-        hint.contains("search"),
-        "hint should mention search: {hint}"
-    );
-    assert!(
-        hint.contains("health"),
-        "hint should mention health: {hint}"
+        hint.contains("host grep") || hint.contains("inspect"),
+        "hint should mention host grep or inspect: {hint}"
     );
 }
 
@@ -102,16 +100,12 @@ fn test_lsp_timeout_hint_includes_workaround() {
         "hint should include timeout duration: {hint}"
     );
     assert!(
-        hint.contains("search"),
-        "hint should mention search: {hint}"
+        hint.contains("host grep") || hint.contains("inspect"),
+        "hint should mention host grep or inspect: {hint}"
     );
     assert!(
         hint.contains("tree-sitter"),
         "hint should mention tree-sitter: {hint}"
-    );
-    assert!(
-        hint.contains("health"),
-        "hint should mention health: {hint}"
     );
 }
 

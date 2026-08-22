@@ -1,8 +1,8 @@
 //! `LspClient` — the production [`Lawyer`] implementation.
 //!
 //! `LspClient` manages a pool of LSP child processes (one per language).
-//! Processes are started lazily on first use and terminated automatically
-//! after an idle timeout.
+//! Processes are started eagerly during initialization via `warm_start()`,
+//! supervised continuously, and remain active for the duration of the session.
 //!
 //! # Crash Recovery
 //! When a crash is detected the client restarts the process with exponential
@@ -36,7 +36,6 @@ use dashmap::DashMap;
 use detect::LanguageLsp as LspDescriptor;
 use process::LspTransport;
 use protocol::RequestDispatcher;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
@@ -46,6 +45,23 @@ pub(crate) struct ProcessLifecycle {
     pub(crate) child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
 }
 
+/// Internal readiness phase of an active language server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadinessState {
+    #[allow(dead_code)]
+    Spawning,
+    #[allow(dead_code)]
+    Handshaking,
+    Probing {
+        started_at: tokio::time::Instant,
+    },
+    Ready(crate::types::CapabilityReadiness),
+    Degraded {
+        reason: String,
+    },
+}
+
+#[allow(dead_code)]
 pub(crate) struct LanguageState {
     pub(crate) transport: Arc<dyn LspTransport>,
     pub(crate) lifecycle: Option<ProcessLifecycle>,
@@ -67,11 +83,18 @@ pub(crate) struct LanguageState {
     pub(crate) live_capabilities: Arc<parking_lot::RwLock<DetectedCapabilities>>,
     pub(crate) in_coexistence_mode: bool,
     pub(crate) watcher_handles: Vec<tokio::task::JoinHandle<()>>,
+    pub(crate) probe_handle: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) readiness_tx: Arc<tokio::sync::watch::Sender<ReadinessState>>,
+    pub(crate) readiness_rx: tokio::sync::watch::Receiver<ReadinessState>,
+    pub(crate) workspace_root: std::path::PathBuf,
 }
 
 impl LanguageState {
     pub(crate) fn abort_watchers(&self) {
         for handle in &self.watcher_handles {
+            handle.abort();
+        }
+        if let Some(ref handle) = self.probe_handle {
             handle.abort();
         }
     }
@@ -87,6 +110,15 @@ pub(crate) struct UnavailableState {
     /// Number of consecutive failed spawn attempts. Used to compute backoff:
     /// `min(1 << backoff_attempt, MAX_BACKOFF_SECS)` seconds.
     pub(crate) backoff_attempt: u32,
+    /// Reason explaining why the process is unavailable.
+    pub(crate) reason: Option<String>,
+}
+
+/// Document entry tracking version and content hash for full sync coherence.
+pub(crate) struct DocumentEntry {
+    pub(crate) language_id: String,
+    pub(crate) version: std::sync::atomic::AtomicI32,
+    pub(crate) content_hash: std::sync::atomic::AtomicU64,
 }
 
 pub(crate) enum ProcessEntry {
@@ -312,28 +344,6 @@ fn validation_status_from_parts(
     }
 }
 
-/// RAII guard that increments in-flight counter on creation and decrements on drop.
-pub(crate) struct InFlightGuard {
-    counter: Arc<AtomicU32>,
-}
-
-impl InFlightGuard {
-    pub(crate) fn new(counter: Arc<AtomicU32>) -> Self {
-        // M-1: Use Release ordering for the counter increment to form a release-acquire
-        // pair with the Acquire load in idle_timeout_task.
-        counter.fetch_add(1, Ordering::Release);
-        Self { counter }
-    }
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        // M-1: Use Release ordering for the counter decrement to form a release-acquire
-        // pair with the Acquire load in idle_timeout_task.
-        self.counter.fetch_sub(1, Ordering::Release);
-    }
-}
-
 /// The production `Lawyer` implementation.
 ///
 /// Manages per-language LSP child processes and provides JSON-RPC request
@@ -343,9 +353,9 @@ impl Drop for InFlightGuard {
 ///
 /// `LspClient` is `Clone`-able — all fields are `Arc`-wrapped. The client is
 /// shared across async tasks via cloning. When the last clone is dropped, the
-/// `shutdown_tx` `Arc` is dropped, which causes the `idle_timeout_task` to see
+/// `shutdown_tx` `Arc` is dropped, which causes the `process_supervisor_task` to see
 /// a `Closed` error on its broadcast receiver and exit cleanly. Therefore,
-/// **no `Drop` impl is needed** — cleanup is handled by the idle-timeout task's
+/// **no `Drop` impl is needed** — cleanup is handled by the process supervisor task's
 /// natural exit when the broadcast channel closes. Adding a naive `Drop` impl
 /// that calls `shutdown()` would fire on every clone drop (not just the last),
 /// which is incorrect. Use `shutdown()` explicitly for deterministic cleanup.
@@ -358,11 +368,13 @@ pub struct LspClient {
     pub(crate) dispatcher: Arc<RequestDispatcher>,
     pub(crate) shutdown_tx: Arc<broadcast::Sender<()>>,
     /// C-1: Set atomically when `shutdown()` is called. Checked by `start_process`
-    /// to prevent inserting new processes after the `idle_timeout_task` has exited.
+    /// to prevent inserting new processes after the `process_supervisor_task` has exited.
     pub(crate) shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) doc_versions: Arc<DashMap<String, (String, std::sync::atomic::AtomicI32)>>,
+    pub(crate) doc_versions: Arc<DashMap<String, DocumentEntry>>,
     pub(crate) warm_start_complete: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) spawner: std::sync::Arc<dyn crate::client::process::ProcessSpawner>,
+    #[allow(dead_code)]
+    pub(crate) clock: Arc<dyn crate::clock::Clock>,
 }
 
 #[cfg(test)]

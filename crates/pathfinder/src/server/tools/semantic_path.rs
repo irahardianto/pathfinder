@@ -17,10 +17,6 @@ impl PathfinderServer {
     ///
     /// Walks the Tree-sitter AST of the file and returns the
     /// semantic path of the symbol that encloses the line.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequential validation pipeline: params → sandbox → file existence → tree-sitter. Extraction would fragment the linear flow."
-    )]
     pub(crate) async fn get_semantic_path_impl(
         &self,
         params: LocateParams,
@@ -120,8 +116,7 @@ impl PathfinderServer {
             None => format!(
                 "Line {line} in '{file}' is not inside a named symbol.\n\n\
                  The line may be a module-level attribute, blank line, or top-level import. \
-                 Use `read(filepath=\"{file}\", detail_level=\"symbols\")` to see \
-                 the available symbols in this file.\n\n\
+                 Use host file reading tools to view the file content.\n\n\
                  [resolved in {duration_ms}ms]",
             ),
         };

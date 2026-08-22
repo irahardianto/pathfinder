@@ -840,10 +840,6 @@ async fn test_find_all_references_grep_fallback_returns_results_with_mock_scout(
         total_matches: 2,
         truncated: false,
         files_searched: 2,
-        files_in_scope: 2,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Use NoOpLawyer to simulate LSP unavailable (forces grep fallback path)
@@ -953,10 +949,6 @@ async fn test_find_all_references_grep_fallback_no_results_stays_none() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Use NoOpLawyer to force grep fallback path
@@ -1046,10 +1038,6 @@ async fn test_find_all_references_lsp_error_uses_grep_fallback() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Use MockLawyer that returns ConnectionLost error (not just NoOpLawyer)
@@ -1135,10 +1123,6 @@ async fn test_find_all_references_lsp_timeout_uses_grep_fallback() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Use MockLawyer that returns Timeout error (not ConnectionLost)
@@ -1414,10 +1398,6 @@ async fn test_grep_references_fallback_overflows() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // search_codebase_impl will call enclosing_symbol_detail, queue a result for it.
@@ -1567,10 +1547,6 @@ async fn test_find_all_references_zero_results_but_resolvable_definition_trigger
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let lawyer = Arc::new(MockLawyer::default());
@@ -1749,10 +1725,6 @@ fn build_non_source_files_search_result() -> pathfinder_search::SearchResult {
         total_matches: 4,
         truncated: false,
         files_searched: 4,
-        files_in_scope: 4,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }
 }
 
@@ -1791,9 +1763,5 @@ fn build_vue_search_result() -> pathfinder_search::SearchResult {
         total_matches: 2,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }
 }

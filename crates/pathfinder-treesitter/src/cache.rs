@@ -1,6 +1,7 @@
 use crate::error::SurgeonError;
 use crate::language::SupportedLanguage;
 use crate::parser::AstParser;
+use crate::surgeon::ExtractedSymbol;
 use crate::vue_zones::{parse_vue_multizone, MultiZoneTree};
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -27,12 +28,21 @@ fn io_err(e: std::io::Error, path: &Path) -> SurgeonError {
     }
 }
 
-/// Type alias for in-flight parse operations.
-/// Represents an `Arc` wrapping a `OnceCell` that will contain the parse result.
-type InFlightParse = Arc<OnceCell<Result<(Tree, Arc<[u8]>), SurgeonError>>>;
+/// Maximum allowed file size for AST parsing (2 MB).
+pub const MAX_FILE_SIZE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Default byte budget for the AST cache (64 MB).
+pub const DEFAULT_MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Type alias for cached single-zone AST parse results.
+pub type CachedParseResult = (Tree, Arc<[u8]>, Arc<Vec<ExtractedSymbol>>);
+
+/// Type alias for in-flight Parse operations.
+type InFlightParse = Arc<OnceCell<Result<CachedParseResult, SurgeonError>>>;
 
 /// Type alias for in-flight Vue parse operations.
-type InFlightVueParse = Arc<OnceCell<Result<(MultiZoneTree, VersionHash), SurgeonError>>>;
+type InFlightVueParse =
+    Arc<OnceCell<Result<(MultiZoneTree, Arc<Vec<ExtractedSymbol>>, VersionHash), SurgeonError>>>;
 
 /// Type alias for the in-flight parse map.
 type InFlightParseMap = HashMap<PathBuf, InFlightParse>;
@@ -53,51 +63,84 @@ pub struct CacheEntry {
     pub tree: Tree,
     /// The raw source code bytes.
     pub source: Arc<[u8]>,
+    /// Extracted symbols cached alongside the tree (TS-A13).
+    pub symbols: Arc<Vec<ExtractedSymbol>>,
     /// The content hash when parsed.
     pub content_hash: VersionHash,
     /// The language used for parsing.
     pub lang: SupportedLanguage,
-    /// Last modification time of the file at the time of parsing (fast-path invalidation).
+    /// Last modification time of the file at the time of parsing.
     pub mtime: SystemTime,
+    /// File size in bytes when parsed (checked alongside mtime).
+    pub file_size: u64,
 }
 
 /// Cached parse result for a Vue SFC across all three zones.
-///
-/// Keyed by `PathBuf` in a separate LRU cache from non-Vue files so that
-/// multi-zone trees don't pollute the single-zone eviction budget.
 #[derive(Debug)]
 pub struct MultiZoneEntry {
     /// The parsed Vue multi-zone tree structure.
     pub multi: Arc<MultiZoneTree>,
+    /// Extracted symbols cached alongside the multi-zone tree (TS-A13).
+    pub symbols: Arc<Vec<ExtractedSymbol>>,
     /// The SHA-256 fingerprint hash of the cached file content.
     pub content_hash: VersionHash,
     /// Last modified time of the file when cached.
     pub mtime: SystemTime,
+    /// File size in bytes when parsed.
+    pub file_size: u64,
 }
 
-/// A thread-safe, parse-on-demand cache for ASTs.
-///
-/// Keeps parsed ASTs in memory up to a capacity limit. Evicts the
-/// least-recently-used entry when full.
-///
-/// ## Fast-path invalidation
-///
-/// `get_or_parse` uses `tokio::fs::metadata` (a single `stat(2)` syscall) to
-/// obtain the file's mtime before touching the cache. If the mtime is unchanged
-/// the cached entry is returned immediately — no disk read, no hashing.
-///
-/// ## Singleflight deduplication
-///
-/// When multiple concurrent requests arrive for the same uncached file, only one
-/// parse operation is performed. The other requests wait and receive the same
-/// result, eliminating redundant I/O and CPU work.
+/// Cached negative parse result (e.g. file size exceeded or unparseable file).
+#[derive(Debug, Clone)]
+pub struct NegativeCacheEntry {
+    /// Last modification time when the failure was cached.
+    pub mtime: SystemTime,
+    /// File size in bytes when the failure was cached.
+    pub file_size: u64,
+    /// The cached error.
+    pub error: SurgeonError,
+}
+
+/// Internal wrapper tracking LRU cache and its current memory usage in bytes.
+#[derive(Debug)]
+pub(crate) struct BoundedLruCache<V> {
+    pub(crate) cache: LruCache<PathBuf, V>,
+    pub(crate) current_bytes: usize,
+    pub(crate) max_bytes: usize,
+}
+
+impl<V> BoundedLruCache<V> {
+    fn new(cap: NonZeroUsize, max_bytes: usize) -> Self {
+        Self {
+            cache: LruCache::new(cap),
+            current_bytes: 0,
+            max_bytes,
+        }
+    }
+}
+
+impl<V> std::ops::Deref for BoundedLruCache<V> {
+    type Target = LruCache<PathBuf, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.cache
+    }
+}
+
+impl<V> std::ops::DerefMut for BoundedLruCache<V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cache
+    }
+}
+
+/// A thread-safe, parse-on-demand cache for ASTs and extracted symbols (TS-A13).
 #[derive(Debug)]
 pub struct AstCache {
-    entries: Mutex<LruCache<PathBuf, CacheEntry>>,
+    pub(crate) entries: Mutex<BoundedLruCache<CacheEntry>>,
     /// Separate LRU cache for Vue SFC multi-zone parse results.
-    vue_entries: Mutex<LruCache<PathBuf, MultiZoneEntry>>,
+    pub(crate) vue_entries: Mutex<BoundedLruCache<MultiZoneEntry>>,
+    /// Negative cache for failed parses and oversized files.
+    pub(crate) negative_entries: Mutex<LruCache<PathBuf, NegativeCacheEntry>>,
     /// Singleflight locks for in-flight parses to prevent redundant work.
-    /// Maps path -> `OnceCell` containing the parse result.
     in_flight: Mutex<InFlightParseMap>,
     /// Singleflight locks for Vue parses.
     vue_in_flight: Mutex<InFlightVueParseMap>,
@@ -118,7 +161,6 @@ where
     // --- Singleflight: check if another request is already parsing this file ---
     let cell = {
         let mut in_flight = in_flight_map.lock();
-        // CLONE: path.to_path_buf() and cloning Arc
         in_flight
             .entry(path.to_path_buf())
             .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -133,57 +175,71 @@ where
         in_flight.remove(path);
     }
 
-    // CLONE: Clone the cached result or error
     result.as_ref().cloned().map_err(Clone::clone)
 }
 
 impl AstCache {
-    /// # Panics
-    /// Panics if `max_entries.max(1)` is somehow 0 (mathematically impossible).
+    /// Create a new AST cache with the given capacity.
     #[must_use]
-    #[allow(clippy::missing_panics_doc, clippy::unwrap_used)]
     pub fn new(max_entries: usize) -> Self {
-        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap();
+        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
-            entries: Mutex::new(LruCache::new(cap)),
-            vue_entries: Mutex::new(LruCache::new(cap)),
+            entries: Mutex::new(BoundedLruCache::new(cap, DEFAULT_MAX_CACHE_BYTES)),
+            vue_entries: Mutex::new(BoundedLruCache::new(cap, DEFAULT_MAX_CACHE_BYTES)),
+            negative_entries: Mutex::new(LruCache::new(cap)),
             in_flight: Mutex::new(HashMap::default()),
             vue_in_flight: Mutex::new(HashMap::default()),
         }
     }
 
-    /// Retrieve the tree and source code for a file.
-    ///
-    /// Uses file mtime as a fast-path guard: if the cached entry's mtime
-    /// matches the file's current mtime, the cached result is returned
-    /// immediately (no disk read). A full read + hash + parse is only
-    /// performed when the mtime has changed or the file is not yet cached.
+    /// Retrieve the tree, source code, and symbols for a file, parsing from disk on a cache miss.
     ///
     /// # Errors
-    /// Returns `SurgeonError` if I/O fails or parsing fails.
+    /// Returns `SurgeonError` if I/O fails, file exceeds size limit, or parsing fails.
     #[instrument(skip(self), fields(cache_hit = false))]
     pub async fn get_or_parse(
         &self,
         path: &Path,
         lang: SupportedLanguage,
-    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
+    ) -> Result<CachedParseResult, SurgeonError> {
         let meta = tokio::fs::metadata(path)
             .await
             .map_err(|e| io_err(e, path))?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let current_size = meta.len();
 
-        self.get_or_parse_single_zone_impl(path, lang, current_mtime, ContentSource::Disk)
-            .await
+        if current_size > MAX_FILE_SIZE_BYTES {
+            let err = SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "File size ({current_size} bytes) exceeds maximum supported limit ({MAX_FILE_SIZE_BYTES} bytes)"
+                ),
+            };
+            self.negative_entries.lock().put(
+                path.to_path_buf(),
+                NegativeCacheEntry {
+                    mtime: current_mtime,
+                    file_size: current_size,
+                    error: err.clone(),
+                },
+            );
+            return Err(err);
+        }
+
+        self.get_or_parse_single_zone_impl(
+            path,
+            lang,
+            current_mtime,
+            current_size,
+            ContentSource::Disk,
+        )
+        .await
     }
 
-    /// Retrieve the tree and source code using pre-loaded content and mtime.
-    ///
-    /// Identical to [`Self::get_or_parse`] but accepts pre-read file bytes and mtime
-    /// instead of reading from disk. Eliminates the double-read when the caller
-    /// already has the file content (e.g., `generate_skeleton_text`).
+    /// Retrieve the tree, source code, and symbols using pre-loaded content and mtime.
     ///
     /// # Errors
-    /// Returns `SurgeonError` if parsing fails.
+    /// Returns [`SurgeonError::ParseError`] if the file size exceeds the limit or parsing fails.
     #[instrument(skip(self, content), fields(cache_hit = false))]
     pub async fn get_or_parse_preloaded(
         &self,
@@ -191,52 +247,145 @@ impl AstCache {
         lang: SupportedLanguage,
         content: Arc<[u8]>,
         mtime: SystemTime,
-    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
-        self.get_or_parse_single_zone_impl(path, lang, mtime, ContentSource::Preloaded(content))
-            .await
+    ) -> Result<CachedParseResult, SurgeonError> {
+        let size = content.len() as u64;
+        if size > MAX_FILE_SIZE_BYTES {
+            return Err(SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "File size ({size} bytes) exceeds maximum supported limit ({MAX_FILE_SIZE_BYTES} bytes)"
+                ),
+            });
+        }
+        self.get_or_parse_single_zone_impl(
+            path,
+            lang,
+            mtime,
+            size,
+            ContentSource::Preloaded(content),
+        )
+        .await
     }
 
-    /// Retrieve the multi-zone parse result for a Vue SFC.
-    ///
-    /// Uses file mtime as a fast-path guard identical to [`Self::get_or_parse`].
-    /// On a cache miss, reads the SFC from disk and calls `parse_vue_multizone`.
+    /// Retrieve the multi-zone parse result and symbols for a Vue SFC.
     ///
     /// # Errors
-    /// Returns `SurgeonError` if I/O fails or the script zone fails to parse.
-    /// Template/style parse failures set `MultiZoneTree::degraded = true` but
-    /// are non-fatal.
+    /// Returns [`SurgeonError`] if metadata lookup, file I/O, or parsing fails.
     #[instrument(skip(self), fields(cache_hit = false))]
     pub async fn get_or_parse_vue(
         &self,
         path: &Path,
-    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
+    ) -> Result<(MultiZoneTree, Arc<Vec<ExtractedSymbol>>, VersionHash), SurgeonError> {
         let meta = tokio::fs::metadata(path)
             .await
             .map_err(|e| io_err(e, path))?;
         let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let current_size = meta.len();
 
-        self.get_or_parse_vue_impl(path, current_mtime, ContentSource::Disk)
+        if current_size > MAX_FILE_SIZE_BYTES {
+            let err = SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "File size ({current_size} bytes) exceeds maximum supported limit ({MAX_FILE_SIZE_BYTES} bytes)"
+                ),
+            };
+            self.record_negative_cache(path, current_mtime, current_size, err.clone());
+            return Err(err);
+        }
+
+        self.get_or_parse_vue_impl(path, current_mtime, current_size, ContentSource::Disk)
             .await
     }
 
-    /// Retrieve the multi-zone parse result for a Vue SFC using pre-loaded content.
-    ///
-    /// Identical to [`Self::get_or_parse_vue`] but accepts pre-read file bytes and mtime
-    /// instead of reading from disk. Eliminates the double-read when the caller
-    /// already has the file content (e.g., `generate_skeleton_text`).
+    /// Retrieve the multi-zone parse result and symbols for a Vue SFC using pre-loaded content.
     ///
     /// # Errors
-    /// Returns `SurgeonError` if the script zone fails to parse.
+    /// Returns [`SurgeonError::ParseError`] if the file size exceeds the limit or parsing fails.
     #[instrument(skip(self, content), fields(cache_hit = false))]
     pub async fn get_or_parse_vue_preloaded(
         &self,
         path: &Path,
         content: &[u8],
         mtime: SystemTime,
-    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
+    ) -> Result<(MultiZoneTree, Arc<Vec<ExtractedSymbol>>, VersionHash), SurgeonError> {
+        let size = content.len() as u64;
+        if size > MAX_FILE_SIZE_BYTES {
+            return Err(SurgeonError::ParseError {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "File size ({size} bytes) exceeds maximum supported limit ({MAX_FILE_SIZE_BYTES} bytes)"
+                ),
+            });
+        }
         let content_arc = Arc::from(content);
-        self.get_or_parse_vue_impl(path, mtime, ContentSource::Preloaded(content_arc))
+        self.get_or_parse_vue_impl(path, mtime, size, ContentSource::Preloaded(content_arc))
             .await
+    }
+
+    fn check_negative_cache(
+        &self,
+        path: &Path,
+        current_mtime: SystemTime,
+        current_size: u64,
+    ) -> Result<(), SurgeonError> {
+        let mut neg = self.negative_entries.lock();
+        if let Some(entry) = neg.get(path) {
+            if entry.mtime == current_mtime && entry.file_size == current_size {
+                return Err(entry.error.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn record_negative_cache(
+        &self,
+        path: &Path,
+        current_mtime: SystemTime,
+        current_size: u64,
+        error: SurgeonError,
+    ) {
+        self.negative_entries.lock().put(
+            path.to_path_buf(),
+            NegativeCacheEntry {
+                mtime: current_mtime,
+                file_size: current_size,
+                error,
+            },
+        );
+    }
+
+    fn insert_single_zone_entry(&self, path: PathBuf, entry: CacheEntry) {
+        let entry_bytes = entry.source.len() + 1024;
+        let mut lock = self.entries.lock();
+        while lock.current_bytes + entry_bytes > lock.max_bytes && !lock.cache.is_empty() {
+            if let Some((_, evicted)) = lock.cache.pop_lru() {
+                lock.current_bytes = lock
+                    .current_bytes
+                    .saturating_sub(evicted.source.len() + 1024);
+            }
+        }
+        if let Some(old) = lock.cache.put(path, entry) {
+            lock.current_bytes = lock.current_bytes.saturating_sub(old.source.len() + 1024);
+        }
+        lock.current_bytes += entry_bytes;
+    }
+
+    fn insert_vue_entry(&self, path: PathBuf, entry: MultiZoneEntry) {
+        let entry_bytes = entry.multi.source.len() + 2048;
+        let mut lock = self.vue_entries.lock();
+        while lock.current_bytes + entry_bytes > lock.max_bytes && !lock.cache.is_empty() {
+            if let Some((_, evicted)) = lock.cache.pop_lru() {
+                lock.current_bytes = lock
+                    .current_bytes
+                    .saturating_sub(evicted.multi.source.len() + 2048);
+            }
+        }
+        if let Some(old) = lock.cache.put(path, entry) {
+            lock.current_bytes = lock
+                .current_bytes
+                .saturating_sub(old.multi.source.len() + 2048);
+        }
+        lock.current_bytes += entry_bytes;
     }
 
     async fn get_or_parse_single_zone_impl(
@@ -244,14 +393,24 @@ impl AstCache {
         path: &Path,
         lang: SupportedLanguage,
         current_mtime: SystemTime,
+        current_size: u64,
         content_source: ContentSource,
-    ) -> Result<(Tree, Arc<[u8]>), SurgeonError> {
+    ) -> Result<CachedParseResult, SurgeonError> {
+        self.check_negative_cache(path, current_mtime, current_size)?;
+
         let needs_hash_check = {
             let mut lock = self.entries.lock();
-            if let Some(entry) = lock.get(path) {
-                if entry.mtime == current_mtime && entry.lang == lang {
+            if let Some(entry) = lock.cache.get(path) {
+                if entry.mtime == current_mtime
+                    && entry.file_size == current_size
+                    && entry.lang == lang
+                {
                     tracing::Span::current().record("cache_hit", true);
-                    return Ok((entry.tree.clone(), entry.source.clone()));
+                    return Ok((
+                        entry.tree.clone(),
+                        entry.source.clone(),
+                        entry.symbols.clone(),
+                    ));
                 }
                 entry.lang == lang
             } else {
@@ -260,38 +419,21 @@ impl AstCache {
         };
 
         if needs_hash_check {
-            let content = match &content_source {
-                ContentSource::Disk => match tokio::fs::read(path).await {
-                    Ok(c) => c,
-                    Err(e) => return Err(io_err(e, path)),
-                },
-                ContentSource::Preloaded(c) => c.to_vec(),
-            };
-            let current_hash = tokio::task::spawn_blocking(move || VersionHash::compute(&content))
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("spawn_blocking hash panicked: {e}");
-                    VersionHash::compute(&[])
-                });
-
-            let mut lock = self.entries.lock();
-            if let Some(entry) = lock.get_mut(path) {
-                if entry.content_hash == current_hash && entry.lang == lang {
-                    entry.mtime = current_mtime;
-                    tracing::Span::current().record("cache_hit", true);
-                    return Ok((entry.tree.clone(), entry.source.clone()));
-                }
+            if let Some(res) = self
+                .check_content_hash_match(path, lang, current_mtime, current_size, &content_source)
+                .await?
+            {
+                return Ok(res);
             }
         }
 
-        get_or_parse_inner(&self.in_flight, path, || {
+        let res = get_or_parse_inner(&self.in_flight, path, || {
             let path_owned = path.to_path_buf();
             let source = match &content_source {
                 ContentSource::Disk => None,
-                ContentSource::Preloaded(c) => Some(Arc::clone(c)), // CLONE: cloning Arc to pass to the closure
+                ContentSource::Preloaded(c) => Some(Arc::clone(c)),
             };
             async move {
-                // --- Slow path: full read + hash + parse ---
                 let content_arc = if let Some(c) = source {
                     c
                 } else {
@@ -301,58 +443,103 @@ impl AstCache {
                     Arc::from(content)
                 };
 
-                // CLONE: content must be moved into spawn_blocking.
-                // The hash/parse CPU work goes to the blocking pool.
-                let (tree, current_hash, content_arc) = tokio::task::spawn_blocking({
-                    let path = path_owned.clone(); // CLONE: path clone for spawn_blocking
-                    let content = Arc::clone(&content_arc); // CLONE: Arc clone for spawn_blocking
+                let (tree, current_hash, content_arc, symbols_arc) = tokio::task::spawn_blocking({
+                    let path = path_owned.clone();
+                    let content = Arc::clone(&content_arc);
                     move || {
                         let current_hash = VersionHash::compute(&content);
-                        // For Vue SFCs, preprocess extracts the <script> block before parsing.
-                        // The original `content` is kept for version hashing and change detection —
-                        // only the input to the AST parser uses the processed bytes.
                         let parse_input = lang.preprocess_source(&content);
                         let tree = AstParser::parse_source(&path, lang, &parse_input)?;
-                        Ok::<_, SurgeonError>((tree, current_hash, content))
+                        let symbols =
+                            crate::symbols::extract_symbols_from_tree(&tree, &content, lang);
+                        Ok::<_, SurgeonError>((tree, current_hash, content, Arc::new(symbols)))
                     }
                 })
                 .await
                 .map_err(|join_err| SurgeonError::ParseError {
-                    path: path_owned.clone(), // CLONE: path clone for error details
+                    path: path_owned.clone(),
                     reason: format!("spawn_blocking panicked: {join_err}"),
                 })??;
 
-                // Fast cache insertion back on async worker (nanoseconds)
-                self.entries.lock().put(
-                    path_owned.clone(), // CLONE: path clone for cache key
+                self.insert_single_zone_entry(
+                    path_owned,
                     CacheEntry {
-                        tree: tree.clone(),          // CLONE: tree clone for cache entry
-                        source: content_arc.clone(), // CLONE: content clone for cache entry
+                        tree: tree.clone(),
+                        source: content_arc.clone(),
+                        symbols: symbols_arc.clone(),
                         content_hash: current_hash,
                         lang,
                         mtime: current_mtime,
+                        file_size: current_size,
                     },
                 );
 
-                Ok::<_, SurgeonError>((tree, content_arc))
+                Ok::<_, SurgeonError>((tree, content_arc, symbols_arc))
             }
         })
-        .await
+        .await;
+
+        if let Err(ref err) = res {
+            self.record_negative_cache(path, current_mtime, current_size, err.clone());
+        }
+
+        res
+    }
+
+    async fn check_content_hash_match(
+        &self,
+        path: &Path,
+        lang: SupportedLanguage,
+        current_mtime: SystemTime,
+        current_size: u64,
+        content_source: &ContentSource,
+    ) -> Result<Option<CachedParseResult>, SurgeonError> {
+        let content = match content_source {
+            ContentSource::Disk => match tokio::fs::read(path).await {
+                Ok(c) => c,
+                Err(e) => return Err(io_err(e, path)),
+            },
+            ContentSource::Preloaded(c) => c.to_vec(),
+        };
+        let current_hash = tokio::task::spawn_blocking(move || VersionHash::compute(&content))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("spawn_blocking hash panicked: {e}");
+                VersionHash::compute(&[])
+            });
+
+        let mut lock = self.entries.lock();
+        if let Some(entry) = lock.cache.get_mut(path) {
+            if entry.content_hash == current_hash && entry.lang == lang {
+                entry.mtime = current_mtime;
+                entry.file_size = current_size;
+                tracing::Span::current().record("cache_hit", true);
+                return Ok(Some((
+                    entry.tree.clone(),
+                    entry.source.clone(),
+                    entry.symbols.clone(),
+                )));
+            }
+        }
+        Ok(None)
     }
 
     async fn get_or_parse_vue_impl(
         &self,
         path: &Path,
         current_mtime: SystemTime,
+        current_size: u64,
         content_source: ContentSource,
-    ) -> Result<(MultiZoneTree, VersionHash), SurgeonError> {
+    ) -> Result<(MultiZoneTree, Arc<Vec<ExtractedSymbol>>, VersionHash), SurgeonError> {
+        self.check_negative_cache(path, current_mtime, current_size)?;
+
         let needs_hash_check = {
             let mut lock = self.vue_entries.lock();
-            if let Some(entry) = lock.get(path) {
-                if entry.mtime == current_mtime {
+            if let Some(entry) = lock.cache.get(path) {
+                if entry.mtime == current_mtime && entry.file_size == current_size {
                     tracing::Span::current().record("cache_hit", true);
                     let multi = (*entry.multi).clone();
-                    return Ok((multi, entry.content_hash.clone()));
+                    return Ok((multi, entry.symbols.clone(), entry.content_hash.clone()));
                 }
                 true
             } else {
@@ -376,24 +563,24 @@ impl AstCache {
                 });
 
             let mut lock = self.vue_entries.lock();
-            if let Some(entry) = lock.get_mut(path) {
+            if let Some(entry) = lock.cache.get_mut(path) {
                 if entry.content_hash == current_hash {
                     entry.mtime = current_mtime;
+                    entry.file_size = current_size;
                     tracing::Span::current().record("cache_hit", true);
                     let multi = (*entry.multi).clone();
-                    return Ok((multi, entry.content_hash.clone()));
+                    return Ok((multi, entry.symbols.clone(), entry.content_hash.clone()));
                 }
             }
         }
 
-        get_or_parse_inner(&self.vue_in_flight, path, || {
+        let res = get_or_parse_inner(&self.vue_in_flight, path, || {
             let path_owned = path.to_path_buf();
             let source = match &content_source {
                 ContentSource::Disk => None,
-                ContentSource::Preloaded(c) => Some(Arc::clone(c)), // CLONE: cloning Arc to pass to the closure
+                ContentSource::Preloaded(c) => Some(Arc::clone(c)),
             };
             async move {
-                // --- Slow path ---
                 let content_arc = if let Some(c) = source {
                     c
                 } else {
@@ -403,11 +590,9 @@ impl AstCache {
                     Arc::from(content)
                 };
 
-                // CLONE: content must be moved into spawn_blocking.
-                // The hash + parse_vue_multizone CPU work goes to blocking pool.
-                let (multi, content_hash) = tokio::task::spawn_blocking({
-                    let path = path_owned.clone(); // CLONE: path clone for spawn_blocking
-                    let content = Arc::clone(&content_arc); // CLONE: Arc clone for spawn_blocking
+                let (multi, content_hash, symbols_arc) = tokio::task::spawn_blocking({
+                    let path = path_owned.clone();
+                    let content = Arc::clone(&content_arc);
                     move || {
                         let content_hash = VersionHash::compute(&content);
                         let multi = parse_vue_multizone(&content).map_err(|e| {
@@ -416,40 +601,57 @@ impl AstCache {
                                 reason: format!("Vue multi-zone parse failed: {e}"),
                             }
                         })?;
-                        Ok::<_, SurgeonError>((multi, content_hash))
+                        let symbols = crate::symbols::extract_symbols_from_multizone(&multi);
+                        Ok::<_, SurgeonError>((multi, content_hash, Arc::new(symbols)))
                     }
                 })
                 .await
                 .map_err(|join_err| SurgeonError::ParseError {
-                    path: path_owned.clone(), // CLONE: path clone for error details
+                    path: path_owned.clone(),
                     reason: format!("spawn_blocking panicked: {join_err}"),
                 })??;
 
-                let cached_multi = Arc::new(multi.clone()); // CLONE: multi clone for cached Arc
-
-                // Fast cache insertion back on async worker (nanoseconds)
-                self.vue_entries.lock().put(
-                    path_owned.clone(), // CLONE: path clone for cache key
+                let cached_multi = Arc::new(multi.clone());
+                self.insert_vue_entry(
+                    path_owned,
                     MultiZoneEntry {
                         multi: cached_multi,
-                        content_hash: content_hash.clone(), // CLONE: content_hash clone for cache entry
+                        symbols: symbols_arc.clone(),
+                        content_hash: content_hash.clone(),
                         mtime: current_mtime,
+                        file_size: current_size,
                     },
                 );
 
-                Ok::<_, SurgeonError>((multi, content_hash))
+                Ok::<_, SurgeonError>((multi, symbols_arc, content_hash))
             }
         })
-        .await
+        .await;
+
+        if let Err(ref err) = res {
+            self.record_negative_cache(path, current_mtime, current_size, err.clone());
+        }
+
+        res
     }
 
     /// Remove a file from the cache, forcing a re-parse on next access.
-    ///
-    /// Flushes the file from *both* single-zone and Vue multi-zone caches so
-    /// that all paths are invalidated simultaneously.
     pub fn invalidate(&self, path: &Path) {
-        self.entries.lock().pop(path);
-        self.vue_entries.lock().pop(path);
+        {
+            let mut lock = self.entries.lock();
+            if let Some(entry) = lock.cache.pop(path) {
+                lock.current_bytes = lock.current_bytes.saturating_sub(entry.source.len() + 1024);
+            }
+        }
+        {
+            let mut lock = self.vue_entries.lock();
+            if let Some(entry) = lock.cache.pop(path) {
+                lock.current_bytes = lock
+                    .current_bytes
+                    .saturating_sub(entry.multi.source.len() + 2048);
+            }
+        }
+        self.negative_entries.lock().pop(path);
     }
 }
 

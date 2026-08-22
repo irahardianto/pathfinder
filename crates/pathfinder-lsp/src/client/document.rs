@@ -4,11 +4,20 @@
 //! sent, even if the caller panics or returns early.
 
 use crate::client::detect::language_id_for_extension;
+use crate::client::DocumentEntry;
 use crate::client::LspClient;
 use crate::client::ProcessEntry;
 use crate::LspError;
 use serde_json::json;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::Ordering;
 use url::Url;
+
+enum OpenAction {
+    SendOpen,
+    SendChange(i32),
+    Dedup,
+}
 
 /// RAII guard that manages LSP textDocument/didOpen and textDocument/didClose lifecycle.
 pub struct DocumentGuard {
@@ -59,24 +68,25 @@ impl Drop for DocumentGuard {
             return;
         };
 
-        client.doc_versions.remove(file_uri.as_str());
+        let file_uri_str = file_uri.to_string();
+        let language_id = language_id.to_owned();
 
-        let has_running = client
-            .processes
-            .get(language_id)
-            .is_some_and(|e| matches!(e.value(), ProcessEntry::Running(_)));
+        tokio::spawn(async move {
+            let has_running = client
+                .processes
+                .get(&language_id)
+                .is_some_and(|e| matches!(e.value(), ProcessEntry::Running(_)));
 
-        if has_running {
-            let params = json!({
-                "textDocument": { "uri": file_uri.as_str() }
-            });
-            let language_id = language_id.to_owned();
-            tokio::spawn(async move {
+            if has_running {
+                let params = json!({
+                    "textDocument": { "uri": file_uri_str.as_str() }
+                });
                 let _ = client
                     .notify(&language_id, "textDocument/didClose", params)
                     .await;
-            });
-        }
+            }
+            client.doc_versions.remove(&file_uri_str);
+        });
     }
 }
 
@@ -108,7 +118,7 @@ impl LspClient {
         ))
     }
 
-    /// Returns `true` if `didOpen` was actually sent, `false` if dedup'd.
+    /// Returns `true` if `didOpen` was actually sent, `false` if dedup'd or updated via `didChange`.
     pub(crate) async fn did_open(
         &self,
         workspace_root: &std::path::Path,
@@ -123,43 +133,103 @@ impl LspClient {
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
-        // Deduplication: if this document is already open (e.g., symbol_overview
-        // opens the file and then find_all_references_impl tries to open it again),
-        // skip sending a second didOpen. Sending duplicate didOpen without an
-        // intervening didClose is an LSP protocol violation that can cause
-        // undefined behavior in jdtls and other strict LSP servers.
-        if self.doc_versions.contains_key(file_uri.as_str()) {
-            tracing::debug!(
-                file = %file_path.display(),
-                "LSP: did_open skipped — document already open (dedup)"
-            );
-            return Ok(false);
-        }
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        let hash = hasher.finish();
 
-        self.doc_versions.insert(
-            file_uri.to_string(),
-            (language_id.to_owned(), std::sync::atomic::AtomicI32::new(1)),
-        );
+        let file_uri_str = file_uri.to_string();
 
-        let params = json!({
-            "textDocument": {
-                "uri": file_uri.as_str(),
-                "languageId": language_id,
-                "version": 1,
-                "text": content
+        let action = match self.doc_versions.entry(file_uri_str.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(DocumentEntry {
+                    language_id: language_id.to_owned(),
+                    version: std::sync::atomic::AtomicI32::new(1),
+                    content_hash: std::sync::atomic::AtomicU64::new(hash),
+                });
+                OpenAction::SendOpen
             }
-        });
+            dashmap::mapref::entry::Entry::Occupied(o) => {
+                let entry = o.get();
+                let prev_hash = entry.content_hash.swap(hash, Ordering::SeqCst);
+                if prev_hash == hash {
+                    OpenAction::Dedup
+                } else {
+                    let next_ver = entry.version.fetch_add(1, Ordering::SeqCst) + 1;
+                    OpenAction::SendChange(next_ver)
+                }
+            }
+        };
 
-        if let Err(e) = self
-            .notify(language_id, "textDocument/didOpen", params)
-            .await
-        {
-            tracing::error!(language = language_id, error = %e, "textDocument/didOpen failed");
-            self.doc_versions.remove(&file_uri.to_string());
-            return Err(e);
+        match action {
+            OpenAction::SendOpen => {
+                let params = json!({
+                    "textDocument": {
+                        "uri": file_uri.as_str(),
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": content
+                    }
+                });
+
+                if let Err(e) = self
+                    .notify(language_id, "textDocument/didOpen", params)
+                    .await
+                {
+                    tracing::error!(language = language_id, error = %e, "textDocument/didOpen failed");
+                    self.doc_versions.remove(&file_uri_str);
+                    return Err(e);
+                }
+                Ok(true)
+            }
+            OpenAction::SendChange(version) => {
+                tracing::debug!(
+                    file = %file_path.display(),
+                    version,
+                    "LSP: content changed on open — sending didChange"
+                );
+                let params = json!({
+                    "textDocument": {
+                        "uri": file_uri.as_str(),
+                        "version": version
+                    },
+                    "contentChanges": [
+                        { "text": content }
+                    ]
+                });
+
+                if let Err(e) = self
+                    .notify(language_id, "textDocument/didChange", params)
+                    .await
+                {
+                    tracing::error!(language = language_id, error = %e, "textDocument/didChange failed");
+                    return Err(e);
+                }
+                Ok(false)
+            }
+            OpenAction::Dedup => {
+                tracing::debug!(
+                    file = %file_path.display(),
+                    "LSP: did_open skipped — document already open with identical content (dedup)"
+                );
+                Ok(false)
+            }
         }
-        self.touch(language_id);
-        Ok(true)
+    }
+
+    /// Broadcast watched file changes to the LSP server for `language_id`.
+    ///
+    /// # Errors
+    /// Returns `LspError::NoLspAvailable` or `LspError::ConnectionLost` if communication fails.
+    pub async fn did_change_watched_files(
+        &self,
+        language_id: &str,
+        changes: Vec<crate::types::FileEvent>,
+    ) -> Result<(), LspError> {
+        let params = json!({
+            "changes": changes
+        });
+        self.notify(language_id, "workspace/didChangeWatchedFiles", params)
+            .await
     }
 
     #[allow(dead_code)] // Used by tests and available as pub(crate) API
@@ -175,8 +245,7 @@ impl LspClient {
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
 
-        // Always clean up doc_versions regardless of process state.
-        self.doc_versions.remove(&file_uri.to_string());
+        let file_uri_str = file_uri.to_string();
 
         // Check if process is already running WITHOUT spawning a new one.
         // If the LSP crashed, re-spawning just to send didClose is wasteful —
@@ -186,25 +255,22 @@ impl LspClient {
             .get(language_id)
             .is_some_and(|e| matches!(e.value(), ProcessEntry::Running(_)));
 
-        if !has_running {
-            tracing::debug!(
-                file = %file_path.display(),
-                "LSP: did_close skipped notify — process not running, doc_versions cleaned up"
-            );
-            return Ok(());
+        if has_running {
+            let params = json!({
+                "textDocument": { "uri": file_uri.as_str() }
+            });
+
+            if let Err(e) = self
+                .notify(language_id, "textDocument/didClose", params)
+                .await
+            {
+                tracing::error!(language = language_id, error = %e, "textDocument/didClose failed");
+                self.doc_versions.remove(&file_uri_str);
+                return Err(e);
+            }
         }
 
-        let params = json!({
-            "textDocument": { "uri": file_uri.as_str() }
-        });
-
-        if let Err(e) = self
-            .notify(language_id, "textDocument/didClose", params)
-            .await
-        {
-            tracing::error!(language = language_id, error = %e, "textDocument/didClose failed");
-            return Err(e);
-        }
+        self.doc_versions.remove(&file_uri_str);
         Ok(())
     }
 }

@@ -138,6 +138,10 @@ pub struct MockLawyer {
     /// All calls made to `goto_implementation` in order.
     pub goto_implementation_calls: Arc<Mutex<Vec<(String, u32, u32)>>>,
 
+    // ── readiness ─────────────────────────────────────────────────────────────
+    /// Configured result for `ensure_ready`.
+    pub readiness_result: Arc<Mutex<Option<crate::types::Readiness>>>,
+
     // ── warm_start ────────────────────────────────────────────────────────────
     /// Whether `is_warm_start_complete()` should return `true`.
     /// Defaults to `true` so existing tests that don't set this behave as if
@@ -152,6 +156,7 @@ impl Default for MockLawyer {
             // scenarios work as before (LSP assumed warm and ready).
             warm_start_complete: true,
             // All other fields default via their own Default implementations.
+            readiness_result: Arc::default(),
             goto_definition_result: Arc::default(),
             goto_definition_results: Arc::default(),
             goto_definition_calls: Arc::default(),
@@ -403,6 +408,19 @@ impl MockLawyer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = missing;
     }
+
+    /// Set the result to return from `ensure_ready()`.
+    pub fn set_readiness_result(&self, result: crate::types::Readiness) {
+        *self
+            .readiness_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+    }
+
+    /// Helper to set a successful `Readiness` value directly.
+    pub fn set_readiness(&self, readiness: crate::types::Readiness) {
+        self.set_readiness_result(readiness);
+    }
 }
 
 #[async_trait]
@@ -592,6 +610,36 @@ impl Lawyer for MockLawyer {
     async fn force_respawn(&self, _language_id: &str) -> Result<(), LspError> {
         // No-op in mock
         Ok(())
+    }
+
+    async fn ensure_ready(
+        &self,
+        language_id: &str,
+        _budget: std::time::Duration,
+    ) -> Result<crate::types::Readiness, LspError> {
+        let configured = self
+            .readiness_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
+        if let Some(res) = configured {
+            Ok(res)
+        } else {
+            // If the language is in missing_languages, return Unavailable
+            let missing = self.missing_languages();
+            if let Some(m) = missing.iter().find(|m| m.language_id == language_id) {
+                Ok(crate::types::Readiness::Unavailable {
+                    language: language_id.to_string(),
+                    install_hint: m.install_hint.clone(),
+                    alternative: "Use host grep and file-read tools".to_string(),
+                })
+            } else {
+                Ok(crate::types::Readiness::Ready(
+                    crate::types::CapabilityReadiness::all(),
+                ))
+            }
+        }
     }
 }
 

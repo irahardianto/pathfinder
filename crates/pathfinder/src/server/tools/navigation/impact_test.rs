@@ -180,10 +180,14 @@ async fn test_find_callers_callees_empty_hierarchy_confirmed_zero() {
         val.degraded_reason,
         Some(DegradedReason::LspWarmupGrepFallback)
     );
-    let incoming = val.incoming.as_ref().expect("must be Some when degraded");
-    let outgoing = val.outgoing.as_ref().expect("must be Some when degraded");
-    assert!(incoming.is_empty(), "confirmed zero callers");
-    assert!(outgoing.is_empty(), "confirmed zero callees");
+    assert!(
+        val.incoming.is_none(),
+        "incoming must be None when degraded with 0 matches"
+    );
+    assert!(
+        val.outgoing.is_none(),
+        "outgoing must be None when degraded with 0 matches"
+    );
 }
 
 #[tokio::test]
@@ -512,10 +516,6 @@ async fn test_find_callers_callees_grep_fallback_with_mock_scout() {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let server = PathfinderServer::with_all_engines(
@@ -682,10 +682,6 @@ fn build_non_source_files_search_result() -> pathfinder_search::SearchResult {
         total_matches: 4,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }
 }
 
@@ -883,16 +879,16 @@ async fn test_find_callers_callees_max_references_truncates_results() {
     );
 }
 
-/// Verify that the `default_max_references()` constant is 50.
+/// Verify that the `default_max_references()` constant is 20.
 ///
 /// This ensures the plan's specified default wasn't accidentally changed.
 #[test]
-fn test_find_callers_callees_default_max_references_is_50() {
+fn test_find_callers_callees_default_max_references_is_20() {
     use crate::server::types::default_max_references;
     assert_eq!(
         default_max_references(),
-        50,
-        "default_max_references must be 50 per the remediation plan spec"
+        20,
+        "default_max_references must be 20 per WS-10 spec"
     );
 }
 
@@ -915,8 +911,8 @@ async fn test_find_callers_callees_handles_empty_incoming_and_outgoing() {
 
     let params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 3,
-        max_references: 50,
+        max_depth: 1,
+        max_references: 20,
         ..Default::default()
     };
     let result = server.find_callers_callees_impl(params).await;
@@ -1039,7 +1035,7 @@ async fn test_find_callers_callees_bfs_handles_cycle_in_call_graph() {
 
     let params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 3,
+        max_depth: 2,
         ..Default::default()
     };
 
@@ -1184,10 +1180,6 @@ async fn test_find_callers_callees_grep_fallback_provides_incoming_heuristic() {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Use NoOpLawyer to force grep fallback
@@ -1261,10 +1253,6 @@ async fn test_find_callers_callees_grep_fallback_no_results_stays_none() {
         total_matches: 0,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Use NoOpLawyer to force grep fallback
@@ -1461,29 +1449,20 @@ async fn test_outgoing_fallback_happy_path() {
         total_matches: 0,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     });
     let validate_result = Ok(pathfinder_search::SearchResult {
         matches: vec![validate_match],
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     });
 
     // Queue: 1st = incoming search (empty), then enough for outgoing candidates
     // Candidates from HashSet: "handle" + "validate" in unknown order.
     // Both get validate_result so we don't depend on order.
     scout.set_results(vec![
-        empty_result.clone(),    // incoming search
-        validate_result.clone(), // 1st outgoing candidate (handle or validate)
-        validate_result.clone(), // 2nd outgoing candidate (the other)
+        empty_result,    // incoming search
+        validate_result, // outgoing candidate search
     ]);
 
     let server = PathfinderServer::with_all_engines(
@@ -1525,7 +1504,7 @@ async fn test_outgoing_fallback_dedup_by_semantic_path() {
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon.read_symbol_scope_results.lock().unwrap().push(Ok(
         pathfinder_common::types::SymbolScope {
-            content: "fn handle(&self) { self.validate(); }".to_string(),
+            content: "fn process(&self) { self.run(); }".to_string(),
             start_line: 9,
             end_line: 9,
             name_column: 0,
@@ -1566,20 +1545,12 @@ async fn test_outgoing_fallback_dedup_by_semantic_path() {
         total_matches: 0,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     });
     let run_result = Ok(pathfinder_search::SearchResult {
         matches: vec![run_match],
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     });
 
     // Candidates: "process" + "run" (deduped by HashSet in extract_call_candidates)
@@ -1589,9 +1560,8 @@ async fn test_outgoing_fallback_dedup_by_semantic_path() {
     // but forms "src/runner.rs::process" which is a different semantic_path).
     // The seen set ensures no dupes regardless.
     scout.set_results(vec![
-        empty_result.clone(), // incoming
-        run_result.clone(),   // 1st outgoing candidate
-        run_result.clone(),   // 2nd outgoing candidate
+        empty_result, // incoming
+        run_result,   // outgoing batch candidates
     ]);
 
     let server = PathfinderServer::with_all_engines(
@@ -1651,8 +1621,10 @@ async fn test_grep_outgoing_fallback_semantic_path_is_hierarchical() {
             start_line: 0,
             end_line: 4,
             name_column: 4,
+            name_point: pathfinder_treesitter::surgeon::Point { row: 0, column: 4 },
             kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
             byte_range: 0..0,
+            attached_range: 0..0,
             access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
             children: vec![],
         })));
@@ -1718,10 +1690,6 @@ fn build_empty_search_result() -> pathfinder_search::SearchResult {
         total_matches: 0,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }
 }
 
@@ -1742,10 +1710,6 @@ fn build_validate_search_result() -> pathfinder_search::SearchResult {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }
 }
 
@@ -1813,10 +1777,6 @@ async fn test_outgoing_fallback_definition_file_exclusion() {
         total_matches: 0,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     });
     // Candidates: {"do_work", "validate"} — order unknown
     // For "do_work": search gets the two-match result (neither is a valid fn do_work)
@@ -1827,16 +1787,11 @@ async fn test_outgoing_fallback_definition_file_exclusion() {
         total_matches: 2,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     });
 
     scout.set_results(vec![
-        empty_result,             // incoming
-        two_match_result.clone(), // 1st outgoing candidate
-        two_match_result,         // 2nd outgoing candidate
+        empty_result,     // incoming
+        two_match_result, // outgoing batch candidate search
     ]);
 
     let server = PathfinderServer::with_all_engines(
@@ -1993,10 +1948,21 @@ async fn test_find_callers_callees_bfs_formats_response_correctly() {
         rmcp::model::RawContent::Text(t) => t.text.clone(),
         _ => panic!("expected text content"),
     };
-    assert!(text.contains("Incoming references: 1"), "text: {text}");
-    assert!(text.contains("Outgoing references: 0"), "text: {text}");
+    assert!(
+        text.contains("Incoming callers: 1") || text.contains("Incoming references: 1"),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("Outgoing callees: 0")
+            || text.contains("Outgoing references: 0")
+            || text.contains("zero outgoing callees"),
+        "text: {text}"
+    );
     assert!(text.contains("[depth="), "text: {text}");
-    assert!(text.contains("src/server.rs:L20"), "text: {text}");
+    assert!(
+        text.contains("src/server.rs") && text.contains(":L20"),
+        "text: {text}"
+    );
     assert!(text.contains("[completed in"), "text: {text}");
 }
 
@@ -2050,7 +2016,7 @@ async fn test_find_callers_callees_bfs_aborts_on_consecutive_failures() {
 
     let params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 4,
+        max_depth: 2,
         max_references: 50,
         ..Default::default()
     };
@@ -2112,7 +2078,7 @@ async fn test_find_callers_callees_bfs_cycle_detection_incoming() {
 
     let params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 3,
+        max_depth: 2,
         ..Default::default()
     };
 
@@ -2174,7 +2140,7 @@ async fn test_find_callers_callees_empty_callee_intermediate() {
 
     let params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 3,
+        max_depth: 2,
         ..Default::default()
     };
 
@@ -2249,7 +2215,7 @@ async fn test_find_callers_callees_bfs_partial_resolution_failure() {
 
     let params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 3,
+        max_depth: 2,
         ..Default::default()
     };
 
@@ -2311,10 +2277,6 @@ async fn test_find_callers_callees_lsp_error_triggers_grep_fallback() {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let lawyer = Arc::new(MockLawyer::default());
@@ -2437,18 +2399,33 @@ async fn test_find_callers_callees_max_depth_boundaries() {
     }]));
     lawyer.push_outgoing_call_result(Ok(vec![]));
 
+    let depth_2_params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 2,
+        ..Default::default()
+    };
+    let depth_2_res = server
+        .find_callers_callees_impl(depth_2_params)
+        .await
+        .expect("max_depth: 2 should succeed");
+    let depth_2_val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(depth_2_res.structured_content.unwrap()).unwrap();
+    assert!(!depth_2_val.degraded);
+
     let large_depth_params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
         max_depth: 10,
         ..Default::default()
     };
-    let large_depth_res = server
+    let large_depth_err = server
         .find_callers_callees_impl(large_depth_params)
         .await
-        .expect("success");
-    let large_depth_val: crate::server::types::FindCallersCalleesMetadata =
-        serde_json::from_value(large_depth_res.structured_content.unwrap()).unwrap();
-    assert!(!large_depth_val.degraded);
+        .expect_err("max_depth > 2 must be rejected");
+    assert_eq!(large_depth_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(large_depth_err
+        .message
+        .contains("max_depth exceeds maximum allowed depth of 2"));
+    assert!(large_depth_err.message.contains("Hint:"));
 }
 
 #[tokio::test]
@@ -2497,13 +2474,14 @@ async fn test_find_callers_callees_empty_results_text_formatting() {
     let val: crate::server::types::FindCallersCalleesMetadata =
         serde_json::from_value(result.structured_content.unwrap()).unwrap();
     assert!(
-        val.degraded,
-        "both BFS results empty → grep fallback fires → must be degraded"
+        !val.degraded,
+        "both BFS results empty + grep empty = confirmed zero, should NOT be degraded"
     );
 
-    // Text should show DEGRADED notice
+    // Text should show confirmed zero notice
     assert!(
-        text.text.contains("DEGRADED (lsp_warmup_grep_fallback)"),
+        text.text.contains("Outgoing callees: 0 (verified zero)")
+            || text.text.contains("LSP confirmed: zero"),
         "Text output did not format zero results correctly: {}",
         text.text
     );
@@ -2767,51 +2745,24 @@ async fn test_hint_warns_when_both_callers_and_callees_unknown() {
     let val: crate::server::types::FindCallersCalleesMetadata =
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-    assert!(
-        val.degraded,
-        "must be degraded when both BFS results are empty (grep fallback triggered)"
-    );
-    // PATCH-003: the hint is now populated in the degraded scenario so
-    // prose-reading agents see an explicit warning.
+    assert!(!val.degraded, "BFS confirmed zero callers and callees");
     let hint = val
         .hint
         .as_ref()
-        .expect("hint must be Some(...) in degraded scenario (PATCH-003 change)");
-    // The hint may be either:
-    //   - "Callers AND callees UNKNOWN" (when grep fallback finds nothing)
-    //   - "heuristic grep-based candidates" (when grep fallback finds refs)
-    // Both convey "do not treat as verified" — the test is the same.
-    let is_unknown_warning = hint.contains("UNKNOWN");
-    let is_heuristic_warning = hint.contains("heuristic");
+        .expect("hint must be Some(...) when zero callers/callees found");
     assert!(
-        is_unknown_warning || is_heuristic_warning,
-        "hint must warn about UNKNOWN or heuristic results, got: {hint}"
-    );
-    // In THIS test, BFS ran and returned empty, then grep found nothing
-    // (default MockScout returns empty). So the data IS BFS-confirmed empty
-    // and the verified flags must reflect this even though the global
-    // `degraded` flag is true (set as a false-negative safety net).
-    // The degraded flag tells the agent "be careful, the BFS might have
-    // missed something" — but the verified flag tells them "this is what
-    // the BFS actually confirmed".
-    //
-    // This is the corrected semantic: BFS-confirmed empty = Some(true)
-    // (verified), but agents should still look at `degraded` for the
-    // false-negative safety net.
-    assert_eq!(
-        val.incoming_verified,
-        Some(true),
-        "incoming_verified must be Some(true) when BFS confirmed empty (degraded=true \
-         is a separate false-negative safety net, not a verification failure). \
-         Got: degraded={}, incoming={:?}, incoming_verified={:?}",
-        val.degraded,
-        val.incoming,
-        val.incoming_verified
+        hint.contains("zero callers") || hint.contains("LSP confirmed"),
+        "hint must describe confirmed zero callers, got: {hint}"
     );
     assert_eq!(
-        val.outgoing_verified,
-        Some(true),
-        "outgoing_verified must be Some(true) when BFS confirmed empty"
+        val.incoming.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Verified),
+        "incoming confidence must be Verified when BFS confirmed empty"
+    );
+    assert_eq!(
+        val.outgoing.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Verified),
+        "outgoing confidence must be Verified when BFS confirmed empty"
     );
 }
 
@@ -2981,7 +2932,7 @@ async fn test_process_grep_fallback_results_updates_state() {
         snippet: "fn login()".to_string(),
         direction: "incoming_heuristic".to_string(),
         depth: 0,
-        confidence: Some("heuristic".to_owned()),
+        confidence: pathfinder_common::types::Confidence::Heuristic,
     }]);
     let grep_out = None;
 
@@ -3053,7 +3004,7 @@ async fn test_process_grep_fallback_results_both_some() {
         snippet: "fn login()".to_string(),
         direction: "incoming_heuristic".to_string(),
         depth: 0,
-        confidence: Some("heuristic".to_owned()),
+        confidence: pathfinder_common::types::Confidence::Heuristic,
     }]);
     let grep_out = Some(vec![crate::server::types::ImpactReference {
         semantic_path: "src/db.rs::query".to_string(),
@@ -3062,7 +3013,7 @@ async fn test_process_grep_fallback_results_both_some() {
         snippet: "fn query()".to_string(),
         direction: "outgoing_heuristic".to_string(),
         depth: 0,
-        confidence: Some("heuristic".to_owned()),
+        confidence: pathfinder_common::types::Confidence::Heuristic,
     }]);
 
     PathfinderServer::process_grep_fallback_results(
@@ -3119,8 +3070,10 @@ async fn test_bfs_output_semantic_path_is_hierarchical_when_surgeon_qualifies() 
             start_line: 19, // 0-indexed (LSP line 20 → surgeon line 19)
             end_line: 25,
             name_column: 4,
+            name_point: pathfinder_treesitter::surgeon::Point { row: 19, column: 4 },
             kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
             byte_range: 0..0,
+            attached_range: 0..0,
             access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
             children: vec![],
         })));
@@ -4029,30 +3982,13 @@ async fn test_trace_degraded_null_incoming_has_hint_and_unverified() {
         "hint must explicitly warn against treating null as zero, got: {hint}"
     );
 
-    // PATCH-003 DELIVERABLE B: machine-readable verified flags
-    assert_eq!(
-        val.incoming_verified,
-        Some(false),
-        "incoming_verified must be Some(false) when callers are UNKNOWN"
-    );
-    assert_eq!(
-        val.outgoing_verified,
-        Some(false),
-        "outgoing_verified must be Some(false) when callees are UNKNOWN"
-    );
-
-    // Verify the fields actually serialize (don't get stripped by skip_serializing_if)
-    let json = serde_json::to_value(&val).expect("serialize");
-    assert_eq!(
-        json["incoming_verified"],
-        serde_json::json!(false),
-        "incoming_verified must be present in JSON output (no skip_serializing_if regression)"
-    );
-    assert_eq!(
-        json["outgoing_verified"],
-        serde_json::json!(false),
-        "outgoing_verified must be present in JSON output (no skip_serializing_if regression)"
-    );
+    // Contract 2: callers and callees are None (UNKNOWN) when degraded with no fallback matches
+    assert!(val.incoming.is_none());
+    assert!(val.outgoing.is_none());
+    assert!(matches!(
+        val.status,
+        pathfinder_common::types::ToolStatus::Degraded { .. }
+    ));
 }
 
 /// PATCH-003 DELIVERABLE D Test 2: When `degraded=false` AND `incoming=Some([])`
@@ -4142,16 +4078,16 @@ async fn test_trace_non_degraded_empty_incoming_has_hint_and_verified() {
         "hint must contain 'confirmed zero' for non-degraded + empty incoming, got: {hint}"
     );
 
-    // PATCH-003 DELIVERABLE B: machine-readable verified flag
+    // Contract 2: machine-readable confidence in Evidence
     assert_eq!(
-        val.incoming_verified,
-        Some(true),
-        "incoming_verified must be Some(true) when LSP confirmed zero callers"
+        val.incoming.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Verified),
+        "incoming must be Verified when LSP confirmed zero callers"
     );
     assert_eq!(
-        val.outgoing_verified,
-        Some(true),
-        "outgoing_verified must be Some(true) when LSP confirmed outgoing callees"
+        val.outgoing.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Verified),
+        "outgoing must be Verified when LSP confirmed outgoing callees"
     );
 }
 
@@ -4159,7 +4095,7 @@ async fn test_trace_non_degraded_empty_incoming_has_hint_and_verified() {
 /// (LSP unavailable, but grep fallback found heuristic candidates), the
 /// response MUST:
 ///
-/// 1. Set `incoming_verified = Some(false)` because the results are heuristic,
+/// 1. Set `incoming.confidence = Heuristic` because the results are heuristic,
 ///    NOT LSP-verified (may include false positives).
 /// 2. Populate `hint` with a warning that the results are heuristic OR that
 ///    the other direction is UNKNOWN, so agents see a warning even if they
@@ -4187,10 +4123,6 @@ async fn test_trace_degraded_heuristic_incoming_is_unverified() {
             total_matches: 1,
             truncated: false,
             files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }
     }
 
@@ -4293,16 +4225,16 @@ async fn test_trace_degraded_heuristic_incoming_is_unverified() {
     assert_eq!(outgoing.len(), 1, "expected 1 heuristic outgoing match");
     assert_eq!(outgoing[0].file, "src/token.rs");
 
-    // PATCH-003 DELIVERABLE B: heuristic results are NOT verified (BOTH directions)
+    // Contract 2: heuristic results have Confidence::Heuristic (BOTH directions)
     assert_eq!(
-        val.incoming_verified,
-        Some(false),
-        "incoming_verified must be Some(false) when results are heuristic grep candidates"
+        val.incoming.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Heuristic),
+        "incoming confidence must be Heuristic when results are heuristic grep candidates"
     );
     assert_eq!(
-        val.outgoing_verified,
-        Some(false),
-        "outgoing_verified must be Some(false) when results are heuristic grep candidates"
+        val.outgoing.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Heuristic),
+        "outgoing confidence must be Heuristic when results are heuristic grep candidates"
     );
 
     // PATCH-003 DELIVERABLE A: hint must warn about heuristic nature
@@ -4319,7 +4251,7 @@ async fn test_trace_degraded_heuristic_incoming_is_unverified() {
 /// PATCH-003 DELIVERABLE D Test 4: When `degraded=false` AND `incoming=Some(vec)`
 /// (LSP returned real callers), the response MUST:
 ///
-/// 1. Set `incoming_verified = Some(true)` because the results are LSP-confirmed.
+/// 1. Set `confidence = Verified` because the results are LSP-confirmed.
 /// 2. NOT populate `hint` (non-degraded + non-empty = no warning needed).
 #[tokio::test]
 async fn test_trace_non_degraded_with_results_is_verified() {
@@ -4398,16 +4330,16 @@ async fn test_trace_non_degraded_with_results_is_verified() {
         .expect("outgoing must be Some when LSP returned callees");
     assert_eq!(outgoing.len(), 1, "expected 1 LSP-confirmed callee");
 
-    // PATCH-003 DELIVERABLE B: LSP-confirmed results ARE verified
+    // Contract 2: LSP-confirmed results have Confidence::Verified
     assert_eq!(
-        val.incoming_verified,
-        Some(true),
-        "incoming_verified must be Some(true) when LSP returned real callers"
+        val.incoming.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Verified),
+        "incoming confidence must be Verified when LSP returned real callers"
     );
     assert_eq!(
-        val.outgoing_verified,
-        Some(true),
-        "outgoing_verified must be Some(true) when LSP returned real callees"
+        val.outgoing.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Verified),
+        "outgoing confidence must be Verified when LSP returned real callees"
     );
 
     // Non-degraded + non-empty = no hint needed
@@ -4428,14 +4360,14 @@ async fn test_trace_non_degraded_with_results_is_verified() {
 //   - `degraded` is true (LspWarmupGrepFallback)
 //   - `lsp_bfs_ran` was true (BFS ran) but is RESET to false because the
 //     data was overwritten by heuristic grep
-//   - Therefore `incoming_verified` and `outgoing_verified` MUST be Some(false)
+//   - Therefore `incoming.confidence` and `outgoing.confidence` MUST be Heuristic
 //
 // If `lsp_bfs_ran` were not reset on grep replacement, the verified flag
 // would incorrectly be Some(true) for heuristic data — defeating the entire
 // purpose of PATCH-003.
 
 /// PATCH-003 edge case: When BFS returns empty + grep fallback finds heuristic
-/// matches that REPLACE the BFS data, the verified flag must be Some(false).
+/// matches that REPLACE the BFS data, confidence must be Heuristic.
 #[tokio::test]
 #[allow(clippy::too_many_lines, reason = "Test data setup needs many lines")]
 async fn test_trace_bfs_empty_grep_replacement_is_unverified() {
@@ -4458,10 +4390,6 @@ async fn test_trace_bfs_empty_grep_replacement_is_unverified() {
             total_matches: 1,
             truncated: false,
             files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }
     }
 
@@ -4546,18 +4474,13 @@ async fn test_trace_bfs_empty_grep_replacement_is_unverified() {
     );
     assert_eq!(incoming[0].file, "src/caller.rs");
 
-    // CRITICAL: incoming_verified must be Some(false) because the data is
-    // heuristic grep results, NOT BFS-confirmed. This is the regression
-    // test for the case where BFS ran, returned empty, and grep OVERWROTE
-    // the empty result with heuristic matches.
+    // CRITICAL: incoming.confidence must be Heuristic because the data is
+    // heuristic grep results, NOT BFS-confirmed.
     assert_eq!(
-        val.incoming_verified,
-        Some(false),
-        "incoming_verified must be Some(false) when grep REPLACED BFS empty result with \
-         heuristic matches. Got: degraded={}, incoming={:?}, incoming_verified={:?}",
-        val.degraded,
-        val.incoming,
-        val.incoming_verified
+        val.incoming.as_ref().map(|ev| ev.confidence),
+        Some(pathfinder_common::types::Confidence::Heuristic),
+        "incoming confidence must be Heuristic when grep REPLACED BFS empty result with \
+         heuristic matches."
     );
 }
 
@@ -4612,7 +4535,7 @@ async fn test_find_callers_callees_consecutive_failures_limit() {
 
     let params = TraceParams {
         semantic_path: "src/auth.rs::login".to_owned(),
-        max_depth: 5,
+        max_depth: 2,
         ..Default::default()
     };
     let result = server.find_callers_callees_impl(params).await;

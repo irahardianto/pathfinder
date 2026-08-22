@@ -11,7 +11,6 @@ use crate::server::helpers::{
 use crate::server::types::InspectParams;
 use crate::server::PathfinderServer;
 use pathfinder_common::types::DegradedReason;
-use pathfinder_lsp::LspError;
 use rmcp::model::{CallToolResult, ErrorData};
 
 use super::{
@@ -19,20 +18,28 @@ use super::{
     language_to_file_glob, LspResolution,
 };
 
+struct AppendOutgoingArgs<'a> {
+    item: &'a pathfinder_lsp::types::CallHierarchyItem,
+    dependencies: &'a mut Vec<crate::server::types::DeepContextDependency>,
+    engines: &'a mut Vec<&'static str>,
+    degraded: &'a mut bool,
+    degraded_reason: &'a mut Option<DegradedReason>,
+    project_only: bool,
+    max_dependencies: u32,
+}
+
+struct EmptyPrepareArgs<'a> {
+    semantic_path: &'a pathfinder_common::types::SemanticPath,
+    start_line: usize,
+    name_column: usize,
+    project_only: bool,
+    max_dependencies: u32,
+    dependencies: &'a mut Vec<crate::server::types::DeepContextDependency>,
+    engines: &'a mut Vec<&'static str>,
+}
+
 impl PathfinderServer {
     /// Resolve LSP call-hierarchy dependencies for a symbol.
-    ///
-    /// PATCH-005: When LSP is degraded, falls back to grep-based dependency discovery
-    /// by parsing the symbol body for function calls and resolving each via search.
-    ///
-    /// Extracted from `read_with_deep_context` to reduce nesting depth.
-    /// Prepares the call hierarchy, then fetches outgoing calls and
-    /// maps them to `DeepContextDependency` entries. Includes LSP warmup
-    /// retry logic (3-second wait + re-probe) mirroring `get_definition_impl`.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Call-hierarchy resolution with LSP warmup probe + retry + grep fallback. Linear structure for readability."
-    )]
     async fn resolve_lsp_dependencies(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
@@ -42,10 +49,7 @@ impl PathfinderServer {
         max_dependencies: u32,
     ) -> LspResolution {
         let mut dependencies = Vec::new();
-        let mut degraded = true;
-        let mut degraded_reason = Some(DegradedReason::NoLsp);
         let mut engines = vec!["tree-sitter"];
-        let mut dependencies_truncated = false;
 
         let lsp_result = self
             .lawyer
@@ -57,129 +61,52 @@ impl PathfinderServer {
             )
             .await;
 
-        match lsp_result {
+        let (degraded, degraded_reason, dependencies_truncated) = match lsp_result {
             Ok(items) if !items.is_empty() => {
-                dependencies_truncated = self
-                    .append_outgoing_deps(
-                        &items[0],
-                        &mut dependencies,
-                        &mut engines,
-                        &mut degraded,
-                        &mut degraded_reason,
+                let mut degraded = true;
+                let mut degraded_reason = Some(DegradedReason::NoLsp);
+                let trunc = self
+                    .append_outgoing_deps(AppendOutgoingArgs {
+                        item: &items[0],
+                        dependencies: &mut dependencies,
+                        engines: &mut engines,
+                        degraded: &mut degraded,
+                        degraded_reason: &mut degraded_reason,
                         project_only,
                         max_dependencies,
-                    )
+                    })
                     .await;
+                (degraded, degraded_reason, trunc)
             }
             Ok(_) => {
-                let probe = self
-                    .lawyer
-                    .goto_definition(
-                        self.workspace_root.path(),
-                        &semantic_path.file_path,
-                        u32::try_from(start_line + 1).unwrap_or(1),
-                        u32::try_from(name_column + 1).unwrap_or(1),
-                    )
-                    .await;
-
-                if matches!(probe, Ok(Some(_))) {
-                    engines.push("lsp");
-                    degraded = false;
-                    degraded_reason = None;
-                } else {
-                    engines.push("lsp");
-
-                    tracing::info!(
-                        tool = "read_with_deep_context",
-                        semantic_path = %semantic_path,
-                        "read_with_deep_context: call_hierarchy_prepare returned [] and goto_definition \
-                         probe returned no result — LSP likely warming up, waiting 1s and retrying"
-                    );
-
-                    // 1s is sufficient — grep fallback handles the case where LSP is still not ready.
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-                    let retry_result = self
-                        .lawyer
-                        .call_hierarchy_prepare(
-                            self.workspace_root.path(),
-                            &semantic_path.file_path,
-                            u32::try_from(start_line + 1).unwrap_or(1),
-                            u32::try_from(name_column + 1).unwrap_or(1),
-                        )
-                        .await;
-
-                    match retry_result {
-                        Ok(retry_items) if !retry_items.is_empty() => {
-                            tracing::info!(
-                                tool = "read_with_deep_context",
-                                semantic_path = %semantic_path,
-                                "read_with_deep_context: call_hierarchy_prepare succeeded on retry after warmup wait"
-                            );
-                            dependencies_truncated = self
-                                .append_outgoing_deps(
-                                    &retry_items[0],
-                                    &mut dependencies,
-                                    &mut engines,
-                                    &mut degraded,
-                                    &mut degraded_reason,
-                                    project_only,
-                                    max_dependencies,
-                                )
-                                .await;
-                        }
-                        _ => {
-                            tracing::info!(
-                                tool = "read_with_deep_context",
-                                semantic_path = %semantic_path,
-                                "read_with_deep_context: retry also returned empty — attempting grep fallback (PATCH-005)"
-                            );
-                            (degraded, degraded_reason, dependencies_truncated) = self
-                                .attempt_grep_fallback(
-                                    semantic_path,
-                                    &mut dependencies,
-                                    &mut engines,
-                                    project_only,
-                                    max_dependencies,
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
-            Err(LspError::NoLspAvailable | LspError::UnsupportedCapability { .. }) => {
-                tracing::info!(
-                    tool = "read_with_deep_context",
-                    semantic_path = %semantic_path,
-                    "read_with_deep_context: NoLspAvailable — attempting grep fallback (PATCH-005)"
-                );
-                (degraded, degraded_reason, dependencies_truncated) = self
-                    .attempt_grep_fallback(
-                        semantic_path,
-                        &mut dependencies,
-                        &mut engines,
-                        project_only,
-                        max_dependencies,
-                    )
-                    .await;
+                self.handle_empty_call_hierarchy_prepare(EmptyPrepareArgs {
+                    semantic_path,
+                    start_line,
+                    name_column,
+                    project_only,
+                    max_dependencies,
+                    dependencies: &mut dependencies,
+                    engines: &mut engines,
+                })
+                .await
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::info!(
                     tool = "read_with_deep_context",
                     error = %e,
-                    "call_hierarchy_prepare failed — attempting grep fallback (PATCH-005)"
+                    semantic_path = %semantic_path,
+                    "call_hierarchy_prepare failed — attempting grep fallback"
                 );
-                (degraded, degraded_reason, dependencies_truncated) = self
-                    .attempt_grep_fallback(
-                        semantic_path,
-                        &mut dependencies,
-                        &mut engines,
-                        project_only,
-                        max_dependencies,
-                    )
-                    .await;
+                self.attempt_grep_fallback(
+                    semantic_path,
+                    &mut dependencies,
+                    &mut engines,
+                    project_only,
+                    max_dependencies,
+                )
+                .await
             }
-        }
+        };
 
         LspResolution {
             dependencies,
@@ -190,40 +117,85 @@ impl PathfinderServer {
         }
     }
 
-    /// PATCH-005: Resolve a candidate function name to its definition using grep search.
-    async fn resolve_candidate_via_grep(
+    async fn handle_empty_call_hierarchy_prepare(
         &self,
-        candidate: &str,
-        language: &str,
-        max_results_per_candidate: usize,
-    ) -> Option<(String, u32, String)> {
-        let pattern = candidate_definition_pattern(language, candidate);
+        args: EmptyPrepareArgs<'_>,
+    ) -> (bool, Option<DegradedReason>, bool) {
+        let EmptyPrepareArgs {
+            semantic_path,
+            start_line,
+            name_column,
+            project_only,
+            max_dependencies,
+            dependencies,
+            engines,
+        } = args;
+        let probe = self
+            .lawyer
+            .goto_definition(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(start_line + 1).unwrap_or(1),
+                u32::try_from(name_column + 1).unwrap_or(1),
+            )
+            .await;
 
-        self.scout
-            .search(&pathfinder_search::SearchParams {
-                workspace_root: self.workspace_root.path().to_path_buf(),
-                query: pattern,
-                is_regex: true,
-                max_results: max_results_per_candidate,
-                path_glob: language_to_file_glob(language).to_string(),
-                exclude_glob: Vec::new(),
-                context_lines: 0,
-                offset: 0,
-            })
-            .await
-            .ok()
-            .and_then(|result| {
-                result.matches.first().map(|m| {
-                    (
-                        m.file.clone(),
-                        u32::try_from(m.line).unwrap_or(u32::MAX),
-                        m.content.clone(),
-                    )
-                })
-            })
+        if matches!(probe, Ok(Some(_))) {
+            engines.push("lsp");
+            return (false, None, false);
+        }
+
+        engines.push("lsp");
+        tracing::info!(
+            tool = "read_with_deep_context",
+            semantic_path = %semantic_path,
+            "read_with_deep_context: call_hierarchy_prepare returned [] and goto_definition \
+             probe returned no result — LSP likely warming up, waiting 1s and retrying"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let retry_result = self
+            .lawyer
+            .call_hierarchy_prepare(
+                self.workspace_root.path(),
+                &semantic_path.file_path,
+                u32::try_from(start_line + 1).unwrap_or(1),
+                u32::try_from(name_column + 1).unwrap_or(1),
+            )
+            .await;
+
+        if let Ok(retry_items) = retry_result {
+            if !retry_items.is_empty() {
+                let mut degraded = true;
+                let mut degraded_reason = Some(DegradedReason::NoLsp);
+                let trunc = self
+                    .append_outgoing_deps(AppendOutgoingArgs {
+                        item: &retry_items[0],
+                        dependencies,
+                        engines,
+                        degraded: &mut degraded,
+                        degraded_reason: &mut degraded_reason,
+                        project_only,
+                        max_dependencies,
+                    })
+                    .await;
+                return (degraded, degraded_reason, trunc);
+            }
+        }
+
+        self.attempt_grep_fallback(
+            semantic_path,
+            dependencies,
+            engines,
+            project_only,
+            max_dependencies,
+        )
+        .await
     }
 
-    /// PATCH-005: Attempt grep-based dependency discovery when LSP is unavailable.
+    /// Attempt grep-based dependency discovery when LSP is unavailable.
+    /// Uses batch candidate resolution with a single alternation pattern pass (RSP-A10).
     async fn attempt_grep_fallback(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
@@ -232,64 +204,105 @@ impl PathfinderServer {
         project_only: bool,
         max_dependencies: u32,
     ) -> (bool, Option<DegradedReason>, bool) {
-        let scope_result = {
-            let Ok(s) = self
-                .surgeon
-                .read_symbol_scope(self.workspace_root.path(), semantic_path)
-                .await
-            else {
-                tracing::warn!(
-                    tool = "read_with_deep_context",
-                    semantic_path = %semantic_path,
-                    "PATCH-005: failed to read symbol scope for grep fallback"
-                );
-                return (true, Some(DegradedReason::GrepFallbackDependencies), false);
-            };
-            s
+        let Ok(scope_result) = self
+            .surgeon
+            .read_symbol_scope(self.workspace_root.path(), semantic_path)
+            .await
+        else {
+            return (true, Some(DegradedReason::GrepFallbackDependencies), false);
         };
 
         let language = &scope_result.language;
         let candidates = extract_call_candidates(&scope_result.content, language);
 
         if candidates.is_empty() {
-            tracing::info!(
-                tool = "read_with_deep_context",
-                semantic_path = %semantic_path,
-                "PATCH-005: grep fallback found no call candidates"
-            );
             return (true, Some(DegradedReason::GrepFallbackDependencies), false);
         }
 
-        tracing::info!(
-            tool = "read_with_deep_context",
-            semantic_path = %semantic_path,
-            candidate_count = candidates.len(),
-            "PATCH-005: grep fallback resolving {} candidates",
-            candidates.len()
-        );
+        let budget = super::GrepFallbackBudget::new();
+        let Some(deadline) = budget.acquire_search() else {
+            return (true, Some(DegradedReason::GrepFallbackDependencies), false);
+        };
 
         let max_deps = max_dependencies as usize;
-        let mut truncated = false;
+        let alt = candidates
+            .iter()
+            .map(|c| regex::escape(c))
+            .collect::<Vec<_>>()
+            .join("|");
+        let pattern = candidate_definition_pattern(language, &alt);
+        let path_glob = language_to_file_glob(language);
 
+        let search_res = self
+            .scout
+            .search(&pathfinder_search::SearchParams {
+                workspace_root: self.workspace_root.path().to_path_buf(),
+                query: pattern,
+                is_regex: true,
+                max_results: max_deps.max(50),
+                path_glob,
+                exclude_glob: Vec::new(),
+                context_lines: 0,
+                offset: 0,
+                deadline: Some(deadline),
+            })
+            .await;
+
+        let truncated = if let Ok(result) = search_res {
+            self.match_grep_candidates(
+                &candidates,
+                language,
+                &result,
+                project_only,
+                max_deps,
+                dependencies,
+            )
+            .await
+        } else {
+            false
+        };
+
+        engines.push("ripgrep");
+        (
+            true,
+            Some(DegradedReason::GrepFallbackDependencies),
+            truncated,
+        )
+    }
+
+    async fn match_grep_candidates(
+        &self,
+        candidates: &[String],
+        language: &str,
+        result: &pathfinder_search::SearchResult,
+        project_only: bool,
+        max_deps: usize,
+        dependencies: &mut Vec<crate::server::types::DeepContextDependency>,
+    ) -> bool {
+        let mut truncated = false;
         for candidate in candidates {
             if dependencies.len() >= max_deps {
                 truncated = true;
                 break;
             }
 
-            if let Some((file, line, signature)) = self
-                .resolve_candidate_via_grep(&candidate, language, 2)
-                .await
-            {
+            let cand_pat = candidate_definition_pattern(language, candidate);
+            let cand_re = regex::Regex::new(&cand_pat).ok();
+            let found_match = result
+                .matches
+                .iter()
+                .find(|m| cand_re.as_ref().is_some_and(|re| re.is_match(&m.content)));
+
+            if let Some(m) = found_match {
+                let file = m.file.clone();
+                let line = u32::try_from(m.line).unwrap_or(u32::MAX);
+                let signature = m.content.clone();
+
                 if project_only && (!is_source_file(&file) || !is_workspace_file(&file)) {
                     continue;
                 }
 
-                // Enrich the grep-resolved candidate name to a qualified treesitter path.
-                // Falls back to `file::candidate` when Surgeon returns None or errors.
-                let dep_path = self.enrich_semantic_path(&file, line, &candidate).await;
-                // Item 1: Dedup by semantic_path to avoid duplicates when
-                // multiple candidates resolve to the same definition.
+                let dep_path = self.enrich_semantic_path(&file, line, candidate).await;
                 if dependencies.iter().any(|d| d.semantic_path == dep_path) {
                     continue;
                 }
@@ -298,42 +311,25 @@ impl PathfinderServer {
                     signature,
                     file,
                     line: line as usize,
+                    confidence: pathfinder_common::types::Confidence::Heuristic,
                 });
             }
         }
-
-        engines.push("ripgrep");
-        tracing::info!(
-            tool = "read_with_deep_context",
-            semantic_path = %semantic_path,
-            resolved_count = dependencies.len(),
-            "PATCH-005: grep fallback resolved {} dependencies",
-            dependencies.len()
-        );
-
-        (
-            true,
-            Some(DegradedReason::GrepFallbackDependencies),
-            truncated,
-        )
+        truncated
     }
 
     /// Fetch outgoing call-hierarchy items and append them as dependencies.
     /// Returns `true` if results were truncated due to `max_dependencies` limit.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "All parameters are logically distinct mutable references required by the BFS caller; grouping into a struct would obscure ownership."
-    )]
-    async fn append_outgoing_deps(
-        &self,
-        item: &pathfinder_lsp::types::CallHierarchyItem,
-        dependencies: &mut Vec<crate::server::types::DeepContextDependency>,
-        engines: &mut Vec<&'static str>,
-        degraded: &mut bool,
-        degraded_reason: &mut Option<DegradedReason>,
-        project_only: bool,
-        max_dependencies: u32,
-    ) -> bool {
+    async fn append_outgoing_deps(&self, args: AppendOutgoingArgs<'_>) -> bool {
+        let AppendOutgoingArgs {
+            item,
+            dependencies,
+            engines,
+            degraded,
+            degraded_reason,
+            project_only,
+            max_dependencies,
+        } = args;
         let mut truncated = false;
         match self
             .lawyer
@@ -349,8 +345,6 @@ impl PathfinderServer {
                     }
 
                     let callee = &call.item;
-
-                    // Filter out non-workspace files (stdlib, dependencies) when project_only
                     if project_only
                         && (!is_source_file(&callee.file) || !is_workspace_file(&callee.file))
                     {
@@ -358,13 +352,9 @@ impl PathfinderServer {
                     }
 
                     let signature = callee.detail.clone().unwrap_or_else(|| callee.name.clone());
-                    // Enrich the flat LSP name to a qualified treesitter path.
-                    // Falls back to `file::flat_name` when Surgeon returns None or errors.
                     let sp = self
                         .enrich_semantic_path(&callee.file, callee.line, &callee.name)
                         .await;
-                    // Dedup by semantic_path to avoid duplicates from LSP returning
-                    // the same callee multiple times.
                     if dependencies.iter().any(|d| d.semantic_path == sp) {
                         continue;
                     }
@@ -373,6 +363,7 @@ impl PathfinderServer {
                         signature,
                         file: callee.file.clone(),
                         line: callee.line as usize,
+                        confidence: pathfinder_common::types::Confidence::Verified,
                     });
                 }
                 *degraded = false;
@@ -384,9 +375,6 @@ impl PathfinderServer {
                     error = %e,
                     "call_hierarchy_outgoing failed"
                 );
-                // Item 3: Set specific reason instead of keeping stale default.
-                // The prepare call succeeded but outgoing deps failed —
-                // this is a partial LSP failure, not a complete absence.
                 *degraded = true;
                 *degraded_reason = Some(DegradedReason::LspErrorGrepFallback);
             }
@@ -395,84 +383,38 @@ impl PathfinderServer {
     }
 
     /// Core logic for the `read_with_deep_context` tool.
-    ///
-    /// Returns the symbol's source code. When LSP is available, appends the
-    /// signatures of all called symbols. Degrades gracefully to symbol scope
-    /// only when no LSP is configured.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sequential pipeline: parse → sandbox → TS → LSP → dep-block rendering. Linear structure is intentional for readability."
-    )]
     pub(crate) async fn read_with_deep_context_impl(
         &self,
         params: InspectParams,
     ) -> Result<CallToolResult, ErrorData> {
         let start = std::time::Instant::now();
-
         let semantic_path_str = params
             .semantic_path
             .as_deref()
             .ok_or_else(|| invalid_params_error("`semantic_path` must be provided"))?;
 
-        tracing::info!(
-            tool = "read_with_deep_context",
-            semantic_path = %semantic_path_str,
-            "read_with_deep_context: start"
-        );
-
-        // Parse and validate the semantic path
         let semantic_path = parse_semantic_path(semantic_path_str)?;
         require_symbol_target(&semantic_path, semantic_path_str)?;
 
-        // Sandbox check
         if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            let duration_ms = start.elapsed().as_millis();
-            tracing::warn!(
-                tool = "read_with_deep_context",
-                error_code = e.error_code(),
-                duration_ms,
-                "sandbox check failed"
-            );
             return Err(pathfinder_to_error_data(&e));
         }
 
-        // Early file existence check — avoid tree-sitter parse on nonexistent files
         let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
         if !abs_file.exists() {
-            let err = pathfinder_common::error::PathfinderError::FileNotFound {
-                path: abs_file.clone(),
-            };
-            tracing::warn!(
-                tool = "read_with_deep_context",
-                path = %abs_file.display(),
-                "file not found"
-            );
+            let err = pathfinder_common::error::PathfinderError::FileNotFound { path: abs_file };
             return Err(pathfinder_to_error_data(&err));
         }
 
-        // Fetch the symbol scope (Tree-sitter)
-        let ts_start = std::time::Instant::now();
         let scope = self
             .read_symbol_scope_enriched(&semantic_path, semantic_path_str)
             .await?;
-        let tree_sitter_ms = ts_start.elapsed().as_millis();
 
-        // IW-3 (DS-1 gap fix): RAII document lifecycle — did_close fires on all exits.
         let file_path = self.workspace_root.path().join(&semantic_path.file_path);
-        let file_content = match tokio::fs::read_to_string(&file_path).await {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::warn!(
-                    tool = "read_with_deep_context",
-                    path = %file_path.display(),
-                    error = %e,
-                    "file read failed — LSP will receive empty content"
-                );
-                String::new()
-            }
-        };
-        // `_doc_guard` fires did_close automatically when this function returns.
-        let _doc_guard = match self
+        let file_content = tokio::fs::read_to_string(&file_path)
+            .await
+            .unwrap_or_default();
+        let _doc_guard = self
             .lawyer
             .open_document(
                 self.workspace_root.path(),
@@ -480,59 +422,51 @@ impl PathfinderServer {
                 &file_content,
             )
             .await
-        {
-            Ok(guard) => Some(guard),
-            Err(e) => {
-                tracing::warn!(
-                    tool = "read_with_deep_context",
-                    semantic_path = %semantic_path,
-                    error = %e,
-                    "open_document failed — LSP queries may return degraded results"
-                );
-                None
-            }
+            .ok();
+
+        let resolution = self
+            .resolve_lsp_dependencies(
+                &semantic_path,
+                scope.start_line,
+                scope.name_column,
+                true,
+                params.max_dependencies,
+            )
+            .await;
+
+        let duration_ms = start.elapsed().as_millis();
+        let imports = if params.include_imports {
+            let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+            self.extract_file_imports(&abs_file).await
+        } else {
+            Vec::new()
         };
 
-        let project_only = true;
-        let max_dependencies = params.max_dependencies;
+        Ok(Self::build_deep_context_result(
+            &scope,
+            &resolution,
+            imports,
+            duration_ms,
+            params.retry_attempt,
+        ))
+    }
 
-        let lsp_start = std::time::Instant::now();
-
+    fn build_deep_context_result(
+        scope: &pathfinder_common::types::SymbolScope,
+        resolution: &LspResolution,
+        imports: Vec<String>,
+        duration_ms: u128,
+        retry_attempt: u32,
+    ) -> CallToolResult {
         let LspResolution {
             dependencies,
             degraded,
             degraded_reason,
             engines,
             dependencies_truncated,
-        } = self
-            .resolve_lsp_dependencies(
-                &semantic_path,
-                scope.start_line,
-                scope.name_column,
-                project_only,
-                max_dependencies,
-            )
-            .await;
+        } = resolution;
 
-        // Note: `_doc_guard` still alive here; drops at function return.
-        let lsp_ms = lsp_start.elapsed().as_millis();
-        let duration_ms = start.elapsed().as_millis();
-
-        let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
-        tracing::info!(
-            tool = "read_with_deep_context",
-            semantic_path = %semantic_path_str,
-            tree_sitter_ms,
-            lsp_ms,
-            duration_ms,
-            degraded,
-            degraded_reason = ?degraded_reason_str,
-            engines_used = ?engines,
-            "read_with_deep_context: complete"
-        );
-
-        let dep_count = dependencies.len();
-        let lsp_readiness = if degraded {
+        let lsp_readiness = if *degraded {
             match degraded_reason {
                 Some(
                     DegradedReason::LspWarmupEmptyUnverified
@@ -544,15 +478,16 @@ impl PathfinderServer {
         } else {
             Some("ready".to_owned())
         };
+
         let warm_start_in_progress = match lsp_readiness.as_deref() {
             Some("warming_up") => Some(true),
             Some("ready") => Some(false),
             _ => None,
         };
-        let resolution_strategy = if !degraded && engines.contains(&"lsp") {
+
+        let resolution_strategy = if !*degraded && engines.contains(&"lsp") {
             Some("lsp_call_hierarchy".to_owned())
-        } else if degraded {
-            // Distinguish: LSP was never available vs LSP failed vs grep fallback.
+        } else if *degraded {
             match degraded_reason {
                 Some(DegradedReason::NoLsp) => Some("treesitter_direct".to_owned()),
                 Some(DegradedReason::GrepFallbackDependencies) => Some("grep_fallback".to_owned()),
@@ -562,71 +497,141 @@ impl PathfinderServer {
             Some("treesitter_direct".to_owned())
         };
 
-        // Extract file-level import statements when requested.
-        // This is a cheap operation (line-scan, no tree-sitter) but opt-in to avoid
-        // unnecessary output for languages without verbose import blocks.
-        let imports = if params.include_imports {
-            let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
-            self.extract_file_imports(&abs_file).await
+        let status = if *degraded {
+            if warm_start_in_progress == Some(true) {
+                pathfinder_common::types::ToolStatus::NotReady {
+                    elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                    retry_after_secs: 15,
+                    eta_secs: None,
+                    phase: "indexing".to_string(),
+                    attempt: retry_attempt,
+                    max_attempts: 3,
+                }
+            } else {
+                pathfinder_common::types::ToolStatus::Degraded {
+                    reason: degraded_reason
+                        .as_ref()
+                        .map_or_else(|| "degraded".into(), ToString::to_string),
+                    retry_after_secs: None,
+                }
+            }
         } else {
-            Vec::new()
+            pathfinder_common::types::ToolStatus::Ok
         };
 
+        let deps_evidence = if *degraded {
+            if dependencies.is_empty() {
+                None
+            } else {
+                Some(pathfinder_common::types::Evidence::heuristic(
+                    dependencies.clone(),
+                ))
+            }
+        } else {
+            Some(pathfinder_common::types::Evidence::verified(
+                dependencies.clone(),
+            ))
+        };
+
+        crate::server::helpers::validate_evidence(&status, deps_evidence.as_ref());
+
         let metadata = crate::server::types::ReadWithDeepContextMetadata {
+            status: status.clone(),
             start_line: scope.start_line,
             end_line: scope.end_line,
-            language: scope.language,
-            dependencies,
-            degraded,
-            degraded_reason,
+            language: scope.language.clone(),
+            dependencies: deps_evidence.clone(),
+            degraded: *degraded,
+            degraded_reason: *degraded_reason,
             actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
             warm_start_in_progress,
-            dependencies_truncated,
+            dependencies_truncated: *dependencies_truncated,
+            next_offset: None,
             resolution_strategy,
             duration_ms: Some(millis_to_u64(duration_ms)),
             imports,
             content: Some(scope.content.clone()),
         };
 
-        // Build the dependency block: list each callee signature, file, and line.
-        // This surfaces the same data as structured_content.dependencies in plain text
-        // so agents reading the text channel don't need to parse JSON.
-        let dep_block: String = if metadata.dependencies.is_empty() {
-            String::new()
-        } else {
-            let mut lines = Vec::with_capacity(metadata.dependencies.len());
-            for dep in &metadata.dependencies {
-                lines.push(format!("  {} ({}:L{})", dep.signature, dep.file, dep.line));
+        let text = Self::render_deep_context_text(
+            &status,
+            *degraded,
+            *degraded_reason,
+            deps_evidence.as_ref(),
+            &metadata.imports,
+            &scope.content,
+            duration_ms,
+        );
+
+        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
+        res.structured_content = serialize_metadata(&metadata);
+        res
+    }
+
+    fn render_deep_context_text(
+        status: &pathfinder_common::types::ToolStatus,
+        degraded: bool,
+        degraded_reason: Option<DegradedReason>,
+        deps_evidence: Option<
+            &pathfinder_common::types::Evidence<crate::server::types::DeepContextDependency>,
+        >,
+        imports: &[String],
+        content: &str,
+        duration_ms: u128,
+    ) -> String {
+        let dep_block: String = match deps_evidence {
+            None => "\nDependencies: UNKNOWN (not verified — do NOT treat as zero)".to_string(),
+            Some(ev)
+                if ev.confidence == pathfinder_common::types::Confidence::Verified
+                    && ev.items.is_empty() =>
+            {
+                "\n0 dependencies loaded (verified zero)".to_string()
             }
-            format!("\n{}", lines.join("\n"))
+            Some(ev) => {
+                let dep_count = ev.items.len();
+                let conf_str = if ev.confidence == pathfinder_common::types::Confidence::Verified {
+                    "(verified)"
+                } else {
+                    "(heuristic candidates)"
+                };
+                let mut lines = Vec::with_capacity(ev.items.len() + 1);
+                lines.push(format!("\n{dep_count} dependencies loaded {conf_str}"));
+                for dep in &ev.items {
+                    if dep.confidence == pathfinder_common::types::Confidence::Heuristic {
+                        lines.push(format!(
+                            "  {} ({}:L{}) [HEURISTIC]",
+                            dep.signature, dep.file, dep.line
+                        ));
+                    } else {
+                        lines.push(format!("  {} ({}:L{})", dep.signature, dep.file, dep.line));
+                    }
+                }
+                lines.join("\n")
+            }
         };
 
-        // Build the imports block for the text channel when present.
-        let import_block = if metadata.imports.is_empty() {
+        let import_block = if imports.is_empty() {
             String::new()
         } else {
-            format!("\nImports:\n{}\n", metadata.imports.join("\n"))
+            format!("\nImports:\n{}\n", imports.join("\n"))
         };
 
-        // Prepend degradation notice when in degraded mode
-        let text = if degraded {
+        let mut text_parts = Vec::new();
+        if let Some(header) = crate::server::helpers::format_tool_status_header(status) {
+            text_parts.push(header);
+        } else if degraded {
             let notice = degraded_reason
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
-            format!(
-                "{notice}\n\n{dep_count} dependencies loaded{dep_block}{import_block}\n\n{}\n[completed in {duration_ms}ms]",
-                scope.content
-            )
-        } else {
-            format!(
-                "{dep_count} dependencies loaded{dep_block}{import_block}\n\n{}\n[completed in {duration_ms}ms]",
-                scope.content
-            )
-        };
-        let mut res = CallToolResult::success(vec![rmcp::model::Content::text(text)]);
-        res.structured_content = serialize_metadata(&metadata);
-        Ok(res)
+            text_parts.push(notice);
+        }
+
+        text_parts.push(format!(
+            "{dep_block}{import_block}\n\n{content}\n[completed in {duration_ms}ms]"
+        ));
+
+        text_parts.join("\n")
     }
 
     /// Extract file-level import/using/require statements from a source file.

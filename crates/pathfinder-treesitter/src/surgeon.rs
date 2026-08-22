@@ -1,6 +1,7 @@
 use crate::error::SurgeonError;
 use pathfinder_common::types::{SemanticPath, SymbolScope};
 use std::path::Path;
+pub use tree_sitter::Point;
 
 /// The access level of an AST symbol, as determined by language-specific rules.
 ///
@@ -20,6 +21,49 @@ pub enum AccessLevel {
     Private,
 }
 
+/// Encoding used for LSP text position offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PositionEncoding {
+    /// UTF-8 byte offsets (e.g., clangd, or rust-analyzer when negotiated).
+    Utf8,
+    /// UTF-16 code units (LSP 3.17 default when unnegotiated).
+    #[default]
+    Utf16,
+}
+
+/// Converts a 0-indexed byte column within a line into an LSP character position (0-indexed).
+///
+/// When `encoding` is [`PositionEncoding::Utf16`], counts UTF-16 code units in the prefix
+/// of `line_bytes` up to `byte_col`. When `encoding` is [`PositionEncoding::Utf8`], returns
+/// the clamped byte column directly.
+#[must_use]
+pub fn to_lsp_character(line_bytes: &[u8], byte_col: usize, encoding: PositionEncoding) -> u32 {
+    let clamped_col = byte_col.min(line_bytes.len());
+    match encoding {
+        PositionEncoding::Utf8 => u32::try_from(clamped_col).unwrap_or(u32::MAX),
+        PositionEncoding::Utf16 => {
+            let slice = &line_bytes[..clamped_col];
+            match std::str::from_utf8(slice) {
+                Ok(s) => s
+                    .chars()
+                    .map(|c| u32::try_from(c.len_utf16()).unwrap_or(0))
+                    .sum(),
+                Err(e) => {
+                    let valid_part = &slice[..e.valid_up_to()];
+                    let mut count: u32 = std::str::from_utf8(valid_part)
+                        .unwrap_or("")
+                        .chars()
+                        .map(|c| u32::try_from(c.len_utf16()).unwrap_or(0))
+                        .sum();
+                    count +=
+                        u32::try_from(slice.len().saturating_sub(e.valid_up_to())).unwrap_or(0);
+                    count
+                }
+            }
+        }
+    }
+}
+
 /// Information about a symbol successfully extracted from the AST.
 #[derive(Debug, Clone)]
 pub struct ExtractedSymbol {
@@ -31,18 +75,21 @@ pub struct ExtractedSymbol {
     pub kind: SymbolKind,
     /// The byte range in the source file spanning the entire symbol.
     pub byte_range: std::ops::Range<usize>,
-    /// The zero-indexed starting line.
+    /// The expanded byte range including attached decorators, attributes, doc comments, and export modifiers (TS-C1).
+    pub attached_range: std::ops::Range<usize>,
+    /// The zero-indexed starting line (for display and range extraction only).
     pub start_line: usize,
-    /// The zero-indexed ending line.
+    /// The zero-indexed ending line (for display and range extraction only).
     pub end_line: usize,
     /// The zero-indexed column where the symbol's **name identifier** begins.
     ///
-    /// For `pub fn dedent(code: &str)`, this is the column of the `d` in `dedent`,
-    /// NOT the `p` in `pub`. Used by LSP navigation tools to position the cursor
-    /// on the symbol name rather than the declaration start.
-    ///
-    /// Falls back to 0 when the name node cannot be resolved (e.g., anonymous symbols).
+    /// Preserved for backward compatibility and display. Derived from `name_point.column`.
     pub name_column: usize,
+    /// The exact AST point (0-indexed row, 0-indexed byte column) of the symbol's **name identifier**.
+    ///
+    /// Used by LSP navigation tools to position queries directly on the identifier token.
+    /// Replaces previous loose pairings of declaration `start_line` with `name_column` (TS-A1).
+    pub name_point: tree_sitter::Point,
     /// The access level of this symbol as determined by language-specific AST rules.
     ///
     /// - Rust: `pub` → `Public`, `pub(crate)` → `Package`, `pub(super)` → `Protected`, bare → `Private`.
@@ -52,6 +99,24 @@ pub struct ExtractedSymbol {
     pub access_level: AccessLevel,
     /// Nested child symbols (e.g., methods within a class).
     pub children: Vec<Self>,
+}
+
+impl Default for ExtractedSymbol {
+    fn default() -> Self {
+        Self {
+            name: String::default(),
+            semantic_path: String::default(),
+            kind: SymbolKind::Function,
+            byte_range: 0..0,
+            attached_range: 0..0,
+            start_line: 0,
+            end_line: 0,
+            name_column: 0,
+            name_point: tree_sitter::Point { row: 0, column: 0 },
+            access_level: AccessLevel::Public,
+            children: Vec::default(),
+        }
+    }
 }
 
 /// The type of an AST symbol.
@@ -191,6 +256,11 @@ pub trait Surgeon: Send + Sync {
         workspace_root: &Path,
         file_path: &Path,
     ) -> Result<(String, String, Vec<ExtractedSymbol>), SurgeonError>;
+
+    /// Invalidate any cached AST or symbols for the given file.
+    fn invalidate(&self, workspace_root: &Path, file_path: &Path) {
+        let _ = (workspace_root, file_path);
+    }
 }
 
 #[cfg(test)]

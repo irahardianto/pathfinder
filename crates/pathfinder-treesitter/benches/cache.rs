@@ -95,6 +95,15 @@ function third() { count.value = 0 }
         });
     });
 
+    group.bench_function("warm_cache_symbol_extraction_hit", |b| {
+        b.iter(|| {
+            let (_tree, _bytes, symbols) = rt
+                .block_on(cache.get_or_parse(&path, SupportedLanguage::Go))
+                .expect("warm cache fetch");
+            std::hint::black_box(&symbols);
+        });
+    });
+
     group.finish();
 }
 

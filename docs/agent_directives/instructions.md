@@ -2,62 +2,47 @@
 
 ## Semantic Paths
 
-All symbol-level tools (`inspect`, `locate`, `trace`) require semantic paths in `file_path::symbol` format:
+All symbol-level tools (`locate`, `trace`, `inspect`) require semantic paths in `file_path::symbol` format:
 
 - ✅ `src/auth.ts::AuthService.login`
 - ✅ `crates/pathfinder/src/server.rs::PathfinderServer.new`
-- ❌ `AuthService.login` (missing file path — will be treated as a file name)
+- ❌ `AuthService.login` (missing file path)
 
-Bare file paths (no `::`) are valid only for `read(filepath="...")` and `explore(path="...")`.
+Symbol segments are separated by `.` (e.g. `ClassName.method_name`).
 
-## Response Format (Critical)
+## Response Format & Contracts
 
-Pathfinder tools return responses through two channels:
-- **Text content** — the primary output (skeleton, source code, formatted results). Always read this.
-- **Structured content** — metadata only (counts, flags, status). Use for programmatic decisions.
+Pathfinder v6 tools return responses through two synchronized channels:
+- **Text content** — the formatted human-readable output (source slices, call hierarchies, reference locations). Always read this.
+- **Structured content** — typed metadata (`status`, `confidence`, counts, flags, pagination). Use for programmatic decisions.
 
-`explore` skeleton is in the **text content** only. `files_scanned: 0` in structured_content for
-`detail="structure"` is expected — structure mode reads directory names, not source files.
+### Tool Status & Readiness (Contract 1)
+- `Ok`: Normal operational success.
+- `NotReady`: LSP indexing/warmup in progress. Check `retry_after_secs` and retry with `retry_attempt = attempt + 1`.
+- `Degraded`: Operating with heuristic fallbacks (tree-sitter/ripgrep).
+- `Unavailable`: Language server unavailable.
 
-`search` puts everything (including results) in the text channel as JSON. No structured_content.
-
-See the skill file for the full per-tool response guide.
-
-## Pre-Flight Check
-
-Call `health()` once at session start. If it returns results, Pathfinder is available. If `health()` fails or is not listed in available tools, fall back to built-in tools (Read, Grep, Glob).
-
-## Critical Gotchas
-
-- `filter_mode="comments_only"` matches both comments AND string literals (non-code content).
-- `kind="class"` is a broad filter matching classes, structs, and interfaces, but NOT enums; `kind="struct"` matches ONLY structs.
+### Confidence & Evidence Tri-State (Contract 2 & 3)
+- `Verified`: Compiler / LSP confirmed truth.
+- `Heuristic`: Best-effort tree-sitter or ripgrep fallback (marked `[HEURISTIC]`).
+- **Tri-State Rule**:
+  - `null` = **UNKNOWN** (not verified — callers/callees/references may exist, do NOT treat as zero).
+  - `[]` = **CONFIRMED ZERO** (LSP verified that exactly zero references/callers exist).
 
 ## Tool Selection Quick Guide
 
-| I want to... | Tool |
-|---|---|
-| Understand project structure | `explore` |
-| Find text/patterns in code | `search` (mode: text/regex) |
-| Find a symbol by name | `search` (mode: symbol) — returns `did_you_mean` suggestions when no exact match |
-| Read a file | `read` |
-| Read a symbol's source code | `inspect` |
-| Jump to a definition | `locate` (with semantic_path) |
-| Convert file:line to symbol | `locate` (with file + line) |
-| See callers/callees | `trace` (scope: callers) |
-| See all references | `trace` (scope: references) |
-| Get full symbol overview | `trace` (scope: overview) |
-| Check LSP status | `health` |
+| I want to... | Tool | Parameters |
+|---|---|---|
+| Jump to a definition | `locate` | `semantic_path="path/to/file.ext::SymbolName"` |
+| Convert file:line to semantic path | `locate` | `file="path/to/file.ext"`, `line=42` |
+| Batch jump to definitions | `locate` | `locations=[{semantic_path: "..."}, {file: "...", line: 42}]` |
+| Read a symbol's source code | `inspect` | `semantic_path="path/to/file.ext::SymbolName"` |
+| Inspect symbol + dependencies | `inspect` | `semantic_path="..."`, `include_dependencies=true` |
+| Batch inspect symbols | `inspect` | `semantic_paths=["...", "..."]` |
+| Trace callers & callees | `trace` | `semantic_path="..."`, `scope="callers"` |
+| Trace all references (usages/imports) | `trace` | `semantic_path="..."`, `scope="references"` |
+| Full symbol overview | `trace` | `semantic_path="..."`, `scope="overview"` |
 
-## Degraded Mode
+## Fallback
 
-When LSP is unavailable, tools fall back to grep/Tree-sitter heuristics. Check the `degraded` field.
-When `degraded: true`, never treat empty results as confirmed-zero — results are best-effort.
-
-Critical: `null` and `[]` in trace results are NOT the same:
-- `null` = unknown (degraded — callers may exist)
-- `[]` = LSP confirmed zero callers
-
-## Detailed Workflows
-
-For step-by-step workflows, error recovery patterns, response format details, and advanced usage,
-see the Pathfinder skill file: `docs/agent_directives/skills/pathfinder/SKILL.md`
+If Pathfinder tools are unavailable or return `ToolStatus::Unavailable`, fall back gracefully to built-in host tools (Read, Grep, Glob).

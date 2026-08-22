@@ -236,8 +236,8 @@ async fn test_get_semantic_path_none_symbol_text_format() {
         "text should contain guidance for line not in symbol, got: {text}"
     );
     assert!(
-        text.contains("read(filepath="),
-        "text should suggest using read tool, got: {text}"
+        text.contains("host file reading tools"),
+        "text should suggest using host file reading tools, got: {text}"
     );
 }
 

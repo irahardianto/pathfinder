@@ -155,12 +155,12 @@ async fn test_doc_versions_inserted_on_did_open() {
         .to_string();
     let entry = client.doc_versions.get(&file_uri).unwrap();
     assert_eq!(
-        entry.value().0,
+        entry.value().language_id,
         "rust",
         "language_id should be stored with doc version"
     );
     assert_eq!(
-        entry.value().1.load(Ordering::Relaxed),
+        entry.value().version.load(Ordering::Relaxed),
         1,
         "version should be 1 on open"
     );
@@ -204,7 +204,7 @@ async fn test_multiple_opens_track_latest_version() {
         .get(&file_uri)
         .unwrap()
         .value()
-        .1
+        .version
         .load(Ordering::Relaxed);
     assert_eq!(v1, 1);
 
@@ -216,7 +216,7 @@ async fn test_multiple_opens_track_latest_version() {
         .get(&file_uri)
         .unwrap()
         .value()
-        .1
+        .version
         .load(Ordering::Relaxed);
     assert_eq!(v2, 1, "version should reset to 1 on re-open");
 }
@@ -263,18 +263,38 @@ async fn test_did_open_dedup_skips_second_notification() {
     );
     assert_eq!(first_notifications[0].0, "textDocument/didOpen");
 
-    // Second open WITHOUT did_close — should be dedup'd, return false
+    // Second open with SAME content WITHOUT did_close — should be dedup'd, return false
     let opened2 = client
-        .did_open(workspace, file_path, "fn main() { updated }")
+        .did_open(workspace, file_path, "fn main() {}")
         .await
         .unwrap();
-    assert!(!opened2, "second did_open should return false (dedup'd)");
+    assert!(
+        !opened2,
+        "second did_open with same content should return false (dedup'd)"
+    );
     let second_notifications = fake.take_notifications();
     assert_eq!(
         second_notifications.len(),
         0,
-        "second open without close should be deduplicated — no notification sent"
+        "second open with same content without close should be deduplicated — no notification sent"
     );
+
+    // Third open with CHANGED content — should send didChange
+    let opened3 = client
+        .did_open(workspace, file_path, "fn main() { updated }")
+        .await
+        .unwrap();
+    assert!(
+        !opened3,
+        "did_open with updated content should return false"
+    );
+    let third_notifications = fake.take_notifications();
+    assert_eq!(
+        third_notifications.len(),
+        1,
+        "did_open with updated content should send didChange notification"
+    );
+    assert_eq!(third_notifications[0].0, "textDocument/didChange");
 
     // doc_versions should still contain the file (from first open)
     let file_uri = Url::from_file_path(workspace.join(file_path))
@@ -416,6 +436,10 @@ async fn test_document_state_cleaned_on_crash() {
     let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
     fake_transport.set_dispatcher(Arc::clone(&client.dispatcher));
 
+    let (readiness_tx, readiness_rx) = tokio::sync::watch::channel(
+        crate::client::ReadinessState::Ready(crate::types::CapabilityReadiness::all()),
+    );
+
     let entry = ProcessEntry::Running(Box::new(LanguageState {
         transport: Arc::clone(&fake_transport) as Arc<dyn LspTransport>,
         lifecycle: None,
@@ -430,6 +454,10 @@ async fn test_document_state_cleaned_on_crash() {
         live_capabilities: Arc::new(parking_lot::RwLock::new(DetectedCapabilities::default())),
         in_coexistence_mode: false,
         watcher_handles: vec![],
+        probe_handle: None,
+        readiness_tx: Arc::new(readiness_tx),
+        readiness_rx,
+        workspace_root: workspace.to_path_buf(),
     }));
     client.processes.insert("rust".to_owned(), entry);
 

@@ -111,7 +111,92 @@ pub(crate) fn invalid_params_error(msg: impl Into<std::borrow::Cow<'static, str>
     ErrorData::invalid_params(msg, None)
 }
 
-// ── Degraded Mode Formatting ────────────────────────────────────────
+// ── Degraded & Status Formatting ────────────────────────────────────
+
+/// Format a standardized tool status header prefix for agent consumption.
+pub(crate) fn format_tool_status_header(
+    status: &pathfinder_common::types::ToolStatus,
+) -> Option<String> {
+    match status {
+        pathfinder_common::types::ToolStatus::Ok => None,
+        pathfinder_common::types::ToolStatus::NotReady {
+            elapsed_secs,
+            retry_after_secs,
+            eta_secs,
+            phase,
+            attempt,
+            max_attempts,
+        } => {
+            let mut s = format!(
+                "NOT_READY ({phase}) — warming up for {elapsed_secs}s — retry in {retry_after_secs}s (attempt {attempt}/{max_attempts})"
+            );
+            if let Some(eta) = eta_secs {
+                let _ = write!(s, " [ETA: ~{eta}s]");
+            }
+            Some(s)
+        }
+        pathfinder_common::types::ToolStatus::Unavailable {
+            language,
+            install_hint,
+            alternative,
+        } => Some(format!(
+            "UNAVAILABLE ({language}) — {install_hint}. Alternative: {alternative}"
+        )),
+        pathfinder_common::types::ToolStatus::Degraded {
+            reason,
+            retry_after_secs,
+        } => {
+            let mut s = format!("DEGRADED ({reason}) — results are heuristic, verify manually");
+            if let Some(secs) = retry_after_secs {
+                let _ = write!(s, " — retry after ~{secs}s");
+            }
+            Some(s)
+        }
+    }
+}
+
+/// Validate evidence consistency against tool status (Contract 2).
+///
+/// Enforces the 4 illegal combinations via `debug_assert!` and `tracing::error!`:
+/// 1. `ToolStatus::Ok` with `Confidence::Heuristic` in any field.
+/// 2. `Evidence { confidence: Heuristic, items: [] }` (must be `None`).
+/// 3. `ToolStatus::NotReady` with `Confidence::Verified`.
+/// 4. `ToolStatus::Unavailable` with non-heuristic or empty unverified states.
+pub(crate) fn validate_evidence<T>(
+    status: &pathfinder_common::types::ToolStatus,
+    evidence: Option<&pathfinder_common::types::Evidence<T>>,
+) {
+    if let Some(ev) = evidence {
+        if ev.confidence == pathfinder_common::types::Confidence::Heuristic && ev.items.is_empty() {
+            tracing::error!(
+                "ILLEGAL STATE: Evidence with Confidence::Heuristic must not have empty items (must be None)"
+            );
+            debug_assert!(
+                false,
+                "Evidence with Confidence::Heuristic must not have empty items (must be None)"
+            );
+        }
+        if *status == pathfinder_common::types::ToolStatus::Ok
+            && ev.confidence == pathfinder_common::types::Confidence::Heuristic
+        {
+            tracing::error!("ILLEGAL STATE: ToolStatus::Ok cannot contain Confidence::Heuristic");
+            debug_assert!(false, "ToolStatus::Ok cannot contain Confidence::Heuristic");
+        }
+        if matches!(
+            status,
+            pathfinder_common::types::ToolStatus::NotReady { .. }
+        ) && ev.confidence == pathfinder_common::types::Confidence::Verified
+        {
+            tracing::error!(
+                "ILLEGAL STATE: ToolStatus::NotReady cannot contain Confidence::Verified"
+            );
+            debug_assert!(
+                false,
+                "ToolStatus::NotReady cannot contain Confidence::Verified"
+            );
+        }
+    }
+}
 
 /// Format a standardized degraded-mode text prefix for agent consumption.
 ///
@@ -136,9 +221,14 @@ pub(crate) fn format_degraded_notice(reason: &pathfinder_common::types::Degraded
     }
 
     if let Some(fallback) = &guidance.fallback_tool {
-        parts.push(format!(
-            "fallback: use {fallback} for authoritative results"
-        ));
+        if *fallback == pathfinder_common::types::FallbackTool::HostGrep {
+            parts
+                .push("fallback: use your host's grep/read tools for authoritative results".into());
+        } else {
+            parts.push(format!(
+                "fallback: use {fallback} for authoritative results"
+            ));
+        }
     }
 
     if let Some(secs) = guidance.retry_after_seconds {
@@ -151,7 +241,7 @@ pub(crate) fn format_degraded_notice(reason: &pathfinder_common::types::Degraded
 // ── Language Detection ──────────────────────────────────────────────
 
 /// Detect the language of a file from its extension.
-/// Used by `read_file` to populate the `language` field in the response.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn language_from_path(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ts" | "tsx") => "typescript",

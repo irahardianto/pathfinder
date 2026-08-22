@@ -212,8 +212,6 @@ async fn test_shutdown_terminates_process() {
         child: Arc::new(tokio::sync::Mutex::new(child_process)),
         stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
         capabilities: crate::client::capabilities::DetectedCapabilities::default(),
-        last_used: parking_lot::Mutex::new(std::time::Instant::now()),
-        in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         _jdtls_lock: None,
     };
 
@@ -256,8 +254,6 @@ fn make_managed_process(sleep_secs: &str) -> ManagedProcess {
         child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdin))),
         capabilities: crate::client::capabilities::DetectedCapabilities::default(),
-        last_used: parking_lot::Mutex::new(std::time::Instant::now()),
-        in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         _jdtls_lock: None,
     }
 }
@@ -652,18 +648,6 @@ async fn test_path_to_file_uri_with_spaces() {
 }
 
 #[tokio::test]
-async fn test_managed_process_last_used_tracking() {
-    let process = make_managed_process("10");
-
-    let before = process.last_used();
-    std::thread::sleep(std::time::Duration::from_millis(10));
-    process.set_last_used(std::time::Instant::now());
-    let after = process.last_used();
-
-    assert!(after > before, "set_last_used should update the timestamp");
-}
-
-#[tokio::test]
 async fn test_managed_process_capabilities_default() {
     let process = make_managed_process("10");
 
@@ -671,19 +655,6 @@ async fn test_managed_process_capabilities_default() {
     assert!(
         !caps.flags.definition_provider,
         "default capabilities should have definition_provider=false"
-    );
-}
-
-#[tokio::test]
-async fn test_managed_process_in_flight_default() {
-    let process = make_managed_process("10");
-
-    assert_eq!(
-        process
-            .in_flight()
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "in_flight should start at 0"
     );
 }
 
@@ -1247,8 +1218,8 @@ async fn test_build_initialize_request_declares_call_hierarchy() {
     );
     assert_eq!(
         call_hierarchy["dynamicRegistration"].as_bool(),
-        Some(true),
-        "callHierarchy should support dynamic registration"
+        Some(false),
+        "callHierarchy should declare dynamicRegistration false on static queries"
     );
 }
 

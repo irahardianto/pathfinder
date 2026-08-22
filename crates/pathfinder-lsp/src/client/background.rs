@@ -1,12 +1,5 @@
-//! Background task functions for LSP client lifecycle management.
-//!
-//! These functions run as detached tokio tasks and manage:
-//! - Reader supervision (crash recovery, zombie reaping)
-//! - Progress watching (indexing completion detection)
-//! - Registration watching (dynamic capability registration)
-//! - Idle timeout (process termination after inactivity)
-
 use crate::client::protocol::RequestDispatcher;
+use crate::client::DocumentEntry;
 use crate::client::ProcessEntry;
 use crate::types::IndexingCompletionSource;
 use dashmap::DashMap;
@@ -14,7 +7,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
 
-const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(15);
 pub(crate) const MAX_BACKOFF_SECS: u64 = 60;
 const IDLE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
@@ -25,7 +17,7 @@ pub async fn reader_supervisor_task(
     reader_alive: Arc<std::sync::atomic::AtomicBool>,
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
-    doc_versions: Arc<DashMap<String, (String, std::sync::atomic::AtomicI32)>>,
+    doc_versions: Arc<DashMap<String, DocumentEntry>>,
 ) {
     let crashed = match reader_handle.await {
         Ok(()) => {
@@ -73,8 +65,8 @@ pub async fn reader_supervisor_task(
             // MAJOR: Clear stale doc_versions for this language after crash recovery.
             // A new LSP instance won't know about previously opened documents.
             let mut cleared = 0;
-            doc_versions.retain(|_uri, (lang, _)| {
-                if lang == &language_id {
+            doc_versions.retain(|_uri, entry| {
+                if entry.language_id == language_id {
                     cleared += 1;
                     false
                 } else {
@@ -98,6 +90,11 @@ pub async fn reader_supervisor_task(
         // respawn loops. Without this, an LSP that exits immediately on startup
         // (bad config, missing deps) creates a tight spawn-exit loop.
         // Only the crash path previously got backoff — normal EOF was unprotected.
+        let reason = if crashed {
+            format!("{language_id} LSP process crashed unexpectedly")
+        } else {
+            format!("{language_id} LSP process exited normally (EOF)")
+        };
         tracing::warn!(
             language = %language_id,
             crashed = crashed,
@@ -108,12 +105,13 @@ pub async fn reader_supervisor_task(
             ProcessEntry::Unavailable(super::UnavailableState {
                 unavailable_since: std::time::Instant::now(),
                 backoff_attempt: 1,
+                reason: Some(reason),
             }),
         );
     } else {
         tracing::debug!(
             language = %language_id,
-            "LSP: supervisor found entry already removed (raced with idle-loop or force_respawn) or replaced by recovery"
+            "LSP: supervisor found entry already removed (raced with supervisor or force_respawn) or replaced by recovery"
         );
     }
 }
@@ -253,67 +251,10 @@ pub async fn registration_watcher_task(
     }
 }
 
-/// Collect languages whose processes are idle (elapsed > timeout, `in_flight` == 0).
-///
-/// Extracted from [`idle_timeout_task`] for testability. The idle timeout task
-/// calls this to determine which processes to remove.
-pub(crate) fn collect_idle_languages(processes: &DashMap<String, ProcessEntry>) -> Vec<String> {
-    use std::sync::atomic::Ordering;
-
-    processes
-        .iter()
-        .filter_map(|entry| {
-            let lang = entry.key();
-            if let ProcessEntry::Running(state) = entry.value() {
-                if state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
-                    && state.transport.in_flight().load(Ordering::Acquire) == 0
-                {
-                    Some(lang.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-async fn shutdown_all_processes(
-    processes: &DashMap<String, ProcessEntry>,
-    dispatcher: &RequestDispatcher,
-) {
-    let keys: Vec<String> = processes.iter().map(|e| e.key().clone()).collect();
-    for lang in keys {
-        if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
-            tracing::debug!(language = %lang, "LSP: shutting down process");
-            // C-3: Send shutdown request BEFORE aborting reader.
-            // If reader is aborted first, nobody reads the shutdown response,
-            // causing the 2s timeout to always fire. With 5 languages,
-            // shutdown takes minimum 10 seconds.
-            // H-4: Wrap transport.shutdown() in timeout to prevent blocking
-            // if child lock is contended (supervisor zombie reaping).
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                state.transport.shutdown(dispatcher, &lang),
-            )
-            .await;
-            state.reader_handle.abort();
-            state.abort_watchers();
-            // BUG-4 fix: reader is aborted so it won't call cancel_for_language.
-            // We must cancel pending requests for this language explicitly.
-            dispatcher.cancel_for_language(&lang);
-            if let Some(ref lifecycle) = state.lifecycle {
-                let _ = lifecycle.child.lock().await.wait().await;
-            }
-        }
-    }
-}
-
 async fn reap_dead_processes(
     processes: &DashMap<String, ProcessEntry>,
     dispatcher: &RequestDispatcher,
-    doc_versions: &DashMap<String, (String, std::sync::atomic::AtomicI32)>,
+    doc_versions: &DashMap<String, DocumentEntry>,
 ) {
     let dead_languages: Vec<String> = processes
         .iter()
@@ -352,8 +293,8 @@ async fn reap_dead_processes(
                     }
                     // Clear stale doc_versions for this language from the dead instance.
                     let mut cleared = 0;
-                    doc_versions.retain(|_uri, (l, _)| {
-                        if l == &lang {
+                    doc_versions.retain(|_uri, entry| {
+                        if entry.language_id == lang {
                             cleared += 1;
                             false
                         } else {
@@ -375,6 +316,9 @@ async fn reap_dead_processes(
                         ProcessEntry::Unavailable(super::UnavailableState {
                             unavailable_since: std::time::Instant::now(),
                             backoff_attempt: 1,
+                            reason: Some(format!(
+                                "{lang} process died outside reader task (zombie)"
+                            )),
                         }),
                     );
                 }
@@ -386,33 +330,14 @@ async fn reap_dead_processes(
     }
 }
 
-async fn reap_idle_processes(
+async fn shutdown_all_processes(
     processes: &DashMap<String, ProcessEntry>,
     dispatcher: &RequestDispatcher,
-    doc_versions: &DashMap<String, (String, std::sync::atomic::AtomicI32)>,
 ) {
-    use std::sync::atomic::Ordering;
-    let candidates = collect_idle_languages(processes);
-
-    for lang in candidates {
-        // Atomically check in_flight and remove if still idle.
-        let removed = processes.remove_if(&lang, |_, v| {
-            if let ProcessEntry::Running(state) = v {
-                state.transport.last_used().elapsed() > DEFAULT_IDLE_TIMEOUT
-                    && state.transport.in_flight().load(Ordering::Acquire) == 0
-            } else {
-                false
-            }
-        });
-
-        if let Some((_lang, ProcessEntry::Running(state))) = removed {
-            tracing::info!(
-                language = %lang,
-                restarts = state.restart_count,
-                "LSP: idle timeout — terminating"
-            );
-            // C-3: Send shutdown BEFORE aborting reader so response can be read.
-            // H-4: Wrap in timeout to prevent blocking.
+    let keys: Vec<String> = processes.iter().map(|e| e.key().clone()).collect();
+    for lang in keys {
+        if let Some((_lang, ProcessEntry::Running(state))) = processes.remove(&lang) {
+            tracing::debug!(language = %lang, "LSP: shutting down process");
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 state.transport.shutdown(dispatcher, &lang),
@@ -420,42 +345,19 @@ async fn reap_idle_processes(
             .await;
             state.reader_handle.abort();
             state.abort_watchers();
-            // Idle timeout: reader is aborted, so call cancel_for_language explicitly.
             dispatcher.cancel_for_language(&lang);
             if let Some(ref lifecycle) = state.lifecycle {
                 let _ = lifecycle.child.lock().await.wait().await;
             }
-            // Clear stale doc_versions for this language from the idle-killed instance.
-            let mut cleared = 0;
-            doc_versions.retain(|_uri, (l, _)| {
-                if l == &lang {
-                    cleared += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-            if cleared > 0 {
-                tracing::debug!(
-                    language = %lang,
-                    cleared,
-                    "LSP: cleared stale doc_versions for language after idle timeout"
-                );
-            }
-        } else {
-            tracing::debug!(
-                language = %lang,
-                "LSP: idle timeout skipped — in_flight request arrived or entry removed"
-            );
         }
     }
 }
 
-/// Periodic background task checking for idle/dead LSP processes and shutting down.
-pub async fn idle_timeout_task(
+/// Periodic background supervisor checking for dead LSP processes and handling shutdown.
+pub async fn process_supervisor_task(
     processes: Arc<DashMap<String, ProcessEntry>>,
     dispatcher: Arc<RequestDispatcher>,
-    doc_versions: Arc<DashMap<String, (String, std::sync::atomic::AtomicI32)>>,
+    doc_versions: Arc<DashMap<String, DocumentEntry>>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     loop {
@@ -468,7 +370,6 @@ pub async fn idle_timeout_task(
             }
             () = tokio::time::sleep(IDLE_CHECK_INTERVAL) => {
                 reap_dead_processes(&processes, &dispatcher, &doc_versions).await;
-                reap_idle_processes(&processes, &dispatcher, &doc_versions).await;
             }
         }
     }

@@ -1,17 +1,25 @@
-//! `search` tool (symbol mode) — Resolve a bare symbol name to its `file::symbol` semantic path(s).
+//! Grep support helpers for navigation fallback and cross-file symbol search.
+//!
+//! Extracted from `search.rs` and `find_symbol.rs` (WS-5 / RSP-A4).
+//! Provides `grep_candidates`, `enrich_matches`, `apply_filter_mode`, and `find_symbol_impl_inner`.
 
 use crate::server::helpers::invalid_params_error;
-use crate::server::types::{FindSymbolResponse, FoundSymbol, SearchParams as SearchToolParams};
+use crate::server::types::{FindSymbolResponse, FoundSymbol};
 use crate::server::PathfinderServer;
 use futures::StreamExt as _;
-use pathfinder_search::SearchParams;
+use pathfinder_common::types::FilterMode;
+use pathfinder_search::{SearchMatch, SearchParams as ScoutSearchParams};
+use pathfinder_treesitter::language::SupportedLanguage;
 use pathfinder_treesitter::surgeon::SymbolKind;
-use rmcp::handler::server::wrapper::Json;
 use rmcp::model::ErrorData;
 use std::path::Path;
 
-const SEARCH_CONCURRENCY: usize = 16;
+/// Maximum number of concurrent Tree-sitter enrichment futures per search call.
 const ENRICHMENT_CONCURRENCY: usize = 32;
+const SEARCH_CONCURRENCY: usize = 16;
+
+/// Per-match enrichment output: `(enclosing_semantic_path, node_type, is_definition)`.
+type EnrichResult = (Option<String>, String, Option<bool>);
 
 const DEFINITION_KEYWORDS: &[&str] = &[
     "fn",
@@ -30,6 +38,15 @@ const DEFINITION_KEYWORDS: &[&str] = &[
     "mod",
     "impl",
 ];
+
+/// Parameters for `find_symbol_impl_inner`.
+#[derive(Debug, Clone, Default)]
+pub struct FindSymbolParams {
+    pub query: String,
+    pub kind: Option<String>,
+    pub path_glob: String,
+    pub max_results: u32,
+}
 
 #[inline]
 fn is_valid_identifier_start(ch: char) -> bool {
@@ -112,12 +129,6 @@ struct EnrichedMatch {
 }
 
 /// Returns `true` if the given kind string is a valid canonical value or accepted alias.
-///
-/// Canonical values: `function`, `class`, `struct`, `interface`, `enum`, `constant`, `module`, `impl`.
-/// Aliases (case-insensitive): `method`/`fn` → function; `trait` → interface;
-/// `const`/`static`/`let` → constant; `mod`/`namespace` → module.
-/// `class` also matches struct and interface.
-/// `unknown` is a valid internal kind but not a useful filter value — excluded intentionally.
 fn is_valid_kind_filter(kind: &str) -> bool {
     matches!(
         kind.to_ascii_lowercase().as_str(),
@@ -142,11 +153,7 @@ fn is_valid_kind_filter(kind: &str) -> bool {
 }
 
 /// Validates `find_symbol` input parameters.
-///
-/// Rejects empty queries, path-traversal-looking queries, and unknown `kind`
-/// filter values (an invalid `kind` would otherwise silently return zero
-/// results, which is confusing for callers).
-fn validate_find_symbol_params(params: &SearchToolParams) -> Result<(), ErrorData> {
+fn validate_find_symbol_params(params: &FindSymbolParams) -> Result<(), ErrorData> {
     if params.query.trim().is_empty() {
         return Err(invalid_params_error("query must not be empty"));
     }
@@ -174,7 +181,7 @@ fn validate_find_symbol_params(params: &SearchToolParams) -> Result<(), ErrorDat
 }
 
 /// Returns `true` when `path_glob` already scopes the search to a single
-/// known source-file extension (directly or via [`infer_single_ext_from_glob`]).
+/// known source-file extension.
 fn glob_has_ext_filter(path_glob: &str) -> bool {
     infer_single_ext_from_glob(path_glob).is_some()
         || path_glob.contains("*.rs")
@@ -188,13 +195,6 @@ fn glob_has_ext_filter(path_glob: &str) -> bool {
 }
 
 /// Determines which (extension, glob) pairs to search.
-///
-/// - Single known extension inferred from `path_glob` → that extension's
-///   language-specific patterns, scoped to the user's glob.
-/// - Ambiguous/unrecognised extension filter (e.g. brace expansion) → a
-///   catch-all `"any"` bare word-boundary search.
-/// - No extension filter at all → every supported language, each with its
-///   own default glob.
 fn resolve_search_extensions(path_glob: &str) -> Vec<(&'static str, String)> {
     if let Some(ext) = infer_single_ext_from_glob(path_glob) {
         return vec![(ext, path_glob.to_string())];
@@ -214,9 +214,7 @@ fn resolve_search_extensions(path_glob: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// When the user's `path_glob` is a plain directory prefix (not an extension
-/// filter, not the catch-all `"**/*"`), extracts that prefix for post-search
-/// directory filtering. Returns `None` when no such filtering applies.
+/// Computes directory prefix for post-search filtering.
 fn compute_user_path_prefix(path_glob: &str, has_ext_filter: bool) -> Option<String> {
     if has_ext_filter || path_glob.is_empty() || path_glob == "**/*" {
         return None;
@@ -229,18 +227,17 @@ fn compute_user_path_prefix(path_glob: &str, has_ext_filter: bool) -> Option<Str
     }
 }
 
-/// Builds one [`SearchParams`] per language-specific definition pattern
-/// across the given `(extension, glob)` pairs.
+/// Builds search params for definition patterns.
 fn build_search_params_list(
     workspace_root: &Path,
     extensions: Vec<(&str, String)>,
     query: &str,
-) -> Vec<SearchParams> {
+) -> Vec<ScoutSearchParams> {
     let mut search_params_list = Vec::new();
     for (ext, glob) in extensions {
         let ext_patterns = crate::server::tools::navigation::definition_patterns(ext, query);
         for pattern in ext_patterns {
-            search_params_list.push(SearchParams {
+            search_params_list.push(ScoutSearchParams {
                 workspace_root: workspace_root.to_path_buf(),
                 query: pattern,
                 is_regex: true,
@@ -249,6 +246,7 @@ fn build_search_params_list(
                 max_results: 100,
                 offset: 0,
                 context_lines: 0,
+                ..Default::default()
             });
         }
     }
@@ -256,12 +254,211 @@ fn build_search_params_list(
 }
 
 impl PathfinderServer {
-    /// Runs every search in `search_params_list` concurrently, treating a
-    /// failed individual search as an empty result rather than aborting the
-    /// whole `find_symbol` call.
+    /// Runs Ripgrep across the workspace and enriches each match with Tree-sitter metadata.
+    ///
+    /// - Populates `enclosing_semantic_path` and `is_definition` on matches.
+    /// - Applies `filter_mode` (code vs comments) unless degraded (unsupported language).
+    pub(crate) async fn grep_candidates(
+        &self,
+        search_params: &ScoutSearchParams,
+        filter_mode: FilterMode,
+    ) -> Result<Vec<SearchMatch>, ErrorData> {
+        let result = self.scout.search(search_params).await.map_err(|e| {
+            tracing::warn!(
+                tool = "grep_candidates",
+                error = %e,
+                "scout search failed"
+            );
+            crate::server::helpers::io_error_data(e.to_string())
+        })?;
+
+        let mut enriched_matches = result.matches;
+        let node_types = self.enrich_matches(&mut enriched_matches).await;
+
+        let degraded = enriched_matches
+            .iter()
+            .any(|m| SupportedLanguage::detect(Path::new(&m.file)).is_none());
+
+        let filter_was_bypassed = degraded && filter_mode != FilterMode::All;
+        let filtered_matches = if filter_was_bypassed {
+            enriched_matches
+        } else {
+            apply_filter_mode(enriched_matches, &node_types, filter_mode)
+        };
+
+        Ok(filtered_matches)
+    }
+
+    /// Enrich a slice of search matches with Tree-sitter metadata.
+    ///
+    /// - Populates `enclosing_semantic_path` on each match.
+    /// - Returns a parallel `Vec<String>` of node-type classifications (`"code"`,
+    ///   `"comment"`, or `"string"`).
+    pub(crate) async fn enrich_matches(&self, matches: &mut [SearchMatch]) -> Vec<String> {
+        let snapshots: Vec<(String, u64, u64)> = matches
+            .iter()
+            .map(|m| (m.file.clone(), m.line, m.column))
+            .collect();
+
+        let enrichment: Vec<EnrichResult> = futures::stream::iter(snapshots)
+            .map(|(file, line_u64, column_u64)| async move {
+                let file_path = Path::new(&file);
+                let line = usize::try_from(line_u64).unwrap_or(usize::MAX);
+                let column = usize::try_from(column_u64).unwrap_or(0);
+
+                let detail = self
+                    .surgeon
+                    .enclosing_symbol_detail(self.workspace_root.path(), file_path, line)
+                    .await
+                    .ok()
+                    .flatten();
+
+                let (symbol, is_definition) = if let Some(ref sym) = detail {
+                    let path = format!("{file}::{}", sym.semantic_path);
+                    debug_assert!(line > 0, "ripgrep line should be 1-indexed, got 0");
+                    let is_def = sym.start_line == line.saturating_sub(1);
+                    (Some(path), Some(is_def))
+                } else {
+                    (None, None)
+                };
+
+                let node_type = self
+                    .surgeon
+                    .node_type_at_position(self.workspace_root.path(), file_path, line, column)
+                    .await
+                    .unwrap_or_else(|_| "code".to_owned());
+
+                (symbol, node_type, is_definition)
+            })
+            .buffered(ENRICHMENT_CONCURRENCY)
+            .collect()
+            .await;
+
+        enrichment
+            .into_iter()
+            .zip(matches.iter_mut())
+            .map(|((symbol, node_type, is_definition), m)| {
+                m.enclosing_semantic_path = symbol;
+                m.is_definition = is_definition;
+                node_type
+            })
+            .collect()
+    }
+
+    /// Core logic for cross-file symbol search and did-you-mean resolution.
+    pub(crate) async fn find_symbol_impl_inner(
+        &self,
+        params: FindSymbolParams,
+    ) -> Result<FindSymbolResponse, ErrorData> {
+        let start = std::time::Instant::now();
+
+        tracing::info!(
+            tool = "find_symbol_inner",
+            query = %params.query,
+            kind = ?params.kind,
+            path_glob = %params.path_glob,
+            max_results = params.max_results,
+            "find_symbol_inner: start"
+        );
+
+        validate_find_symbol_params(&params)?;
+
+        let has_ext_filter = glob_has_ext_filter(&params.path_glob);
+        let extensions = resolve_search_extensions(&params.path_glob);
+        let user_path_prefix = compute_user_path_prefix(&params.path_glob, has_ext_filter);
+        let search_params_list =
+            build_search_params_list(self.workspace_root.path(), extensions, &params.query);
+
+        let search_results = self.run_parallel_searches(search_params_list).await;
+
+        let pre_dedup_count: usize = search_results.iter().map(|r| r.matches.len()).sum();
+        let matches_to_enrich =
+            self.filter_and_dedup_matches(search_results, user_path_prefix.as_deref());
+        let dedup_eliminated = pre_dedup_count.saturating_sub(matches_to_enrich.len());
+
+        tracing::debug!(
+            tool = "find_symbol_inner",
+            num_matches = matches_to_enrich.len(),
+            dedup_eliminated,
+            "find_symbol_inner: starting parallel enrichments"
+        );
+
+        let enriched_with_degraded = self
+            .enrich_find_symbol_matches(matches_to_enrich, params.kind.clone())
+            .await;
+
+        let mut any_degraded = false;
+        let mut all_matches: Vec<FoundSymbol> = Vec::new();
+        for (enriched, is_degraded) in enriched_with_degraded {
+            if is_degraded {
+                any_degraded = true;
+            }
+            if let Some(e) = enriched {
+                all_matches.push(FoundSymbol {
+                    semantic_path: e.semantic_path,
+                    kind: e.kind.to_owned(),
+                    file: e.file,
+                    line: e.line,
+                    preview: e.preview,
+                });
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut unique_matches: Vec<FoundSymbol> = Vec::new();
+        for m in all_matches {
+            if seen.insert(m.semantic_path.clone()) {
+                unique_matches.push(m);
+            }
+        }
+
+        unique_matches.sort_by(|a, b| {
+            let score_a = relevance_score(
+                &params.query,
+                &extract_symbol_name_from_path(&a.semantic_path),
+            );
+            let score_b = relevance_score(
+                &params.query,
+                &extract_symbol_name_from_path(&b.semantic_path),
+            );
+            score_b
+                .cmp(&score_a)
+                .then_with(|| a.file.cmp(&b.file))
+                .then_with(|| a.line.cmp(&b.line))
+        });
+
+        let total_found = unique_matches.len();
+        unique_matches.truncate(params.max_results as usize);
+
+        let duration_ms = start.elapsed().as_millis();
+        let search_strategy = if any_degraded {
+            "ripgrep+fallback".to_string()
+        } else {
+            "ripgrep+treesitter".to_string()
+        };
+
+        tracing::info!(
+            tool = "find_symbol_inner",
+            total_found,
+            returned = unique_matches.len(),
+            duration_ms,
+            search_strategy = %search_strategy,
+            "find_symbol_inner: complete"
+        );
+
+        Ok(FindSymbolResponse {
+            symbols: unique_matches,
+            total_found: u32::try_from(total_found).unwrap_or(u32::MAX),
+            search_strategy,
+            duration_ms: Some(u64::try_from(duration_ms).unwrap_or(u64::MAX)),
+            did_you_mean: None,
+            hint: None,
+        })
+    }
+
     async fn run_parallel_searches(
         &self,
-        search_params_list: Vec<SearchParams>,
+        search_params_list: Vec<ScoutSearchParams>,
     ) -> Vec<pathfinder_search::SearchResult> {
         futures::stream::iter(search_params_list)
             .map(|search_params| async move {
@@ -280,10 +477,6 @@ impl PathfinderServer {
                             total_matches: 0,
                             truncated: false,
                             files_searched: 0,
-                            files_in_scope: 0,
-                            binary_skipped: 0,
-                            gitignored_skipped: 0,
-                            other_skipped: 0,
                         }
                     }
                 }
@@ -293,9 +486,6 @@ impl PathfinderServer {
             .await
     }
 
-    /// Flattens raw search results into enrichment candidates, rejecting
-    /// unsafe/out-of-workspace/sandbox-denied paths and applying the user's
-    /// directory prefix filter, then deduplicates by `(file, line)`.
     fn filter_and_dedup_matches(
         &self,
         search_results: Vec<pathfinder_search::SearchResult>,
@@ -326,9 +516,6 @@ impl PathfinderServer {
         matches_to_enrich
     }
 
-    /// Returns `true` if a raw search match should be enriched: the path is
-    /// safe (no traversal), inside the workspace, not sandbox-denied, and
-    /// (when set) matches the user's directory prefix filter.
     fn is_admissible_match(
         &self,
         m: &pathfinder_search::SearchMatch,
@@ -346,7 +533,7 @@ impl PathfinderServer {
 
         let file_path = Path::new(&m.file);
 
-        if !is_workspace_file(file_path, self.workspace_root.path(), canonical_root) {
+        if !is_workspace_file_path(file_path, self.workspace_root.path(), canonical_root) {
             return false;
         }
 
@@ -369,18 +556,12 @@ impl PathfinderServer {
         true
     }
 
-    /// Enriches a single ripgrep match with Tree-sitter's enclosing-symbol
-    /// detail (name + kind), falling back to line-based heuristics when
-    /// Tree-sitter can't resolve it. Returns `(None, _)` when the match
-    /// should be dropped (empty symbol name, or filtered out by `kind`).
     async fn enrich_one_match(
         &self,
         m: MatchToEnrich,
         kind_filter: Option<&str>,
     ) -> (Option<EnrichedMatch>, bool) {
         let file_path = Path::new(&m.file);
-        // m.line is 1-indexed from ripgrep; tree-sitter also expects 1-indexed.
-        // Default to 1 (first line) if conversion fails, preserving valid indexing.
         let line_usize = usize::try_from(m.line).unwrap_or(1);
 
         let fallback_name = extract_name_from_line(&m.content);
@@ -444,7 +625,6 @@ impl PathfinderServer {
         )
     }
 
-    /// Enriches every candidate match concurrently.
     async fn enrich_find_symbol_matches(
         &self,
         matches_to_enrich: Vec<MatchToEnrich>,
@@ -459,237 +639,31 @@ impl PathfinderServer {
             .collect()
             .await
     }
+}
 
-    /// Core logic for the `find_symbol` tool.
-    ///
-    /// Runs ripgrep across the workspace with language-aware definition patterns
-    /// (from spec 007), then enriches each match with Tree-sitter to get the
-    /// enclosing semantic path and symbol kind.
-    ///
-    /// Performance: Uses parallel execution for both searches and Tree-sitter enrichments.
-    ///
-    /// Results are:
-    /// 1. Deduplicated by semantic path
-    /// 2. Sorted by relevance (exact match > prefix match > contains match)
-    /// 3. Filtered by optional `kind` parameter
-    /// 4. Limited to `max_results` entries
-    pub(crate) async fn find_symbol_impl_inner(
-        &self,
-        params: SearchToolParams,
-    ) -> Result<Json<FindSymbolResponse>, ErrorData> {
-        let start = std::time::Instant::now();
-
-        tracing::info!(
-            tool = "find_symbol",
-            query = %params.query,
-            kind = ?params.kind,
-            path_glob = %params.path_glob,
-            max_results = params.max_results,
-            "find_symbol_inner: start"
-        );
-
-        validate_find_symbol_params(&params)?;
-
-        let has_ext_filter = glob_has_ext_filter(&params.path_glob);
-        let extensions = resolve_search_extensions(&params.path_glob);
-        let user_path_prefix = compute_user_path_prefix(&params.path_glob, has_ext_filter);
-        let search_params_list =
-            build_search_params_list(self.workspace_root.path(), extensions, &params.query);
-
-        tracing::debug!(
-            tool = "find_symbol",
-            num_searches = search_params_list.len(),
-            "find_symbol: starting parallel searches"
-        );
-        let search_results = self.run_parallel_searches(search_params_list).await;
-
-        let pre_dedup_count: usize = search_results.iter().map(|r| r.matches.len()).sum();
-        let matches_to_enrich =
-            self.filter_and_dedup_matches(search_results, user_path_prefix.as_deref());
-        let dedup_eliminated = pre_dedup_count.saturating_sub(matches_to_enrich.len());
-
-        tracing::debug!(
-            tool = "find_symbol",
-            num_matches = matches_to_enrich.len(),
-            dedup_eliminated = dedup_eliminated,
-            "find_symbol: starting parallel enrichments"
-        );
-        let enriched_with_degraded = self
-            .enrich_find_symbol_matches(matches_to_enrich, params.kind.clone())
-            .await;
-
-        // Build FoundSymbol list, deduplicate, sort, truncate
-        let mut any_degraded = false;
-        let mut all_matches: Vec<FoundSymbol> = Vec::new();
-        for (enriched, is_degraded) in enriched_with_degraded {
-            if is_degraded {
-                any_degraded = true;
-            }
-            if let Some(e) = enriched {
-                all_matches.push(FoundSymbol {
-                    semantic_path: e.semantic_path,
-                    kind: e.kind.to_owned(),
-                    file: e.file,
-                    line: e.line,
-                    preview: e.preview,
-                });
-            }
-        }
-
-        // Deduplicate by semantic path
-        let mut seen = std::collections::HashSet::new();
-        let mut unique_matches: Vec<FoundSymbol> = Vec::new();
-        for m in all_matches {
-            if seen.insert(m.semantic_path.clone()) {
-                unique_matches.push(m);
-            }
-        }
-
-        // Sort by relevance (exact match > prefix match > contains match)
-        unique_matches.sort_by(|a, b| {
-            let score_a = relevance_score(
-                &params.query,
-                &extract_symbol_name_from_path(&a.semantic_path),
-            );
-            let score_b = relevance_score(
-                &params.query,
-                &extract_symbol_name_from_path(&b.semantic_path),
-            );
-            score_b
-                .cmp(&score_a)
-                .then_with(|| a.file.cmp(&b.file))
-                .then_with(|| a.line.cmp(&b.line))
-        });
-
-        // Limit results
-        let total_found = unique_matches.len();
-        unique_matches.truncate(params.max_results as usize);
-
-        let duration_ms = start.elapsed().as_millis();
-        let search_strategy = if any_degraded {
-            "ripgrep+fallback".to_string()
-        } else {
-            "ripgrep+treesitter".to_string()
-        };
-
-        tracing::info!(
-            tool = "find_symbol",
-            total_found,
-            returned = unique_matches.len(),
-            duration_ms,
-            search_strategy = %search_strategy,
-            "find_symbol: complete"
-        );
-
-        Ok(Json(FindSymbolResponse {
-            symbols: unique_matches,
-            total_found: u32::try_from(total_found).unwrap_or(u32::MAX),
-            search_strategy,
-            duration_ms: Some(u64::try_from(duration_ms).unwrap_or(u64::MAX)),
-            did_you_mean: None,
-            hint: None,
-        }))
-    }
-
-    /// Resolve a bare symbol name to its `file::symbol` semantic path(s).
-    ///
-    /// This is the public entry point that wraps `find_symbol_impl_inner`
-    /// with did-you-mean suggestions when no exact matches are found.
-    ///
-    /// Performance: Uses parallel execution for both searches and Tree-sitter enrichments.
-    ///
-    /// Results are:
-    /// 1. Deduplicated by semantic path
-    /// 2. Sorted by relevance (exact match > prefix match > contains match)
-    /// 3. Filtered by optional `kind` parameter
-    /// 4. Limited to `max_results` entries
-    /// 5. When empty, includes `did_you_mean` suggestions if similar symbols exist
-    pub(crate) async fn find_symbol_impl(
-        &self,
-        params: SearchToolParams,
-    ) -> Result<Json<FindSymbolResponse>, ErrorData> {
-        let start = std::time::Instant::now();
-        let query = params.query.clone();
-        let path_glob = params.path_glob.clone();
-
-        let Json(result) = self.find_symbol_impl_inner(params).await?;
-
-        if result.symbols.is_empty() && !query.is_empty() {
-            let suggestions = self.compute_symbol_did_you_mean(&query, &path_glob).await;
-
-            if !suggestions.is_empty() {
-                return Ok(Json(FindSymbolResponse {
-                    symbols: vec![],
-                    total_found: 0,
-                    search_strategy: result.search_strategy,
-                    duration_ms: Some(crate::server::helpers::millis_to_u64(
-                        start.elapsed().as_millis(),
-                    )),
-                    did_you_mean: Some(suggestions),
-                    hint: Some(
-                        "No exact symbol match found. Check did_you_mean for suggested alternative paths."
-                            .to_string(),
-                    ),
-                }));
-            }
-        }
-
-        Ok(Json(result))
-    }
-
-    /// Compute did-you-mean suggestions for a failed symbol search.
-    /// Uses text search to find definitions and usages containing the query,
-    /// then extracts symbol names from those matches.
-    async fn compute_symbol_did_you_mean(&self, query: &str, path_glob: &str) -> Vec<String> {
-        let search_params = crate::server::types::SearchParams {
-            query: query.to_string(),
-            mode: crate::server::types::SearchMode::Text,
-            path_glob: path_glob.to_string(),
-            max_results: 50,
-            ..Default::default()
-        };
-
-        let Ok(Json(response)) = self.search_codebase_impl(search_params).await else {
-            return vec![];
-        };
-
-        let mut suggestions: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        for m in response.matches {
-            if !m.content.is_empty() {
-                let is_likely_definition = m.is_definition == Some(true)
-                    || DEFINITION_KEYWORDS
-                        .iter()
-                        .any(|kw| m.content.contains(&format!("{kw} ")));
-
-                if is_likely_definition {
-                    let name = extract_name_from_line(&m.content);
-                    if !name.is_empty() && !name.contains(char::is_whitespace) {
-                        let semantic_path = format!("{}::{}", m.file, name);
-                        if seen.insert(semantic_path.clone()) {
-                            suggestions.push(semantic_path);
-                        }
-                    }
-                }
-            }
-
-            if let Some(ref path) = m.enclosing_semantic_path {
-                if !path.is_empty() {
-                    let semantic_path = format!("{}::{}", m.file, path);
-                    if seen.insert(semantic_path.clone()) {
-                        suggestions.push(semantic_path);
-                    }
-                }
-            }
-        }
-
-        suggestions.truncate(5);
-        suggestions
+/// Apply `filter_mode` to a list of enriched matches using pre-computed node types.
+pub(crate) fn apply_filter_mode(
+    matches: Vec<SearchMatch>,
+    node_types: &[String],
+    mode: FilterMode,
+) -> Vec<SearchMatch> {
+    match mode {
+        FilterMode::All => matches,
+        FilterMode::CodeOnly => matches
+            .into_iter()
+            .zip(node_types.iter())
+            .filter(|(_, t)| t.as_str() == "code")
+            .map(|(m, _)| m)
+            .collect(),
+        FilterMode::CommentsOnly => matches
+            .into_iter()
+            .zip(node_types.iter())
+            .filter(|(_, t)| t.as_str() == "comment" || t.as_str() == "string")
+            .map(|(m, _)| m)
+            .collect(),
     }
 }
 
-/// Extract just the symbol name from a semantic path (e.g., "`src/auth.ts::AuthService.login`" -> "AuthService.login")
 fn extract_symbol_name_from_path(semantic_path: &str) -> String {
     semantic_path
         .split("::")
@@ -698,9 +672,6 @@ fn extract_symbol_name_from_path(semantic_path: &str) -> String {
         .join("::")
 }
 
-/// Map a treesitter [`SymbolKind`] to the filter-string vocabulary used by
-/// [`kind_matches_filter`]. This is the authoritative kind source when
-/// treesitter succeeds — it replaces the heuristic `infer_kind_from_line`.
 fn symbol_kind_to_filter_string(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::Function | SymbolKind::Method | SymbolKind::Test => "function",
@@ -711,17 +682,10 @@ fn symbol_kind_to_filter_string(kind: SymbolKind) -> &'static str {
         SymbolKind::Interface => "interface",
         SymbolKind::Enum => "enum",
         SymbolKind::Module => "module",
-        // Vue-specific kinds and other non-standard kinds fall through
-        // to "unknown" — agents won't typically filter for these.
         _ => "unknown",
     }
 }
 
-/// Heuristic kind classification from a source line's text content.
-///
-/// Used as a fallback when treesitter is unavailable (unsupported language,
-/// parse failure, etc.). For languages with treesitter support, the
-/// authoritative kind comes from [`symbol_kind_to_filter_string`].
 fn infer_kind_from_line(line: &str) -> &'static str {
     let lower = line.to_lowercase();
     if lower.contains("fn ")
@@ -753,9 +717,6 @@ fn infer_kind_from_line(line: &str) -> &'static str {
     }
 }
 
-/// Extract symbol name from line content (fallback when Tree-sitter unavailable)
-///
-/// Uses keyword scanning with static list; no regex compilation per call.
 fn extract_name_from_line(line: &str) -> String {
     let trimmed = line.trim();
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
@@ -774,12 +735,6 @@ fn extract_name_from_line(line: &str) -> String {
         .unwrap_or_else(|| tokens.first().map(ToString::to_string).unwrap_or_default())
 }
 
-/// Check if symbol kind matches the filter.
-///
-/// The mapping is intentionally broad: `"function"` and `"method"` are treated
-/// as synonyms because different languages classify the same concept differently
-/// (e.g. Java methods are extracted as `SymbolKind::Function`). An agent asking
-/// for `kind="method"` should still find Java methods.
 fn kind_matches_filter(kind: &str, filter: &str) -> bool {
     let k = kind.to_ascii_lowercase();
     let f = filter.to_ascii_lowercase();
@@ -806,15 +761,7 @@ fn kind_matches_filter(kind: &str, filter: &str) -> bool {
     }
 }
 
-/// Check if file is in workspace (not in `node_modules`, target, .git, etc.)
-///
-/// Takes a pre-computed `canonical_root` to avoid the expensive `canonicalize()`
-/// syscall per match. The caller pre-computes this once before the loop.
-///
-/// Fast path: if the path is relative and contains no `..` traversal, it is
-/// unconditionally in-workspace (only skip-pattern filtering applies). This
-/// covers ~99% of ripgrep output.
-fn is_workspace_file(path: &Path, workspace_root: &Path, canonical_root: &Path) -> bool {
+fn is_workspace_file_path(path: &Path, workspace_root: &Path, canonical_root: &Path) -> bool {
     let path_str = path.to_string_lossy();
 
     let skip_patterns = [
@@ -832,16 +779,10 @@ fn is_workspace_file(path: &Path, workspace_root: &Path, canonical_root: &Path) 
         }
     }
 
-    // Fast path: relative paths without traversal are guaranteed in-workspace.
-    // The caller (find_symbol_impl Phase 3) already rejects paths containing
-    // ".." or starting with "/" / "\\", so this fast path handles the
-    // overwhelming majority of matches without any syscall.
     if !path.is_absolute() && !path_str.contains("..") {
         return true;
     }
 
-    // Slow path: only reached for edge cases (absolute paths, symlinks).
-    // Uses the pre-computed canonical root — avoids redundant canonicalize().
     let Ok(full_path) = workspace_root.join(path).canonicalize() else {
         return false;
     };
@@ -849,34 +790,14 @@ fn is_workspace_file(path: &Path, workspace_root: &Path, canonical_root: &Path) 
     full_path.starts_with(canonical_root)
 }
 
-/// Extract a single canonical extension from a glob pattern string.
-///
-/// Returns `Some(ext)` only when the glob unambiguously targets a single known
-/// source language (e.g. `"**/*.rs"` → `Some("rs")`). Returns `None` for:
-/// - Multi-extension brace expansions: `"**/*.{ts,tsx}"`, `"**/*.{js,jsx}"`
-/// - Extension-agnostic globs:         `"**/*"`, `"src/*"`, `"target_dir/*"`
-/// - Unknown extensions:               `"**/*.xyz"`
-///
-/// This is intentionally conservative: when in doubt, `None` is returned and the
-/// caller falls back to the appropriate strategy (either all-languages search or
-/// the "any" bare-word fallback).
 fn infer_single_ext_from_glob(glob: &str) -> Option<&'static str> {
-    // Brace expansion (multi-ext) — bail immediately.
     if glob.contains('{') {
         return None;
     }
 
-    // Extension markers paired with their canonical names.
-    //
-    // IMPORTANT: order matters — longer extensions must come before their prefixes.
-    // "*.tsx" must appear before "*.ts" because "*.tsx" contains "*.ts" as a substring.
-    // The matching loop stops at the first hit, but we still scan all markers to detect
-    // multi-extension globs. We therefore use an anchored suffix check: a marker only
-    // matches when the next character after it is NOT alphanumeric (i.e., no additional
-    // extension characters follow). This prevents "*.ts" from matching inside "*.tsx".
     let known: &[(&str, &'static str)] = &[
-        ("*.tsx", "tsx"), // before *.ts
-        ("*.jsx", "jsx"), // before *.js
+        ("*.tsx", "tsx"),
+        ("*.jsx", "jsx"),
         ("*.rs", "rs"),
         ("*.ts", "ts"),
         ("*.js", "js"),
@@ -888,8 +809,6 @@ fn infer_single_ext_from_glob(glob: &str) -> Option<&'static str> {
 
     let mut matched: Option<&'static str> = None;
     for (marker, ext) in known {
-        // Anchored check: "*.ts" must not be followed by another alphabetic char
-        // (which would indicate a longer extension like tsx).
         let found = glob.match_indices(marker).any(|(pos, _)| {
             let after_pos = pos + marker.len();
             !glob[after_pos..]
@@ -899,7 +818,6 @@ fn infer_single_ext_from_glob(glob: &str) -> Option<&'static str> {
         });
         if found {
             if matched.is_some() {
-                // More than one extension detected — ambiguous, bail.
                 return None;
             }
             matched = Some(ext);
@@ -907,7 +825,3 @@ fn infer_single_ext_from_glob(glob: &str) -> Option<&'static str> {
     }
     matched
 }
-
-#[cfg(test)]
-#[path = "find_symbol_test.rs"]
-mod tests;

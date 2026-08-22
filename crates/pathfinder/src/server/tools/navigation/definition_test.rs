@@ -8,6 +8,7 @@ use pathfinder_common::types::{DegradedReason, WorkspaceRoot};
 use pathfinder_lsp::{DefinitionLocation, MockLawyer};
 use pathfinder_search::MockScout;
 use pathfinder_treesitter::mock::MockSurgeon;
+use pathfinder_treesitter::surgeon::Point;
 use std::sync::Arc;
 
 /// Extract `GetDefinitionResponse` from a `CallToolResult.structured_content`.
@@ -209,10 +210,6 @@ async fn test_get_definition_generic_lsp_error_falls_back_to_grep() {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     // Lawyer returns a generic LSP error (not NoLspAvailable)
@@ -280,10 +277,6 @@ async fn test_get_definition_connection_lost_falls_back_to_grep() {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let lawyer = Arc::new(MockLawyer::default());
@@ -389,10 +382,6 @@ async fn test_get_definition_grep_fallback_with_mock_scout() {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let server = PathfinderServer::with_all_engines(
@@ -515,9 +504,11 @@ async fn test_get_definition_returns_did_you_mean_suggestions_on_symbol_not_foun
             semantic_path: "logIn".to_owned(),
             kind: SymbolKind::Function,
             byte_range: 0..5,
+            attached_range: 0..0,
             start_line: 0,
             end_line: 0,
             name_column: 0,
+            name_point: Point { row: 0, column: 0 },
             access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -526,9 +517,11 @@ async fn test_get_definition_returns_did_you_mean_suggestions_on_symbol_not_foun
             semantic_path: "logon".to_owned(),
             kind: SymbolKind::Function,
             byte_range: 10..15,
+            attached_range: 0..0,
             start_line: 1,
             end_line: 1,
             name_column: 0,
+            name_point: Point { row: 1, column: 0 },
             access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -620,10 +613,6 @@ async fn test_get_definition_grep_fallback_when_lsp_returns_none() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let ws_dir = make_temp_workspace();
@@ -676,10 +665,6 @@ async fn test_get_definition_grep_fallback_when_no_lsp() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let ws_dir = make_temp_workspace();
@@ -741,10 +726,6 @@ async fn test_get_definition_lsp_timeout_falls_back_to_grep() {
         total_matches: 1,
         truncated: false,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let lawyer = Arc::new(MockLawyer::default());
@@ -809,10 +790,6 @@ async fn test_get_definition_multi_strategy_fallback() {
             total_matches: 0,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         // Strategy 3 returns match (global search)
         Ok(pathfinder_search::SearchResult {
@@ -831,10 +808,6 @@ async fn test_get_definition_multi_strategy_fallback() {
             total_matches: 1,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
     ]);
 
@@ -957,10 +930,6 @@ async fn test_get_definition_grep_fallback_with_two_segment_symbol() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let ws_dir = make_temp_workspace();
@@ -1054,10 +1023,6 @@ async fn test_get_definition_grep_impl_method_strategy() {
             total_matches: 0,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         // Strategy 1 pattern 2: struct|enum|trait|type|mod\s+check\b — empty
         Ok(pathfinder_search::SearchResult {
@@ -1065,10 +1030,6 @@ async fn test_get_definition_grep_impl_method_strategy() {
             total_matches: 0,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         // Strategy 1 pattern 3: const|static\s+check\b — empty
         Ok(pathfinder_search::SearchResult {
@@ -1076,10 +1037,6 @@ async fn test_get_definition_grep_impl_method_strategy() {
             total_matches: 0,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         // Strategy 1 pattern 4: \bcheck\b — empty
         Ok(pathfinder_search::SearchResult {
@@ -1087,10 +1044,6 @@ async fn test_get_definition_grep_impl_method_strategy() {
             total_matches: 0,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         // Strategy 2 step 1: impl block search finds src/sandbox.rs
         Ok(pathfinder_search::SearchResult {
@@ -1109,10 +1062,6 @@ async fn test_get_definition_grep_impl_method_strategy() {
             total_matches: 1,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         // Strategy 2 step 2: method search finds fn check in src/sandbox.rs
         Ok(pathfinder_search::SearchResult {
@@ -1131,10 +1080,6 @@ async fn test_get_definition_grep_impl_method_strategy() {
             total_matches: 1,
             truncated: false,
             files_searched: 1,
-            files_in_scope: 1,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
     ]);
 

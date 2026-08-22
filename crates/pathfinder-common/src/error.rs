@@ -157,12 +157,12 @@ impl PathfinderError {
                 Some("File is outside workspace sandbox. Check .pathfinderignore rules.".to_owned())
             }
             Self::UnsupportedLanguage { .. } => Some(
-                "No tree-sitter grammar for this file type. Use read for raw content."
+                "No tree-sitter grammar for this file type. Use your host's file-reading tools for raw content."
                     .to_owned(),
             ),
             Self::FileNotFound { .. } => Some(
                 "Verify the file path is relative to the workspace root and the file exists. \
-                 Use search(query=\"...\") to find the correct path, or explore to see all files."
+                 Use your host's file search tools or locate to find the correct path."
                     .to_owned(),
             ),
             Self::InvalidSemanticPath { input, issue } => {
@@ -175,13 +175,13 @@ impl PathfinderError {
             Self::LspError { message } => Some(Self::hint_lsp_error(message)),
             Self::LspTimeout { timeout_ms } => Some(format!(
                 "LSP timed out after {timeout_ms}ms. The language server may still be indexing, under memory pressure, or deadlocked. \
-                 Workaround: use search + inspect (tree-sitter) instead of \
+                 Workaround: use inspect (tree-sitter) or host grep instead of \
                  LSP-dependent tools (locate, trace, inspect). \
-                 Check health for current status."
+                 Retry after language server becomes ready."
             )),
             Self::NoLspAvailable { language } => Some(format!(
                 "No LSP available for {language}. Install a language server to enable LSP-dependent features. \
-                 Tree-sitter tools (inspect, search, read) still work without LSP."
+                 Tree-sitter tools (inspect) still work without LSP."
             )),
             _ => None,
         }
@@ -218,7 +218,6 @@ impl PathfinderError {
 
         if did_you_mean.is_empty() {
             // No suggestions — the symbol might be in a different file than what the agent guessed.
-            // Suggest search to locate the correct file.
             let base_name = semantic_path
                 .split("::")
                 .last()
@@ -227,12 +226,12 @@ impl PathfinderError {
                 .next()
                 .unwrap_or(semantic_path);
             format!(
-                "Symbol not found in the specified file. Use search(mode=\"symbol\", query=\"{base_name}\") to locate the correct file, or search(query=\"{base_name}\") to search the entire workspace.{}",
+                "Symbol not found in the specified file. Use locate or your host's grep tool to search for \"{base_name}\".{}",
                 separator_hint.unwrap_or("")
             )
         } else {
             format!(
-                "Did you mean: {}? Use search if the symbol is in a different file, or read to see available symbols in this file.{}",
+                "Did you mean: {}? Use locate or inspect with the suggested path.{}",
                 did_you_mean.join(", "),
                 separator_hint.unwrap_or("")
             )
@@ -242,7 +241,7 @@ impl PathfinderError {
     fn hint_invalid_semantic_path(input: &str, issue: &str) -> String {
         if issue.contains("symbol target") {
             format!(
-                "'{input}' is a file path without a symbol target. This tool requires 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). If you want the full file content without symbol resolution, use read(filepath=\"{input}\")."
+                "'{input}' is a file path without a symbol target. This tool requires 'file.rs::symbol' format (e.g., 'src/auth.ts::AuthService.login'). Use 'file.rs::symbol' format with locate, trace, or inspect."
             )
         } else {
             format!(
@@ -255,21 +254,18 @@ impl PathfinderError {
         let hint = if message.contains("timed out") || message.contains("timeout") {
             format!(
                  "LSP timed out. The language server may still be indexing, under memory pressure, or deadlocked. \
-                  Workaround: use search + inspect (tree-sitter) instead of \
+                  Workaround: use inspect (tree-sitter) or host grep instead of \
                   LSP-dependent tools (locate, trace, inspect). \
                   Original error: {message}"
             )
         } else if message.contains("connection lost") || message.contains("crashed") {
             format!(
                 "LSP process crashed or disconnected. Pathfinder will attempt to restart it. \
-                 Workaround: use tree-sitter-based tools (search, inspect, read). \
+                 Workaround: use tree-sitter-based tools (inspect) or host grep. \
                  Original error: {message}"
             )
         } else {
-            format!(
-                "LSP error: {message}. Workaround: use search for text-based navigation \
-                 or check health for current status."
-            )
+            format!("LSP error: {message}. Workaround: use host grep or inspect for navigation.")
         };
         hint
     }

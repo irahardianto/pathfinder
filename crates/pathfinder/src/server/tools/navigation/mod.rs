@@ -18,7 +18,7 @@ use crate::server::helpers::{
     treesitter_error_to_error_data,
 };
 use crate::server::types::{
-    BatchLocateResult, GetDefinitionResponse, GetSemanticPathResult, HealthParams, LocateParams,
+    BatchLocateResult, GetDefinitionResponse, GetSemanticPathResult, LocateParams,
     LocateResultEntry, TraceParams, TraceScope,
 };
 use crate::server::PathfinderServer;
@@ -28,43 +28,94 @@ use std::fmt::Write as _;
 
 mod deep_context;
 mod definition;
-mod health;
+pub(crate) mod grep_support;
 mod impact;
 mod overview;
 mod references;
 #[cfg(test)]
 mod test_helpers;
 
-/// File extensions considered source code for grep fallback filtering.
+/// Shared budget for grep fallback execution in navigation tools (RSP-A10, RSP-D3).
 ///
-/// When the LSP is unavailable and we fall back to text search, we only
-/// want results from actual source files, not documentation (.md), config
-/// (.json, .yaml, .toml), or other non-source files.
-const SOURCE_FILE_EXTENSIONS: &[&str] = &[
-    "rs",   // Rust
-    "go",   // Go
-    "ts",   // TypeScript
-    "tsx",  // TypeScript + JSX
-    "js",   // JavaScript
-    "jsx",  // JavaScript + JSX
-    "mjs",  // JavaScript (ESM module)
-    "cjs",  // JavaScript (CommonJS)
-    "py",   // Python
-    "pyi",  // Python type stub
-    "vue",  // Vue Single-File Component
-    "java", // Java
-];
+/// Enforces:
+/// 1. Shared wall-clock deadline (5.0 seconds).
+/// 2. Hard limit of at most 8 searches across all strategies and candidates.
+#[derive(Debug, Clone)]
+pub(crate) struct GrepFallbackBudget {
+    deadline: std::time::Instant,
+    max_searches: usize,
+    searches_done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl GrepFallbackBudget {
+    /// Create a budget with standard 5-second deadline and 8-search limit.
+    pub(crate) fn new() -> Self {
+        Self::with_budget(std::time::Duration::from_secs(5), 8)
+    }
+
+    pub(crate) fn with_budget(timeout: std::time::Duration, max_searches: usize) -> Self {
+        Self {
+            deadline: std::time::Instant::now() + timeout,
+            max_searches,
+            searches_done: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Checks if a search may proceed under the budget.
+    /// If yes, returns `Some(deadline)` and increments the counter.
+    /// If budget is exhausted (time expired or max searches reached), returns `None`.
+    pub(crate) fn acquire_search(&self) -> Option<std::time::Instant> {
+        if std::time::Instant::now() >= self.deadline {
+            return None;
+        }
+        let prev = self
+            .searches_done
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if prev >= self.max_searches {
+            return None;
+        }
+        Some(self.deadline)
+    }
+
+    /// Returns the wall-clock deadline.
+    #[cfg(test)]
+    pub(crate) fn deadline(&self) -> std::time::Instant {
+        self.deadline
+    }
+
+    /// Returns the number of searches performed so far.
+    #[cfg(test)]
+    pub(crate) fn searches_performed(&self) -> usize {
+        self.searches_done.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Default for GrepFallbackBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Returns `true` if the file path has a source code extension.
 ///
-/// Used to filter out non-source files (docs, configs) from grep fallback
-/// search results to reduce false positives.
-fn is_source_file(file: &str) -> bool {
+/// Driven from the Tree-sitter grammar and LSP plugin registries (WS-8).
+/// Excludes non-code markup/styling grammars (e.g. html, css).
+pub(crate) fn is_source_file(file: &str) -> bool {
     let ext = std::path::Path::new(file)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    SOURCE_FILE_EXTENSIONS.contains(&ext)
+    if ext.is_empty() {
+        return false;
+    }
+    if pathfinder_lsp::plugin_for_extension(ext).is_some() {
+        return true;
+    }
+    if let Some(grammar) = pathfinder_treesitter::language::LanguageGrammar::find_by_extension(ext)
+    {
+        return grammar.id != "html" && grammar.id != "css";
+    }
+    false
 }
 
 /// Returns `true` if the file looks like it's from the user's workspace (not external/dependencies).
@@ -183,12 +234,17 @@ pub(crate) fn last_symbol_name(
 }
 
 /// Returns language keywords to filter out from call-candidate extraction.
+/// Driven from grammar and LSP plugin registry with normalized fallback.
 #[expect(
     clippy::too_many_lines,
     reason = "keyword lookup table; large match is natural"
 )]
 fn keywords_for_language(language: &str) -> &'static [&'static str] {
-    match language {
+    let lang = pathfinder_treesitter::language::LanguageGrammar::find_by_id(language).map_or_else(
+        || pathfinder_lsp::plugin_for_language(language).map_or(language, |p| p.language_id()),
+        |g| g.lsp_language_id(),
+    );
+    match lang {
         "rust" => &[
             "if", "else", "for", "while", "loop", "match", "return", "break", "continue", "let",
             "mut", "const", "static", "struct", "enum", "trait", "impl", "fn", "type", "where",
@@ -366,75 +422,109 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
     }
 }
 
-/// PATCH-005: Map tree-sitter language ID to file glob pattern.
+/// Map language ID to file glob pattern, driven from plugin and grammar registries.
 ///
-/// Used by `resolve_candidate_via_grep` to search for definition files.
-fn language_to_file_glob(language: &str) -> &str {
+/// Used by candidate resolution and grep fallbacks to search for definition files.
+fn language_to_file_glob(language: &str) -> String {
     match language {
-        "rust" => "**/*.rs",
-        "typescript" | "tsx" => "**/*.{ts,tsx}",
-        "javascript" => "**/*.{js,jsx}",
-        "python" => "**/*.py",
-        "go" => "**/*.go",
-        "vue" => "**/*.{vue,ts,tsx,js,jsx,mjs,cjs}",
-        "java" => "**/*.java",
-        _ => "**/*",
+        "rust" => "**/*.rs".to_string(),
+        "typescript" | "tsx" => "**/*.{ts,tsx}".to_string(),
+        "javascript" => "**/*.{js,jsx}".to_string(),
+        "python" => "**/*.py".to_string(),
+        "go" => "**/*.go".to_string(),
+        "vue" => "**/*.{vue,ts,tsx,js,jsx,mjs,cjs}".to_string(),
+        "java" => "**/*.java".to_string(),
+        _ => {
+            if let Some(plugin) = pathfinder_lsp::plugin_for_language(language) {
+                let exts = plugin.file_extensions();
+                if exts.len() == 1 {
+                    format!("**/*.{}", exts[0])
+                } else if !exts.is_empty() {
+                    format!("**/*.{{{}}}", exts.join(","))
+                } else {
+                    "**/*".to_string()
+                }
+            } else if let Some(grammar) =
+                pathfinder_treesitter::language::LanguageGrammar::find_by_id(language)
+            {
+                let exts = grammar.extensions;
+                if exts.len() == 1 {
+                    format!("**/*.{}", exts[0])
+                } else if !exts.is_empty() {
+                    format!("**/*.{{{}}}", exts.join(","))
+                } else {
+                    "**/*".to_string()
+                }
+            } else {
+                "**/*".to_string()
+            }
+        }
     }
 }
 
-/// DELIVERABLE F: Java-specific regex pattern for resolving candidate definitions.
+/// Java-specific regex pattern for resolving candidate definitions.
 ///
 /// Matches Java method definitions, constructors, records, and class/interface declarations.
 /// Used by grep fallback for outgoing dependency discovery.
 fn java_resolve_pattern(candidate: &str) -> String {
-    let escaped = regex::escape(candidate);
+    let escaped = if candidate.contains('|') {
+        candidate.to_string()
+    } else {
+        regex::escape(candidate)
+    };
     format!(
-        r"(?:^[ \t]*(?:(?:public|private|protected)\s+)?(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?{escaped}\s*\(|^[ \t]*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?(?:(?:void|boolean|int|long|double|float|short|byte|char)|[A-Z][a-zA-Z0-9_]*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>)?)(?:\[\])*\s+{escaped}\s*\(|^[ \t]*(?:(?:public|private|protected|static|final)\s+)*record\s+{escaped}\s*[<(]|(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+|sealed\s+|non-sealed\s+|strictfp\s+)*(?:class|interface|enum|@interface)\s+{escaped}\b)"
+        r"(?:^[ \t]*(?:(?:public|private|protected)\s+)?(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?(?:{escaped})\s*\(|^[ \t]*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?(?:(?:void|boolean|int|long|double|float|short|byte|char)|[A-Z][a-zA-Z0-9_]*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>)?)(?:\[\])*\s+(?:{escaped})\s*\(|^[ \t]*(?:(?:public|private|protected|static|final)\s+)*record\s+(?:{escaped})\s*[<(]|(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+|sealed\s+|non-sealed\s+|strictfp\s+)*(?:class|interface|enum|@interface)\s+(?:{escaped})\b)"
     )
 }
 
-/// DELIVERABLE F: Build a regex pattern to find a candidate function's definition.
+/// Build a regex pattern to find a candidate function's definition.
 ///
+/// Supports single candidate identifiers or alternation patterns (`candidate1|candidate2`).
 /// Used by grep fallback for outgoing dependency discovery in both
 /// `inspect` (deep context) and `trace` (callers/callees).
 fn candidate_definition_pattern(language: &str, candidate: &str) -> String {
-    let escaped = regex::escape(candidate);
-    match language {
+    let escaped = if candidate.contains('|') {
+        candidate.to_string()
+    } else {
+        regex::escape(candidate)
+    };
+    let lang = pathfinder_treesitter::language::LanguageGrammar::find_by_id(language).map_or_else(
+        || pathfinder_lsp::plugin_for_language(language).map_or(language, |p| p.language_id()),
+        |g| g.lsp_language_id(),
+    );
+    match lang {
         // The outer non-capturing group is intentionally closed at the end so
         // regex::Regex::new() succeeds and optional pub/async qualifiers are grouped.
-        "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{escaped}\b)"),
-        "go" => format!(r"func\s+{escaped}\b"),
-        "typescript" | "tsx" | "javascript" | "vue" => {
+        "rust" => format!(r"(?:(?:pub\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+(?:{escaped})\b)"),
+        "go" => format!(r"func\s+(?:{escaped})\b"),
+        "typescript" | "javascript" | "vue" => {
             format!(
-                r"(?:(?:export\s+(?:default\s*)?)?function\s+{escaped}\b|(?:export\s+)?(?:const|let|var)\s+{escaped}\s*[=:]|(?:{escaped}\s*:\s*)[^{{]*\([^)]*\)\s*=>)"
+                r"(?:(?:export\s+(?:default\s*)?)?function\s+(?:{escaped})\b|(?:export\s+)?(?:const|let|var)\s+(?:{escaped})\s*[=:]|(?:(?:{escaped})\s*:\s*)[^{{]*\([^)]*\)\s*=>)"
             )
         }
-        "python" => format!(r"(?:async\s+)?def\s+{escaped}\b"),
-        "java" => java_resolve_pattern(candidate),
-        _ => format!(r"\b(?:fn|def|function|class|struct|type|interface)\s+{escaped}\b"),
+        "python" => format!(r"(?:async\s+)?def\s+(?:{escaped})\b"),
+        "java" => java_resolve_pattern(&escaped),
+        _ => format!(r"\b(?:fn|def|function|class|struct|type|interface)\s+(?:{escaped})\b"),
     }
 }
 
-/// SPEC 007: Language-aware regex patterns for definition search.
+/// Language-aware regex patterns for definition search.
 ///
-/// Returns language-specific regex patterns for finding symbol definitions.
+/// Returns language-specific regex patterns for finding symbol definitions,
+/// driven from the Tree-sitter and LSP plugin registries (WS-8).
 /// Used by `find_symbol` and `fallback_definition_grep` for grep-based fallbacks.
-///
-/// # Patterns
-///
-/// | Extension | Patterns |
-/// |-----------|----------|
-/// | `rs` | Functions (`fn`), types (`struct`, `enum`, `trait`, `type`, `mod`), constants (`const`, `static`) |
-/// | `ts`/`tsx`/`js`/`jsx` | Functions (`function`), classes (`class`, `interface`, `type`, `enum`), variable declarations |
-/// | `py` | Functions (`def`), classes (`class`), module-level assignments |
-/// | `go` | Functions (`func`), types (`type`), constants (`const`, `var`) |
-/// | Other | Bare word boundary fallback |
-///
 pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
+    if ext == "invalid_regex" {
+        return vec!["[invalid".to_string()];
+    }
     let name = regex::escape(symbol_name);
-    match ext {
-        "invalid_regex" => vec!["[invalid".to_string()],
-        "rs" => vec![
+    let lang = pathfinder_treesitter::language::LanguageGrammar::find_by_extension(ext)
+        .map_or_else(
+            || pathfinder_lsp::plugin_for_extension(ext).map_or(ext, |p| p.language_id()),
+            |g| g.lsp_language_id(),
+        );
+    match lang {
+        "rust" => vec![
             format!(
                 r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+{name}\b"
             ),
@@ -442,7 +532,7 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
             format!(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const|static)\s+{name}\b"),
             format!(r"macro_rules!\s+{name}\b"),
         ],
-        "ts" | "tsx" | "js" | "jsx" => vec![
+        "typescript" | "javascript" => vec![
             format!(r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+{name}\b"),
             format!(
                 r"(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+{name}\b"
@@ -452,7 +542,7 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
                 r"(?:export\s+)?(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?\s*=>"
             ),
         ],
-        "py" => vec![
+        "python" => vec![
             format!(r"(?:async\s+)?def\s+{name}\b"),
             format!(r"class\s+{name}\b"),
             format!(r"^{name}\s*[=:]"),
@@ -472,7 +562,6 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
                     r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+|sealed\s+|non-sealed\s+|strictfp\s+)*(?:class|interface|enum|@interface)\s+{name}\b"
                 ),
                 // P1: Constructor — no return type, only modifiers + optional type-params before name.
-                // Line-anchored (^) prevents matching `throw new MyClass(` or `return new MyClass(`.
                 format!(
                     r"^[ \t]*(?:(?:public|private|protected)\s+)?(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?{parent}\s*\("
                 ),
@@ -481,7 +570,6 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
                     r"^[ \t]*(?:(?:public|private|protected|static|final)\s+)*record\s+{name}\s*[<(]"
                 ),
                 // P3: Method — return type must be primitive keyword or start uppercase.
-                // `new`/`throw` are lowercase non-primitives → rejected. No \s in type token.
                 format!(
                     r"^[ \t]*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>\s+)?(?:(?:void|boolean|int|long|double|float|short|byte|char)|[A-Z][a-zA-Z0-9_]*(?:<[^>]*?(?:<[^>]*?>[^>]*?)*>)?)(?:\[\])*\s+{name}\s*\("
                 ),
@@ -580,19 +668,17 @@ impl PathfinderServer {
                 if let Some(chain) = &semantic_path.symbol_chain {
                     if let Some(base_name) = chain.segments.last() {
                         // Use find_symbol to search across files
-                        let find_params = crate::server::types::SearchParams {
+                        let find_params = grep_support::FindSymbolParams {
                             query: base_name.name.clone(),
-                            mode: crate::server::types::SearchMode::Symbol,
                             // PATCH-002-C: filter to function kind to narrow cross-file results
                             // (avoids matching unrelated structs/enums named "search")
                             kind: Some("function".to_string()),
                             path_glob: "**/*".to_owned(),
                             max_results: 20,
-                            ..Default::default()
                         };
                         match self.find_symbol_impl_inner(find_params).await {
                             Ok(response) => {
-                                for symbol in response.0.symbols {
+                                for symbol in response.symbols {
                                     if !suggestions.contains(&symbol.semantic_path) {
                                         suggestions.push(symbol.semantic_path);
                                     }
@@ -617,7 +703,7 @@ impl PathfinderServer {
 
     /// Wrapper around `surgeon.read_symbol_scope` that enriches `SymbolNotFound` errors
     /// with separator correction (Spec 2.2) and cross-file search (Spec 2.3).
-    async fn read_symbol_scope_enriched(
+    pub(crate) async fn read_symbol_scope_enriched(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
         semantic_path_str: &str,
@@ -669,10 +755,8 @@ impl PathfinderServer {
     }
 
     /// Consolidated `locate` handler.
-    pub(crate) async fn locate_impl(
-        &self,
-        params: LocateParams,
-    ) -> Result<CallToolResult, ErrorData> {
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn locate_impl(&self, params: LocateParams) -> Result<CallToolResult, ErrorData> {
         if let Some(ref locations) = params.locations {
             // Mutual exclusion: batch mode cannot be combined with single-mode params
             if params.semantic_path.is_some() || params.file.is_some() || params.line.is_some() {
@@ -692,6 +776,7 @@ impl PathfinderServer {
             file: entry.file.clone(),
             line: entry.line,
             locations: None,
+            retry_attempt: 0,
         };
         let is_semantic_path = entry.semantic_path.is_some();
         let res = self.locate_impl_single(single_params).await;
@@ -701,55 +786,9 @@ impl PathfinderServer {
                     .structured_content
                     .unwrap_or(serde_json::Value::Null);
                 if is_semantic_path {
-                    match serde_json::from_value::<GetDefinitionResponse>(val) {
-                        Ok(meta) => LocateResultEntry {
-                            input: entry,
-                            status: "ok".to_string(),
-                            file: Some(meta.file),
-                            line: Some(meta.line),
-                            column: Some(meta.column),
-                            semantic_path: None,
-                            preview: Some(meta.preview),
-                            resolution_strategy: meta.resolution_strategy,
-                            error: None,
-                        },
-                        Err(e) => LocateResultEntry {
-                            input: entry,
-                            status: "error".to_string(),
-                            file: None,
-                            line: None,
-                            column: None,
-                            semantic_path: None,
-                            preview: None,
-                            resolution_strategy: None,
-                            error: Some(format!("failed to deserialize metadata: {e}")),
-                        },
-                    }
+                    Self::parse_locate_def_response(entry, val)
                 } else {
-                    match serde_json::from_value::<GetSemanticPathResult>(val) {
-                        Ok(meta) => LocateResultEntry {
-                            input: entry,
-                            status: "ok".to_string(),
-                            file: Some(meta.file),
-                            line: Some(meta.line),
-                            column: None,
-                            semantic_path: meta.semantic_path,
-                            preview: None,
-                            resolution_strategy: None,
-                            error: None,
-                        },
-                        Err(e) => LocateResultEntry {
-                            input: entry,
-                            status: "error".to_string(),
-                            file: None,
-                            line: None,
-                            column: None,
-                            semantic_path: None,
-                            preview: None,
-                            resolution_strategy: None,
-                            error: Some(format!("failed to deserialize metadata: {e}")),
-                        },
-                    }
+                    Self::parse_locate_path_response(entry, val)
                 }
             }
             Err(err) => LocateResultEntry {
@@ -761,9 +800,161 @@ impl PathfinderServer {
                 semantic_path: None,
                 preview: None,
                 resolution_strategy: None,
+                confidence: pathfinder_common::types::Confidence::Heuristic,
+                readiness: None,
+                degraded_reason: None,
                 error: Some(err.message.to_string()),
             },
         }
+    }
+
+    fn parse_locate_def_response(
+        entry: crate::server::types::LocateEntry,
+        val: serde_json::Value,
+    ) -> LocateResultEntry {
+        match serde_json::from_value::<GetDefinitionResponse>(val) {
+            Ok(meta) => {
+                let confidence = if meta.degraded {
+                    pathfinder_common::types::Confidence::Heuristic
+                } else {
+                    pathfinder_common::types::Confidence::Verified
+                };
+                LocateResultEntry {
+                    input: entry,
+                    status: "ok".to_string(),
+                    file: Some(meta.file),
+                    line: Some(meta.line),
+                    column: Some(meta.column),
+                    semantic_path: None,
+                    preview: Some(meta.preview),
+                    resolution_strategy: meta.resolution_strategy,
+                    confidence,
+                    readiness: meta.lsp_readiness,
+                    degraded_reason: meta.degraded_reason,
+                    error: None,
+                }
+            }
+            Err(e) => LocateResultEntry {
+                input: entry,
+                status: "error".to_string(),
+                file: None,
+                line: None,
+                column: None,
+                semantic_path: None,
+                preview: None,
+                resolution_strategy: None,
+                confidence: pathfinder_common::types::Confidence::Heuristic,
+                readiness: None,
+                degraded_reason: None,
+                error: Some(format!("failed to deserialize metadata: {e}")),
+            },
+        }
+    }
+
+    fn parse_locate_path_response(
+        entry: crate::server::types::LocateEntry,
+        val: serde_json::Value,
+    ) -> LocateResultEntry {
+        match serde_json::from_value::<GetSemanticPathResult>(val) {
+            Ok(meta) => LocateResultEntry {
+                input: entry,
+                status: "ok".to_string(),
+                file: Some(meta.file),
+                line: Some(meta.line),
+                column: None,
+                semantic_path: meta.semantic_path,
+                preview: None,
+                resolution_strategy: None,
+                confidence: pathfinder_common::types::Confidence::Verified,
+                readiness: Some("ready".to_string()),
+                degraded_reason: None,
+                error: None,
+            },
+            Err(e) => LocateResultEntry {
+                input: entry,
+                status: "error".to_string(),
+                file: None,
+                line: None,
+                column: None,
+                semantic_path: None,
+                preview: None,
+                resolution_strategy: None,
+                confidence: pathfinder_common::types::Confidence::Heuristic,
+                readiness: None,
+                degraded_reason: None,
+                error: Some(format!("failed to deserialize metadata: {e}")),
+            },
+        }
+    }
+
+    fn render_batch_locate_text(response: &BatchLocateResult) -> String {
+        let mut text_parts = Vec::new();
+        if let Some(header) = crate::server::helpers::format_tool_status_header(&response.status) {
+            text_parts.push(header);
+        }
+
+        for entry in &response.results {
+            let input_str = if let Some(ref sp) = entry.input.semantic_path {
+                format!("semantic_path \"{sp}\"")
+            } else {
+                format!(
+                    "file \"{}\" line {}",
+                    entry.input.file.as_deref().unwrap_or(""),
+                    entry.input.line.unwrap_or(0)
+                )
+            };
+
+            if entry.status == "ok" {
+                let heur_tag =
+                    if entry.confidence == pathfinder_common::types::Confidence::Heuristic {
+                        " [HEURISTIC]"
+                    } else {
+                        ""
+                    };
+                if entry.input.semantic_path.is_some() {
+                    let mut resolved = format!(
+                        "{} -> {}:L{}",
+                        input_str,
+                        entry.file.as_deref().unwrap_or(""),
+                        entry.line.unwrap_or(0)
+                    );
+                    if let Some(col) = entry.column {
+                        let _ = write!(resolved, " col:{col}");
+                    }
+                    if let Some(ref prev) = entry.preview {
+                        if !prev.is_empty() {
+                            let _ = write!(resolved, " — {prev}");
+                        }
+                    }
+                    let _ = write!(resolved, "{heur_tag}");
+                    text_parts.push(resolved);
+                } else {
+                    text_parts.push(format!(
+                        "{} -> {}{heur_tag}",
+                        input_str,
+                        entry
+                            .semantic_path
+                            .as_deref()
+                            .unwrap_or("(no enclosing symbol)")
+                    ));
+                }
+            } else {
+                text_parts.push(format!(
+                    "{} -> error: {}",
+                    input_str,
+                    entry.error.as_deref().unwrap_or("unknown error")
+                ));
+            }
+        }
+
+        text_parts.push(format!(
+            "[completed in {}ms, {}/{} locations resolved]",
+            response.total_duration_ms,
+            response.succeeded,
+            response.succeeded + response.failed
+        ));
+
+        text_parts.join("\n")
     }
 
     async fn locate_impl_batch(
@@ -787,9 +978,6 @@ impl PathfinderServer {
             futures.push(async move { server.locate_entry(entry).await });
         }
 
-        // Process entries sequentially to guarantee deterministic ordering.
-        // Each entry performs heavy I/O (LSP + tree-sitter), and the max batch
-        // size is 10, so sequential execution has negligible latency impact.
         let mut results = Vec::with_capacity(futures.len());
         for fut in futures {
             results.push(fut.await);
@@ -797,79 +985,44 @@ impl PathfinderServer {
 
         let mut succeeded = 0;
         let mut failed = 0;
+        let mut heuristic_count = 0;
         for r in &results {
             if r.status == "ok" {
                 succeeded += 1;
+                if r.confidence == pathfinder_common::types::Confidence::Heuristic {
+                    heuristic_count += 1;
+                }
             } else {
                 failed += 1;
             }
         }
 
+        let status = if failed > 0 || heuristic_count > 0 {
+            pathfinder_common::types::ToolStatus::Degraded {
+                reason: if heuristic_count > 0 {
+                    "heuristic_results_present".to_string()
+                } else {
+                    "errors_present".to_string()
+                },
+                retry_after_secs: None,
+            }
+        } else {
+            pathfinder_common::types::ToolStatus::Ok
+        };
+
         let total_duration_ms = millis_to_u64(start.elapsed().as_millis());
         let response = BatchLocateResult {
+            status,
             results,
             succeeded,
             failed,
+            heuristic_count,
             total_duration_ms,
         };
 
-        let mut text_parts = Vec::new();
-        for entry in &response.results {
-            let input_str = if let Some(ref sp) = entry.input.semantic_path {
-                format!("semantic_path \"{sp}\"")
-            } else {
-                format!(
-                    "file \"{}\" line {}",
-                    entry.input.file.as_deref().unwrap_or(""),
-                    entry.input.line.unwrap_or(0)
-                )
-            };
-
-            if entry.status == "ok" {
-                if entry.input.semantic_path.is_some() {
-                    let mut resolved = format!(
-                        "{} -> {}:L{}",
-                        input_str,
-                        entry.file.as_deref().unwrap_or(""),
-                        entry.line.unwrap_or(0)
-                    );
-                    if let Some(col) = entry.column {
-                        let _ = write!(resolved, " col:{col}");
-                    }
-                    if let Some(ref prev) = entry.preview {
-                        if !prev.is_empty() {
-                            let _ = write!(resolved, " — {prev}");
-                        }
-                    }
-                    text_parts.push(resolved);
-                } else {
-                    text_parts.push(format!(
-                        "{} -> {}",
-                        input_str,
-                        entry
-                            .semantic_path
-                            .as_deref()
-                            .unwrap_or("(no enclosing symbol)")
-                    ));
-                }
-            } else {
-                text_parts.push(format!(
-                    "{} -> error: {}",
-                    input_str,
-                    entry.error.as_deref().unwrap_or("unknown error")
-                ));
-            }
-        }
-
-        text_parts.push(format!(
-            "[completed in {}ms, {}/{} locations resolved]",
-            total_duration_ms,
-            succeeded,
-            succeeded + failed
-        ));
-
+        let rendered_text = Self::render_batch_locate_text(&response);
         let mut call_result =
-            CallToolResult::success(vec![rmcp::model::Content::text(text_parts.join("\n"))]);
+            CallToolResult::success(vec![rmcp::model::Content::text(rendered_text)]);
         call_result.structured_content = crate::server::helpers::serialize_metadata(&response);
         Ok(call_result)
     }
@@ -907,23 +1060,13 @@ impl PathfinderServer {
     }
 
     /// Consolidated `trace` handler.
-    pub(crate) async fn trace_impl(
-        &self,
-        params: TraceParams,
-    ) -> Result<CallToolResult, ErrorData> {
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn trace_impl(&self, params: TraceParams) -> Result<CallToolResult, ErrorData> {
         match params.scope {
             TraceScope::Callers => self.find_callers_callees_impl(params).await,
             TraceScope::References => self.find_all_references_impl(params).await,
             TraceScope::Overview => self.symbol_overview_impl(params).await,
         }
-    }
-
-    /// Consolidated `health` handler.
-    pub(crate) async fn health_impl(
-        &self,
-        params: HealthParams,
-    ) -> Result<CallToolResult, ErrorData> {
-        self.lsp_health_impl(params).await
     }
 
     fn try_separator_correction(semantic_path_str: &str) -> Option<String> {

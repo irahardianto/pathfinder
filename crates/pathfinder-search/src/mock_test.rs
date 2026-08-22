@@ -25,10 +25,6 @@ async fn test_mock_returns_configured_result() {
         total_matches: 42,
         truncated: true,
         files_searched: 0,
-        files_in_scope: 0,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
     let result = mock.search(&params()).await.expect("should succeed");
     assert_eq!(result.total_matches, 42);
@@ -60,30 +56,18 @@ async fn test_mock_set_results_returns_sequentially() {
             total_matches: 1,
             truncated: false,
             files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         Ok(SearchResult {
             matches: vec![],
             total_matches: 2,
             truncated: false,
             files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
         Ok(SearchResult {
             matches: vec![],
             total_matches: 3,
             truncated: false,
             files_searched: 0,
-            files_in_scope: 0,
-            binary_skipped: 0,
-            gitignored_skipped: 0,
-            other_skipped: 0,
         }),
     ]);
 

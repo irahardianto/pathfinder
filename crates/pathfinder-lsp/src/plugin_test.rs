@@ -291,7 +291,7 @@ fn check_extension_overlap(plugins: &[&dyn LanguagePlugin]) {
 #[test]
 fn test_no_extension_overlap_between_plugins() {
     // Each extension should map to exactly one plugin.
-    check_extension_overlap(all_plugins());
+    check_extension_overlap(&all_plugins());
 }
 
 #[test]
@@ -462,4 +462,222 @@ fn test_java_marker_search_depth_supports_monorepo() {
         JavaPlugin.marker_search_depth() >= 2,
         "Java should search at least depth 2 for monorepo support"
     );
+}
+
+// ── 11 Divergence Axes Tests ────────────────────────────────────────
+
+#[test]
+fn test_rust_marker_validation() {
+    assert!(RustPlugin
+        .validate_marker("Cargo.toml", "[package]\nname = \"foo\"")
+        .is_ok());
+    assert!(RustPlugin
+        .validate_marker("Cargo.toml", "[workspace]\nmembers = []")
+        .is_ok());
+    assert!(RustPlugin
+        .validate_marker("Cargo.toml", "invalid = [toml")
+        .is_err());
+    assert!(RustPlugin
+        .validate_marker("Cargo.toml", "foo = \"bar\"")
+        .is_err());
+    assert!(RustPlugin.validate_marker("other.txt", "anything").is_ok());
+}
+
+#[test]
+fn test_go_marker_validation() {
+    assert!(GoPlugin
+        .validate_marker("go.mod", "module example.com/foo\n\ngo 1.22")
+        .is_ok());
+    assert!(GoPlugin
+        .validate_marker("go.mod", "// comment\nmodule example.com/foo")
+        .is_ok());
+    assert!(GoPlugin
+        .validate_marker("go.mod", "// comment only\n")
+        .is_err());
+    assert!(GoPlugin
+        .validate_marker("go.mod", "invalid module line")
+        .is_err());
+}
+
+#[test]
+fn test_typescript_marker_validation() {
+    assert!(TypeScriptPlugin
+        .validate_marker("tsconfig.json", "{\"compilerOptions\": {}}")
+        .is_ok());
+    assert!(TypeScriptPlugin
+        .validate_marker(
+            "tsconfig.json",
+            "{\n  // comment\n  \"compilerOptions\": {},\n}"
+        )
+        .is_ok());
+    assert!(TypeScriptPlugin
+        .validate_marker("tsconfig.json", "{ malformed json")
+        .is_err());
+    assert_eq!(
+        TypeScriptPlugin.marker_sibling_requirement("package.json"),
+        Some("tsconfig.json")
+    );
+    assert_eq!(
+        TypeScriptPlugin.marker_sibling_requirement("tsconfig.json"),
+        None
+    );
+}
+
+#[test]
+fn test_python_marker_validation() {
+    assert!(PythonPlugin
+        .validate_marker("pyproject.toml", "[tool.poetry]\nname = \"foo\"")
+        .is_ok());
+    assert!(PythonPlugin
+        .validate_marker("pyproject.toml", "invalid [ toml")
+        .is_err());
+}
+
+#[test]
+fn test_java_marker_validation_and_normalization() {
+    assert!(JavaPlugin
+        .validate_marker(
+            "pom.xml",
+            "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"></project>"
+        )
+        .is_ok());
+    assert!(JavaPlugin
+        .validate_marker("pom.xml", "<empty></empty>")
+        .is_err());
+    assert!(JavaPlugin
+        .validate_marker("build.gradle", "plugins { id 'java' }")
+        .is_ok());
+    assert!(JavaPlugin.validate_marker("build.gradle", "").is_err());
+
+    // Symbol normalization
+    assert_eq!(
+        JavaPlugin.normalize_symbol_name("login(String, String) : boolean"),
+        "login"
+    );
+    assert_eq!(JavaPlugin.normalize_symbol_name("getAge() : int"), "getAge");
+    assert_eq!(JavaPlugin.normalize_symbol_name("count : int"), "count");
+    assert_eq!(
+        JavaPlugin.normalize_symbol_name("simpleMethod"),
+        "simpleMethod"
+    );
+}
+
+#[test]
+fn test_spawn_env_and_gitignore() {
+    let dummy_root = Path::new("/workspace");
+    assert!(!RustPlugin.needs_gitignore_entry());
+    assert!(GoPlugin.needs_gitignore_entry());
+    assert!(TypeScriptPlugin.needs_gitignore_entry());
+    assert!(PythonPlugin.needs_gitignore_entry());
+    assert!(JavaPlugin.needs_gitignore_entry());
+
+    let rust_env = RustPlugin.spawn_env(dummy_root);
+    assert_eq!(rust_env.len(), 1);
+    assert_eq!(rust_env[0].0, "CARGO_TARGET_DIR");
+
+    let go_env = GoPlugin.spawn_env(dummy_root);
+    assert_eq!(go_env.len(), 2);
+    assert_eq!(go_env[0].0, "GOCACHE");
+    assert_eq!(go_env[1].0, "GOMODCACHE");
+
+    let ts_env = TypeScriptPlugin.spawn_env(dummy_root);
+    assert_eq!(ts_env.len(), 1);
+    assert_eq!(ts_env[0].0, "TMPDIR");
+
+    let py_env = PythonPlugin.spawn_env(dummy_root);
+    assert_eq!(py_env.len(), 1);
+    assert_eq!(py_env[0].0, "PYTHONPYCACHEPREFIX");
+}
+
+#[test]
+fn test_isolation_descriptions() {
+    assert!(RustPlugin.isolation_description().is_some());
+    assert!(GoPlugin.isolation_description().is_some());
+    assert!(TypeScriptPlugin.isolation_description().is_some());
+    assert!(PythonPlugin.isolation_description().is_some());
+}
+
+// ── TOML Plugin Parsing & Registry Tests (LSP-D8) ───────────────────
+
+#[test]
+fn test_toml_plugin_loading_and_resolution() {
+    reset_registry();
+
+    let toml_content = r#"
+[[language]]
+id = "kotlin"
+extensions = ["kt", "kts"]
+markers = ["build.gradle.kts", "settings.gradle.kts"]
+marker_depth = 3
+install_hint = "Install kotlin-language-server"
+readiness_budget_secs = 90
+handshake_timeout_secs = 45
+
+[[language.lsp_candidates]]
+binary = "kotlin-language-server"
+args = ["--stdio"]
+"#;
+
+    let loaded = load_toml_plugins(toml_content).expect("load toml plugins");
+    assert_eq!(loaded.len(), 1);
+    let kotlin = plugin_for_language("kotlin").expect("find kotlin plugin");
+    assert_eq!(kotlin.language_id(), "kotlin");
+    assert_eq!(kotlin.file_extensions(), &["kt", "kts"]);
+    assert_eq!(
+        kotlin.marker_files(),
+        &["build.gradle.kts", "settings.gradle.kts"]
+    );
+    assert_eq!(kotlin.marker_search_depth(), 3);
+    assert_eq!(kotlin.readiness_budget(), Duration::from_secs(90));
+    assert_eq!(kotlin.handshake_timeout(), Duration::from_secs(45));
+    assert_eq!(kotlin.lsp_candidates().len(), 1);
+    assert_eq!(kotlin.lsp_candidates()[0].binary, "kotlin-language-server");
+    assert_eq!(kotlin.lsp_candidates()[0].default_args, &["--stdio"]);
+
+    let ext_plugin = plugin_for_extension("kt").expect("find by kt extension");
+    assert_eq!(ext_plugin.language_id(), "kotlin");
+
+    reset_registry();
+}
+
+#[test]
+fn test_registry_duplicate_language_id_rejection() {
+    reset_registry();
+
+    let toml_duplicate_id = r#"
+[[language]]
+id = "rust"
+extensions = ["rs2"]
+markers = ["Cargo.toml"]
+"#;
+
+    let result = load_toml_plugins(toml_duplicate_id);
+    assert!(result.is_err());
+    if let Err(err) = result {
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("duplicate language ID 'rust'"));
+    }
+
+    reset_registry();
+}
+
+#[test]
+fn test_registry_duplicate_extension_rejection_lsp_d8() {
+    reset_registry();
+
+    let toml_duplicate_ext = r#"
+[[language]]
+id = "custom_rust"
+extensions = ["rs"]
+markers = ["Custom.toml"]
+"#;
+
+    let result = load_toml_plugins(toml_duplicate_ext);
+    assert!(result.is_err());
+    if let Err(err) = result {
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("extension '.rs' claimed by both 'rust' and 'custom_rust'"));
+    }
+
+    reset_registry();
 }

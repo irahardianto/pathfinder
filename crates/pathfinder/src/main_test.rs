@@ -5,7 +5,7 @@ use pathfinder_common::sandbox::Sandbox;
 use pathfinder_common::types::{SymbolScope, WorkspaceRoot};
 use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem, ReferenceLocation};
 use pathfinder_lsp::{DefinitionLocation, MockLawyer};
-use pathfinder_search::{MockScout, SearchMatch, SearchResult};
+use pathfinder_search::MockScout;
 use pathfinder_treesitter::mock::MockSurgeon;
 use rmcp::ServiceExt;
 use std::sync::Arc;
@@ -65,6 +65,7 @@ fn test_parse_init() {
 
 struct IntegrationTestBundle {
     server: PathfinderServer,
+    #[expect(dead_code)]
     scout: Arc<MockScout>,
     surgeon: Arc<MockSurgeon>,
     lawyer: Arc<MockLawyer>,
@@ -99,6 +100,49 @@ fn create_integration_test_server() -> IntegrationTestBundle {
         _temp_dir: temp_dir,
         ws,
     }
+}
+
+fn setup_mock_call_hierarchy(bundle: &IntegrationTestBundle) {
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 1,
+        column: 4,
+        data: None,
+    };
+    bundle
+        .lawyer
+        .push_prepare_call_hierarchy_result(Ok(vec![item]));
+    bundle
+        .lawyer
+        .push_incoming_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "handle_request".into(),
+                kind: "function".into(),
+                detail: Some("fn handle_request()".into()),
+                file: "src/server.rs".into(),
+                line: 20,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![25],
+        }]));
+    bundle
+        .lawyer
+        .push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+            item: CallHierarchyItem {
+                name: "validate_token".into(),
+                kind: "function".into(),
+                detail: Some("fn validate_token() -> bool".into()),
+                file: "src/token.rs".into(),
+                line: 15,
+                column: 4,
+                data: None,
+            },
+            call_sites: vec![9],
+        }]));
 }
 
 fn create_transport_pair() -> (
@@ -267,47 +311,7 @@ async fn test_mcp_integration_trace_tool_impact_success() {
         .unwrap()
         .push(Ok(expected_scope));
 
-    // Mock lawyer for call hierarchy
-    let item = CallHierarchyItem {
-        name: "login".into(),
-        kind: "function".into(),
-        detail: None,
-        file: "src/auth.rs".into(),
-        line: 1,
-        column: 4,
-        data: None,
-    };
-    bundle
-        .lawyer
-        .push_prepare_call_hierarchy_result(Ok(vec![item.clone()]));
-    bundle
-        .lawyer
-        .push_incoming_call_result(Ok(vec![CallHierarchyCall {
-            item: CallHierarchyItem {
-                name: "handle_request".into(),
-                kind: "function".into(),
-                detail: Some("fn handle_request()".into()),
-                file: "src/server.rs".into(),
-                line: 20,
-                column: 4,
-                data: None,
-            },
-            call_sites: vec![25],
-        }]));
-    bundle
-        .lawyer
-        .push_outgoing_call_result(Ok(vec![CallHierarchyCall {
-            item: CallHierarchyItem {
-                name: "validate_token".into(),
-                kind: "function".into(),
-                detail: Some("fn validate_token() -> bool".into()),
-                file: "src/token.rs".into(),
-                line: 15,
-                column: 4,
-                data: None,
-            },
-            call_sites: vec![9],
-        }]));
+    setup_mock_call_hierarchy(&bundle);
 
     let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
     let server_handle = tokio::spawn(async move {
@@ -341,14 +345,15 @@ async fn test_mcp_integration_trace_tool_impact_success() {
 
     let structured = &response["result"]["structuredContent"];
     assert_eq!(structured["degraded"], false);
-    assert!(structured["incoming"].is_array());
+    assert_eq!(structured["status"]["status"], "ok");
+    assert!(structured["incoming"]["items"].is_array());
     assert_eq!(
-        structured["incoming"][0]["semantic_path"],
+        structured["incoming"]["items"][0]["semantic_path"],
         "src/server.rs::handle_request"
     );
-    assert!(structured["outgoing"].is_array());
+    assert!(structured["outgoing"]["items"].is_array());
     assert_eq!(
-        structured["outgoing"][0]["semantic_path"],
+        structured["outgoing"]["items"][0]["semantic_path"],
         "src/token.rs::validate_token"
     );
 
@@ -414,78 +419,8 @@ async fn test_mcp_integration_inspect_tool_symbols_success() {
 
     let structured = &response["result"]["structuredContent"];
     assert_eq!(structured["language"], "rust");
-    assert_eq!(structured["start_line"], 0);
-    assert_eq!(structured["end_line"], 0);
-
-    drop(client_writer);
-    let _ = server_handle.await;
-}
-
-#[tokio::test]
-async fn test_mcp_integration_search_tool_success() {
-    let bundle = create_integration_test_server();
-
-    // Mock scout
-    let search_match = SearchMatch {
-        file: "src/auth.rs".to_string(),
-        line: 1,
-        column: 0,
-        content: "fn login() {}".to_string(),
-        context_before: vec![],
-        context_after: vec![],
-        enclosing_semantic_path: None,
-        is_definition: Some(true),
-        version_hash: "sha256:123".to_string(),
-        known: None,
-    };
-    bundle.scout.set_result(Ok(SearchResult {
-        matches: vec![search_match],
-        total_matches: 1,
-        truncated: false,
-        files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
-    }));
-
-    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
-    let server_handle = tokio::spawn(async move {
-        bundle
-            .server
-            .serve((server_read, server_write))
-            .await
-            .expect("server serve")
-    });
-
-    do_handshake(&mut client_writer, &mut client_reader).await;
-
-    // Call "search" tool
-    let search_call = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "search",
-            "arguments": {
-                "query": "login"
-            }
-        }
-    });
-    write_jsonrpc(&mut client_writer, &search_call).await;
-
-    let response = read_jsonrpc(&mut client_reader).await;
-    assert_eq!(response["jsonrpc"], "2.0");
-    assert_eq!(response["id"], 2);
-
-    let text_content = response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("text content");
-    let structured: serde_json::Value =
-        serde_json::from_str(text_content).expect("valid JSON in text content");
-    assert_eq!(structured["total_matches"], 1);
-    assert_eq!(structured["matches"][0]["file"], "src/auth.rs");
-    assert_eq!(structured["matches"][0]["content"], "fn login() {}");
+    assert_eq!(structured["start_line"], 1);
+    assert_eq!(structured["end_line"], 1);
 
     drop(client_writer);
     let _ = server_handle.await;
@@ -579,9 +514,10 @@ async fn test_mcp_integration_inspect_tool_deep_context_success() {
 
     let structured = &response["result"]["structuredContent"];
     assert_eq!(structured["degraded"], false);
-    assert!(structured["dependencies"].is_array());
+    assert_eq!(structured["status"]["status"], "ok");
+    assert!(structured["dependencies"]["items"].is_array());
     assert_eq!(
-        structured["dependencies"][0]["semantic_path"],
+        structured["dependencies"]["items"][0]["semantic_path"],
         "src/token.rs::validate_token"
     );
 
@@ -703,17 +639,18 @@ async fn test_mcp_integration_trace_tool_overview_success() {
     assert_eq!(response["id"], 2);
 
     let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["status"]["status"], "ok");
     assert_eq!(structured["source"]["content"], "fn login() { }\n");
     assert_eq!(
-        structured["impact"]["incoming"][0]["semantic_path"],
+        structured["impact"]["incoming"]["items"][0]["semantic_path"],
         "src/server.rs::handle_request"
     );
     assert_eq!(
-        structured["impact"]["outgoing"][0]["semantic_path"],
+        structured["impact"]["outgoing"]["items"][0]["semantic_path"],
         "src/token.rs::validate_token"
     );
-    assert_eq!(structured["references"][0]["file"], "src/main.rs");
-    assert_eq!(structured["references"][0]["snippet"], "login();");
+    assert_eq!(structured["references"]["items"][0]["file"], "src/main.rs");
+    assert_eq!(structured["references"]["items"][0]["snippet"], "");
 
     drop(client_writer);
     let _ = server_handle.await;

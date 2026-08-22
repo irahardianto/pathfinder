@@ -115,6 +115,7 @@ fn create_workspace(file_count: usize, files_with_needle: usize) -> WorkspaceFix
         max_results: 50,
         offset: 0,
         context_lines: 2,
+        ..Default::default()
     };
 
     WorkspaceFixture { _temp: dir, params }

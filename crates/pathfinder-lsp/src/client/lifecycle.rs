@@ -4,16 +4,18 @@
 //! and process health monitoring.
 
 use crate::client::background::{
-    idle_timeout_task, progress_watcher_task, reader_supervisor_task, registration_watcher_task,
-    MAX_BACKOFF_SECS,
+    process_supervisor_task, progress_watcher_task, reader_supervisor_task,
+    registration_watcher_task, MAX_BACKOFF_SECS,
 };
-use crate::client::detect::{detect_languages, language_id_for_extension, LanguageLsp};
+use crate::client::detect::{
+    detect_languages, install_hint, language_id_for_extension, LanguageLsp,
+};
 use crate::client::process::{spawn_and_initialize, LspTransport, SpawnParams};
 use crate::client::protocol::RequestDispatcher;
 use crate::client::{
-    InFlightGuard, LanguageState, ProcessEntry, ProcessLifecycle, UnavailableState,
+    LanguageState, ProcessEntry, ProcessLifecycle, ReadinessState, UnavailableState,
 };
-use crate::types::IndexingCompletionSource;
+use crate::types::{IndexingCompletionSource, Readiness};
 use crate::LspError;
 use dashmap::DashMap;
 use serde_json::json;
@@ -47,9 +49,10 @@ impl super::LspClient {
     /// Create a new `LspClient` for the given workspace root.
     ///
     /// Performs Zero-Config language detection immediately (cheap directory
-    /// scan). LSP processes are **not** started until first use.
+    /// scan). Language server processes are spawned eagerly in the background
+    /// via `warm_start()`.
     ///
-    /// Starts the idle-timeout background task.
+    /// Starts the process supervisor and watcher background tasks.
     ///
     /// # Errors
     /// Returns `Err` if the workspace root directory cannot be read.
@@ -80,13 +83,14 @@ impl super::LspClient {
             doc_versions: Arc::new(DashMap::new()),
             warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             spawner: std::sync::Arc::new(crate::client::process::RealProcessSpawner),
+            clock: Arc::new(crate::clock::TokioClock),
         };
 
         let processes = Arc::clone(&client.processes);
         let dispatcher = Arc::clone(&client.dispatcher);
         let shutdown_rx = shutdown_tx.subscribe();
         let doc_versions = Arc::clone(&client.doc_versions);
-        tokio::spawn(idle_timeout_task(
+        tokio::spawn(process_supervisor_task(
             processes,
             dispatcher,
             doc_versions,
@@ -157,7 +161,9 @@ impl super::LspClient {
                         tracing::warn!(
                             language = %lang,
                             error = %e,
-                            "PATCH-004: warm_start failed (will retry lazily)"
+                            // Genuine failure-retry path: warm start failed during eager init;
+                            // requests will retry lazily on demand.
+                            "PATCH-004: warm_start failed (will retry lazily on request)"
                         );
                     }
                 }
@@ -226,29 +232,15 @@ impl super::LspClient {
                         tracing::warn!(
                             language = %lang,
                             error = %e,
-                            "LT-4: warm_start_for_languages — failed (will retry lazily)"
+                            // Genuine failure-retry path: pre-warming failed;
+                            // requests will retry lazily on demand.
+                            "LT-4: warm_start_for_languages — failed (will retry lazily on demand)"
                         );
                     }
                 }
             }));
         }
         handles
-    }
-
-    /// Touches the idle timeout tracking of an active language server.
-    ///
-    /// Refreshes the last used timestamp of the process to keep it alive
-    /// when file operations or other activity occur on that language.
-    pub fn touch_language(&self, language_id: &str) {
-        if let Some(mut entry) = self.processes.get_mut(language_id) {
-            if let ProcessEntry::Running(state) = entry.value_mut() {
-                state.transport.set_last_used(Instant::now());
-                tracing::trace!(
-                    language = language_id,
-                    "LT-4: idle timer refreshed from file operation"
-                );
-            }
-        }
     }
 
     /// Gracefully shuts down all active LSP processes and terminates background tasks.
@@ -334,10 +326,6 @@ impl super::LspClient {
             }
             // Clear stale doc_versions for this language.
             self.clear_doc_versions_for_language(language_id);
-            // DEL-4.1: FUTURE: init_locks cleanup when dynamic language support is added.
-            // Currently bounded to 5 languages (rust/go/typescript/python/java),
-            // so memory cost is negligible (~5 entries * 100 bytes each).
-            // self.init_locks.remove(language_id);
         }
 
         // Extract backoff_attempt from existing Unavailable entry, if any.
@@ -388,7 +376,7 @@ impl super::LspClient {
             .clone();
         let _guard = init_lock.lock().await;
 
-        if let Some(entry) = self.processes.get(language_id) {
+        let attempt_to_start = if let Some(entry) = self.processes.get(language_id) {
             match entry.value() {
                 ProcessEntry::Running(_) => return Ok(()),
                 ProcessEntry::Unavailable(state) => {
@@ -396,43 +384,37 @@ impl super::LspClient {
                     let backoff_secs = std::cmp::min(1u64 << capped_attempt, MAX_BACKOFF_SECS);
                     let elapsed_secs = state.unavailable_since.elapsed().as_secs();
                     if elapsed_secs >= backoff_secs {
-                        // Backoff elapsed = fresh attempt. Start from 0, not state.backoff_attempt.
-                        // This avoids race conditions: pre-lock no longer removes the entry,
-                        // so post-lock must explicitly reset the attempt counter.
-                        let attempt = 0;
-                        drop(entry);
                         tracing::info!(
                             language = %language_id,
                             backoff_secs,
                             elapsed_secs,
                             "LSP: backoff elapsed (post-lock check), attempting recovery"
                         );
-                        self.processes.remove(language_id);
-                        // Clear stale doc_versions from the crashed instance.
-                        self.clear_doc_versions_for_language(language_id);
-
-                        let descriptor = self
-                            .descriptors
-                            .iter()
-                            .find(|d| d.language_id == language_id)
-                            .ok_or(LspError::NoLspAvailable)?
-                            .clone();
-
-                        return self.start_process(descriptor, attempt).await;
+                        Some(0)
+                    } else {
+                        return Err(LspError::NoLspAvailable);
                     }
-                    return Err(LspError::NoLspAvailable);
                 }
             }
+        } else {
+            Some(0)
+        };
+
+        if let Some(attempt) = attempt_to_start {
+            self.processes.remove(language_id);
+            self.clear_doc_versions_for_language(language_id);
+
+            let descriptor = self
+                .descriptors
+                .iter()
+                .find(|d| d.language_id == language_id)
+                .ok_or(LspError::NoLspAvailable)?
+                .clone();
+
+            return self.start_process(descriptor, attempt).await;
         }
 
-        let descriptor = self
-            .descriptors
-            .iter()
-            .find(|d| d.language_id == language_id)
-            .ok_or(LspError::NoLspAvailable)?
-            .clone();
-
-        self.start_process(descriptor, 0).await
+        Ok(())
     }
 
     pub(crate) fn spawn_indexing_timeout_fallback(
@@ -543,19 +525,13 @@ impl super::LspClient {
     async fn handle_shutdown_abort_cleanup(
         &self,
         language_id: &str,
-        handles: (
-            tokio::task::JoinHandle<()>,
-            tokio::task::JoinHandle<()>,
-            tokio::task::JoinHandle<()>,
-            tokio::task::JoinHandle<()>,
-        ),
+        handles: &[tokio::task::JoinHandle<()>],
         transport: Arc<dyn LspTransport>,
         lifecycle: &ProcessLifecycle,
     ) {
-        handles.0.abort();
-        handles.1.abort();
-        handles.2.abort();
-        handles.3.abort();
+        for handle in handles {
+            handle.abort();
+        }
 
         // Gracefully shutdown the LSP process
         let _ = tokio::time::timeout(
@@ -641,6 +617,7 @@ impl super::LspClient {
                     ProcessEntry::Unavailable(UnavailableState {
                         unavailable_since: Instant::now(),
                         backoff_attempt: next_attempt,
+                        reason: Some(format!("initialization failed: {e}")),
                     }),
                 );
                 return Err(LspError::NoLspAvailable);
@@ -711,6 +688,21 @@ impl super::LspClient {
             &transport,
         );
 
+        let (readiness_tx, readiness_rx) = tokio::sync::watch::channel(ReadinessState::Probing {
+            started_at: tokio::time::Instant::now(),
+        });
+        let readiness_tx = Arc::new(readiness_tx);
+
+        let client_for_probe = self.clone();
+        let lang_for_probe = language_id.clone();
+        let root_for_probe = descriptor.root.clone();
+        let readiness_tx_for_probe = Arc::clone(&readiness_tx);
+        let probe_handle = tokio::spawn(async move {
+            client_for_probe
+                .run_readiness_probe(lang_for_probe, root_for_probe, readiness_tx_for_probe)
+                .await;
+        });
+
         if in_coexistence_mode {
             tracing::warn!(
                 language = %language_id,
@@ -731,12 +723,13 @@ impl super::LspClient {
 
             self.handle_shutdown_abort_cleanup(
                 &language_id,
-                (
+                &[
                     progress_handle,
                     registration_handle,
                     supervisor_handle,
                     indexing_timeout_handle,
-                ),
+                    probe_handle,
+                ],
                 transport,
                 &lifecycle,
             )
@@ -760,6 +753,10 @@ impl super::LspClient {
                 indexing_progress_percent: indexing_progress,
                 live_capabilities,
                 in_coexistence_mode,
+                readiness_tx,
+                readiness_rx,
+                probe_handle: Some(probe_handle),
+                workspace_root: descriptor.root,
                 watcher_handles: vec![
                     progress_handle,
                     registration_handle,
@@ -992,14 +989,6 @@ impl super::LspClient {
         false
     }
 
-    pub(crate) fn touch(&self, language_id: &str) {
-        if let Some(mut entry) = self.processes.get_mut(language_id) {
-            if let ProcessEntry::Running(state) = entry.value_mut() {
-                state.transport.set_last_used(Instant::now());
-            }
-        }
-    }
-
     /// Clear all `doc_versions` entries whose URIs contain the language's file extensions.
     ///
     /// After a crash recovery, the new LSP instance doesn't know about previously
@@ -1008,8 +997,8 @@ impl super::LspClient {
     fn clear_doc_versions_for_language(&self, language_id: &str) {
         // Clear only doc_versions entries for the specified language.
         let mut cleared = 0;
-        self.doc_versions.retain(|_uri, (lang, _)| {
-            if lang == language_id {
+        self.doc_versions.retain(|_uri, entry| {
+            if entry.language_id == language_id {
                 cleared += 1;
                 false
             } else {
@@ -1038,7 +1027,7 @@ impl super::LspClient {
         let (id, rx) = self.dispatcher.register(language_id);
         let message = RequestDispatcher::make_request(id, method, &params);
 
-        let (_in_flight_guard, transport) = {
+        let transport = {
             let Some(entry) = self.processes.get(language_id) else {
                 self.dispatcher.remove(id);
                 return Err(LspError::NoLspAvailable);
@@ -1047,13 +1036,15 @@ impl super::LspClient {
                 self.dispatcher.remove(id);
                 return Err(LspError::NoLspAvailable);
             };
-            if state.reader_handle.is_finished() {
+            if !state
+                .reader_alive
+                .load(std::sync::atomic::Ordering::Acquire)
+                || state.reader_handle.is_finished()
+            {
                 self.dispatcher.remove(id);
                 return Err(LspError::ConnectionLost);
             }
-            let counter = Arc::clone(state.transport.in_flight());
-            let transport = Arc::clone(&state.transport);
-            (InFlightGuard::new(counter), transport)
+            Arc::clone(&state.transport)
         };
 
         // H-1: Clean up dispatcher entry on send failure to prevent leak.
@@ -1099,7 +1090,11 @@ impl super::LspClient {
         let ProcessEntry::Running(state) = entry.value() else {
             return Err(LspError::NoLspAvailable);
         };
-        if state.reader_handle.is_finished() {
+        if !state
+            .reader_alive
+            .load(std::sync::atomic::Ordering::Acquire)
+            || state.reader_handle.is_finished()
+        {
             return Err(LspError::ConnectionLost);
         }
         // P2-3 fix: Extract transport clone before sending, so we don't hold
@@ -1123,49 +1118,245 @@ impl super::LspClient {
         }
     }
 
-    pub(crate) async fn wait_for_capability<F>(
+    pub(crate) async fn run_readiness_probe(
+        &self,
+        language_id: String,
+        workspace_root: std::path::PathBuf,
+        readiness_tx: Arc<tokio::sync::watch::Sender<ReadinessState>>,
+    ) {
+        let start = tokio::time::Instant::now();
+        let max_budget = indexing_timeout_for_language(&language_id);
+        let mut backoff = Duration::from_millis(250);
+        let max_backoff = Duration::from_secs(2);
+
+        let probe_target = find_probe_target(&workspace_root, &language_id);
+
+        loop {
+            if start.elapsed() >= max_budget {
+                let reason = format!(
+                    "readiness probe timed out after {}s for {}",
+                    max_budget.as_secs(),
+                    language_id
+                );
+                tracing::warn!(language = %language_id, %reason, "LSP: behavioural probe failed within budget");
+                let _ = readiness_tx.send(ReadinessState::Degraded { reason });
+                return;
+            }
+
+            let probe_passed = if let Some((ref rel_path, line, col)) = probe_target {
+                let abs_path = workspace_root.join(rel_path);
+                let content = tokio::fs::read_to_string(&abs_path)
+                    .await
+                    .unwrap_or_default();
+                if let Ok(file_uri) = url::Url::from_file_path(&abs_path) {
+                    let open_params = json!({
+                        "textDocument": {
+                            "uri": file_uri.as_str(),
+                            "languageId": language_id,
+                            "version": 1,
+                            "text": content
+                        }
+                    });
+                    let _ = self
+                        .notify(&language_id, "textDocument/didOpen", open_params)
+                        .await;
+
+                    let def_params = json!({
+                        "textDocument": { "uri": file_uri.as_str() },
+                        "position": {
+                            "line": line.saturating_sub(1),
+                            "character": col.saturating_sub(1)
+                        }
+                    });
+                    let result = self
+                        .request(
+                            &language_id,
+                            "textDocument/definition",
+                            def_params,
+                            Duration::from_secs(5),
+                        )
+                        .await;
+
+                    let close_params = json!({
+                        "textDocument": { "uri": file_uri.as_str() }
+                    });
+                    let _ = self
+                        .notify(&language_id, "textDocument/didClose", close_params)
+                        .await;
+
+                    match result {
+                        Ok(val) => {
+                            // If null or empty array, server responded but found nothing yet
+                            !val.is_null() && val.as_array().is_none_or(|arr| !arr.is_empty())
+                        }
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+
+            if probe_passed {
+                let caps = self.capabilities_for(&language_id).unwrap_or_default();
+                let cap_readiness = crate::types::CapabilityReadiness {
+                    definition: caps.flags.definition_provider,
+                    references: caps.flags.references_provider,
+                    hierarchy: crate::types::HierarchyReadiness {
+                        call_hierarchy: caps.flags.call_hierarchy_provider,
+                        implementation: caps.flags.implementation_provider,
+                    },
+                };
+                tracing::info!(
+                    language = %language_id,
+                    definition = cap_readiness.definition,
+                    references = cap_readiness.references,
+                    call_hierarchy = cap_readiness.call_hierarchy(),
+                    implementation = cap_readiness.implementation(),
+                    "LSP: behavioural probe passed — language server is Ready"
+                );
+                let _ = readiness_tx.send(ReadinessState::Ready(cap_readiness));
+                return;
+            }
+
+            tokio::time::sleep(backoff).await;
+            backoff = std::cmp::min(backoff * 2, max_backoff);
+        }
+    }
+
+    async fn wait_for_readiness_rx(
+        rx: &mut tokio::sync::watch::Receiver<ReadinessState>,
+        deadline: tokio::time::Instant,
+    ) -> Readiness {
+        loop {
+            let current = rx.borrow_and_update().clone();
+            match current {
+                ReadinessState::Ready(caps) => return Readiness::Ready(caps),
+                ReadinessState::Degraded { reason } => {
+                    return Readiness::Degraded {
+                        reason,
+                        retry_after_secs: None,
+                    };
+                }
+                ReadinessState::Spawning
+                | ReadinessState::Handshaking
+                | ReadinessState::Probing { .. } => {
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        let elapsed_secs = match current {
+                            ReadinessState::Probing { started_at } => {
+                                u32::try_from(started_at.elapsed().as_secs()).unwrap_or(u32::MAX)
+                            }
+                            _ => 0,
+                        };
+                        let phase = match current {
+                            ReadinessState::Spawning => "spawning",
+                            ReadinessState::Handshaking => "handshaking",
+                            ReadinessState::Probing { .. } => "probing",
+                            _ => "indexing",
+                        }
+                        .to_string();
+                        return Readiness::NotReady {
+                            elapsed_secs,
+                            retry_after_secs: 5,
+                            eta_secs: None,
+                            phase,
+                        };
+                    }
+                    let remaining = deadline - now;
+                    if tokio::time::timeout(remaining, rx.changed()).await.is_err() {
+                        let elapsed_secs = match current {
+                            ReadinessState::Probing { started_at } => {
+                                u32::try_from(started_at.elapsed().as_secs()).unwrap_or(u32::MAX)
+                            }
+                            _ => 0,
+                        };
+                        return Readiness::NotReady {
+                            elapsed_secs,
+                            retry_after_secs: 5,
+                            eta_secs: None,
+                            phase: "probing".to_string(),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wait for the language server to become ready, up to `budget` duration.
+    ///
+    /// # Errors
+    /// Returns `LspError::ConnectionLost` or other fatal transport errors if the LSP process fails to start.
+    pub async fn ensure_ready(
         &self,
         language_id: &str,
-        check_cap: F,
-        cap_name: &str,
-    ) -> Result<(), LspError>
-    where
-        F: Fn(&crate::client::DetectedCapabilities) -> bool,
-    {
-        let grace = crate::client::grace_period_for_language(language_id);
-        if grace == 0 {
-            let caps = self.capabilities_for(language_id)?;
-            if check_cap(&caps) {
-                return Ok(());
-            }
-            return Err(LspError::UnsupportedCapability {
-                capability: cap_name.to_owned(),
+        budget: Duration,
+    ) -> Result<Readiness, LspError> {
+        let is_known = self
+            .descriptors
+            .iter()
+            .any(|d| d.language_id == language_id);
+        if !is_known {
+            let hint = self
+                .missing_languages
+                .iter()
+                .find(|m| m.language_id == language_id)
+                .map_or_else(
+                    || install_hint(language_id).clone(),
+                    |m| m.install_hint.clone(),
+                );
+            return Ok(Readiness::Unavailable {
+                language: language_id.to_string(),
+                install_hint: hint,
+                alternative: "Use your host's grep and file-read tools".to_string(),
             });
         }
 
-        loop {
-            let uptime = {
-                let entry = self
-                    .processes
-                    .get(language_id)
-                    .ok_or(LspError::NoLspAvailable)?;
-                match entry.value() {
-                    ProcessEntry::Unavailable(_) => return Err(LspError::NoLspAvailable),
-                    ProcessEntry::Running(state) => state.spawned_at.elapsed().as_secs(),
+        if let Err(e) = self.ensure_process(language_id).await {
+            match e {
+                LspError::NoLspAvailable => {
+                    if let Some(entry) = self.processes.get(language_id) {
+                        if let ProcessEntry::Unavailable(ref state) = *entry {
+                            let reason = state.reason.clone().unwrap_or_else(|| {
+                                format!("{language_id} LSP is unavailable due to repeated failures")
+                            });
+                            return Ok(Readiness::Degraded {
+                                reason,
+                                retry_after_secs: Some(10),
+                            });
+                        }
+                    }
+                    let hint = install_hint(language_id).clone();
+                    return Ok(Readiness::Unavailable {
+                        language: language_id.to_string(),
+                        install_hint: hint,
+                        alternative: "Use your host's grep and file-read tools".to_string(),
+                    });
                 }
-            };
-            let caps = self.capabilities_for(language_id)?;
-            if check_cap(&caps) {
-                return Ok(());
+                _ => return Err(e),
             }
-            if uptime >= grace {
-                return Err(LspError::UnsupportedCapability {
-                    capability: cap_name.to_owned(),
-                });
-            }
-            // Sleep for 100ms before retrying to avoid spinning CPU
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
+
+        let rx = {
+            let Some(entry) = self.processes.get(language_id) else {
+                return Ok(Readiness::Degraded {
+                    reason: format!("{language_id} process not found"),
+                    retry_after_secs: Some(5),
+                });
+            };
+            let ProcessEntry::Running(ref state) = *entry else {
+                return Ok(Readiness::Degraded {
+                    reason: format!("{language_id} process unavailable"),
+                    retry_after_secs: Some(10),
+                });
+            };
+            state.readiness_rx.clone()
+        };
+
+        let mut rx = rx;
+        let deadline = tokio::time::Instant::now() + budget;
+        Ok(Self::wait_for_readiness_rx(&mut rx, deadline).await)
     }
 
     pub(crate) async fn call_hierarchy_request(
@@ -1203,8 +1394,6 @@ impl super::LspClient {
             }
         };
 
-        self.touch(language_id);
-
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
             language = language_id,
@@ -1220,6 +1409,102 @@ impl super::LspClient {
             ranges_key,
         )
     }
+}
+
+/// Find a probe target (relative file path, 1-indexed line, 1-indexed col) for a language in a workspace.
+pub(crate) fn find_probe_target(
+    workspace_root: &Path,
+    language_id: &str,
+) -> Option<(std::path::PathBuf, u32, u32)> {
+    let extensions: &[&str] = match language_id {
+        "rust" => &["rs"],
+        "go" => &["go"],
+        "typescript" => &["ts", "tsx", "js", "jsx"],
+        "python" => &["py"],
+        "java" => &["java"],
+        _ => &[],
+    };
+
+    if extensions.is_empty() {
+        return None;
+    }
+
+    let mut dirs_to_visit = vec![workspace_root.to_path_buf()];
+    let mut files_found = Vec::new();
+
+    while let Some(dir) = dirs_to_visit.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_name = entry.file_name();
+                let name_str = file_name.to_string_lossy();
+                if name_str.starts_with('.')
+                    || name_str == "target"
+                    || name_str == "node_modules"
+                    || name_str == "dist"
+                    || name_str == "build"
+                    || name_str == "vendor"
+                {
+                    continue;
+                }
+                if path.is_dir() {
+                    if let Ok(rel) = path.strip_prefix(workspace_root) {
+                        if rel.components().count() <= 3 {
+                            dirs_to_visit.push(path);
+                        }
+                    }
+                } else if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if extensions.contains(&ext) {
+                            if let Ok(rel) = path.strip_prefix(workspace_root) {
+                                files_found.push((rel.to_path_buf(), path.clone()));
+                                if files_found.len() >= 5 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if files_found.len() >= 5 {
+            break;
+        }
+    }
+
+    for (rel_path, abs_path) in files_found {
+        if let Ok(content) = std::fs::read_to_string(&abs_path) {
+            if content.trim().is_empty() {
+                continue;
+            }
+            if let Some(lang) =
+                pathfinder_treesitter::language::SupportedLanguage::detect(&abs_path)
+            {
+                if let Ok(tree) = pathfinder_treesitter::parser::AstParser::parse_source(
+                    &abs_path,
+                    lang,
+                    content.as_bytes(),
+                ) {
+                    let symbols = pathfinder_treesitter::symbols::extract_symbols_from_tree(
+                        &tree,
+                        content.as_bytes(),
+                        lang,
+                    );
+                    if let Some(first_sym) = symbols
+                        .into_iter()
+                        .find(|s| s.start_line > 0 || s.name_point.row > 0)
+                    {
+                        let line = u32::try_from(first_sym.name_point.row + 1).unwrap_or(1);
+                        let col = u32::try_from(first_sym.name_point.column + 1).unwrap_or(1);
+                        return Some((rel_path, line, col));
+                    }
+                }
+            }
+            return Some((rel_path, 1, 1));
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

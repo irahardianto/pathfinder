@@ -1,8 +1,8 @@
-# 003. LSP Process Lifecycle: Eager Start, Probe-Gated Readiness, Host-Bound Lifetime
+# ADR-003: LSP Process Lifecycle — Eager Start, Probe-Gated Readiness, Host-Bound Lifetime
 
 **Date:** 2026-08-22
 **Status:** Accepted
-**Related:** `docs/requirements/pathfinder-v6/00-plan.md`, scope card WS-3, findings `LSP-A1` `LSP-A2` `LSP-A3` `LSP-A6` `LSP-B0` `LSP-B1`
+**Related:** `docs/requirements/pathfinder-v6/00-plan.md`, scope card WS-3, findings `LSP-A1`, `LSP-A2`, `LSP-A3`, `LSP-A6`, `LSP-B0`, `LSP-B1`, `LSP-B9`
 
 ## Context
 

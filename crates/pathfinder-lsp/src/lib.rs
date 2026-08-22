@@ -17,6 +17,8 @@
 
 /// Client module.
 pub mod client;
+/// Clock abstraction and utilities for time management.
+pub mod clock;
 /// Module for error handling and definitions.
 pub mod error;
 /// The Lawyer trait — testability boundary for all LSP operations.
@@ -33,11 +35,15 @@ pub mod plugin;
 pub mod types;
 
 pub use client::LspClient;
+pub use clock::{Clock, DefaultClock, MockClock, TokioClock};
 pub use error::LspError;
 pub use lawyer::Lawyer;
 pub use mock::MockLawyer;
 pub use no_op::NoOpLawyer;
-pub use types::DefinitionLocation;
+pub use types::{
+    CapabilityReadiness, DefinitionLocation, FileChangeType, FileEvent, HierarchyReadiness,
+    Readiness, ReferenceLocation, TraversalOutcome,
+};
 
 pub use plugin::{
     all_plugins, plugin_for_extension, plugin_for_language, GoPlugin, JavaPlugin, LanguagePlugin,

@@ -2,6 +2,38 @@ use super::*;
 use serde_json::json;
 use std::time::Duration;
 
+fn make_test_language_state(
+    transport: Arc<dyn crate::client::process::LspTransport>,
+    reader_handle: tokio::task::JoinHandle<()>,
+    reader_alive: Arc<std::sync::atomic::AtomicBool>,
+    watcher_handles: Vec<tokio::task::JoinHandle<()>>,
+) -> crate::client::LanguageState {
+    let (readiness_tx, readiness_rx) = tokio::sync::watch::channel(
+        crate::client::ReadinessState::Ready(crate::types::CapabilityReadiness::all()),
+    );
+    crate::client::LanguageState {
+        transport,
+        lifecycle: None,
+        reader_handle,
+        reader_alive,
+        restart_count: 0,
+        spawned_at: Instant::now(),
+        indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
+        indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
+        indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
+        live_capabilities: Arc::new(parking_lot::RwLock::new(
+            crate::client::DetectedCapabilities::default(),
+        )),
+        in_coexistence_mode: false,
+        watcher_handles,
+        probe_handle: None,
+        readiness_tx: Arc::new(readiness_tx),
+        readiness_rx,
+        workspace_root: std::path::PathBuf::from("/tmp"),
+    }
+}
+
 #[test]
 fn test_extract_progress_action_end() {
     let msg = json!({
@@ -553,23 +585,12 @@ async fn test_reader_supervisor_normal_exit_removes_entry() {
 
     processes.insert(
         "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::clone(&reader_alive),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+        ProcessEntry::Running(Box::new(make_test_language_state(
+            fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            tokio::spawn(async {}),
+            Arc::clone(&reader_alive),
+            vec![],
+        ))),
     );
 
     reader_supervisor_task(
@@ -693,157 +714,6 @@ async fn test_registration_watcher_lagged_continues() {
 }
 
 #[tokio::test]
-async fn test_collect_idle_languages_returns_stale_entries() {
-    use crate::client::fake_transport::FakeTransport;
-    use crate::client::process::LspTransport;
-
-    let processes = DashMap::new();
-    let dispatcher = Arc::new(RequestDispatcher::new());
-
-    // Create a FakeTransport with last_used set far in the past (over 15 min).
-    let fake_transport = Arc::new(FakeTransport::new());
-    fake_transport.set_dispatcher(Arc::clone(&dispatcher));
-    // Set last_used to 20 minutes ago (well past the 15-min idle timeout).
-    let stale_time = Instant::now()
-        .checked_sub(Duration::from_mins(20))
-        .expect("time subtraction should not underflow");
-    fake_transport.set_last_used(stale_time);
-
-    processes.insert(
-        "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
-    );
-
-    let idle = collect_idle_languages(&processes);
-    assert_eq!(idle.len(), 1, "should collect 1 stale language");
-    assert_eq!(idle[0], "rust");
-}
-
-#[tokio::test]
-async fn test_collect_idle_languages_skips_recent() {
-    use crate::client::fake_transport::FakeTransport;
-    use crate::client::process::LspTransport;
-
-    let processes = DashMap::new();
-    let dispatcher = Arc::new(RequestDispatcher::new());
-
-    // Create a FakeTransport with last_used set to now (recent activity).
-    let fake_transport = Arc::new(FakeTransport::new());
-    fake_transport.set_dispatcher(Arc::clone(&dispatcher));
-    // last_used defaults to Instant::now() in FakeTransport::new(), so it's recent.
-
-    processes.insert(
-        "go".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
-    );
-
-    let idle = collect_idle_languages(&processes);
-    assert!(
-        idle.is_empty(),
-        "should not collect recently-used languages, got: {idle:?}"
-    );
-}
-
-#[test]
-fn test_collect_idle_languages_skips_unavailable_entries() {
-    let processes = DashMap::new();
-
-    // Unavailable entries should be ignored by collect_idle_languages.
-    processes.insert(
-        "python".to_owned(),
-        ProcessEntry::Unavailable(crate::client::UnavailableState {
-            unavailable_since: Instant::now().checked_sub(Duration::from_mins(30)).unwrap(),
-            backoff_attempt: 1,
-        }),
-    );
-
-    let idle = collect_idle_languages(&processes);
-    assert!(
-        idle.is_empty(),
-        "should not collect Unavailable entries, got: {idle:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_collect_idle_languages_skips_in_flight() {
-    use crate::client::fake_transport::FakeTransport;
-    use crate::client::process::LspTransport;
-    use std::sync::atomic::Ordering;
-
-    let processes = DashMap::new();
-    let dispatcher = Arc::new(RequestDispatcher::new());
-
-    let fake_transport = Arc::new(FakeTransport::new());
-    fake_transport.set_dispatcher(Arc::clone(&dispatcher));
-    // Set last_used to 20 minutes ago (stale).
-    let stale_time = Instant::now()
-        .checked_sub(Duration::from_mins(20))
-        .expect("time subtraction should not underflow");
-    fake_transport.set_last_used(stale_time);
-    // But set in_flight to 1 (active request in progress).
-    fake_transport.in_flight().store(1, Ordering::Release);
-
-    processes.insert(
-        "typescript".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
-    );
-
-    let idle = collect_idle_languages(&processes);
-    assert!(
-        idle.is_empty(),
-        "should not collect languages with in-flight requests, got: {idle:?}"
-    );
-}
-
-#[tokio::test]
 async fn test_reader_supervisor_crash_cancels_and_clears_docs() {
     let processes = Arc::new(DashMap::new());
     let dispatcher = Arc::new(RequestDispatcher::new());
@@ -851,11 +721,19 @@ async fn test_reader_supervisor_crash_cancels_and_clears_docs() {
 
     doc_versions.insert(
         "file:///foo.rs".to_string(),
-        ("rust".to_string(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "rust".to_string(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
     doc_versions.insert(
         "file:///bar.go".to_string(),
-        ("go".to_string(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "go".to_string(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
 
     let reader_handle = tokio::spawn(async {
@@ -867,23 +745,12 @@ async fn test_reader_supervisor_crash_cancels_and_clears_docs() {
 
     processes.insert(
         "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::clone(&reader_alive),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+        ProcessEntry::Running(Box::new(make_test_language_state(
+            fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            tokio::spawn(async {}),
+            Arc::clone(&reader_alive),
+            vec![],
+        ))),
     );
 
     reader_supervisor_task(
@@ -942,35 +809,25 @@ async fn test_progress_watcher_warns_on_late_end() {
 }
 
 #[tokio::test]
-async fn test_idle_timeout_task_shutdown() {
+async fn test_process_supervisor_task_shutdown() {
     let processes = Arc::new(DashMap::new());
     let dispatcher = Arc::new(RequestDispatcher::new());
     let doc_versions = Arc::new(DashMap::new());
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
     let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
+    fake_transport.set_dispatcher(Arc::clone(&dispatcher));
     processes.insert(
         "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+        ProcessEntry::Running(Box::new(make_test_language_state(
+            fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            tokio::spawn(async {}),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            vec![],
+        ))),
     );
 
-    let handle = tokio::spawn(idle_timeout_task(
+    let handle = tokio::spawn(process_supervisor_task(
         Arc::clone(&processes),
         dispatcher,
         doc_versions,
@@ -985,9 +842,7 @@ async fn test_idle_timeout_task_shutdown() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn test_idle_timeout_task_reaps_zombies_and_idle() {
-    use crate::client::process::LspTransport;
-
+async fn test_process_supervisor_task_reaps_zombies() {
     let processes = Arc::new(DashMap::new());
     let dispatcher = Arc::new(RequestDispatcher::new());
     let doc_versions = Arc::new(DashMap::new());
@@ -995,7 +850,11 @@ async fn test_idle_timeout_task_reaps_zombies_and_idle() {
 
     doc_versions.insert(
         "file:///foo.rs".to_string(),
-        ("rust".to_string(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "rust".to_string(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
 
     let dead_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
@@ -1003,51 +862,15 @@ async fn test_idle_timeout_task_reaps_zombies_and_idle() {
 
     processes.insert(
         "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: dead_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+        ProcessEntry::Running(Box::new(make_test_language_state(
+            dead_transport as Arc<dyn crate::client::process::LspTransport>,
+            tokio::spawn(async {}),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            vec![],
+        ))),
     );
 
-    let idle_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
-    let stale_time = Instant::now().checked_sub(Duration::from_mins(20)).unwrap();
-    idle_transport.set_last_used(stale_time);
-
-    processes.insert(
-        "go".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: idle_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
-    );
-
-    let handle = tokio::spawn(idle_timeout_task(
+    let handle = tokio::spawn(process_supervisor_task(
         Arc::clone(&processes),
         dispatcher,
         Arc::clone(&doc_versions),
@@ -1063,8 +886,6 @@ async fn test_idle_timeout_task_reaps_zombies_and_idle() {
         ProcessEntry::Unavailable(_)
     ));
     assert!(!doc_versions.contains_key("file:///foo.rs"));
-
-    assert!(!processes.contains_key("go"));
 
     handle.abort();
 }
@@ -1320,7 +1141,11 @@ async fn test_reader_supervisor_clears_doc_versions_with_zero_cleared() {
     // Do NOT insert any document versions for "rust" to keep cleared = 0 (covers line 89 branch)
     doc_versions.insert(
         "file:///bar.go".to_string(),
-        ("go".to_string(), std::sync::atomic::AtomicI32::new(1)),
+        crate::client::DocumentEntry {
+            language_id: "go".to_string(),
+            version: std::sync::atomic::AtomicI32::new(1),
+            content_hash: std::sync::atomic::AtomicU64::new(0),
+        },
     );
 
     let reader_handle = tokio::spawn(async {
@@ -1332,23 +1157,12 @@ async fn test_reader_supervisor_clears_doc_versions_with_zero_cleared() {
 
     processes.insert(
         "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::clone(&reader_alive),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+        ProcessEntry::Running(Box::new(make_test_language_state(
+            fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            tokio::spawn(async {}),
+            Arc::clone(&reader_alive),
+            vec![],
+        ))),
     );
 
     reader_supervisor_task(
@@ -1383,35 +1197,8 @@ async fn test_reader_supervisor_raced_or_already_removed() {
     .await;
 }
 
-#[tokio::test]
-async fn test_idle_timeout_task_unavailable_ignored_in_collect() {
-    let processes = Arc::new(DashMap::new());
-    let dispatcher = Arc::new(RequestDispatcher::new());
-    let doc_versions = Arc::new(DashMap::new());
-    let (_shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-
-    // Insert an Unavailable entry (covers line 330)
-    processes.insert(
-        "rust".to_owned(),
-        ProcessEntry::Unavailable(UnavailableState {
-            unavailable_since: Instant::now(),
-            backoff_attempt: 1,
-        }),
-    );
-
-    let handle = tokio::spawn(idle_timeout_task(
-        Arc::clone(&processes),
-        dispatcher,
-        doc_versions,
-        shutdown_rx,
-    ));
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    handle.abort();
-}
-
 #[tokio::test(start_paused = true)]
-async fn test_idle_timeout_task_reap_race_and_remove_if_false() {
+async fn test_process_supervisor_task_reap_race_and_remove_if_false() {
     use crate::client::process::LspTransport;
 
     let processes = Arc::new(DashMap::new());
@@ -1431,27 +1218,19 @@ async fn test_idle_timeout_task_reap_race_and_remove_if_false() {
     let dead_transport_rust = Arc::new(crate::client::fake_transport::FakeTransport::new());
     dead_transport_rust.kill();
 
+    let mut state_rust = make_test_language_state(
+        dead_transport_rust as Arc<dyn LspTransport>,
+        tokio::spawn(async {}),
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        vec![],
+    );
+    state_rust.lifecycle = Some(ProcessLifecycle {
+        child: Arc::new(tokio::sync::Mutex::new(child_rust)),
+    });
+
     processes.insert(
         "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: dead_transport_rust as Arc<dyn LspTransport>,
-            lifecycle: Some(ProcessLifecycle {
-                child: Arc::new(tokio::sync::Mutex::new(child_rust)),
-            }),
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+        ProcessEntry::Running(Box::new(state_rust)),
     );
 
     let dead_transport_go = Arc::new(crate::client::fake_transport::FakeTransport::new());
@@ -1459,27 +1238,16 @@ async fn test_idle_timeout_task_reap_race_and_remove_if_false() {
 
     processes.insert(
         "go".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: dead_transport_go as Arc<dyn LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+        ProcessEntry::Running(Box::new(make_test_language_state(
+            dead_transport_go as Arc<dyn LspTransport>,
+            tokio::spawn(async {}),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            vec![],
+        ))),
     );
 
     let processes_clone = Arc::clone(&processes);
-    let handle = tokio::spawn(idle_timeout_task(
+    let handle = tokio::spawn(process_supervisor_task(
         processes_clone,
         dispatcher,
         doc_versions,
@@ -1494,6 +1262,7 @@ async fn test_idle_timeout_task_reap_race_and_remove_if_false() {
             ProcessEntry::Unavailable(UnavailableState {
                 unavailable_since: Instant::now(),
                 backoff_attempt: 2,
+                reason: None,
             }),
         );
     });
@@ -1512,116 +1281,6 @@ async fn test_idle_timeout_task_reap_race_and_remove_if_false() {
     if let Some(entry) = entry_go {
         if let ProcessEntry::Unavailable(ref state) = entry.value() {
             assert_eq!(state.backoff_attempt, 2);
-        } else {
-            panic!("expected Unavailable for go");
-        }
-    }
-
-    shutdown_tx.send(()).unwrap();
-    let _ = handle.await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn test_idle_timeout_task_idle_race_remove_if_false() {
-    use crate::client::process::LspTransport;
-
-    let processes = Arc::new(DashMap::new());
-    let dispatcher = Arc::new(RequestDispatcher::new());
-    let doc_versions = Arc::new(DashMap::new());
-    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-
-    // We insert two idle candidate processes: "rust" and "go".
-    // "rust" has a lifecycle child process.
-    let child_rust = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg("exit 0")
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let idle_transport_rust = Arc::new(crate::client::fake_transport::FakeTransport::new());
-    let stale_time = Instant::now().checked_sub(Duration::from_mins(20)).unwrap();
-    idle_transport_rust.set_last_used(stale_time);
-
-    processes.insert(
-        "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: idle_transport_rust as Arc<dyn LspTransport>,
-            lifecycle: Some(ProcessLifecycle {
-                child: Arc::new(tokio::sync::Mutex::new(child_rust)),
-            }),
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
-    );
-
-    let idle_transport_go = Arc::new(crate::client::fake_transport::FakeTransport::new());
-    idle_transport_go.set_last_used(stale_time);
-
-    processes.insert(
-        "go".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: idle_transport_go as Arc<dyn LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
-    );
-
-    let processes_clone = Arc::clone(&processes);
-    let handle = tokio::spawn(idle_timeout_task(
-        processes_clone,
-        dispatcher,
-        doc_versions,
-        shutdown_rx,
-    ));
-
-    let processes_for_race = Arc::clone(&processes);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(61)).await;
-        // Modify "go" so remove_if predicate on line 399 returns false (covers line 399 and 440)
-        processes_for_race.insert(
-            "go".to_owned(),
-            ProcessEntry::Unavailable(UnavailableState {
-                unavailable_since: Instant::now(),
-                backoff_attempt: 3,
-            }),
-        );
-    });
-
-    tokio::time::sleep(Duration::from_secs(65)).await;
-
-    // Verify "rust" was reaped (removed from map because it was idle)
-    assert!(!processes.contains_key("rust"));
-
-    // Verify "go" was kept as Unavailable because remove_if returned false
-    let entry_go = processes.get("go");
-    assert!(entry_go.is_some());
-    if let Some(entry) = entry_go {
-        if let ProcessEntry::Unavailable(ref state) = entry.value() {
-            assert_eq!(state.backoff_attempt, 3);
         } else {
             panic!("expected Unavailable for go");
         }
@@ -1651,28 +1310,17 @@ async fn test_reader_supervisor_clears_doc_versions_with_lifecycle() {
 
     let fake_transport = Arc::new(crate::client::fake_transport::FakeTransport::new());
 
-    processes.insert(
-        "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: Some(ProcessLifecycle {
-                child: Arc::new(tokio::sync::Mutex::new(child)),
-            }),
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::clone(&reader_alive),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![],
-        })),
+    let mut state = make_test_language_state(
+        fake_transport as Arc<dyn crate::client::process::LspTransport>,
+        tokio::spawn(async {}),
+        Arc::clone(&reader_alive),
+        vec![],
     );
+    state.lifecycle = Some(ProcessLifecycle {
+        child: Arc::new(tokio::sync::Mutex::new(child)),
+    });
+
+    processes.insert("rust".to_owned(), ProcessEntry::Running(Box::new(state)));
 
     reader_supervisor_task(
         "rust".to_owned(),
@@ -1713,23 +1361,12 @@ async fn test_watchers_aborted_on_crash() {
 
     processes.insert(
         "rust".to_owned(),
-        ProcessEntry::Running(Box::new(crate::client::LanguageState {
-            transport: fake_transport as Arc<dyn crate::client::process::LspTransport>,
-            lifecycle: None,
-            reader_handle: tokio::spawn(async {}),
-            reader_alive: Arc::clone(&reader_alive),
-            restart_count: 0,
-            spawned_at: Instant::now(),
-            indexing_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            indexing_completion_source: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_duration_secs: Arc::new(parking_lot::Mutex::new(None)),
-            indexing_progress_percent: Arc::new(parking_lot::Mutex::new(None)),
-            live_capabilities: Arc::new(parking_lot::RwLock::new(
-                crate::client::DetectedCapabilities::default(),
-            )),
-            in_coexistence_mode: false,
-            watcher_handles: vec![progress_handle, registration_handle],
-        })),
+        ProcessEntry::Running(Box::new(make_test_language_state(
+            fake_transport as Arc<dyn crate::client::process::LspTransport>,
+            tokio::spawn(async {}),
+            Arc::clone(&reader_alive),
+            vec![progress_handle, registration_handle],
+        ))),
     );
 
     // 2. Call the supervisor task

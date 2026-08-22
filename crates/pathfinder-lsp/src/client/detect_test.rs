@@ -306,7 +306,6 @@ async fn test_root_override_config() {
         pathfinder_common::config::LspConfig {
             command: "gopls".to_string(),
             args: vec![],
-            idle_timeout_minutes: 15,
             settings: serde_json::Value::Null,
             root_override: Some("custom/backend".to_string()),
             typescript_plugins: vec![],
@@ -444,7 +443,6 @@ async fn test_command_override_empty_string_falls_back_to_which() {
         pathfinder_common::config::LspConfig {
             command: String::default(),
             args: vec![],
-            idle_timeout_minutes: 15,
             settings: serde_json::Value::Null,
             root_override: None,
             typescript_plugins: vec![],
@@ -534,7 +532,6 @@ async fn test_config_plugins_override_auto_detection() {
         pathfinder_common::config::LspConfig {
             command: String::new(),
             args: vec![],
-            idle_timeout_minutes: 15,
             settings: serde_json::Value::Null,
             root_override: None,
             typescript_plugins: vec!["@custom/plugin".to_owned()],
@@ -807,7 +804,6 @@ async fn test_python_args_correct_per_binary() {
             pathfinder_common::config::LspConfig {
                 command: "sh".to_string(), // Use sh as a dummy command
                 args: vec![],              // No args specified in config
-                idle_timeout_minutes: 15,
                 settings: serde_json::Value::Null,
                 root_override: None,
                 typescript_plugins: vec![],
@@ -1489,7 +1485,6 @@ async fn test_detect_typescript_with_args_override() {
         pathfinder_common::config::LspConfig {
             command: String::new(),
             args: vec!["--stdio".to_owned(), "--log-level".to_owned()],
-            idle_timeout_minutes: 15,
             settings: serde_json::Value::Null,
             root_override: None,
             typescript_plugins: vec![],
@@ -1737,7 +1732,6 @@ async fn test_detect_command_override_skips_which() {
         pathfinder_common::config::LspConfig {
             command: "/usr/local/bin/custom-gopls".to_string(),
             args: vec![],
-            idle_timeout_minutes: 15,
             settings: serde_json::Value::Null,
             root_override: None,
             typescript_plugins: vec![],

@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub(crate) struct FailingBehavior {
     pub fail_after_n_requests: Option<u32>,
@@ -30,8 +30,6 @@ pub(crate) struct FakeTransport {
     responses: Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
     notifications_sent: Arc<Mutex<Vec<(String, Value)>>>,
     alive: Arc<AtomicBool>,
-    last_used: parking_lot::Mutex<Instant>,
-    in_flight: Arc<AtomicU32>,
     capabilities: parking_lot::Mutex<DetectedCapabilities>,
     dispatcher: parking_lot::Mutex<Option<Arc<RequestDispatcher>>>,
     language_id: String,
@@ -46,8 +44,6 @@ impl Default for FakeTransport {
             responses: Arc::new(Mutex::new(HashMap::new())),
             notifications_sent: Arc::new(Mutex::new(Vec::new())),
             alive: Arc::new(AtomicBool::new(true)),
-            last_used: parking_lot::Mutex::new(Instant::now()),
-            in_flight: Arc::new(AtomicU32::new(0)),
             capabilities: parking_lot::Mutex::new(DetectedCapabilities::default()),
             dispatcher: parking_lot::Mutex::new(None),
             language_id: "test".to_owned(),
@@ -253,18 +249,6 @@ impl LspTransport for FakeTransport {
 
     fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
-    }
-
-    fn last_used(&self) -> Instant {
-        *self.last_used.lock()
-    }
-
-    fn set_last_used(&self, when: Instant) {
-        *self.last_used.lock() = when;
-    }
-
-    fn in_flight(&self) -> &Arc<AtomicU32> {
-        &self.in_flight
     }
 
     fn capabilities(&self) -> DetectedCapabilities {

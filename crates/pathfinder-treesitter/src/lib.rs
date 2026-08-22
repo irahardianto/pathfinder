@@ -11,6 +11,8 @@
 pub mod cache;
 /// Module containing error types and utilities.
 pub mod error;
+/// Multi-zone and injected grammar parsing utilities.
+pub mod injection;
 /// Language detection and support for various programming languages.
 pub mod language;
 /// Module containing mock implementations for testing.
@@ -25,9 +27,11 @@ pub mod surgeon;
 pub mod symbols;
 /// Public module providing Tree-sitter-based surgery utilities.
 pub mod treesitter_surgeon;
-/// Vue multi-zone parsing utilities.
+/// Vue multi-zone parsing utilities (re-exports from injection).
 pub mod vue_zones;
 
 pub use error::SurgeonError;
 pub use surgeon::Surgeon;
+pub use tree_sitter;
+pub use tree_sitter::Point;
 pub use treesitter_surgeon::TreeSitterSurgeon;

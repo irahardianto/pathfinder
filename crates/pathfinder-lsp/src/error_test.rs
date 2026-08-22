@@ -10,7 +10,8 @@ fn test_lsp_error_no_lsp_available_recovery_hint() {
     assert!(hint.is_some());
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("No LSP available"));
-    assert!(hint_str.contains("lsp_health"));
+    assert!(hint_str.contains("PATH"));
+    assert!(hint_str.contains("locate"));
 }
 
 #[test]
@@ -26,8 +27,7 @@ fn test_lsp_error_timeout_recovery_hint() {
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("textDocument/definition"));
     assert!(hint_str.contains("10000ms"));
-    assert!(hint_str.contains("lsp_health"));
-    assert!(hint_str.contains("retry in 30s"));
+    assert!(hint_str.contains("retry_attempt"));
 }
 
 #[test]
@@ -39,8 +39,7 @@ fn test_lsp_error_protocol_recovery_hint() {
     assert!(hint.is_some());
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("malformed JSON-RPC"));
-    assert!(hint_str.contains("lsp_health"));
-    assert!(hint_str.contains("search_codebase"));
+    assert!(hint_str.contains("inspect"));
 }
 
 #[test]
@@ -57,7 +56,7 @@ fn test_lsp_error_server_error_recovery_hint() {
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("-32601"));
     assert!(hint_str.contains("Method not found"));
-    assert!(hint_str.contains("lsp_health"));
+    assert!(hint_str.contains("inspect"));
 }
 
 #[test]
@@ -110,9 +109,8 @@ fn test_lsp_error_connection_lost_recovery_hint() {
     assert!(hint.is_some());
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("connection lost"));
-    assert!(hint_str.contains("lsp_health"));
-    assert!(hint_str.contains("restart"));
-    assert!(hint_str.contains("read_source_file"));
+    assert!(hint_str.contains("supervisor"));
+    assert!(hint_str.contains("inspect"));
 }
 
 #[test]
@@ -127,7 +125,7 @@ fn test_lsp_error_unsupported_capability_recovery_hint() {
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("diagnosticProvider"));
     assert!(hint_str.contains("does not support"));
-    assert!(hint_str.contains("search_codebase"));
+    assert!(hint_str.contains("inspect"));
 }
 
 #[test]
@@ -142,7 +140,6 @@ fn test_lsp_error_io_not_found_recovery_hint() {
     assert!(hint_str.contains("binary not found"));
     assert!(hint_str.contains("installed"));
     assert!(hint_str.contains("PATH"));
-    assert!(hint_str.contains("lsp_health"));
 }
 
 #[test]
@@ -156,7 +153,6 @@ fn test_lsp_error_io_permission_denied_recovery_hint() {
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("I/O error"));
     assert!(hint_str.contains("access denied"));
-    assert!(hint_str.contains("lsp_health"));
 }
 
 #[test]
@@ -170,7 +166,6 @@ fn test_lsp_error_io_broken_pipe_recovery_hint() {
     let hint_str = hint.unwrap();
     assert!(hint_str.contains("I/O error"));
     assert!(hint_str.contains("pipe broken"));
-    assert!(hint_str.contains("lsp_health"));
 }
 
 #[test]

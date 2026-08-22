@@ -160,9 +160,7 @@ async fn test_handshake_tools_list_contains_expected_tools() {
         .map(|t| t["name"].as_str().expect("tool name"))
         .collect();
 
-    let expected_tools = [
-        "explore", "search", "read", "inspect", "locate", "trace", "health",
-    ];
+    let expected_tools = ["inspect", "locate", "trace"];
 
     for expected in &expected_tools {
         assert!(
@@ -388,59 +386,6 @@ async fn test_trace_tool_description_documents_null_vs_empty_array() {
         description.contains("confidence"),
         "trace tool description must mention `confidence` so agents know \
          to check the confidence field on each reference.\nGot: {description:?}"
-    );
-
-    drop(client_writer);
-    let service = server_handle.await.expect("join");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), service.waiting()).await;
-}
-
-/// Verify that the `search` tool's `exclude_glob` parameter description (in
-/// `inputSchema.properties`) includes brace expansion documentation.
-///
-/// Finding 6: agents see the `description` field from the MCP `inputSchema`.
-/// Without brace expansion docs, agents assume only a single pattern is supported.
-#[tokio::test]
-async fn test_search_tool_exclude_glob_schema_documents_brace_expansion() {
-    let bundle = create_test_server();
-    let (server_read, server_write, mut client_reader, mut client_writer) = create_transport_pair();
-
-    let server_handle = tokio::spawn(async move {
-        bundle
-            .server
-            .serve((server_read, server_write))
-            .await
-            .expect("server start")
-    });
-
-    // Complete handshake
-    write_jsonrpc(&mut client_writer, &initialize_request(1)).await;
-    let _ = read_jsonrpc(&mut client_reader).await;
-    write_jsonrpc(&mut client_writer, &initialized_notification()).await;
-
-    // Request tools list
-    write_jsonrpc(&mut client_writer, &tools_list_request(2)).await;
-    let resp = read_jsonrpc(&mut client_reader).await;
-
-    let tools = resp["result"]["tools"]
-        .as_array()
-        .expect("tools should be an array");
-
-    let search_tool = tools
-        .iter()
-        .find(|t| t["name"] == "search")
-        .expect("search tool must be present in tools/list");
-
-    let exclude_glob_desc = search_tool["inputSchema"]["properties"]["exclude_glob"]["description"]
-        .as_str()
-        .expect(
-            "search tool `inputSchema.properties.exclude_glob` must have a `description` string",
-        );
-
-    assert!(
-        exclude_glob_desc.contains("brace expansion"),
-        "`exclude_glob` MCP schema description must mention brace expansion so agents \
-         know they can use `{{**/*.spec.*,**/*.test.*}}` syntax.\nGot: {exclude_glob_desc:?}"
     );
 
     drop(client_writer);

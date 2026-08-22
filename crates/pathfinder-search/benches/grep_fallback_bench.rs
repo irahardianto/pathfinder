@@ -35,6 +35,7 @@ fn bench_real_workspace_grep_fallback(c: &mut Criterion) {
         max_results: 1,
         offset: 0,
         context_lines: 0,
+        ..Default::default()
     };
 
     let scout = RipgrepScout;

@@ -559,17 +559,12 @@ fn test_extract_rust_impl_methods() {
     .unwrap();
     let syms = extract_symbols_from_tree(&tree, source, SupportedLanguage::Rust);
 
-    // Expect: one Class node holding the methods, and one Impl node kept for line tracking
-    assert_eq!(syms.len(), 2);
+    // Expect: one Struct node holding the methods because struct is declared in the same scope and impl block is merged (TS-A3)
+    assert_eq!(syms.len(), 1);
     let struct_sym = &syms[0];
     assert_eq!(struct_sym.name, "MyStruct");
     assert_eq!(struct_sym.semantic_path, "MyStruct");
     assert_eq!(struct_sym.children.len(), 2);
-
-    let impl_sym = &syms[1];
-    assert_eq!(impl_sym.name, "impl MyStruct");
-    assert_eq!(impl_sym.semantic_path, "impl MyStruct");
-    assert_eq!(impl_sym.children.len(), 0);
     assert_eq!(struct_sym.children[0].name, "foo");
     assert_eq!(struct_sym.children[0].kind, SymbolKind::Method);
     assert_eq!(struct_sym.children[0].semantic_path, "MyStruct.foo");
@@ -736,9 +731,11 @@ fn test_resolve_overloads() {
         semantic_path: "AuthService".to_string(),
         kind: SymbolKind::Class,
         byte_range: 0..20,
+        attached_range: 0..20,
         start_line: 0,
         end_line: 1,
         name_column: 0,
+        name_point: tree_sitter::Point { row: 0, column: 0 },
         access_level: crate::surgeon::AccessLevel::Public,
         children: vec![
             ExtractedSymbol {
@@ -746,9 +743,11 @@ fn test_resolve_overloads() {
                 semantic_path: "AuthService.login".to_string(),
                 kind: SymbolKind::Method,
                 byte_range: 0..10,
+                attached_range: 0..10,
                 start_line: 0,
                 end_line: 0,
                 name_column: 0,
+                name_point: tree_sitter::Point { row: 0, column: 0 },
                 access_level: crate::surgeon::AccessLevel::Public,
                 children: vec![],
             },
@@ -757,9 +756,11 @@ fn test_resolve_overloads() {
                 semantic_path: "AuthService.login#2".to_string(),
                 kind: SymbolKind::Method,
                 byte_range: 10..20,
+                attached_range: 10..20,
                 start_line: 1,
                 end_line: 1,
                 name_column: 0,
+                name_point: tree_sitter::Point { row: 1, column: 0 },
                 access_level: crate::surgeon::AccessLevel::Public,
                 children: vec![],
             },
@@ -829,7 +830,7 @@ fn test_extract_tsx_jsx_elements_in_return() {
         .find(|c| c.name == "div")
         .expect("should find <div> JSX element");
     assert_eq!(div.kind, SymbolKind::HtmlElement);
-    assert_eq!(div.semantic_path, "Greeting::return::div");
+    assert_eq!(div.semantic_path, "Greeting.div");
 }
 
 #[test]
@@ -857,7 +858,7 @@ fn test_extract_tsx_jsx_self_closing_element() {
         .find(|c| c.name == "img")
         .expect("should find <img /> self-closing JSX");
     assert_eq!(img.kind, SymbolKind::HtmlElement);
-    assert_eq!(img.semantic_path, "Avatar::return::img");
+    assert_eq!(img.semantic_path, "Avatar.img");
 }
 
 #[test]
@@ -889,7 +890,7 @@ fn test_extract_tsx_jsx_component_capitalized() {
         .find(|c| c.name == "Header")
         .expect("should find <Header /> component");
     assert_eq!(header.kind, SymbolKind::Component);
-    assert_eq!(header.semantic_path, "App::return::Header");
+    assert_eq!(header.semantic_path, "App.Header");
 
     let button = app
         .children
@@ -897,7 +898,7 @@ fn test_extract_tsx_jsx_component_capitalized() {
         .find(|c| c.name == "Button")
         .expect("should find <Button> component");
     assert_eq!(button.kind, SymbolKind::Component);
-    assert_eq!(button.semantic_path, "App::return::Button");
+    assert_eq!(button.semantic_path, "App.Button");
 }
 
 #[test]
@@ -922,7 +923,7 @@ fn test_extract_tsx_arrow_function_returning_jsx() {
         .find(|c| c.name == "span")
         .expect("arrow function returning JSX should have span child");
     assert_eq!(span.kind, SymbolKind::HtmlElement);
-    assert_eq!(span.semantic_path, "Arrow::return::span");
+    assert_eq!(span.semantic_path, "Arrow.span");
 }
 
 #[test]
@@ -956,11 +957,11 @@ fn test_extract_tsx_jsx_duplicate_tags_get_nth_suffix() {
         .collect();
     assert_eq!(lis.len(), 3, "should find 3 <li> elements");
     assert_eq!(lis[0].name, "li");
-    assert_eq!(lis[0].semantic_path, "List::return::li");
+    assert_eq!(lis[0].semantic_path, "List.li");
     assert_eq!(lis[1].name, "li[2]");
-    assert_eq!(lis[1].semantic_path, "List::return::li[2]");
+    assert_eq!(lis[1].semantic_path, "List.li[2]");
     assert_eq!(lis[2].name, "li[3]");
-    assert_eq!(lis[2].semantic_path, "List::return::li[3]");
+    assert_eq!(lis[2].semantic_path, "List.li[3]");
 }
 
 #[test]
@@ -2382,9 +2383,11 @@ fn test_did_you_mean_fuzzy_and_exact() {
             semantic_path: "MyHandler".into(),
             kind: SymbolKind::Function,
             byte_range: 0..10,
+            attached_range: 0..10,
             start_line: 0,
             end_line: 5,
             name_column: 0,
+            name_point: tree_sitter::Point { row: 0, column: 0 },
             access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -2393,9 +2396,11 @@ fn test_did_you_mean_fuzzy_and_exact() {
             semantic_path: "MyHelper".into(),
             kind: SymbolKind::Function,
             byte_range: 11..20,
+            attached_range: 11..20,
             start_line: 6,
             end_line: 10,
             name_column: 0,
+            name_point: tree_sitter::Point { row: 6, column: 0 },
             access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -2433,9 +2438,11 @@ fn test_resolve_symbol_chain_with_overload_index() {
             semantic_path: "foo".into(),
             kind: SymbolKind::Function,
             byte_range: 0..10,
+            attached_range: 0..10,
             start_line: 0,
             end_line: 5,
             name_column: 0,
+            name_point: tree_sitter::Point { row: 0, column: 0 },
             access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -2444,9 +2451,11 @@ fn test_resolve_symbol_chain_with_overload_index() {
             semantic_path: "foo#2".into(),
             kind: SymbolKind::Function,
             byte_range: 11..20,
+            attached_range: 11..20,
             start_line: 6,
             end_line: 10,
             name_column: 0,
+            name_point: tree_sitter::Point { row: 6, column: 0 },
             access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -2512,7 +2521,7 @@ fn test_vue_self_closing_template_element() {
     );
     assert_eq!(
         my_input.unwrap().semantic_path,
-        "template::MyInput",
+        "template.MyInput",
         "component should have promoted path"
     );
 
@@ -2591,8 +2600,8 @@ mod sub {
 
     assert_no_path_prefix(&symbols, "super::");
 
-    // The module's child impl node should be named `impl MyStruct`, not
-    // `impl super::MyStruct`
+    // The module's child impl node should be named `MyStruct`, not
+    // `super::MyStruct`
     let sub_mod = symbols
         .iter()
         .find(|s| s.name == "sub")
@@ -2600,7 +2609,7 @@ mod sub {
     let impl_sym = sub_mod
         .children
         .iter()
-        .find(|c| c.name.starts_with("impl "))
+        .find(|c| c.kind == SymbolKind::Impl)
         .expect("impl block must exist inside mod sub");
     assert!(
         impl_sym.name.contains("MyStruct"),
@@ -2902,7 +2911,7 @@ trait Mapper<T> {
 struct MyStruct;
 impl<T> Mapper<T> for MyStruct {
     fn map(&self) -> T {
-        todo!()
+        loop {}
     }
 }
 ";
@@ -3049,9 +3058,15 @@ trait Printable { fn print(&self); }
     let mut cursor = root.walk();
     let items: Vec<_> = root.named_children(&mut cursor).collect();
 
-    assert_eq!(refine_class_kind(items[0]), SymbolKind::Enum);
-    assert_eq!(refine_class_kind(items[1]), SymbolKind::Struct);
-    assert_eq!(refine_class_kind(items[2]), SymbolKind::Interface);
+    assert_eq!(refine_class_kind(items[0], source_bytes), SymbolKind::Enum);
+    assert_eq!(
+        refine_class_kind(items[1], source_bytes),
+        SymbolKind::Struct
+    );
+    assert_eq!(
+        refine_class_kind(items[2], source_bytes),
+        SymbolKind::Interface
+    );
 }
 
 #[test]
@@ -3188,9 +3203,11 @@ fn test_did_you_mean_fuzzy_matching() {
             semantic_path: "auth.LoginUser".to_string(),
             kind: SymbolKind::Function,
             byte_range: 0..10,
+            attached_range: 0..10,
             start_line: 0,
             end_line: 0,
             name_column: 0,
+            name_point: tree_sitter::Point { row: 0, column: 0 },
             access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -3199,9 +3216,11 @@ fn test_did_you_mean_fuzzy_matching() {
             semantic_path: "auth.LogoutUser".to_string(),
             kind: SymbolKind::Function,
             byte_range: 10..20,
+            attached_range: 10..20,
             start_line: 1,
             end_line: 1,
             name_column: 0,
+            name_point: tree_sitter::Point { row: 1, column: 0 },
             access_level: crate::surgeon::AccessLevel::Public,
             children: vec![],
         },
@@ -3282,4 +3301,240 @@ fn test_css_at_rules_and_selectors_extraction() {
     assert_eq!(style_syms.len(), 2);
     assert_eq!(style_syms[0].name, "@media");
     assert_eq!(style_syms[1].name, "@media[2]");
+}
+
+// ── WS-7b Deliverables Tests (TS-A6, TS-A8, TS-C1, TS-B5) ────────────────────
+
+#[test]
+fn test_rust_test_negative_control_ts_a8() {
+    let source = "fn regular_utility_function() -> bool { true }";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].name, "regular_utility_function");
+    assert_eq!(
+        symbols[0].kind,
+        SymbolKind::Function,
+        "Non-test function without test_ prefix or #[test] attribute must NOT be SymbolKind::Test"
+    );
+}
+
+#[test]
+fn test_rust_tokio_test_attribute_without_test_prefix_ts_a8() {
+    let source = "#[tokio::test]\nasync fn verify_async_handler() {}";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].name, "verify_async_handler");
+    assert_eq!(
+        symbols[0].kind,
+        SymbolKind::Test,
+        "Function decorated with #[tokio::test] must be classified as SymbolKind::Test even without test_ prefix"
+    );
+}
+
+#[test]
+fn test_rust_impl_item_visibility_ts_a8() {
+    use crate::surgeon::AccessLevel;
+    let source = "
+pub struct Service;
+
+impl Service {
+    pub fn public_method(&self) {}
+    pub(crate) fn crate_method(&self) {}
+    fn private_method(&self) {}
+}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Rust);
+    let service = symbols
+        .iter()
+        .find(|s| s.name == "Service")
+        .expect("Service struct found");
+
+    let pub_m = service
+        .children
+        .iter()
+        .find(|c| c.name == "public_method")
+        .expect("public_method found");
+    assert_eq!(pub_m.access_level, AccessLevel::Public);
+
+    let crate_m = service
+        .children
+        .iter()
+        .find(|c| c.name == "crate_method")
+        .expect("crate_method found");
+    assert_eq!(crate_m.access_level, AccessLevel::Package);
+
+    let priv_m = service
+        .children
+        .iter()
+        .find(|c| c.name == "private_method")
+        .expect("private_method found");
+    assert_eq!(priv_m.access_level, AccessLevel::Private);
+}
+
+#[test]
+fn test_go_receiver_method_binding_ts_a6() {
+    use crate::surgeon::AccessLevel;
+    let source = "
+package main
+
+type Router struct {}
+
+func (r *Router) Register(path string) {}
+func (r Router) DirectValue() {}
+func FreeFunction() {}
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Go);
+    let router = symbols
+        .iter()
+        .find(|s| s.name == "Router")
+        .expect("Router struct found");
+    assert_eq!(router.kind, SymbolKind::Struct);
+
+    let reg = router
+        .children
+        .iter()
+        .find(|c| c.name == "Register")
+        .expect("Register method bound to Router");
+    assert_eq!(reg.kind, SymbolKind::Method);
+    assert_eq!(reg.semantic_path, "Router.Register");
+    assert_eq!(reg.access_level, AccessLevel::Public);
+
+    let direct = router
+        .children
+        .iter()
+        .find(|c| c.name == "DirectValue")
+        .expect("DirectValue method bound to Router");
+    assert_eq!(direct.semantic_path, "Router.DirectValue");
+
+    let free = symbols
+        .iter()
+        .find(|s| s.name == "FreeFunction")
+        .expect("FreeFunction top level found");
+    assert_eq!(free.kind, SymbolKind::Function);
+    assert_eq!(free.semantic_path, "FreeFunction");
+}
+
+#[test]
+fn test_go_const_var_specs_extraction_ts_a6() {
+    use crate::surgeon::AccessLevel;
+    let source = "
+package main
+
+const (
+    MaxRetries = 5
+    defaultTimeout = 30
+)
+
+const SingleConst = 100
+
+var (
+    GlobalRegistry = \"registered\"
+    localTracker = 0
+)
+
+var SingleVar = \"single\"
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Go);
+
+    let max_retries = symbols
+        .iter()
+        .find(|s| s.name == "MaxRetries")
+        .expect("MaxRetries extracted");
+    assert_eq!(max_retries.kind, SymbolKind::Constant);
+    assert_eq!(max_retries.access_level, AccessLevel::Public);
+
+    let def_timeout = symbols
+        .iter()
+        .find(|s| s.name == "defaultTimeout")
+        .expect("defaultTimeout extracted");
+    assert_eq!(def_timeout.kind, SymbolKind::Constant);
+    assert_eq!(def_timeout.access_level, AccessLevel::Package);
+
+    let single_c = symbols
+        .iter()
+        .find(|s| s.name == "SingleConst")
+        .expect("SingleConst extracted");
+    assert_eq!(single_c.kind, SymbolKind::Constant);
+    assert_eq!(single_c.access_level, AccessLevel::Public);
+
+    let global_reg = symbols
+        .iter()
+        .find(|s| s.name == "GlobalRegistry")
+        .expect("GlobalRegistry extracted");
+    assert_eq!(global_reg.kind, SymbolKind::Constant);
+    assert_eq!(global_reg.access_level, AccessLevel::Public);
+
+    let local_tr = symbols
+        .iter()
+        .find(|s| s.name == "localTracker")
+        .expect("localTracker extracted");
+    assert_eq!(local_tr.kind, SymbolKind::Constant);
+    assert_eq!(local_tr.access_level, AccessLevel::Package);
+
+    let single_v = symbols
+        .iter()
+        .find(|s| s.name == "SingleVar")
+        .expect("SingleVar extracted");
+    assert_eq!(single_v.kind, SymbolKind::Constant);
+    assert_eq!(single_v.access_level, AccessLevel::Public);
+}
+
+#[test]
+fn test_attached_range_computation_ts_c1() {
+    let rust_source = "
+/// This is a doc comment for Foo.
+#[derive(Debug, Clone)]
+pub struct Foo {
+    pub field: u32,
+}
+";
+    let symbols = parse_and_extract(rust_source, SupportedLanguage::Rust);
+    let foo = symbols.iter().find(|s| s.name == "Foo").unwrap();
+    assert!(
+        foo.attached_range.start < foo.byte_range.start,
+        "attached_range must start before byte_range to include doc comments and attributes"
+    );
+    let attached_slice = &rust_source[foo.attached_range.clone()];
+    assert!(attached_slice.contains("/// This is a doc comment"));
+    assert!(attached_slice.contains("#[derive(Debug, Clone)]"));
+    assert!(attached_slice.contains("pub struct Foo"));
+
+    let ts_source = "
+/**
+ * Doc comment for TS function.
+ */
+export function calculateTotal(a: number, b: number): number {
+    return a + b;
+}
+";
+    let ts_symbols = parse_and_extract(ts_source, SupportedLanguage::TypeScript);
+    let calc = ts_symbols
+        .iter()
+        .find(|s| s.name == "calculateTotal")
+        .unwrap();
+    assert!(
+        calc.attached_range.start < calc.byte_range.start,
+        "TS attached_range must include doc comment and export keyword"
+    );
+    let ts_slice = &ts_source[calc.attached_range.clone()];
+    assert!(ts_slice.contains("/**\n * Doc comment"));
+    assert!(ts_slice.contains("export function calculateTotal"));
+}
+
+#[test]
+fn test_language_grammar_n_to_1_lsp_mapping_ts_b5_ts_c3() {
+    assert_eq!(SupportedLanguage::Rust.lsp_language_id(), "rust");
+    assert_eq!(SupportedLanguage::Go.lsp_language_id(), "go");
+    assert_eq!(
+        SupportedLanguage::TypeScript.lsp_language_id(),
+        "typescript"
+    );
+    assert_eq!(SupportedLanguage::Tsx.lsp_language_id(), "typescript");
+    assert_eq!(
+        SupportedLanguage::JavaScript.lsp_language_id(),
+        "javascript"
+    );
+    assert_eq!(SupportedLanguage::Python.lsp_language_id(), "python");
+    assert_eq!(SupportedLanguage::Java.lsp_language_id(), "java");
+    assert_eq!(SupportedLanguage::Vue.lsp_language_id(), "vue");
 }

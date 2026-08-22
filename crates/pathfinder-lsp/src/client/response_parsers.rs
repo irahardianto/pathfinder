@@ -71,13 +71,14 @@ fn parse_uri_and_range(
     location: &serde_json::Value,
 ) -> Option<(String, u64, u64, Option<std::path::PathBuf>)> {
     let (uri_str, start_line, start_char) = if location.get("targetUri").is_some() {
+        let range = location
+            .get("targetSelectionRange")
+            .or_else(|| location.get("targetRange"));
         (
             location["targetUri"].as_str().unwrap_or(""),
-            location["targetSelectionRange"]["start"]["line"]
-                .as_u64()
-                .unwrap_or(0),
-            location["targetSelectionRange"]["start"]["character"]
-                .as_u64()
+            range.and_then(|r| r["start"]["line"].as_u64()).unwrap_or(0),
+            range
+                .and_then(|r| r["start"]["character"].as_u64())
                 .unwrap_or(0),
         )
     } else {
@@ -105,12 +106,31 @@ fn parse_uri_and_range(
 ///
 /// # Errors
 /// - `LspError::Protocol` — response has no URI
+/// - `LspError::ServerError` — LSP returned a JSON-RPC error object
 pub async fn parse_definition_response(
     response: serde_json::Value,
     workspace_root: &Path,
 ) -> Result<Option<DefinitionLocation>, LspError> {
     if response.is_null() {
         return Ok(None);
+    }
+
+    if let Some(err_obj) = response.get("error") {
+        let code = err_obj
+            .get("code")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let message = err_obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("LSP error")
+            .to_owned();
+        let data = err_obj.get("data").cloned();
+        return Err(LspError::ServerError {
+            code,
+            message,
+            data,
+        });
     }
 
     let location = if response.is_array() {
@@ -186,7 +206,9 @@ pub async fn parse_single_definition_location(
     })
 }
 
-/// Parse multiple definition locations from a response.
+/// Parse multiple definition locations from a response (Location, Location[], or `LocationLink`[]).
+///
+/// Preserves all definition locations in order (closing LSP-A7).
 pub async fn parse_definition_response_multi(
     response: &serde_json::Value,
     workspace_root: &Path,
@@ -195,7 +217,14 @@ pub async fn parse_definition_response_multi(
         return Vec::new();
     }
 
-    if let Some(items) = response.as_array() {
+    let items_opt = response.as_array().map(Vec::as_slice).or_else(|| {
+        response
+            .get("result")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+    });
+
+    if let Some(items) = items_opt {
         let mut result = Vec::with_capacity(items.len());
         for item in items {
             if let Some(loc) = parse_single_definition_location(item, workspace_root).await {
@@ -204,7 +233,8 @@ pub async fn parse_definition_response_multi(
         }
         result
     } else {
-        parse_single_definition_location(response, workspace_root)
+        let target = response.get("result").unwrap_or(response);
+        parse_single_definition_location(target, workspace_root)
             .await
             .map(|loc| vec![loc])
             .unwrap_or_default()
@@ -330,7 +360,8 @@ pub fn parse_call_hierarchy_calls_response(
 /// Parse a textDocument/references response into a list of `ReferenceLocation`.
 ///
 /// # Errors
-/// - `LspError::Protocol` — response is not an array, contains invalid URIs, or missing ranges
+/// - `LspError::Protocol` — response is not an array, contains invalid URIs, or missing/malformed ranges
+/// - `LspError::ServerError` — LSP returned a JSON-RPC error object (LSP-A4)
 pub async fn parse_references_response(
     response: &serde_json::Value,
     workspace_root: &Path,
@@ -339,44 +370,90 @@ pub async fn parse_references_response(
         return Ok(Vec::new());
     }
 
-    let references = response
-        .as_array()
-        .ok_or_else(|| LspError::Protocol("expected array".to_owned()))?;
+    if let Some(err_obj) = response.get("error") {
+        let code = err_obj
+            .get("code")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let message = err_obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("LSP error")
+            .to_owned();
+        let data = err_obj.get("data").cloned();
+        return Err(LspError::ServerError {
+            code,
+            message,
+            data,
+        });
+    }
+
+    let references = if let Some(arr) = response.as_array() {
+        arr
+    } else if let Some(arr) = response.get("result").and_then(|r| r.as_array()) {
+        arr
+    } else if response
+        .get("result")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        return Ok(Vec::new());
+    } else {
+        return Err(LspError::Protocol(
+            "expected array in references response".to_owned(),
+        ));
+    };
 
     let mut result = Vec::with_capacity(references.len());
+    let mut skipped_count = 0usize;
+
     for ref_item in references {
         let Some(uri_str) = ref_item.get("uri").and_then(|u| u.as_str()) else {
+            skipped_count += 1;
             continue;
         };
 
         let uri =
             Url::parse(uri_str).map_err(|e| LspError::Protocol(format!("invalid URI: {e}")))?;
+
         let Ok(file_path) = uri.to_file_path() else {
+            tracing::debug!(uri = %uri_str, "Skipping non-file URI in references");
+            skipped_count += 1;
             continue;
         };
-        let relative_path = match file_path.strip_prefix(workspace_root) {
-            Ok(p) => p.to_path_buf(),
-            Err(_) => file_path,
+
+        let Ok(relative_path) = file_path.strip_prefix(workspace_root) else {
+            tracing::debug!(path = %file_path.display(), "Skipping reference outside workspace root");
+            skipped_count += 1;
+            continue;
         };
 
         let range = ref_item
             .get("range")
-            .ok_or_else(|| LspError::Protocol("missing range".to_owned()))?;
+            .ok_or_else(|| LspError::Protocol("missing range in reference".to_owned()))?;
 
-        let line = range
+        let start = range
             .get("start")
-            .and_then(|s| s.get("line"))
-            .and_then(serde_json::Value::as_u64)
-            .map_or(1, |l| u32::try_from(l.saturating_add(1)).unwrap_or(1));
+            .ok_or_else(|| LspError::Protocol("missing start in reference range".to_owned()))?;
 
-        let column = range
-            .get("start")
-            .and_then(|s| s.get("character"))
+        let start_line = start
+            .get("line")
             .and_then(serde_json::Value::as_u64)
-            .map_or(1, |c| u32::try_from(c.saturating_add(1)).unwrap_or(1));
+            .ok_or_else(|| {
+                LspError::Protocol("missing start.line in reference range".to_owned())
+            })?;
+
+        let start_char = start
+            .get("character")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                LspError::Protocol("missing start.character in reference range".to_owned())
+            })?;
+
+        let line = u32::try_from(start_line.saturating_add(1)).unwrap_or(1);
+        let column = u32::try_from(start_char.saturating_add(1)).unwrap_or(1);
 
         let snippet = read_preview_line(
-            &workspace_root.join(&relative_path),
+            &workspace_root.join(relative_path),
             usize::try_from(line).unwrap_or(0).saturating_sub(1),
         )
         .await;
@@ -387,6 +464,13 @@ pub async fn parse_references_response(
             column,
             snippet,
         });
+    }
+
+    if skipped_count > 0 {
+        tracing::debug!(
+            skipped_count,
+            "parse_references_response: skipped non-workspace or non-file reference entries"
+        );
     }
 
     Ok(result)

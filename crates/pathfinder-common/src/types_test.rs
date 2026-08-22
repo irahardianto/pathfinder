@@ -304,7 +304,7 @@ fn test_degraded_reason_guidance_no_lsp() {
     let g = DegradedReason::NoLsp.guidance();
     assert!(!g.retry_recommended);
     assert!(g.permanent);
-    assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+    assert_eq!(g.fallback_tool, Some(FallbackTool::HostGrep));
     assert_eq!(g.trust_level, TrustLevel::Partial);
 }
 
@@ -323,7 +323,7 @@ fn test_degraded_reason_guidance_grep_fallback_permanent() {
     let g = DegradedReason::LspErrorGrepFallback.guidance();
     assert!(!g.retry_recommended);
     assert!(g.permanent);
-    assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+    assert_eq!(g.fallback_tool, Some(FallbackTool::HostGrep));
     assert_eq!(g.trust_level, TrustLevel::Heuristic);
 }
 
@@ -428,8 +428,10 @@ fn test_degraded_reason_all_variants() {
 #[test]
 fn test_fallback_tool_serde_roundtrip() {
     let variants = [
-        (FallbackTool::Search, "\"search\""),
-        (FallbackTool::Read, "\"read\""),
+        (FallbackTool::Locate, "\"locate\""),
+        (FallbackTool::Trace, "\"trace\""),
+        (FallbackTool::Inspect, "\"inspect\""),
+        (FallbackTool::HostGrep, "\"host_grep\""),
     ];
     for (variant, expected_json) in variants {
         let serialized = serde_json::to_string(&variant).expect("FallbackTool should serialize");
@@ -467,7 +469,7 @@ fn test_actionable_guidance_serde_roundtrip() {
     let guidance = ActionableGuidance {
         retry_recommended: true,
         retry_after_seconds: Some(30),
-        fallback_tool: Some(FallbackTool::Search),
+        fallback_tool: Some(FallbackTool::HostGrep),
         trust_level: TrustLevel::Heuristic,
         permanent: false,
     };
@@ -491,17 +493,13 @@ fn test_actionable_guidance_serde_roundtrip() {
     assert_eq!(deserialized_no_fallback, no_fallback);
 
     // Case 3: retry_after_seconds=None — must NOT appear as "null" in JSON
-    let no_retry = DegradedReason::NoLsp.guidance(); // retry_after_seconds: None, fallback_tool: None
+    let no_retry = DegradedReason::NoLsp.guidance(); // retry_after_seconds: None, fallback_tool: HostGrep
     let serialized_no_retry =
         serde_json::to_string(&no_retry).expect("ActionableGuidance should serialize");
     assert!(
             !serialized_no_retry.contains("\"retry_after_seconds\":null"),
             "retry_after_seconds=None should be omitted, not serialized as null. Got: {serialized_no_retry}"
         );
-    assert!(
-        !serialized_no_retry.contains("\"fallback_tool\":null"),
-        "fallback_tool=None should be omitted, not serialized as null. Got: {serialized_no_retry}"
-    );
     let deserialized_no_retry: ActionableGuidance =
         serde_json::from_str(&serialized_no_retry).expect("ActionableGuidance should deserialize");
     assert_eq!(deserialized_no_retry, no_retry);
@@ -512,7 +510,7 @@ fn test_actionable_guidance_serde_roundtrip() {
 #[test]
 fn test_guidance_lsp_warmup_grep_fallback() {
     let g = DegradedReason::LspWarmupGrepFallback.guidance();
-    assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+    assert_eq!(g.fallback_tool, None);
     assert_eq!(g.trust_level, TrustLevel::Heuristic);
     assert!(!g.permanent);
     assert!(g.retry_recommended);
@@ -521,7 +519,7 @@ fn test_guidance_lsp_warmup_grep_fallback() {
 #[test]
 fn test_guidance_lsp_timeout_grep_fallback() {
     let g = DegradedReason::LspTimeoutGrepFallback.guidance();
-    assert_eq!(g.fallback_tool, Some(FallbackTool::Search));
+    assert_eq!(g.fallback_tool, None);
     assert_eq!(g.trust_level, TrustLevel::Heuristic);
     assert!(!g.permanent);
     assert!(g.retry_recommended);
@@ -530,7 +528,7 @@ fn test_guidance_lsp_timeout_grep_fallback() {
 #[test]
 fn test_guidance_unsupported_language_filter_bypassed() {
     let g = DegradedReason::UnsupportedLanguageFilterBypassed.guidance();
-    assert_eq!(g.fallback_tool, Some(FallbackTool::Read));
+    assert_eq!(g.fallback_tool, Some(FallbackTool::HostGrep));
     assert_eq!(g.trust_level, TrustLevel::Partial);
     assert!(g.permanent);
 }
@@ -538,7 +536,7 @@ fn test_guidance_unsupported_language_filter_bypassed() {
 #[test]
 fn test_guidance_unsupported_language() {
     let g = DegradedReason::UnsupportedLanguage.guidance();
-    assert_eq!(g.fallback_tool, Some(FallbackTool::Read));
+    assert_eq!(g.fallback_tool, Some(FallbackTool::HostGrep));
     assert_eq!(g.trust_level, TrustLevel::None);
     assert!(g.permanent);
 }
@@ -629,10 +627,70 @@ fn test_workspace_root_new_nonexistent_path_fails() {
 
 #[test]
 fn test_fallback_tool_as_str_and_display() {
-    assert_eq!(FallbackTool::Search.as_str(), "search");
-    assert_eq!(FallbackTool::Read.as_str(), "read");
-    assert_eq!(format!("{}", FallbackTool::Search), "search");
-    assert_eq!(format!("{}", FallbackTool::Read), "read");
+    assert_eq!(FallbackTool::Locate.as_str(), "locate");
+    assert_eq!(FallbackTool::Trace.as_str(), "trace");
+    assert_eq!(FallbackTool::Inspect.as_str(), "inspect");
+    assert_eq!(FallbackTool::HostGrep.as_str(), "host_grep");
+    assert_eq!(format!("{}", FallbackTool::Locate), "locate");
+    assert_eq!(format!("{}", FallbackTool::Trace), "trace");
+    assert_eq!(format!("{}", FallbackTool::Inspect), "inspect");
+    assert_eq!(
+        format!("{}", FallbackTool::HostGrep),
+        "use your host's grep/read tools"
+    );
+}
+
+#[test]
+fn test_tool_status_serde_roundtrip() {
+    let ok = ToolStatus::Ok;
+    let serialized_ok = serde_json::to_string(&ok).unwrap();
+    assert_eq!(serialized_ok, "{\"status\":\"ok\"}");
+    let deserialized_ok: ToolStatus = serde_json::from_str(&serialized_ok).unwrap();
+    assert_eq!(deserialized_ok, ok);
+
+    let not_ready = ToolStatus::NotReady {
+        elapsed_secs: 5,
+        retry_after_secs: 8,
+        eta_secs: Some(25),
+        phase: "indexing".into(),
+        attempt: 1,
+        max_attempts: 3,
+    };
+    let serialized_nr = serde_json::to_string(&not_ready).unwrap();
+    assert!(serialized_nr.contains("\"status\":\"not_ready\""));
+    assert!(serialized_nr.contains("\"retry_after_secs\":8"));
+    let deserialized_nr: ToolStatus = serde_json::from_str(&serialized_nr).unwrap();
+    assert_eq!(deserialized_nr, not_ready);
+
+    let unavail = ToolStatus::Unavailable {
+        language: "python".into(),
+        install_hint: "pipx install pyright".into(),
+        alternative: "Use your host's grep and file-read tools for Python.".into(),
+    };
+    let serialized_un = serde_json::to_string(&unavail).unwrap();
+    assert!(serialized_un.contains("\"status\":\"unavailable\""));
+    let deserialized_un: ToolStatus = serde_json::from_str(&serialized_un).unwrap();
+    assert_eq!(deserialized_un, unavail);
+
+    let degraded = ToolStatus::Degraded {
+        reason: "probe_failed".into(),
+        retry_after_secs: Some(30),
+    };
+    let serialized_deg = serde_json::to_string(&degraded).unwrap();
+    assert!(serialized_deg.contains("\"status\":\"degraded\""));
+    let deserialized_deg: ToolStatus = serde_json::from_str(&serialized_deg).unwrap();
+    assert_eq!(deserialized_deg, degraded);
+}
+
+#[test]
+fn test_evidence_and_confidence() {
+    let verified_ev = Evidence::verified(vec![1, 2, 3]);
+    assert_eq!(verified_ev.confidence, Confidence::Verified);
+    assert_eq!(verified_ev.items, vec![1, 2, 3]);
+
+    let heuristic_ev = Evidence::heuristic(vec!["a", "b"]);
+    assert_eq!(heuristic_ev.confidence, Confidence::Heuristic);
+    assert_eq!(heuristic_ev.items, vec!["a", "b"]);
 }
 
 #[test]

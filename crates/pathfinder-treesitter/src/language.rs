@@ -1,3 +1,4 @@
+use crate::surgeon::ExtractedSymbol;
 use std::path::Path;
 use tree_sitter::Language;
 
@@ -11,7 +12,7 @@ pub struct LanguageNodeTypes {
     /// Node kinds that represent methods.
     pub method_kinds: &'static [&'static str],
     /// Node kinds that represent impl blocks (e.g. `impl_item` in Rust).
-    /// When non-empty, the extractor will descent into these nodes and extract
+    /// When non-empty, the extractor will descend into these nodes and extract
     /// their child function items as `SymbolKind::Method` under the impl type.
     pub impl_kinds: &'static [&'static str],
     /// Node kinds that represent constants.
@@ -21,6 +22,154 @@ pub struct LanguageNodeTypes {
     /// Example: Rust `mod tests { fn foo() {} }` → `tests` (Module) with child `foo`.
     pub module_kinds: &'static [&'static str],
 }
+
+/// Language grammar specification for query-driven AST extraction (TS-B5, TS-B6).
+pub struct LanguageGrammar {
+    /// Unique grammar identifier (e.g. "rust", "typescript", "go").
+    pub id: &'static str,
+    /// File extensions associated with this grammar.
+    pub extensions: &'static [&'static str],
+    /// Grammar loader function.
+    pub grammar: fn() -> tree_sitter::Language,
+    /// ORDERED tags queries. TypeScript MUST be [`javascript_tags`, `typescript_tags`] (TS-B5).
+    pub tags_queries: &'static [&'static str],
+    /// Injections query for multi-grammar parsing (TS-B6).
+    pub injections_query: Option<&'static str>,
+    /// Language-specific post-processing hook (TS-B3).
+    pub post_process: Option<fn(&mut Vec<ExtractedSymbol>)>,
+}
+
+impl LanguageGrammar {
+    /// Return the corresponding LSP language ID (TS-C3, N:1 mapping).
+    #[must_use]
+    pub fn lsp_language_id(&self) -> &'static str {
+        match self.id {
+            "go" => "go",
+            "typescript" | "tsx" => "typescript",
+            "javascript" => "javascript",
+            "python" => "python",
+            "rust" => "rust",
+            "java" => "java",
+            "vue" => "vue",
+            "html" => "html",
+            "css" => "css",
+            other => other,
+        }
+    }
+
+    /// Look up a grammar by file extension.
+    #[must_use]
+    pub fn find_by_extension(ext: &str) -> Option<&'static Self> {
+        GRAMMARS
+            .iter()
+            .find(|g| g.extensions.iter().any(|&e| e.eq_ignore_ascii_case(ext)))
+    }
+
+    /// Look up a grammar by ID.
+    #[must_use]
+    pub fn find_by_id(id: &str) -> Option<&'static Self> {
+        GRAMMARS.iter().find(|g| g.id == id)
+    }
+
+    /// Return all registered language grammars.
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        GRAMMARS
+    }
+}
+
+/// Static registry of language grammar specifications (TS-B5, TS-B6, TS-C3).
+pub static GRAMMARS: &[LanguageGrammar] = &[
+    LanguageGrammar {
+        id: "go",
+        extensions: &["go"],
+        grammar: || tree_sitter_go::LANGUAGE.into(),
+        tags_queries: &[tree_sitter_go::TAGS_QUERY],
+        injections_query: None,
+        post_process: Some(crate::symbols::post_process_go),
+    },
+    LanguageGrammar {
+        id: "typescript",
+        extensions: &["ts"],
+        grammar: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        tags_queries: &[
+            tree_sitter_javascript::TAGS_QUERY,
+            tree_sitter_typescript::TAGS_QUERY,
+        ],
+        injections_query: None,
+        post_process: Some(crate::symbols::post_process_typescript),
+    },
+    LanguageGrammar {
+        id: "tsx",
+        extensions: &["tsx"],
+        grammar: || tree_sitter_typescript::LANGUAGE_TSX.into(),
+        tags_queries: &[
+            tree_sitter_javascript::TAGS_QUERY,
+            tree_sitter_typescript::TAGS_QUERY,
+        ],
+        injections_query: None,
+        post_process: Some(crate::symbols::post_process_typescript),
+    },
+    LanguageGrammar {
+        id: "javascript",
+        extensions: &["js", "jsx"],
+        grammar: || tree_sitter_javascript::LANGUAGE.into(),
+        tags_queries: &[tree_sitter_javascript::TAGS_QUERY],
+        injections_query: Some(tree_sitter_javascript::INJECTIONS_QUERY),
+        post_process: Some(crate::symbols::post_process_javascript),
+    },
+    LanguageGrammar {
+        id: "python",
+        extensions: &["py"],
+        grammar: || tree_sitter_python::LANGUAGE.into(),
+        tags_queries: &[tree_sitter_python::TAGS_QUERY],
+        injections_query: None,
+        post_process: Some(crate::symbols::post_process_python),
+    },
+    LanguageGrammar {
+        id: "rust",
+        extensions: &["rs"],
+        grammar: || tree_sitter_rust::LANGUAGE.into(),
+        tags_queries: &[tree_sitter_rust::TAGS_QUERY],
+        injections_query: Some(tree_sitter_rust::INJECTIONS_QUERY),
+        post_process: Some(crate::symbols::post_process_rust),
+    },
+    LanguageGrammar {
+        id: "java",
+        extensions: &["java"],
+        grammar: || tree_sitter_java::LANGUAGE.into(),
+        tags_queries: &[tree_sitter_java::TAGS_QUERY],
+        injections_query: None,
+        post_process: Some(crate::symbols::post_process_java),
+    },
+    LanguageGrammar {
+        id: "vue",
+        extensions: &["vue"],
+        grammar: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        tags_queries: &[
+            tree_sitter_javascript::TAGS_QUERY,
+            tree_sitter_typescript::TAGS_QUERY,
+        ],
+        injections_query: None,
+        post_process: None,
+    },
+    LanguageGrammar {
+        id: "html",
+        extensions: &["html", "htm"],
+        grammar: || tree_sitter_html::LANGUAGE.into(),
+        tags_queries: &[],
+        injections_query: Some(tree_sitter_html::INJECTIONS_QUERY),
+        post_process: None,
+    },
+    LanguageGrammar {
+        id: "css",
+        extensions: &["css"],
+        grammar: || tree_sitter_css::LANGUAGE.into(),
+        tags_queries: &[],
+        injections_query: None,
+        post_process: None,
+    },
+];
 
 /// The programming languages natively supported by the Surgeon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,7 +210,11 @@ static TS_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
         "abstract_class_declaration",
         "type_alias_declaration",
     ],
-    method_kinds: &["method_definition"],
+    method_kinds: &[
+        "method_definition",
+        "method_signature",
+        "abstract_method_signature",
+    ],
     impl_kinds: &[],
     constant_kinds: &["lexical_declaration", "variable_declaration"],
     module_kinds: &["internal_module"],
@@ -78,7 +231,13 @@ static PYTHON_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
 
 static RUST_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
     function_kinds: &["function_item", "function_signature_item"],
-    class_kinds: &["struct_item", "enum_item", "trait_item", "type_item"],
+    class_kinds: &[
+        "struct_item",
+        "enum_item",
+        "trait_item",
+        "type_item",
+        "union_item",
+    ],
     method_kinds: &[],
     impl_kinds: &["impl_item"],
     constant_kinds: &["const_item", "static_item"],
@@ -144,6 +303,27 @@ impl SupportedLanguage {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Java => tree_sitter_java::LANGUAGE.into(),
         }
+    }
+
+    /// Get the associated `LanguageGrammar` definition.
+    #[must_use]
+    pub fn grammar_def(&self) -> &'static LanguageGrammar {
+        match self {
+            Self::Go => &GRAMMARS[0],
+            Self::TypeScript => &GRAMMARS[1],
+            Self::Tsx => &GRAMMARS[2],
+            Self::JavaScript => &GRAMMARS[3],
+            Self::Python => &GRAMMARS[4],
+            Self::Rust => &GRAMMARS[5],
+            Self::Java => &GRAMMARS[6],
+            Self::Vue => &GRAMMARS[7],
+        }
+    }
+
+    /// Return the corresponding LSP language ID (TS-C3, N:1 mapping).
+    #[must_use]
+    pub fn lsp_language_id(self) -> &'static str {
+        self.grammar_def().lsp_language_id()
     }
 
     /// Get the node type maps for building semantic paths.
@@ -216,10 +396,9 @@ pub fn extract_vue_script(source: &[u8]) -> Vec<u8> {
         }
     };
 
-    // Find the closing </script> tag
-    let script_close_start = match text[script_open_end..].find("</script>") {
-        Some(rel) => script_open_end + rel,
-        None => return Vec::new(),
+    // Find the closing </script> tag, skipping JS string literals and comments
+    let Some(script_close_start) = find_closing_script_tag(text, script_open_end) else {
+        return Vec::new();
     };
 
     let script_content = &text[script_open_end..script_close_start];
@@ -236,6 +415,71 @@ pub fn extract_vue_script(source: &[u8]) -> Vec<u8> {
     }
     result.extend_from_slice(script_content.as_bytes());
     result
+}
+
+fn find_closing_script_tag(source: &str, start_offset: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut i = start_offset;
+
+    while i < len {
+        if bytes[i] == b'/' {
+            if i + 1 < len && bytes[i + 1] == b'/' {
+                // Line comment
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            } else if i + 1 < len && bytes[i + 1] == b'*' {
+                // Block comment
+                i += 2;
+                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+        } else if bytes[i] == b'\'' || bytes[i] == b'"' {
+            let quote = bytes[i];
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == quote {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        } else if bytes[i] == b'`' {
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == b'`' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        } else if bytes[i] == b'<'
+            && (source[i..].starts_with("</script>")
+                || (source[i..].starts_with("</script")
+                    && matches!(
+                        bytes.get(i + "</script".len()),
+                        Some(b'>' | b' ' | b'\t' | b'\n' | b'\r')
+                    )))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]

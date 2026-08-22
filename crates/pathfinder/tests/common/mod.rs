@@ -137,3 +137,37 @@ pub fn tools_list_request(id: u64) -> String {
     })
     .to_string()
 }
+
+// ── Non-ASCII and Fixture Workspace Helpers (`LSP-A5`, `TS-A2`) ───────
+
+/// Create a test workspace with non-ASCII multi-byte UTF-8 source files.
+///
+/// Contains characters where byte offsets, UTF-16 code units, and unicode scalars diverge:
+/// - Multi-byte UTF-8 letters (e.g. `é`, `ñ`, `ä` — 2 bytes, 1 UTF-16 unit)
+/// - CJK ideographs (e.g. `中`, `文` — 3 bytes, 1 UTF-16 unit)
+/// - Astral plane emoji (e.g. `🦀`, `🚀` — 4 bytes, 2 UTF-16 surrogate units)
+#[allow(dead_code)]
+pub fn make_non_ascii_workspace() -> TempDir {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let root = dir.path();
+
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"non-ascii-workspace\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("failed to write Cargo.toml");
+
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).expect("create src dir");
+
+    // Line 1 contains 4-byte emoji 🦀 before fn declaration to test position encoding offsets
+    let source_content = "// 🦀 Non-ASCII test fixture with UTF-8 / UTF-16 divergence\n\
+                          // 中文注释 and accented café\n\
+                          fn calculate_score() -> u32 {\n\
+                              42\n\
+                          }\n";
+
+    std::fs::write(src.join("lib.rs"), source_content).expect("write lib.rs");
+
+    dir
+}

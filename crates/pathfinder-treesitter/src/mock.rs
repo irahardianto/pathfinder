@@ -56,6 +56,8 @@ pub struct MockSurgeon {
     pub generate_skeleton_calls: Mutex<Vec<GenerateSkeletonCallArgs>>,
     /// Recorded `(workspace_root, file_path, line, column)` for each `node_type_at_position` call.
     pub node_type_at_position_calls: Mutex<Vec<(PathBuf, PathBuf, usize, usize)>>,
+    /// Recorded `(workspace_root, file_path)` for each `invalidate` call.
+    pub invalidate_calls: Mutex<Vec<(PathBuf, PathBuf)>>,
 }
 
 impl MockSurgeon {
@@ -268,5 +270,12 @@ impl Surgeon for MockSurgeon {
         } else {
             results.remove(0)
         }
+    }
+
+    fn invalidate(&self, workspace_root: &Path, file_path: &Path) {
+        self.invalidate_calls
+            .lock()
+            .expect("mutex poisoned")
+            .push((workspace_root.to_path_buf(), file_path.to_path_buf()));
     }
 }

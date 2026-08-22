@@ -313,16 +313,6 @@ impl Sink for MatchCollector<'_> {
 
 // ── Scout implementation ─────────────────────────────────────────────
 
-/// The result of `walk_files` containing collected files and skip counts.
-struct WalkFilesResult {
-    /// List of file absolute paths and their relative path strings.
-    files: Vec<(PathBuf, String)>,
-    /// Number of files skipped due to matching binary extensions.
-    binary_skipped: usize,
-    /// Number of files skipped due to being ignored by gitignore rules.
-    gitignored_skipped: usize,
-}
-
 /// Walker-level directory pruning callback.
 ///
 /// Prevents `WalkBuilder` from descending into directories listed in
@@ -459,12 +449,14 @@ impl RipgrepScout {
             regex::escape(&params.query)
         };
 
-        let cache_key = format!("{pattern}\0ci=false");
+        let cache_key = pattern.clone();
 
         REGEX_CACHE.with_borrow_mut(|cache| {
             let matcher = cache.try_get_or_insert(cache_key, || {
                 let mut builder = RegexMatcherBuilder::new();
                 builder.case_insensitive(false);
+                builder.size_limit(10 * 1024 * 1024); // 10MB limit
+                builder.dfa_size_limit(2 * 1024 * 1024); // 2MB DFA cache
                 builder
                     .build(&pattern)
                     .map_err(|e| SearchError::InvalidPattern(e.to_string()))
@@ -478,10 +470,9 @@ impl RipgrepScout {
     /// Applies `path_glob` (include filter) and `exclude_glob` (exclude filter)
     /// before searching — so excluded files are never read at all.
     ///
-    /// Returns `WalkFilesResult` containing the list of files to search, and the counts of
-    /// skipped files (binary and gitignored).
+    /// Single traversal with gitignore enabled (RSP-A10).
     #[tracing::instrument(skip_all)]
-    fn walk_files(params: &SearchParams) -> Result<WalkFilesResult, SearchError> {
+    fn walk_files(params: &SearchParams) -> Result<Vec<(PathBuf, String)>, SearchError> {
         let glob = &params.path_glob;
         let (glob_matcher, exclude_matcher) = build_globsets(glob, &params.exclude_glob)?;
 
@@ -494,50 +485,8 @@ impl RipgrepScout {
             .filter_entry(prune_excluded_dirs);
         let walker = walker_builder.build();
 
-        let mut walker_no_ignore_builder = WalkBuilder::new(&params.workspace_root);
-        walker_no_ignore_builder
-            .hidden(false)
-            .git_ignore(false)
-            .git_global(false)
-            .git_exclude(false)
-            .filter_entry(prune_excluded_dirs);
-        let walker_no_ignore = walker_no_ignore_builder.build();
-
         let mut files = Vec::new();
-        let mut binary_skipped: usize = 0;
-        let mut total_files_without_gitignore: usize = 0;
 
-        // First walk: gitignore disabled — count how many non-binary files pass the glob filter.
-        // `total_files_without_gitignore` and `binary_skipped` are counted on the same population
-        // so the gitignored_skipped arithmetic below is consistent.
-        for entry in walker_no_ignore.flatten() {
-            let path = entry.path().to_path_buf();
-            if !path.is_file() {
-                continue;
-            }
-
-            let relative = match path.strip_prefix(&params.workspace_root) {
-                Ok(r) => r.to_string_lossy().to_string(),
-                Err(_) => continue,
-            };
-
-            if filter_entry(
-                &relative,
-                &path,
-                glob,
-                &glob_matcher,
-                exclude_matcher.as_ref(),
-                false,
-            ) {
-                if is_binary_extension(&path) {
-                    binary_skipped += 1;
-                } else {
-                    total_files_without_gitignore += 1;
-                }
-            }
-        }
-
-        // Second walk: gitignore enabled — collect files that actually pass all filters.
         for entry in walker.flatten() {
             let path = entry.path().to_path_buf();
             if !path.is_file() {
@@ -562,19 +511,7 @@ impl RipgrepScout {
         }
 
         files.sort_by(|a, b| a.1.cmp(&b.1));
-
-        // gitignored_skipped = files that passed all filters without gitignore
-        //                      minus files that passed with gitignore.
-        // Since total_files_without_gitignore and files.len() both exclude binary files
-        // (total_files_without_gitignore filters out binaries in the first walk, and
-        // files.len() filters them out in the second walk), this difference represents
-        // exactly the non-binary files excluded by gitignore.
-        let gitignored_skipped = total_files_without_gitignore.saturating_sub(files.len());
-        Ok(WalkFilesResult {
-            files,
-            binary_skipped,
-            gitignored_skipped,
-        })
+        Ok(files)
     }
 }
 
@@ -594,11 +531,7 @@ impl Scout for RipgrepScout {
             );
 
             let matcher = RipgrepScout::build_matcher(params)?;
-            let walk_result = Self::walk_files(params)?;
-            let files = walk_result.files;
-            let binary_skipped = walk_result.binary_skipped;
-            let gitignored_skipped = walk_result.gitignored_skipped;
-            let files_in_scope = files.len();
+            let files = Self::walk_files(params)?;
 
             let mut match_buf: Vec<SearchMatch> =
                 Vec::with_capacity(params.max_results.min(256));
@@ -606,7 +539,6 @@ impl Scout for RipgrepScout {
             let mut skipped_count: usize = 0;
             let mut truncated = false;
             let mut files_searched: usize = 0;
-            let mut other_skipped: usize = 0;
 
             let mut searcher = SearcherBuilder::new()
                 .line_number(true)
@@ -615,13 +547,20 @@ impl Scout for RipgrepScout {
                 .build();
 
             for (abs_path, relative) in &files {
+                // Wall-clock budget deadline check between files (RSP-A10)
+                if let Some(deadline) = params.deadline {
+                    if std::time::Instant::now() >= deadline {
+                        truncated = true;
+                        break;
+                    }
+                }
+
                 let matches_before = match_buf.len();
 
                 let file = match std::fs::File::open(abs_path) {
                     Ok(f) => f,
                     Err(e) => {
                         tracing::warn!(file = %relative, error = %e, "Scout: failed to open file; skipping");
-                        other_skipped += 1;
                         continue;
                     }
                 };
@@ -646,7 +585,6 @@ impl Scout for RipgrepScout {
 
                 if let Err(e) = searcher.search_reader(&matcher, &mut tee, &mut sink) {
                     tracing::warn!(file = %relative, error = %e, "Scout: failed to search file; skipping");
-                    other_skipped += 1;
                     continue;
                 }
                 files_searched += 1;
@@ -678,7 +616,6 @@ impl Scout for RipgrepScout {
                 returned = match_buf.len(),
                 truncated,
                 files_searched,
-                files_in_scope,
                 "Scout: search complete"
             );
 
@@ -687,10 +624,6 @@ impl Scout for RipgrepScout {
                 total_matches: total_count,
                 truncated,
                 files_searched,
-                files_in_scope,
-                binary_skipped,
-                gitignored_skipped,
-                other_skipped,
             })
         })
         .await

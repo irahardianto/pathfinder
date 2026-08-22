@@ -769,3 +769,118 @@ fn test_parse_call_hierarchy_prepare_no_detail() {
     assert_eq!(result.len(), 1);
     assert!(result[0].detail.is_none(), "missing detail should be None");
 }
+
+// ── LSP-A7, LSP-A4, LSP-A9 Tests ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_parse_definition_response_multi_all_locations_lsp_a7() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file1 = temp.path().join("file1.rs");
+    let file2 = temp.path().join("file2.rs");
+    std::fs::write(&file1, "fn first() {}").unwrap();
+    std::fs::write(&file2, "fn second() {}").unwrap();
+
+    let uri1 = Url::from_file_path(&file1).unwrap().to_string();
+    let uri2 = Url::from_file_path(&file2).unwrap().to_string();
+
+    let response = json!([
+        {
+            "uri": uri1,
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 10 } }
+        },
+        {
+            "uri": uri2,
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 10 } }
+        }
+    ]);
+
+    let defs = parse_definition_response_multi(&response, temp.path()).await;
+    assert_eq!(defs.len(), 2, "must preserve all definition locations");
+    assert_eq!(defs[0].file, "file1.rs");
+    assert_eq!(defs[1].file, "file2.rs");
+}
+
+#[tokio::test]
+async fn test_parse_definition_response_error_object_lsp_a4() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = json!({
+        "error": {
+            "code": -32600,
+            "message": "Invalid Request"
+        }
+    });
+
+    let res = parse_definition_response(response, temp.path()).await;
+    assert!(matches!(
+        res,
+        Err(LspError::ServerError { code: -32600, .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_parse_references_response_error_object_lsp_a4() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = json!({
+        "error": {
+            "code": -32001,
+            "message": "Server canceled request"
+        }
+    });
+
+    let res = parse_references_response(&response, temp.path()).await;
+    assert!(matches!(
+        res,
+        Err(LspError::ServerError { code: -32001, .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_parse_references_response_missing_start_line_lsp_a9() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file = temp.path().join("main.rs");
+    std::fs::write(&file, "fn main() {}").unwrap();
+    let uri = Url::from_file_path(&file).unwrap().to_string();
+
+    let response = json!([
+        {
+            "uri": uri,
+            "range": {
+                "start": { "character": 5 },
+                "end": { "line": 0, "character": 10 }
+            }
+        }
+    ]);
+
+    let res = parse_references_response(&response, temp.path()).await;
+    assert!(matches!(res, Err(LspError::Protocol(ref m)) if m.contains("missing start.line")));
+}
+
+#[tokio::test]
+async fn test_parse_references_response_outside_workspace_skipped_lsp_a9() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let outside = tempfile::tempdir().expect("temp dir 2");
+    let file_inside = temp.path().join("inside.rs");
+    let file_outside = outside.path().join("outside.rs");
+    std::fs::write(&file_inside, "fn inside() {}").unwrap();
+    std::fs::write(&file_outside, "fn outside() {}").unwrap();
+
+    let uri_inside = Url::from_file_path(&file_inside).unwrap().to_string();
+    let uri_outside = Url::from_file_path(&file_outside).unwrap().to_string();
+
+    let response = json!([
+        {
+            "uri": uri_outside,
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 5 } }
+        },
+        {
+            "uri": uri_inside,
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 5 } }
+        }
+    ]);
+
+    let res = parse_references_response(&response, temp.path())
+        .await
+        .expect("ok");
+    assert_eq!(res.len(), 1, "out-of-workspace reference must be skipped");
+    assert_eq!(res[0].file, "inside.rs");
+}

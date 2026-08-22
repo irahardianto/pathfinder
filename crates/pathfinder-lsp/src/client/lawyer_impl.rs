@@ -15,15 +15,19 @@ use url::Url;
 
 #[async_trait]
 impl Lawyer for LspClient {
+    async fn ensure_ready(
+        &self,
+        language_id: &str,
+        budget: Duration,
+    ) -> Result<crate::types::Readiness, LspError> {
+        LspClient::ensure_ready(self, language_id, budget).await
+    }
+
     fn warm_start_for_languages(
         &self,
         language_ids: &[String],
     ) -> Vec<tokio::task::JoinHandle<()>> {
         LspClient::warm_start_for_languages(self, language_ids)
-    }
-
-    fn touch_language(&self, language_id: &str) {
-        LspClient::touch_language(self, language_id);
     }
 
     async fn open_document(
@@ -51,12 +55,12 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        self.wait_for_capability(
-            language_id,
-            |caps| caps.flags.definition_provider,
-            "definitionProvider",
-        )
-        .await?;
+        let caps = self.capabilities_for(language_id)?;
+        if !caps.flags.definition_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "definitionProvider".to_owned(),
+            });
+        }
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -85,8 +89,6 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id);
-
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
             tool = "get_definition",
@@ -111,12 +113,12 @@ impl Lawyer for LspClient {
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
 
-        self.wait_for_capability(
-            language_id,
-            |caps| caps.flags.call_hierarchy_provider,
-            "callHierarchyProvider",
-        )
-        .await?;
+        let caps = self.capabilities_for(language_id)?;
+        if !caps.flags.call_hierarchy_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "callHierarchyProvider".to_owned(),
+            });
+        }
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -144,8 +146,6 @@ impl Lawyer for LspClient {
                 return Err(e);
             }
         };
-
-        self.touch(language_id);
 
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
@@ -207,12 +207,12 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        self.wait_for_capability(
-            language_id,
-            |caps| caps.flags.references_provider,
-            "referencesProvider",
-        )
-        .await?;
+        let caps = self.capabilities_for(language_id)?;
+        if !caps.flags.references_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "referencesProvider".to_owned(),
+            });
+        }
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -248,8 +248,6 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id);
-
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
             tool = "references",
@@ -276,12 +274,12 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        self.wait_for_capability(
-            language_id,
-            |caps| caps.flags.implementation_provider,
-            "implementationProvider",
-        )
-        .await?;
+        let caps = self.capabilities_for(language_id)?;
+        if !caps.flags.implementation_provider {
+            return Err(LspError::UnsupportedCapability {
+                capability: "implementationProvider".to_owned(),
+            });
+        }
 
         let file_uri = Url::from_file_path(workspace_root.join(file_path))
             .map_err(|()| LspError::Protocol("cannot convert file path to URI".to_owned()))?;
@@ -310,8 +308,6 @@ impl Lawyer for LspClient {
             }
         };
 
-        self.touch(language_id);
-
         let elapsed = start.elapsed().as_millis();
         tracing::info!(
             tool = "goto_implementation",
@@ -337,7 +333,7 @@ impl Lawyer for LspClient {
             let lang_status = self.processes.get(&desc.language_id).map_or_else(
                 || crate::types::LspLanguageStatus {
                     validation: true,
-                    reason: format!("{} available (lazy start)", desc.command),
+                    reason: format!("{} available (eager start / reprobe)", desc.command),
                     navigation_ready: None,
                     diagnostics_strategy: None,
                     indexing_complete: None,

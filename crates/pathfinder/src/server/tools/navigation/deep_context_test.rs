@@ -49,7 +49,8 @@ async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() 
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(
-        text_content.starts_with("DEGRADED (grep_fallback_dependencies) — results are heuristic (grep-based), verify manually — fallback: use search for authoritative results\n\n0 dependencies loaded\n\nfn login() { }"),
+        text_content.contains("DEGRADED (grep_fallback_dependencies)")
+            && text_content.contains("Dependencies: UNKNOWN (not verified — do NOT treat as zero)"),
         "text_content: {text_content}"
     );
     assert!(val.degraded);
@@ -57,7 +58,7 @@ async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() 
         val.degraded_reason,
         Some(DegradedReason::GrepFallbackDependencies)
     );
-    assert!(val.dependencies.is_empty());
+    assert!(val.dependencies.is_none());
 }
 
 #[tokio::test]
@@ -111,19 +112,19 @@ async fn test_read_with_deep_context_lsp_populates_dependencies() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(
-        text_content.starts_with("1 dependencies loaded\n  fn validate_token() -> bool (src/token.rs:L15)\n\nfn login() { }"),
+        text_content.contains("1 dependencies loaded (verified)")
+            && text_content.contains("fn validate_token() -> bool (src/token.rs:L15)")
+            && text_content.contains("fn login() { }"),
         "text_content: {text_content}"
     );
     assert!(!val.degraded);
     assert_eq!(val.degraded_reason, None);
-    assert_eq!(val.dependencies.len(), 1);
-    assert_eq!(
-        val.dependencies[0].semantic_path,
-        "src/token.rs::validate_token"
-    );
-    assert_eq!(val.dependencies[0].signature, "fn validate_token() -> bool");
-    assert_eq!(val.dependencies[0].file, "src/token.rs");
-    assert_eq!(val.dependencies[0].line, 15);
+    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].semantic_path, "src/token.rs::validate_token");
+    assert_eq!(deps[0].signature, "fn validate_token() -> bool");
+    assert_eq!(deps[0].file, "src/token.rs");
+    assert_eq!(deps[0].line, 15);
 }
 
 // ── read_with_deep_context with outgoing call error ───────────────────
@@ -172,7 +173,7 @@ async fn test_read_with_deep_context_outgoing_error_degrades() {
         val.degraded_reason,
         Some(DegradedReason::LspErrorGrepFallback)
     );
-    assert!(val.dependencies.is_empty());
+    assert!(val.dependencies.is_none());
 }
 
 // ── read_with_deep_context with empty hierarchy (confirmed zero deps) ──
@@ -216,7 +217,10 @@ async fn test_read_with_deep_context_empty_hierarchy_zero_deps() {
         "must not be degraded when probe confirms LSP is warm"
     );
     assert_eq!(val.degraded_reason, None);
-    assert!(val.dependencies.is_empty(), "confirmed zero dependencies");
+    assert!(
+        val.dependencies.as_ref().is_some_and(|d| d.is_empty()),
+        "confirmed zero dependencies"
+    );
 }
 
 #[tokio::test]
@@ -257,7 +261,7 @@ async fn test_read_with_deep_context_empty_hierarchy_warmup_degrades() {
         Some(DegradedReason::GrepFallbackDependencies),
         "degraded_reason must indicate grep fallback was used"
     );
-    assert!(val.dependencies.is_empty());
+    assert!(val.dependencies.is_none());
 }
 
 #[tokio::test]
@@ -356,7 +360,7 @@ async fn test_read_with_deep_context_max_dependencies_truncates_results() {
         serde_json::from_value(result.structured_content.unwrap()).unwrap();
 
     assert_eq!(
-        val.dependencies.len(),
+        val.dependencies.as_ref().unwrap().len(),
         2,
         "dependencies must be capped at max_dependencies=2"
     );
@@ -425,10 +429,6 @@ async fn test_read_with_deep_context_grep_fallback_resolves_candidates() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let server = PathfinderServer::with_all_engines(
@@ -456,9 +456,9 @@ async fn test_read_with_deep_context_grep_fallback_resolves_candidates() {
     );
     // The grep fallback should have resolved "validate_token" from the scope body.
     assert!(
-        !val.dependencies.is_empty(),
-        "expected at least 1 resolved dependency, got {}",
-        val.dependencies.len()
+        val.dependencies.as_ref().is_some_and(|d| !d.is_empty()),
+        "expected at least 1 resolved dependency, got {:?}",
+        val.dependencies
     );
 }
 
@@ -488,8 +488,10 @@ async fn test_attempt_grep_fallback_semantic_path_is_hierarchical() {
             start_line: 4,
             end_line: 8,
             name_column: 4,
+            name_point: pathfinder_treesitter::surgeon::Point { row: 4, column: 4 },
             kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
             byte_range: 0..0,
+            attached_range: 0..0,
             access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
             children: vec![],
         })));
@@ -523,10 +525,6 @@ async fn test_attempt_grep_fallback_semantic_path_is_hierarchical() {
         total_matches: 1,
         truncated: false,
         files_searched: 1,
-        files_in_scope: 1,
-        binary_skipped: 0,
-        gitignored_skipped: 0,
-        other_skipped: 0,
     }));
 
     let server = PathfinderServer::with_all_engines(
@@ -552,9 +550,10 @@ async fn test_attempt_grep_fallback_semantic_path_is_hierarchical() {
         val.degraded_reason,
         Some(DegradedReason::GrepFallbackDependencies)
     );
-    assert_eq!(val.dependencies.len(), 1);
+    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(deps.len(), 1);
     assert_eq!(
-        val.dependencies[0].semantic_path, "src/token.rs::TokenValidator.validate_token",
+        deps[0].semantic_path, "src/token.rs::TokenValidator.validate_token",
         "grep fallback dependency path should be qualified using surgeon enclosing_symbol_detail"
     );
 }
@@ -610,13 +609,11 @@ async fn test_read_with_deep_context_detail_none_falls_back_to_name() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(!val.degraded);
-    assert_eq!(val.dependencies.len(), 1);
+    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(deps.len(), 1);
     // Signature should be the name since detail is None
-    assert_eq!(val.dependencies[0].signature, "validate_token");
-    assert_eq!(
-        val.dependencies[0].semantic_path,
-        "src/token.rs::validate_token"
-    );
+    assert_eq!(deps[0].signature, "validate_token");
+    assert_eq!(deps[0].semantic_path, "src/token.rs::validate_token");
 }
 
 // ── Warmup retry success ────────────────────────────────────────
@@ -675,11 +672,9 @@ async fn test_read_with_deep_context_warmup_retry_success() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(!val.degraded, "should NOT be degraded on retry success");
-    assert_eq!(val.dependencies.len(), 1);
-    assert_eq!(
-        val.dependencies[0].semantic_path,
-        "src/token.rs::validate_token"
-    );
+    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].semantic_path, "src/token.rs::validate_token");
 }
 
 // ── project_only filtering in append_outgoing_deps ──────────────
@@ -747,12 +742,10 @@ async fn test_read_with_deep_context_filters_non_workspace_deps() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(!val.degraded);
+    let deps = val.dependencies.as_ref().unwrap();
     // Only the workspace dep should be included
-    assert_eq!(val.dependencies.len(), 1);
-    assert_eq!(
-        val.dependencies[0].semantic_path,
-        "src/token.rs::validate_token"
-    );
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].semantic_path, "src/token.rs::validate_token");
 }
 
 // ── Dedup in append_outgoing_deps ────────────────────────────────
@@ -820,12 +813,13 @@ async fn test_read_with_deep_context_deduplicates_deps() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(!val.degraded);
+    let deps = val.dependencies.as_ref().unwrap();
     // Dedup should prevent the duplicate
     assert_eq!(
-        val.dependencies.len(),
+        deps.len(),
         1,
         "duplicate callees should be deduped, got {}",
-        val.dependencies.len()
+        deps.len()
     );
 }
 
@@ -1381,34 +1375,28 @@ async fn test_grep_fallback_max_dependencies_truncation() {
     std::fs::create_dir_all(ws_dir.path().join("src")).unwrap();
     std::fs::write(ws_dir.path().join("src/auth.rs"), body).unwrap();
 
+    let names = ["alpha", "beta", "gamma", "delta", "epsilon"];
     let scout = Arc::new(MockScout::default());
-    // Queue 5 search results — one per candidate call extracted from the scope content.
-    let search_results: Vec<Result<pathfinder_search::SearchResult, String>> = (0..5)
-        .map(|i| {
-            Ok(pathfinder_search::SearchResult {
-                matches: vec![pathfinder_search::SearchMatch {
-                    file: format!("src/dep_{i}.rs"),
-                    line: 1,
-                    column: 1,
-                    content: format!("fn dep_{i}() {{}}"),
-                    context_before: vec![],
-                    context_after: vec![],
-                    enclosing_semantic_path: None,
-                    is_definition: None,
-                    version_hash: "sha256:abc".to_string(),
-                    known: Some(false),
-                }],
-                total_matches: 1,
-                truncated: false,
-                files_searched: 1,
-                files_in_scope: 1,
-                binary_skipped: 0,
-                gitignored_skipped: 0,
-                other_skipped: 0,
+    scout.set_result(Ok(pathfinder_search::SearchResult {
+        matches: names
+            .iter()
+            .map(|name| pathfinder_search::SearchMatch {
+                file: format!("src/{name}.rs"),
+                line: 1,
+                column: 1,
+                content: format!("fn {name}() {{}}"),
+                context_before: vec![],
+                context_after: vec![],
+                enclosing_semantic_path: None,
+                is_definition: None,
+                version_hash: "sha256:abc".to_string(),
+                known: Some(false),
             })
-        })
-        .collect();
-    scout.set_results(search_results);
+            .collect(),
+        total_matches: 5,
+        truncated: false,
+        files_searched: 5,
+    }));
 
     let server = PathfinderServer::with_all_engines(
         ws,
@@ -1430,10 +1418,11 @@ async fn test_grep_fallback_max_dependencies_truncation() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(val.degraded);
+    let deps = val.dependencies.as_ref().unwrap();
     assert!(
-        val.dependencies.len() <= 2,
+        deps.len() <= 2,
         "dependencies must be capped at max_dependencies=2, got {}",
-        val.dependencies.len()
+        deps.len()
     );
     assert!(
         val.dependencies_truncated,
@@ -1515,8 +1504,10 @@ async fn test_inspect_dependency_semantic_path_is_hierarchical_when_surgeon_qual
             start_line: 14, // 0-indexed (LSP line 15 → 14)
             end_line: 20,
             name_column: 4,
+            name_point: pathfinder_treesitter::surgeon::Point { row: 14, column: 4 },
             kind: pathfinder_treesitter::surgeon::SymbolKind::Function,
             byte_range: 0..0,
+            attached_range: 0..0,
             access_level: pathfinder_treesitter::surgeon::AccessLevel::Public,
             children: vec![],
         })));
@@ -1558,14 +1549,15 @@ async fn test_inspect_dependency_semantic_path_is_hierarchical_when_surgeon_qual
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(!val.degraded);
-    assert_eq!(val.dependencies.len(), 1);
+    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(deps.len(), 1);
     assert_eq!(
-        val.dependencies[0].semantic_path, "src/token.rs::TokenValidator.validate_token",
+        deps[0].semantic_path, "src/token.rs::TokenValidator.validate_token",
         "dependency path must use qualified treesitter chain, not flat LSP name"
     );
-    assert_eq!(val.dependencies[0].signature, "fn validate_token() -> bool");
-    assert_eq!(val.dependencies[0].file, "src/token.rs");
-    assert_eq!(val.dependencies[0].line, 15);
+    assert_eq!(deps[0].signature, "fn validate_token() -> bool");
+    assert_eq!(deps[0].file, "src/token.rs");
+    assert_eq!(deps[0].line, 15);
 }
 
 /// When Surgeon returns Ok(None) for a callee's file+line (top-level function),
@@ -1623,9 +1615,10 @@ async fn test_inspect_dependency_semantic_path_falls_back_to_flat_when_surgeon_r
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(!val.degraded);
-    assert_eq!(val.dependencies.len(), 1);
+    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(deps.len(), 1);
     assert_eq!(
-        val.dependencies[0].semantic_path, "src/token.rs::validate_token",
+        deps[0].semantic_path, "src/token.rs::validate_token",
         "flat fallback must be used when surgeon returns None"
     );
 }
@@ -1691,9 +1684,10 @@ async fn test_inspect_dependency_semantic_path_falls_back_on_surgeon_error() {
         !val.degraded,
         "surgeon error in enrichment must not degrade inspect"
     );
-    assert_eq!(val.dependencies.len(), 1);
+    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(deps.len(), 1);
     assert_eq!(
-        val.dependencies[0].semantic_path, "src/token.rs::validate_token",
+        deps[0].semantic_path, "src/token.rs::validate_token",
         "surgeon error must cause flat-name fallback, not panic"
     );
 }

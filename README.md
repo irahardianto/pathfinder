@@ -51,10 +51,25 @@ Pathfinder solves these problems by providing:
 
 ### Key Features
 
-- 🛠️ **7 MCP Tools** — covering code exploration, semantic search, file reading, symbol inspection, navigation, impact tracing, and LSP health.
+- 🛠️ **3 MCP Tools** — high-precision resolution layer covering symbol location, relationship tracing, and source inspection (`locate`, `trace`, `inspect`).
 - 🌐 **8 Languages** — native Tree-sitter support for Go, Java, TypeScript, TSX, JavaScript, Python, Rust, and Vue SFCs.
 - 🏗️ **5 Rust Crates** — modular workspace architecture for clean separation of concerns.
-- ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace.
+- ⚡ **Zero Configuration** — auto-detects languages and LSP servers in your workspace with probe-gated readiness.
+
+<!-- CONFORMANCE_TIER_TABLE_START -->
+### Language Support & Conformance Tiers
+
+Language maturity is verified by the automated conformance suite (WS-9, 16 assertions C-1 through C-16):
+
+| Language | Tier | Conformance Score | AST Navigation (C-1..C-3, C-11..C-15) | LSP Resolution (C-4..C-10, C-16) | Product Thesis (C-6) |
+|---|---|---|---|---|---|
+| **Rust** | **Tier 1** (Full) | 16/16 | ✅ Verified | ✅ Verified | ✅ Verified |
+| **Go** | **Tier 1** (Full) | 16/16 | ✅ Verified | ✅ Verified | ✅ Verified |
+| **TypeScript** | **Tier 1** (Full) | 16/16 | ✅ Verified | ✅ Verified | ✅ Verified |
+| **Python** | **Tier 1** (Full) | 16/16 | ✅ Verified | ✅ Verified | ✅ Verified |
+| **Java** | **Tier 1** (Full) | 16/16 | ✅ Verified | ✅ Verified | ✅ Verified |
+
+<!-- CONFORMANCE_TIER_TABLE_END -->
 
 <!-- GETTING STARTED -->
 ## Getting Started
@@ -220,34 +235,15 @@ For any MCP-compatible client, the minimum effective setup is to inject the **AG
 <!-- TOOLS -->
 ## Tools
 
-Pathfinder exposes 7 tools. Every tool operates within the workspace sandbox and returns structured JSON responses.
+Pathfinder exposes exactly 3 high-precision MCP tools. Every tool operates within the workspace sandbox and returns structured JSON responses with dual-channel human-readable text.
 
-### 🗺️ Exploration & Search
-
-| Tool | Description |
-|---|---|
-| `explore` | Get the structural skeleton of the project — directory tree, file listing, or full AST symbol hierarchy. Three detail levels: `structure` (dirs + package files), `files` (dirs + all filenames), `symbols` (default — full AST hierarchy). Token-budgeted with configurable `depth` and `max_tokens`. Supports `changed_since`, `include_extensions`, and `exclude_extensions` for focused exploration. |
-| `search` | Search for text patterns, regex, or resolve symbol names across the codebase. Three modes: `text` (default — literal search), `regex` (pattern search), `symbol` (resolve bare name to semantic paths). AST-aware filtering (code-only by default). Token-efficiency parameters: `known_files`, `exclude_glob`, `path_glob`. |
-
-### 📖 Reading & Inspection
+### 🧭 Navigation, Tracing & Inspection
 
 | Tool | Description |
 |---|---|
-| `read` | Read file contents — single file or batch (max 10). Auto-detects source vs config files. Source files (.rs, .ts, .go, .py, .vue, .js, .java) get AST-parsed content with detail levels (`source_only`, `compact`, `symbols`, `full`). Config files get raw content. Supports `start_line`/`end_line` for line ranges. |
-| `inspect` | Extract a symbol's source code by semantic path, optionally with its dependency graph. Default: source only (fast, Tree-sitter). With `include_dependencies=true`: also fetches callee signatures (LSP-powered). |
-
-### 🧭 Navigation & Tracing
-
-| Tool | Description |
-|---|---|
-| `locate` | Jump to a symbol's definition, or resolve a file+line to its semantic path. Two auto-detected modes: provide `semantic_path` for definition lookup, or `file`+`line` for semantic path resolution. LSP-powered with ripgrep fallback. |
-| `trace` | Trace a symbol's relationships — callers/callees, all references, or full overview. Three scopes: `callers` (default — call hierarchy), `references` (all usages including imports, type annotations), `overview` (combined source + callers + callees + references). Essential for understanding blast radius before refactoring. |
-
-### 🔧 Utility
-
-| Tool | Description |
-|---|---|
-| `health` | Check per-language LSP readiness — including `navigation_ready`, `indexing_status`, `supports_call_hierarchy`, and `degraded_tools`. Use to diagnose why navigation tools returned degraded results. Supports `action="restart"` to force-restart a stuck LSP. |
+| `locate` | Jump to a symbol's definition, or resolve a file+line to its semantic path. Two auto-detected modes: provide `semantic_path` for definition lookup, or `file`+`line` for semantic path resolution. Supports batch lookups (`locations`). LSP-powered with ripgrep fallback. |
+| `trace` | Trace a symbol's relationships — callers/callees, all references, or full overview. Three scopes: `callers` (call hierarchy), `references` (all usages including imports, type annotations), `overview` (combined source + callers + callees + references). Essential for understanding blast radius before refactoring. |
+| `inspect` | Extract a symbol's source code by semantic path, optionally with its dependency graph. Supports batch extraction (`semantic_paths`). Default: source only (fast, Tree-sitter). With `include_dependencies=true`: also fetches callee signatures (LSP-powered). |
 
 <!-- ARCHITECTURE -->
 ## Architecture
@@ -260,18 +256,12 @@ pathfinder/
 │   ├── pathfinder/              # MCP server, CLI, tool routing
 │   │   └── src/
 │   │       ├── main.rs          # CLI entry point (clap)
-│   │       ├── server.rs        # MCP tool router (7 consolidated tools)
+│   │       ├── server.rs        # MCP tool router (3 consolidated tools)
 │   │       └── server/
-│   │           ├── types.rs     # Parameter & response types
-│   │           ├── helpers.rs   # Shared utilities
-│   │           └── tools/       # One module per tool category
-│   │               ├── search.rs        # search tool handler
-│   │               ├── repo_map.rs      # explore tool handler
-│   │               ├── source_file.rs   # read tool handler (single file)
-│   │               ├── read_files.rs    # read tool handler (batch)
-│   │               ├── find_symbol.rs   # search(mode=symbol) handler
-│   │               ├── file_ops.rs      # file I/O utilities
-│   │               ├── symbols.rs       # symbol extraction
+│   │           ├── types.rs     # Parameter & response types (contracts 1-5)
+│   │           ├── helpers.rs   # Dual-channel formatting & validation
+│   │           └── tools/       # Core tool handlers
+│   │               ├── inspect.rs       # inspect tool handler (single & batch)
 │   │               ├── semantic_path.rs # locate(file+line) handler
 │   │               └── navigation/      # LSP-backed navigation
 │   │                   ├── definition.rs   # locate tool handler
@@ -279,12 +269,13 @@ pathfinder/
 │   │                   ├── references.rs   # trace(scope=references) handler
 │   │                   ├── overview.rs     # trace(scope=overview) handler
 │   │                   ├── deep_context.rs # inspect(include_dependencies) handler
-│   │                   └── health.rs       # health tool handler
+│   │                   └── grep_support.rs # Navigation fallback search
 │   │
-│   ├── pathfinder-common/       # Shared types, errors, config, sandbox
-│   ├── pathfinder-treesitter/   # The Surgeon — AST parsing & symbol extraction
-│   ├── pathfinder-search/       # The Scout — ripgrep-powered code search
-│   └── pathfinder-lsp/          # The Lawyer — LSP client & lifecycle management
+│   ├── pathfinder-common/       # Shared types, ToolStatus, Evidence<T>, config, sandbox
+│   ├── pathfinder-treesitter/   # The Surgeon — AST parsing, symbol extraction, containment
+│   ├── pathfinder-search/       # The Scout — internal ripgrep search engine & matchers
+│   └── pathfinder-lsp/          # The Lawyer — LSP client, probe-gated readiness, process supervisor
+```
 │
 ├── docs/
 │   ├── agent_directives/        # AI agent rules and skills

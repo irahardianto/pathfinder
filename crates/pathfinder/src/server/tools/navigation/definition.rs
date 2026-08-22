@@ -12,7 +12,7 @@ use pathfinder_lsp::LspError;
 use pathfinder_treesitter::symbols::did_you_mean;
 use rmcp::model::ErrorData;
 
-use super::definition_patterns;
+use super::{candidate_definition_pattern, definition_patterns, GrepFallbackBudget};
 
 impl PathfinderServer {
     /// Applies a context-specific [`DegradedReason`] override to a grep-fallback
@@ -78,6 +78,7 @@ impl PathfinderServer {
                 "get_definition: complete (succeeded on retry after warmup wait)"
             );
             return Ok(Self::get_def_to_call_result(&GetDefinitionResponse {
+                status: pathfinder_common::types::ToolStatus::Ok,
                 file: def.file,
                 line: def.line,
                 column: def.column,
@@ -477,6 +478,7 @@ impl PathfinderServer {
                     "get_definition: complete"
                 );
                 Ok(Self::get_def_to_call_result(&GetDefinitionResponse {
+                    status: pathfinder_common::types::ToolStatus::Ok,
                     file: def.file,
                     line: def.line,
                     column: def.column,
@@ -528,25 +530,20 @@ impl PathfinderServer {
     ///
     /// Mirrors the pattern used by all other tools in the suite.
     fn get_def_to_call_result(def: &GetDefinitionResponse) -> rmcp::model::CallToolResult {
-        let text = if def.degraded {
+        let mut text_parts = Vec::new();
+        if let Some(header) = crate::server::helpers::format_tool_status_header(&def.status) {
+            text_parts.push(header);
+        } else if def.degraded {
             let notice = def
                 .degraded_reason
                 .as_ref()
                 .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
+            text_parts.push(notice);
+        }
+
+        let loc = if def.column > 0 {
             format!(
-                "{notice}\n{}:L{} — {}\n[completed in {}ms]",
-                def.file,
-                def.line,
-                if def.preview.is_empty() {
-                    "(no preview)"
-                } else {
-                    &def.preview
-                },
-                def.duration_ms.unwrap_or(0),
-            )
-        } else {
-            format!(
-                "{}:L{} col:{} — {}\n[completed in {}ms]",
+                "{}:L{} col:{} — {}",
                 def.file,
                 def.line,
                 def.column,
@@ -554,10 +551,24 @@ impl PathfinderServer {
                     "(no preview)"
                 } else {
                     &def.preview
-                },
-                def.duration_ms.unwrap_or(0),
+                }
+            )
+        } else {
+            format!(
+                "{}:L{} — {}",
+                def.file,
+                def.line,
+                if def.preview.is_empty() {
+                    "(no preview)"
+                } else {
+                    &def.preview
+                }
             )
         };
+        text_parts.push(loc);
+        text_parts.push(format!("[completed in {}ms]", def.duration_ms.unwrap_or(0)));
+
+        let text = text_parts.join("\n");
         let mut res = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
         res.structured_content = serialize_metadata(def);
         res
@@ -582,7 +593,7 @@ impl PathfinderServer {
 
     /// Grep-based fallback for definition resolution when LSP is unavailable or warming up.
     ///
-    /// Uses a multi-strategy approach:
+    /// Uses a multi-strategy approach with a shared fan-out budget (RSP-A10):
     /// 1. Search the expected file first (if known from the semantic path)
     /// 2. Search for struct-qualified patterns (e.g., `impl Struct` + `fn method`)
     /// 3. Fall back to a global search (excludes test/mock files, returns first match)
@@ -594,10 +605,11 @@ impl PathfinderServer {
         let symbol_chain = semantic_path.symbol_chain.as_ref()?;
         let symbol_name = symbol_chain.segments.last()?.name.clone();
         let expected_file = &semantic_path.file_path;
+        let budget = GrepFallbackBudget::new();
 
         // Strategy 1: Search the expected file first (highest confidence)
         if let Some(result) = self
-            .grep_definition_in_file(symbol_name.clone(), expected_file.clone())
+            .grep_definition_in_file(symbol_name.clone(), expected_file.clone(), &budget)
             .await
         {
             return Some(result);
@@ -614,7 +626,7 @@ impl PathfinderServer {
                 .unwrap_or("");
             let path_glob = format!("**/*.{ext}");
             if let Some(result) = self
-                .grep_impl_method(&parent_name, &symbol_name, &path_glob)
+                .grep_impl_method(&parent_name, &symbol_name, &path_glob, &budget)
                 .await
             {
                 return Some(result);
@@ -622,12 +634,14 @@ impl PathfinderServer {
         }
 
         // Strategy 3: Global search (excludes test/mock files, returns first match)
-        if let Some(result) = self.grep_definition_global(symbol_name.clone()).await {
+        if let Some(result) = self
+            .grep_definition_global(symbol_name.clone(), &budget)
+            .await
+        {
             return Some(result);
         }
 
-        // Spec 2.3: Strategy 4: Broad symbol search when definition patterns fail
-        self.grep_symbol_broad(&symbol_name).await
+        None
     }
 
     /// Search for a definition within a specific file.
@@ -637,6 +651,7 @@ impl PathfinderServer {
         &self,
         symbol_name: String,
         file_path: std::path::PathBuf,
+        budget: &GrepFallbackBudget,
     ) -> Option<GetDefinitionResponse> {
         // Extract file extension to determine which language patterns to use
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -650,6 +665,10 @@ impl PathfinderServer {
 
         // Try each pattern in sequence until a match is found
         for pattern in patterns {
+            let Some(deadline) = budget.acquire_search() else {
+                break;
+            };
+
             let search_result = self
                 .scout
                 .search(&pathfinder_search::SearchParams {
@@ -661,6 +680,7 @@ impl PathfinderServer {
                     exclude_glob: Vec::new(),
                     context_lines: 0,
                     offset: 0,
+                    deadline: Some(deadline),
                 })
                 .await;
 
@@ -668,6 +688,10 @@ impl PathfinderServer {
                 if !result.matches.is_empty() {
                     let m = &result.matches[0];
                     return Some(GetDefinitionResponse {
+                        status: pathfinder_common::types::ToolStatus::Degraded {
+                            reason: DegradedReason::GrepFallbackFileScoped.to_string(),
+                            retry_after_secs: None,
+                        },
                         file: m.file.clone(),
                         line: u32::try_from(m.line).unwrap_or(u32::MAX),
                         column: u32::try_from(m.column).unwrap_or(1),
@@ -701,7 +725,10 @@ impl PathfinderServer {
         parent_name: &str,
         method_name: &str,
         path_glob: &str,
+        budget: &GrepFallbackBudget,
     ) -> Option<GetDefinitionResponse> {
+        let deadline = budget.acquire_search()?;
+
         // First find files containing the impl block
         let parent_escaped = regex::escape(parent_name);
         let impl_pattern = format!(r"impl\s+(?:<[^>]+>\s+)?{parent_escaped}\b");
@@ -716,32 +743,22 @@ impl PathfinderServer {
                 exclude_glob: Vec::new(),
                 context_lines: 0,
                 offset: 0,
+                deadline: Some(deadline),
             })
             .await;
 
         if let Ok(result) = search_result {
             for m in &result.matches {
-                // Now search within this specific file for the method.
-                // Use language-aware patterns based on file extension.
+                let Some(deadline) = budget.acquire_search() else {
+                    break;
+                };
+
+                // Now search within this specific file for the method using shared candidate pattern.
                 let ext = std::path::Path::new(&m.file)
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
-                let method_escaped = regex::escape(method_name);
-                let method_pattern = match ext {
-                    "rs" => format!(
-                        r"(?:(?:pub|crate)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?fn\s+{method_escaped}\b"
-                    ),
-                    "ts" | "js" | "tsx" | "jsx" => format!(
-                        r"(?:(?:export\s+(?:default\s*)?)?(?:async\s+)?)?(?:function\s+{method_escaped}\b|{method_escaped}\s*[=:])"
-                    ),
-                    "py" => format!(r"(?:async\s+)?def\s+{method_escaped}\b"),
-                    "go" => format!(r"func\s+(?:\([^)]*\)\s+)?{method_escaped}\b"),
-                    "java" => format!(
-                        r"(?:public\s+|private\s+|protected\s+|static\s+|final\s+|abstract\s+)*(?:<[^>]*>\s+)?[a-zA-Z_][a-zA-Z0-9_<>\[\],\s]+\s+{method_escaped}\s*\("
-                    ),
-                    _ => format!(r"\b{method_escaped}\b"),
-                };
+                let method_pattern = candidate_definition_pattern(ext, method_name);
                 let file_search = self
                     .scout
                     .search(&pathfinder_search::SearchParams {
@@ -753,6 +770,7 @@ impl PathfinderServer {
                         exclude_glob: Vec::new(),
                         context_lines: 0,
                         offset: 0,
+                        deadline: Some(deadline),
                     })
                     .await;
 
@@ -760,6 +778,10 @@ impl PathfinderServer {
                     if !file_result.matches.is_empty() {
                         let hit = &file_result.matches[0];
                         return Some(GetDefinitionResponse {
+                            status: pathfinder_common::types::ToolStatus::Degraded {
+                                reason: DegradedReason::GrepFallbackImplScoped.to_string(),
+                                retry_after_secs: None,
+                            },
                             file: hit.file.clone(),
                             line: u32::try_from(hit.line).unwrap_or(u32::MAX),
                             column: u32::try_from(hit.column).unwrap_or(1),
@@ -778,7 +800,8 @@ impl PathfinderServer {
                 } else if let Err(e) = file_search {
                     tracing::warn!(
                         tool = "get_definition",
-                        strategy = "grep_impl_method",
+                        strategy = "grep_impl_method_file",
+                        file = %m.file,
                         error = %e,
                         "scout.search failed during impl-method grep fallback"
                     );
@@ -787,7 +810,7 @@ impl PathfinderServer {
         } else if let Err(e) = search_result {
             tracing::warn!(
                 tool = "get_definition",
-                strategy = "grep_impl_block",
+                strategy = "grep_impl_method",
                 error = %e,
                 "scout.search failed during impl-block grep fallback"
             );
@@ -795,16 +818,19 @@ impl PathfinderServer {
         None
     }
 
-    /// Global search for a definition when file-scoped and impl-scoped searches fail.
-    /// Avoids matching in test files and mock implementations.
-    async fn grep_definition_global(&self, symbol_name: String) -> Option<GetDefinitionResponse> {
-        // Match definition patterns with optional preceding visibility modifier.
-        // Rust: `pub fn`, `pub(crate) fn`, `pub async fn`, bare `fn`
-        // TypeScript: `export function`, `export default function`, bare `function`
-        // Python: `def`, `async def`
+    /// Search globally across the workspace for a definition when file-scoped search fails.
+    ///
+    /// Excludes test files and mock implementations to prefer real definitions.
+    async fn grep_definition_global(
+        &self,
+        symbol_name: String,
+        budget: &GrepFallbackBudget,
+    ) -> Option<GetDefinitionResponse> {
+        let deadline = budget.acquire_search()?;
+
         let name = regex::escape(&symbol_name);
         let pattern = format!(
-            r"(?:(?:pub|export|public|private|protected|internal|open)\s*(?:\([^)]*\)\s*)?(?:async\s*)?)?(?:fn|def|func|function|class|struct|type|interface|const|let|var|enum|trait|mod)\s+{name}\b"
+            r"(?:fn|def|function|class|struct|interface|type|enum|record)\s+(?:<[^>]+>\s+)?{name}\b"
         );
 
         let search_result = self
@@ -819,6 +845,7 @@ impl PathfinderServer {
                 exclude_glob: vec!["**/{test,tests,mock}*/**".to_owned()],
                 offset: 0,
                 context_lines: 0,
+                deadline: Some(deadline),
             })
             .await;
 
@@ -826,6 +853,10 @@ impl PathfinderServer {
             if !result.matches.is_empty() {
                 let m = &result.matches[0];
                 return Some(GetDefinitionResponse {
+                    status: pathfinder_common::types::ToolStatus::Degraded {
+                        reason: DegradedReason::GrepFallbackGlobal.to_string(),
+                        retry_after_secs: None,
+                    },
                     file: m.file.clone(),
                     line: u32::try_from(m.line).unwrap_or(u32::MAX),
                     column: u32::try_from(m.column).unwrap_or(1),
@@ -845,56 +876,6 @@ impl PathfinderServer {
                 strategy = "grep_definition_global",
                 error = %e,
                 "scout.search failed during global grep fallback"
-            );
-        }
-        None
-    }
-
-    /// Spec 2.3: Broad cross-file symbol search fallback when definition patterns fail.
-    ///
-    /// Searches for the bare symbol name (not just definition patterns) across all
-    /// source files. Returns the first match that looks like a symbol definition or reference.
-    async fn grep_symbol_broad(&self, symbol_name: &str) -> Option<GetDefinitionResponse> {
-        let name = regex::escape(symbol_name);
-        let pattern = format!(r"\b{name}\b");
-
-        let search_result = self
-            .scout
-            .search(&pathfinder_search::SearchParams {
-                workspace_root: self.workspace_root.path().to_path_buf(),
-                query: pattern,
-                is_regex: true,
-                max_results: 20,
-                path_glob: "**/*".to_owned(),
-                exclude_glob: vec!["**/{test,tests,mock}*/**".to_owned()],
-                offset: 0,
-                context_lines: 0,
-            })
-            .await;
-
-        if let Ok(result) = search_result {
-            if !result.matches.is_empty() {
-                let m = &result.matches[0];
-                return Some(GetDefinitionResponse {
-                    file: m.file.clone(),
-                    line: u32::try_from(m.line).unwrap_or(u32::MAX),
-                    column: u32::try_from(m.column).unwrap_or(1),
-                    preview: m.content.clone(),
-                    degraded: true,
-                    degraded_reason: Some(DegradedReason::GrepFallbackGlobal),
-                    actionable_guidance: Some(DegradedReason::GrepFallbackGlobal.guidance()),
-                    lsp_readiness: Some("unavailable".to_owned()),
-                    warm_start_in_progress: None,
-                    duration_ms: None,
-                    resolution_strategy: Some("grep_broad".to_owned()),
-                });
-            }
-        } else if let Err(e) = search_result {
-            tracing::warn!(
-                tool = "get_definition",
-                strategy = "grep_symbol_broad",
-                error = %e,
-                "scout.search failed during broad grep fallback"
             );
         }
         None

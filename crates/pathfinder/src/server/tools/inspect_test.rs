@@ -383,7 +383,7 @@ async fn test_inspect_single_unchanged() {
     )
     .expect("single-path mode must return ReadSymbolScopeMetadata, not BatchInspectResult");
     assert_eq!(meta.content, "fn test() {}");
-    assert_eq!(meta.start_line, 1);
+    assert_eq!(meta.start_line, 2);
 }
 
 // ── PATCH-005 batch with include_dependencies=true ─────────────────────────
@@ -472,12 +472,16 @@ async fn test_inspect_batch_with_dependencies() {
     .expect("batch mode returns BatchInspectResult");
 
     assert_eq!(val.results.len(), 2);
-    // Both entries must have dependencies field present (empty because NoOpLawyer)
+    // Both entries have status "ok", degraded confidence (NoOpLawyer), and dependencies None (unknown)
     for entry in &val.results {
         assert_eq!(entry.status, "ok");
+        assert_eq!(
+            entry.confidence,
+            pathfinder_common::types::Confidence::Heuristic
+        );
         assert!(
-            entry.dependencies.is_some(),
-            "include_dependencies=true must populate dependencies field"
+            entry.dependencies.is_none(),
+            "NoOpLawyer is degraded so dependencies must be None (unknown)"
         );
     }
     assert_eq!(val.succeeded, 2);

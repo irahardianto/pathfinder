@@ -106,6 +106,18 @@ impl Lawyer for NoOpLawyer {
     fn is_warm_start_complete(&self) -> bool {
         false
     }
+
+    async fn ensure_ready(
+        &self,
+        language_id: &str,
+        _budget: std::time::Duration,
+    ) -> Result<crate::types::Readiness, LspError> {
+        Ok(crate::types::Readiness::Unavailable {
+            language: language_id.to_string(),
+            install_hint: format!("No LSP available for {language_id}"),
+            alternative: "Use host grep and file-read tools".to_string(),
+        })
+    }
 }
 
 #[cfg(test)]

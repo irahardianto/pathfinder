@@ -206,12 +206,28 @@ pub trait Lawyer: Send + Sync {
     fn warm_start_for_languages_and_track(&self, language_ids: &[String]) {
         let _ = self.warm_start_for_languages(language_ids);
     }
+    /// Ensure that the LSP server for `language_id` is ready to serve requests.
+    ///
+    /// Executes or awaits the behavioural symbol probe within `budget`.
+    ///
+    /// # Returns
+    /// - [`Readiness::Ready`](crate::types::Readiness::Ready) if the server is up and verified with probe.
+    /// - [`Readiness::NotReady`](crate::types::Readiness::NotReady) if the server is still initializing/probing and budget expired.
+    /// - [`Readiness::Unavailable`](crate::types::Readiness::Unavailable) if no LSP binary exists for this language.
+    /// - [`Readiness::Degraded`](crate::types::Readiness::Degraded) if the probe failed or server crashed repeatedly.
+    async fn ensure_ready(
+        &self,
+        language_id: &str,
+        budget: std::time::Duration,
+    ) -> Result<crate::types::Readiness, LspError> {
+        let _ = (language_id, budget);
+        Ok(crate::types::Readiness::Ready(
+            crate::types::CapabilityReadiness::all(),
+        ))
+    }
 
     /// LT-4: Extend idle timer for a language without making an LSP request.
     ///
-    /// Called by `read` to prevent the LSP from timing out while
-    /// the agent is actively reading files.
-    ///
-    /// Default implementation is a no-op.
+    /// Deprecated: Process supervisor no longer uses idle termination.
     fn touch_language(&self, _language_id: &str) {}
 }

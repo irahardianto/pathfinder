@@ -577,14 +577,156 @@ impl fmt::Display for DegradedReason {
     }
 }
 
+/// Status discriminator on tool responses (Contract 1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolStatus {
+    /// Behavioural probe passed. Every result in this response is LSP-verified.
+    #[default]
+    Ok,
+
+    /// The language server for this file is still becoming usable.
+    /// Results, if any, are heuristic. RETRY THIS EXACT CALL.
+    NotReady {
+        /// Seconds already spent probing. Monotonic across retries.
+        elapsed_secs: u32,
+        /// Wall-clock seconds to wait before reissuing. ALWAYS present, never 0.
+        /// The caller may sleep exactly this long and retry verbatim.
+        retry_after_secs: u32,
+        /// Best-known total. `None` (null) when the server reports no progress.
+        /// `null` means UNKNOWN -- it does NOT mean "soon".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eta_secs: Option<u32>,
+        /// "spawning" | "handshaking" | "indexing" | "probing"
+        phase: String,
+        /// Times this exact call has been answered `NotReady`, echoed from the
+        /// client's `retry_attempt` param. Lets the agent bound its own loop.
+        attempt: u32,
+        /// Hard ceiling. At `attempt >= max_attempts` the next response is
+        /// guaranteed Ok or Degraded, never `NotReady`. Default 3.
+        max_attempts: u32,
+    },
+
+    /// No language server binary for this language. TERMINAL. Do not retry.
+    Unavailable {
+        /// Language identifier (e.g., `"python"`, `"rust"`).
+        language: String,
+        /// Installation command or instructions.
+        install_hint: String,
+        /// What to do instead. MUST name only tools that exist.
+        alternative: String,
+    },
+
+    /// Server running but failed its behavioural probe within budget.
+    /// Results, if any, are heuristic. Retrying is unlikely to help.
+    Degraded {
+        /// Reason for degradation.
+        reason: String,
+        /// Optional retry after delay in seconds.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u32>,
+    },
+}
+
+/// Confidence level of a resolved symbol, reference, or dependency (Contract 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    /// Produced by an LSP request against a language whose behavioural probe passed.
+    Verified,
+    /// Produced by ripgrep and/or Tree-sitter pattern matching. A hypothesis.
+    Heuristic,
+}
+
+/// Homogeneous evidence wrapper for query results (Contract 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Evidence<T> {
+    /// Confidence of all items in this evidence collection.
+    pub confidence: Confidence,
+    /// Items in this evidence collection.
+    pub items: Vec<T>,
+}
+
+impl<T> Evidence<T> {
+    /// Construct a verified evidence collection.
+    #[must_use]
+    pub fn verified(items: Vec<T>) -> Self {
+        Self {
+            confidence: Confidence::Verified,
+            items,
+        }
+    }
+
+    /// Construct a heuristic evidence collection.
+    ///
+    /// # Panics
+    /// In debug mode, panics if `items` is empty (heuristic empty must be encoded as `None`).
+    #[must_use]
+    pub fn heuristic(items: Vec<T>) -> Self {
+        debug_assert!(
+            !items.is_empty(),
+            "Evidence::heuristic with empty items is forbidden; use None"
+        );
+        Self {
+            confidence: Confidence::Heuristic,
+            items,
+        }
+    }
+}
+
+impl<T> Default for Evidence<T> {
+    fn default() -> Self {
+        Self {
+            confidence: Confidence::Verified,
+            items: Vec::new(),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Evidence<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+impl<T> std::ops::DerefMut for Evidence<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.items
+    }
+}
+
+impl<T> IntoIterator for Evidence<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Evidence<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
+    }
+}
+
 /// Fallback tool to use for authoritative results when degraded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FallbackTool {
-    /// Fall back to the search tool.
-    Search,
-    /// Fall back to the read tool.
-    Read,
+    /// Fall back to the locate tool.
+    Locate,
+    /// Fall back to the trace tool.
+    Trace,
+    /// Fall back to the inspect tool.
+    Inspect,
+    /// Fall back to host grep / read tools.
+    HostGrep,
 }
 
 impl FallbackTool {
@@ -592,15 +734,22 @@ impl FallbackTool {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
-            FallbackTool::Search => "search",
-            FallbackTool::Read => "read",
+            FallbackTool::Locate => "locate",
+            FallbackTool::Trace => "trace",
+            FallbackTool::Inspect => "inspect",
+            FallbackTool::HostGrep => "host_grep",
         }
     }
 }
 
 impl fmt::Display for FallbackTool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
+        match self {
+            FallbackTool::Locate => write!(f, "locate"),
+            FallbackTool::Trace => write!(f, "trace"),
+            FallbackTool::Inspect => write!(f, "inspect"),
+            FallbackTool::HostGrep => write!(f, "use your host's grep/read tools"),
+        }
     }
 }
 
@@ -673,13 +822,15 @@ impl DegradedReason {
     #[must_use]
     pub fn guidance(&self) -> ActionableGuidance {
         match self {
-            DegradedReason::NoLsp => ActionableGuidance {
-                retry_recommended: false,
-                retry_after_seconds: None,
-                fallback_tool: Some(FallbackTool::Search),
-                trust_level: TrustLevel::Partial,
-                permanent: true,
-            },
+            DegradedReason::NoLsp | DegradedReason::UnsupportedLanguageFilterBypassed => {
+                ActionableGuidance {
+                    retry_recommended: false,
+                    retry_after_seconds: None,
+                    fallback_tool: Some(FallbackTool::HostGrep),
+                    trust_level: TrustLevel::Partial,
+                    permanent: true,
+                }
+            }
             DegradedReason::LspWarmupEmptyUnverified => ActionableGuidance {
                 retry_recommended: true,
                 retry_after_seconds: Some(15),
@@ -691,7 +842,7 @@ impl DegradedReason {
                 ActionableGuidance {
                     retry_recommended: true,
                     retry_after_seconds: Some(30),
-                    fallback_tool: Some(FallbackTool::Search),
+                    fallback_tool: None,
                     trust_level: TrustLevel::Heuristic,
                     permanent: false,
                 }
@@ -704,21 +855,14 @@ impl DegradedReason {
             | DegradedReason::GrepFallbackDependencies => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some(FallbackTool::Search),
+                fallback_tool: Some(FallbackTool::HostGrep),
                 trust_level: TrustLevel::Heuristic,
-                permanent: true,
-            },
-            DegradedReason::UnsupportedLanguageFilterBypassed => ActionableGuidance {
-                retry_recommended: false,
-                retry_after_seconds: None,
-                fallback_tool: Some(FallbackTool::Read),
-                trust_level: TrustLevel::Partial,
                 permanent: true,
             },
             DegradedReason::UnsupportedLanguage => ActionableGuidance {
                 retry_recommended: false,
                 retry_after_seconds: None,
-                fallback_tool: Some(FallbackTool::Read),
+                fallback_tool: Some(FallbackTool::HostGrep),
                 trust_level: TrustLevel::None,
                 permanent: true,
             },

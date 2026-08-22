@@ -16,8 +16,7 @@ fn test_config_deserialization() {
             "lsp": {
                 "typescript": {
                     "command": "typescript-language-server",
-                    "args": ["--stdio"],
-                    "idle_timeout_minutes": 30
+                    "args": ["--stdio"]
                 }
             },
             "sandbox": {
@@ -37,7 +36,6 @@ fn test_config_deserialization() {
 
     let ts_config = &config.lsp["typescript"];
     assert_eq!(ts_config.command, "typescript-language-server");
-    assert_eq!(ts_config.idle_timeout_minutes, 30);
 }
 
 #[test]
@@ -86,11 +84,6 @@ async fn test_load_valid_config_from_file() {
     assert_eq!(config.log_level, "trace");
     // Fields not in the JSON should retain defaults
     assert_eq!(config.search.max_results, 50);
-}
-
-#[test]
-fn test_default_idle_timeout_value() {
-    assert_eq!(default_idle_timeout(), 15);
 }
 
 #[test]
@@ -150,8 +143,7 @@ fn test_validation_valid_cases() {
 /// Phase 2 §5: Full jdtls config block deserializes correctly via the
 /// generic `lsp` `HashMap` (no Java-specific schema additions needed).
 ///
-/// Verifies: command, args, `idle_timeout_minutes`, and settings all round-trip
-/// through `serde_json`.
+/// Verifies: command, args, and settings all round-trip through `serde_json`.
 #[test]
 fn test_java_lsp_config_section() {
     let json = r#"{
@@ -159,7 +151,6 @@ fn test_java_lsp_config_section() {
                 "java": {
                     "command": "jdtls",
                     "args": ["--jvm-arg=-Xmx2G"],
-                    "idle_timeout_minutes": 20,
                     "settings": {
                         "java": {
                             "format": { "enabled": true },
@@ -185,10 +176,6 @@ fn test_java_lsp_config_section() {
         java_config.args,
         vec!["--jvm-arg=-Xmx2G"],
         "args must round-trip"
-    );
-    assert_eq!(
-        java_config.idle_timeout_minutes, 20,
-        "idle timeout must be 20"
     );
 
     // settings blob preserved
@@ -217,12 +204,6 @@ fn test_java_lsp_config_minimal() {
 
     assert_eq!(java_config.command, "jdtls");
     assert!(java_config.args.is_empty(), "args should default to empty");
-    assert_eq!(
-        java_config.idle_timeout_minutes,
-        default_idle_timeout(),
-        "idle_timeout_minutes must default to {}",
-        default_idle_timeout()
-    );
     assert!(
         java_config.settings.is_null(),
         "settings should default to null"
@@ -244,8 +225,7 @@ fn test_java_and_typescript_lsp_configs_coexist() {
     let json = r#"{
             "lsp": {
                 "java": {
-                    "command": "jdtls",
-                    "idle_timeout_minutes": 30
+                    "command": "jdtls"
                 },
                 "typescript": {
                     "command": "typescript-language-server",
@@ -262,7 +242,6 @@ fn test_java_and_typescript_lsp_configs_coexist() {
     );
 
     assert_eq!(config.lsp["java"].command, "jdtls");
-    assert_eq!(config.lsp["java"].idle_timeout_minutes, 30);
 
     assert_eq!(
         config.lsp["typescript"].command,

@@ -105,6 +105,7 @@ fn test_process_entry_unavailable_status() {
     let entry = ProcessEntry::Unavailable(UnavailableState {
         backoff_attempt: 0,
         unavailable_since: std::time::Instant::now(),
+        reason: None,
     });
     let status = entry.to_validation_status("gopls", "go");
     assert!(!status.validation);
@@ -308,6 +309,7 @@ pub(crate) fn client_no_languages() -> LspClient {
         spawner: std::sync::Arc::new(
             crate::client::process::test_mocks::MockProcessSpawner::failing(),
         ),
+        clock: Arc::new(crate::clock::TokioClock),
     }
 }
 
@@ -349,6 +351,7 @@ pub(crate) fn client_with_descriptors(
         spawner: std::sync::Arc::new(
             crate::client::process::test_mocks::MockProcessSpawner::failing(),
         ),
+        clock: Arc::new(crate::clock::TokioClock),
     }
 }
 
@@ -364,6 +367,10 @@ pub(crate) fn make_running_client(language_id: &str) -> (LspClient, Arc<FakeTran
     let reader_handle = tokio::spawn(async {
         std::future::pending::<()>().await;
     });
+
+    let (readiness_tx, readiness_rx) = tokio::sync::watch::channel(
+        crate::client::ReadinessState::Ready(crate::types::CapabilityReadiness::all()),
+    );
 
     let entry = ProcessEntry::Running(Box::new(LanguageState {
         transport: Arc::clone(&fake) as Arc<dyn LspTransport>,
@@ -389,6 +396,10 @@ pub(crate) fn make_running_client(language_id: &str) -> (LspClient, Arc<FakeTran
         })),
         in_coexistence_mode: false,
         watcher_handles: vec![],
+        probe_handle: None,
+        readiness_tx: Arc::new(readiness_tx),
+        readiness_rx,
+        workspace_root: std::env::temp_dir(),
     }));
 
     let descriptors = vec![LspDescriptor {
@@ -417,6 +428,7 @@ pub(crate) fn make_running_client(language_id: &str) -> (LspClient, Arc<FakeTran
         spawner: std::sync::Arc::new(
             crate::client::process::test_mocks::MockProcessSpawner::failing(),
         ),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     (client, fake)
@@ -477,22 +489,6 @@ async fn test_warm_start_for_languages_ignores_unknown() {
     // Languages not in descriptors should be silently ignored.
     let client = client_with_descriptors(vec!["rust"], HashMap::new());
     let _ = client.warm_start_for_languages(&["unknown_lang".to_owned()]);
-}
-
-#[tokio::test]
-async fn test_touch_language_extends_idle_timer() {
-    // touch_language must update last_used for a running process.
-    let client = client_no_languages();
-    // With no processes, touch should be a no-op (no panic).
-    client.touch_language("rust");
-}
-
-#[tokio::test]
-async fn test_touch_language_no_process_is_noop() {
-    // touch_language on a language with no running process must be a no-op.
-    let client = client_with_descriptors(vec!["rust"], HashMap::new());
-    client.touch_language("rust");
-    // No panic, no error.
 }
 
 // ── Tests for validation_status_from_parts helper ───────────────────────
@@ -637,66 +633,6 @@ fn test_validation_status_no_server_name() {
     assert!(status.server_name.is_none());
 }
 
-// ── Tests for InFlightGuard ───────────────────────────────────────────────
-
-#[test]
-fn test_in_flight_guard_increments_counter() {
-    use std::sync::atomic::AtomicU32;
-    let counter = Arc::new(AtomicU32::new(0));
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
-
-    {
-        let _guard = InFlightGuard::new(Arc::clone(&counter));
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
-
-        {
-            let _guard2 = InFlightGuard::new(Arc::clone(&counter));
-            assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 2);
-        }
-        // Second guard dropped
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
-    }
-    // First guard dropped
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
-}
-
-#[test]
-fn test_in_flight_guard_concurrent() {
-    use std::sync::atomic::AtomicU32;
-    use std::sync::Barrier;
-    use std::thread;
-    let counter = Arc::new(AtomicU32::new(0));
-    let barrier = Arc::new(Barrier::new(11)); // 10 threads + main
-    let mut handles = vec![];
-
-    for _ in 0..10 {
-        let counter_clone = Arc::clone(&counter);
-        let barrier_clone = Arc::clone(&barrier);
-        let handle = thread::spawn(move || {
-            let _guard = InFlightGuard::new(counter_clone);
-            // Wait for all threads to reach this point
-            barrier_clone.wait();
-            // Guard is still alive here
-            thread::sleep(std::time::Duration::from_millis(10));
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all threads to create their guards
-    barrier.wait();
-
-    // All guards should be alive now
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 10);
-
-    // Wait for all threads to complete and drop their guards
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    // All guards should be dropped
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
-}
-
 // ── G-1: ProcessSpawner DI Integration Test ─────────────────────────
 
 #[tokio::test]
@@ -728,6 +664,7 @@ async fn test_g_1_mock_process_spawner_integration() {
         doc_versions: Arc::new(DashMap::new()),
         warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         spawner: mock_spawner.clone(),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     let descriptor = client.descriptors.first().unwrap().clone();
@@ -794,6 +731,7 @@ async fn test_g_1_mock_process_spawner_with_failing_behavior() {
         doc_versions: Arc::new(DashMap::new()),
         warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         spawner: mock_spawner.clone(),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     let result = client.ensure_process("rust").await;
@@ -852,6 +790,7 @@ async fn test_g_1_ensure_process_records_spawn_call_through_di_chain() {
         doc_versions: Arc::new(DashMap::new()),
         warm_start_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         spawner: mock_spawner.clone(),
+        clock: Arc::new(crate::clock::TokioClock),
     };
 
     assert_eq!(

@@ -70,9 +70,14 @@ impl AstParser {
                 Some(options),
             );
 
+            let timed_out = start.elapsed() > timeout;
             result.ok_or_else(|| SurgeonError::ParseError {
                 path: path.to_path_buf(),
-                reason: "Parser returned None (timed out or no language set)".into(),
+                reason: if timed_out {
+                    "Parser timed out (exceeded 500ms limit)".into()
+                } else {
+                    "Parser returned None".into()
+                },
             })
         })
     }

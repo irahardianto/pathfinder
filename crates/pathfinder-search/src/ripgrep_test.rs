@@ -822,10 +822,10 @@ fn test_decode_line_invalid_utf8() {
     );
 }
 
-// ── GAP: binary_skipped count in results ──────────────────────────
+// ── GAP: binary files skipped in results ──────────────────────────
 
 #[tokio::test]
-async fn test_binary_skipped_count_in_results() {
+async fn test_binary_files_are_skipped() {
     let ws = make_workspace(&[
         ("src/main.rs", "needle\n"),
         ("assets/image.png", "needle\n"),
@@ -837,14 +837,10 @@ async fn test_binary_skipped_count_in_results() {
         .await
         .expect("search should succeed");
 
-    assert!(
-        result.binary_skipped > 0,
-        "binary_skipped should be > 0, got {}",
-        result.binary_skipped
-    );
     // Only the .rs file should produce a match
     assert_eq!(result.total_matches, 1);
     assert_eq!(result.matches[0].file, "src/main.rs");
+    assert_eq!(result.files_searched, 1);
 }
 
 // ── GAP: files_searched count ─────────────────────────────────────
@@ -1172,7 +1168,7 @@ async fn test_search_unreadable_file_skips() {
 
         let scout = RipgrepScout;
         let result = scout.search(&params_for(&ws, "needle")).await.unwrap();
-        assert_eq!(result.other_skipped, 1);
+        assert_eq!(result.files_searched, 0);
         assert_eq!(result.total_matches, 0);
 
         // Restore permissions so tempdir can clean up
@@ -1180,4 +1176,32 @@ async fn test_search_unreadable_file_skips() {
         perms.set_mode(0o644);
         std::fs::set_permissions(&path, perms).unwrap();
     }
+}
+
+// ── Deadline & Limits tests (RSP-A10) ──────────────────────────
+
+#[tokio::test]
+async fn test_search_respects_deadline() {
+    let ws = make_workspace(&[
+        ("a.rs", "needle in a\n"),
+        ("b.rs", "needle in b\n"),
+        ("c.rs", "needle in c\n"),
+    ]);
+    let scout = RipgrepScout;
+    // Set deadline already expired in the past
+    let params = SearchParams {
+        workspace_root: ws.path().to_path_buf(),
+        query: "needle".to_owned(),
+        deadline: std::time::Instant::now().checked_sub(std::time::Duration::from_millis(10)),
+        ..Default::default()
+    };
+    let result = scout.search(&params).await.expect("search succeeds");
+    assert!(
+        result.truncated,
+        "should be marked truncated due to expired deadline"
+    );
+    assert_eq!(
+        result.files_searched, 0,
+        "should stop before searching files"
+    );
 }

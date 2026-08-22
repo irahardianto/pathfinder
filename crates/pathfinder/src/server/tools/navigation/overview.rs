@@ -17,10 +17,14 @@ pub(super) struct RenderOverviewParams<'a> {
     pub(super) end_line: usize,
     pub(super) scope_content: &'a str,
     pub(super) impact: Option<&'a crate::server::types::ImpactSummary>,
-    pub(super) references: Option<&'a [crate::server::types::SymbolOverviewReference]>,
+    pub(super) references: Option<
+        &'a pathfinder_common::types::Evidence<crate::server::types::SymbolOverviewReference>,
+    >,
     pub(super) files_referenced: usize,
     pub(super) degraded: bool,
     pub(super) degraded_reason: Option<DegradedReason>,
+    pub(super) status: &'a pathfinder_common::types::ToolStatus,
+    pub(super) hint: Option<&'a str>,
     pub(super) duration_ms: u128,
 }
 
@@ -29,6 +33,84 @@ impl PathfinderServer {
     ///
     /// Orchestrates `read_symbol_scope` + `find_callers_callees` + `find_all_references`.
     /// Uses depth=2 and capped references for bounded responses.
+    fn validate_overview_request(
+        &self,
+        params: &crate::server::types::TraceParams,
+    ) -> Result<pathfinder_common::types::SemanticPath, ErrorData> {
+        let semantic_path = parse_semantic_path(&params.semantic_path)?;
+        require_symbol_target(&semantic_path, &params.semantic_path)?;
+
+        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
+            return Err(pathfinder_to_error_data(&e));
+        }
+
+        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
+        if !abs_file.exists() {
+            let err = pathfinder_common::error::PathfinderError::FileNotFound {
+                path: abs_file.clone(),
+            };
+            return Err(pathfinder_to_error_data(&err));
+        }
+
+        if params.max_depth > 2 {
+            return Err(crate::server::helpers::invalid_params_error(format!(
+                "max_depth exceeds maximum allowed depth of 2 (requested: {}). Hint: For deep dependency traversal beyond depth 2, delegate to subagents or issue follow-up trace calls at each boundary.",
+                params.max_depth
+            )));
+        }
+
+        Ok(semantic_path)
+    }
+
+    fn compute_overview_status(
+        degraded: bool,
+        warm_start_in_progress: Option<bool>,
+        has_verified: bool,
+        duration_ms: u128,
+        attempt: u32,
+        degraded_reason: Option<&DegradedReason>,
+    ) -> pathfinder_common::types::ToolStatus {
+        if degraded {
+            if warm_start_in_progress == Some(true) && !has_verified {
+                pathfinder_common::types::ToolStatus::NotReady {
+                    elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                    retry_after_secs: 15,
+                    eta_secs: None,
+                    phase: "indexing".to_string(),
+                    attempt,
+                    max_attempts: 3,
+                }
+            } else {
+                pathfinder_common::types::ToolStatus::Degraded {
+                    reason: degraded_reason.map_or_else(|| "degraded".into(), ToString::to_string),
+                    retry_after_secs: None,
+                }
+            }
+        } else {
+            pathfinder_common::types::ToolStatus::Ok
+        }
+    }
+
+    fn check_has_verified(
+        impact: Option<&crate::server::types::ImpactSummary>,
+        references: Option<
+            &pathfinder_common::types::Evidence<crate::server::types::SymbolOverviewReference>,
+        >,
+    ) -> bool {
+        let has_impact = impact.is_some_and(|imp| {
+            imp.incoming
+                .as_ref()
+                .is_some_and(|e| e.confidence == pathfinder_common::types::Confidence::Verified)
+                || imp
+                    .outgoing
+                    .as_ref()
+                    .is_some_and(|e| e.confidence == pathfinder_common::types::Confidence::Verified)
+        });
+        has_impact
+            || references
+                .is_some_and(|e| e.confidence == pathfinder_common::types::Confidence::Verified)
+    }
+
     pub(crate) async fn symbol_overview_impl(
         &self,
         params: crate::server::types::TraceParams,
@@ -41,22 +123,7 @@ impl PathfinderServer {
             "symbol_overview: start"
         );
 
-        let semantic_path = parse_semantic_path(&params.semantic_path)?;
-        require_symbol_target(&semantic_path, &params.semantic_path)?;
-
-        if let Err(e) = self.sandbox.check(&semantic_path.file_path) {
-            return Err(pathfinder_to_error_data(&e));
-        }
-
-        // Early file existence check
-        let abs_file = self.workspace_root.path().join(&semantic_path.file_path);
-        if !abs_file.exists() {
-            let err = pathfinder_common::error::PathfinderError::FileNotFound {
-                path: abs_file.clone(),
-            };
-            return Err(pathfinder_to_error_data(&err));
-        }
-
+        let semantic_path = self.validate_overview_request(&params)?;
         let scope = self
             .read_symbol_scope_enriched(&semantic_path, &params.semantic_path)
             .await?;
@@ -69,18 +136,26 @@ impl PathfinderServer {
         });
 
         let _doc_guard = self.open_document_safely(&semantic_path).await;
+        let max_refs = if params.max_references == 0 {
+            20
+        } else {
+            params.max_references.clamp(1, 500)
+        };
 
-        // Clamp max_references to [1, 500] — sub-calls also clamp, but being explicit here
-        // makes the bound visible at the orchestration level.
-        let max_references = params.max_references.clamp(1, 500);
-
-        let (impact, impact_degraded, impact_reason) = self
-            .get_impact_summary(&params.semantic_path, max_references)
+        let (impact, impact_degraded, impact_reason, impact_hint) = self
+            .get_impact_summary(&params.semantic_path, max_refs, params.retry_attempt)
             .await;
 
-        let (references, refs_degraded, refs_reason, files_referenced, _warm_start_in_progress) =
-            self.get_references_summary(&params.semantic_path, max_references)
-                .await;
+        let (
+            references,
+            refs_degraded,
+            refs_reason,
+            files_referenced,
+            _warm_start_in_progress,
+            refs_hint,
+        ) = self
+            .get_references_summary(&params.semantic_path, max_refs, params.retry_attempt)
+            .await;
 
         let duration_ms = start.elapsed().as_millis();
 
@@ -92,7 +167,26 @@ impl PathfinderServer {
                 refs_reason,
             );
 
+        let has_verified = Self::check_has_verified(impact.as_ref(), references.as_ref());
+        let status = Self::compute_overview_status(
+            degraded,
+            warm_start_in_progress,
+            has_verified,
+            duration_ms,
+            params.retry_attempt,
+            degraded_reason.as_ref(),
+        );
+
+        if let Some(imp) = &impact {
+            crate::server::helpers::validate_evidence(&status, imp.incoming.as_ref());
+            crate::server::helpers::validate_evidence(&status, imp.outgoing.as_ref());
+        }
+        crate::server::helpers::validate_evidence(&status, references.as_ref());
+
+        let hint = impact_hint.or(refs_hint);
+
         let response = crate::server::types::SymbolOverviewResponse {
+            status: status.clone(),
             source,
             impact: impact.clone(),
             references: references.clone(),
@@ -104,26 +198,44 @@ impl PathfinderServer {
             actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
             warm_start_in_progress,
+            hint: hint.clone(),
+            resolution_strategy: None,
         };
 
+        Ok(Self::build_overview_call_result(
+            &params,
+            &scope,
+            &response,
+            duration_ms,
+        ))
+    }
+
+    fn build_overview_call_result(
+        params: &crate::server::types::TraceParams,
+        scope: &pathfinder_common::types::SymbolScope,
+        response: &crate::server::types::SymbolOverviewResponse,
+        duration_ms: u128,
+    ) -> rmcp::model::CallToolResult {
         let render_params = RenderOverviewParams {
             semantic_path: &params.semantic_path,
             start_line: scope.start_line,
             end_line: scope.end_line,
             scope_content: &scope.content,
-            impact: impact.as_ref(),
-            references: references.as_deref(),
-            files_referenced,
-            degraded,
-            degraded_reason,
+            impact: response.impact.as_ref(),
+            references: response.references.as_ref(),
+            files_referenced: response.files_referenced,
+            degraded: response.degraded,
+            degraded_reason: response.degraded_reason,
+            status: &response.status,
+            hint: response.hint.as_deref(),
             duration_ms,
         };
         let text = Self::render_overview_text(&render_params);
 
         let mut result =
             rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)]);
-        result.structured_content = serialize_metadata(&response);
-        Ok(result)
+        result.structured_content = serialize_metadata(response);
+        result
     }
 
     async fn open_document_safely(
@@ -169,17 +281,20 @@ impl PathfinderServer {
         &self,
         semantic_path: &str,
         max_references: u32,
+        retry_attempt: u32,
     ) -> (
         Option<crate::server::types::ImpactSummary>,
         bool,
         Option<DegradedReason>,
+        Option<String>,
     ) {
         let impact_params = crate::server::types::TraceParams {
             semantic_path: semantic_path.to_owned(),
             scope: crate::server::types::TraceScope::Callers,
-            max_depth: 2,
+            max_depth: 1,
             max_references,
             offset: 0,
+            retry_attempt,
         };
 
         let impact_result = self.find_callers_callees_impl(impact_params).await;
@@ -208,33 +323,43 @@ impl PathfinderServer {
                 } else {
                     Some(crate::server::types::ImpactSummary {
                         incoming: meta.incoming.map(|incoming| {
-                            incoming
-                                .into_iter()
-                                .map(|r| crate::server::types::SymbolOverviewImpactEntry {
-                                    semantic_path: r.semantic_path,
-                                    file: r.file,
-                                    line: r.line,
-                                    snippet: r.snippet,
-                                    direction: r.direction,
-                                })
-                                .collect()
+                            pathfinder_common::types::Evidence {
+                                confidence: incoming.confidence,
+                                items: incoming
+                                    .items
+                                    .into_iter()
+                                    .map(|r| crate::server::types::SymbolOverviewImpactEntry {
+                                        semantic_path: r.semantic_path,
+                                        file: r.file,
+                                        line: r.line,
+                                        snippet: r.snippet,
+                                        direction: r.direction,
+                                        confidence: r.confidence,
+                                    })
+                                    .collect(),
+                            }
                         }),
                         outgoing: meta.outgoing.map(|outgoing| {
-                            outgoing
-                                .into_iter()
-                                .map(|r| crate::server::types::SymbolOverviewImpactEntry {
-                                    semantic_path: r.semantic_path,
-                                    file: r.file,
-                                    line: r.line,
-                                    snippet: r.snippet,
-                                    direction: r.direction,
-                                })
-                                .collect()
+                            pathfinder_common::types::Evidence {
+                                confidence: outgoing.confidence,
+                                items: outgoing
+                                    .items
+                                    .into_iter()
+                                    .map(|r| crate::server::types::SymbolOverviewImpactEntry {
+                                        semantic_path: r.semantic_path,
+                                        file: r.file,
+                                        line: r.line,
+                                        snippet: r.snippet,
+                                        direction: r.direction,
+                                        confidence: r.confidence,
+                                    })
+                                    .collect(),
+                            }
                         }),
                         degraded: meta.degraded,
                     })
                 };
-                (summary, meta.degraded, meta.degraded_reason)
+                (summary, meta.degraded, meta.degraded_reason, meta.hint)
             }
             Err(e) => {
                 tracing::warn!(
@@ -242,7 +367,7 @@ impl PathfinderServer {
                     error = %e,
                     "find_callers_callees_impl failed — impact will be unavailable"
                 );
-                (None, true, Some(DegradedReason::LspErrorGrepFallback))
+                (None, true, Some(DegradedReason::LspErrorGrepFallback), None)
             }
         }
     }
@@ -251,12 +376,14 @@ impl PathfinderServer {
         &self,
         semantic_path: &str,
         max_references: u32,
+        retry_attempt: u32,
     ) -> (
-        Option<Vec<crate::server::types::SymbolOverviewReference>>,
+        Option<pathfinder_common::types::Evidence<crate::server::types::SymbolOverviewReference>>,
         bool,
         Option<DegradedReason>,
         usize,
         Option<bool>,
+        Option<String>,
     ) {
         let refs_params = crate::server::types::TraceParams {
             semantic_path: semantic_path.to_owned(),
@@ -264,6 +391,7 @@ impl PathfinderServer {
             max_depth: 0,
             max_references,
             offset: 0,
+            retry_attempt,
         };
 
         let refs_result = self.find_all_references_impl(refs_params).await;
@@ -287,16 +415,22 @@ impl PathfinderServer {
                             ..Default::default()
                         }
                     });
-                let refs = meta.references.map(|refs| {
-                    refs.into_iter()
-                        .map(|r| crate::server::types::SymbolOverviewReference {
-                            file: r.file,
-                            line: r.line,
-                            column: r.column,
-                            snippet: r.snippet,
-                        })
-                        .collect()
-                });
+                let refs = meta
+                    .references
+                    .map(|refs| pathfinder_common::types::Evidence {
+                        confidence: refs.confidence,
+                        items: refs
+                            .items
+                            .into_iter()
+                            .map(|r| crate::server::types::SymbolOverviewReference {
+                                file: r.file,
+                                line: r.line,
+                                column: r.column,
+                                snippet: r.snippet,
+                                confidence: r.confidence,
+                            })
+                            .collect(),
+                    });
                 let warm_start_in_progress = meta.warm_start_in_progress;
                 (
                     refs,
@@ -304,6 +438,7 @@ impl PathfinderServer {
                     meta.degraded_reason,
                     meta.files_referenced,
                     warm_start_in_progress,
+                    meta.hint,
                 )
             }
             Err(e) => {
@@ -317,6 +452,7 @@ impl PathfinderServer {
                     true,
                     Some(DegradedReason::LspErrorGrepFallback),
                     0,
+                    None,
                     None,
                 )
             }
@@ -393,38 +529,86 @@ impl PathfinderServer {
             source_block.push_str("```\n");
         }
 
+        let mut status_prefix = String::new();
+        if let Some(header) = crate::server::helpers::format_tool_status_header(params.status) {
+            status_prefix = format!("{header}\n\n");
+        }
+
         let impact_block = if let Some(imp) = params.impact {
-            let inc = imp.incoming.as_ref().map_or(0, Vec::len);
-            let out = imp.outgoing.as_ref().map_or(0, Vec::len);
-            let deg = if imp.degraded { " (degraded)" } else { "" };
-            format!("CALLERS: {inc} direct{deg}\nCALLEES: {out}{deg}\n")
+            let inc_str = match &imp.incoming {
+                None => "unavailable (not verified)".to_string(),
+                Some(ev)
+                    if ev.confidence == pathfinder_common::types::Confidence::Verified
+                        && ev.items.is_empty() =>
+                {
+                    "0 direct (verified zero)".to_string()
+                }
+                Some(ev) if ev.confidence == pathfinder_common::types::Confidence::Verified => {
+                    format!("{} direct (verified)", ev.items.len())
+                }
+                Some(ev) => format!("{} direct (heuristic candidates)", ev.items.len()),
+            };
+            let out_str = match &imp.outgoing {
+                None => "unavailable (not verified)".to_string(),
+                Some(ev)
+                    if ev.confidence == pathfinder_common::types::Confidence::Verified
+                        && ev.items.is_empty() =>
+                {
+                    "0 (verified zero)".to_string()
+                }
+                Some(ev) if ev.confidence == pathfinder_common::types::Confidence::Verified => {
+                    format!("{} (verified)", ev.items.len())
+                }
+                Some(ev) => format!("{} (heuristic candidates)", ev.items.len()),
+            };
+            format!("CALLERS: {inc_str}\nCALLEES: {out_str}\n")
         } else {
-            "CALLERS: unavailable\nCALLEES: unavailable\n".to_owned()
+            "CALLERS: unavailable (not verified)\nCALLEES: unavailable (not verified)\n".to_owned()
         };
 
-        let refs_block = if let Some(refs) = params.references {
-            let total = refs.len();
+        let refs_block = if let Some(ev) = params.references {
+            let total = ev.items.len();
+            let conf_label = if ev.confidence == pathfinder_common::types::Confidence::Verified {
+                if total == 0 {
+                    "(verified zero)"
+                } else {
+                    "(verified)"
+                }
+            } else {
+                "(heuristic candidates)"
+            };
             format!(
-                "REFERENCES: {total} total across {} files\n",
+                "REFERENCES: {total} total across {} files {conf_label}\n",
                 params.files_referenced
             )
         } else {
-            "REFERENCES: unavailable\n".to_owned()
+            "REFERENCES: unavailable (not verified)\n".to_owned()
         };
 
-        let degraded_block = if params.degraded {
-            let notice = params
-                .degraded_reason
-                .as_ref()
-                .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
-            format!("{notice}\n")
+        let degraded_block =
+            if !params.degraded && *params.status == pathfinder_common::types::ToolStatus::Ok {
+                "DEGRADED: no (LSP-backed, authoritative)\n".to_owned()
+            } else {
+                let notice = params
+                    .degraded_reason
+                    .as_ref()
+                    .map_or_else(|| "DEGRADED (unknown)".to_owned(), format_degraded_notice);
+                format!("{notice}\n")
+            };
+
+        let hint_block = if let Some(h) = params.hint {
+            if h.is_empty() {
+                String::new()
+            } else {
+                format!("HINT: {h}\n")
+            }
         } else {
-            "DEGRADED: no (LSP-backed, authoritative)\n".to_owned()
+            String::new()
         };
 
         let extra = if params.degraded { "\n" } else { "" };
         format!(
-            "{source_block}{impact_block}{refs_block}{degraded_block}{extra}[completed in {}ms]",
+            "{status_prefix}{source_block}{impact_block}{refs_block}{degraded_block}{hint_block}{extra}[completed in {}ms]",
             params.duration_ms
         )
     }

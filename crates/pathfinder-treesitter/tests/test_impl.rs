@@ -15,7 +15,10 @@ fn test_extract_rust_impl_symbols() {
     )
     .unwrap();
     let symbols = extract_symbols_from_tree(&tree, source.as_bytes(), SupportedLanguage::Rust);
-    assert_eq!(symbols.len(), 2); // The impl and the fn
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].name, "Test");
+    assert_eq!(symbols[0].children.len(), 1);
+    assert_eq!(symbols[0].children[0].name, "test");
 }
 
 #[test]

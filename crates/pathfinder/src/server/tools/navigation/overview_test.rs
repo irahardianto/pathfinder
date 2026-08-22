@@ -173,9 +173,9 @@ async fn test_symbol_overview_no_impact_no_references_shows_unavailable() {
     assert_eq!(refs.len(), 0);
     assert_eq!(val.files_referenced, 0);
 
-    // Degraded because results are empty
-    assert!(val.degraded);
-    assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
+    // Non-degraded because LSP confirmed zero callers, callees, and references
+    assert!(!val.degraded);
+    assert_eq!(val.lsp_readiness, Some("ready".to_owned()));
 }
 
 #[tokio::test]
@@ -382,19 +382,17 @@ async fn test_symbol_overview_bfs_error_logs_warning_continues_with_empty_result
     let val: crate::server::types::SymbolOverviewResponse =
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-    // Verify degraded (empty BFS call hierarchy results in degradation)
-    assert!(val.degraded);
-    assert_eq!(
-        val.degraded_reason,
-        Some(DegradedReason::LspWarmupGrepFallback)
-    );
-    assert_eq!(val.lsp_readiness, Some("warming_up".to_owned()));
+    // Verify non-degraded: BFS continues after single error with empty results
+    assert!(!val.degraded);
+    assert_eq!(val.lsp_readiness, Some("ready".to_owned()));
 
-    // Impact is populated with empty arrays (prepare succeeded)
+    // Impact is populated with verified empty results
     assert!(val.impact.is_some());
     let impact = val.impact.as_ref().unwrap();
     assert!(impact.incoming.is_some());
     assert!(impact.outgoing.is_some());
+    assert_eq!(impact.incoming.as_ref().unwrap().len(), 0);
+    assert_eq!(impact.outgoing.as_ref().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -909,6 +907,8 @@ fn test_render_overview_text_format() {
         files_referenced: 0,
         degraded: false,
         degraded_reason: None,
+        status: &pathfinder_common::types::ToolStatus::Ok,
+        hint: None,
         duration_ms: 123,
     });
 
