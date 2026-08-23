@@ -60,8 +60,8 @@ Every tool returns dual-channel output:
 
 | Parameter | Tool | Default | Purpose |
 |---|---|---|---|
-| `max_references` | `trace` | `50` | Cap total references in `references` and `overview` scopes |
-| `max_depth` | `trace` | `3` | BFS traversal depth (clamped 1–5). `scope="callers"` only |
+| `max_references` | `trace` | `20` | Cap total references in `references` and `overview` scopes |
+| `max_depth` | `trace` | `1` | BFS traversal depth. Hard ceiling 2 — requests above 2 are rejected, not clamped. `scope="callers"` only |
 | `max_dependencies` | `inspect` | `50` | Cap outgoing dependency entries (with `include_dependencies=true`) |
 
 ## Fallback

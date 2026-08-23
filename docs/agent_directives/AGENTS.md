@@ -12,7 +12,7 @@ Semantic navigation tools (`locate`, `trace`, `inspect`). Workflows and deep det
 | Read symbol source | `inspect` | `semantic_path="..."`. Extract exact symbol block by semantic path. |
 | Inspect symbol + dependencies | `inspect` | `semantic_path="..."`, `include_dependencies=true`. Fetches callee signatures (LSP-powered). |
 | Batch inspect symbols | `inspect` | `semantic_paths=["...", ...]`. (max 10). |
-| Find callers and callees | `trace` | `semantic_path="..."`, `scope="callers"` (default). Callers + callees via LSP call hierarchy. `max_depth` (default 3, clamped 1–5). |
+| Find callers and callees | `trace` | `semantic_path="..."`, `scope="callers"` (default). Callers + callees via LSP call hierarchy. `max_depth` (default 1, hard ceiling 2 — requests above 2 are rejected, not clamped). |
 | Find all references | `trace` | `semantic_path="..."`, `scope="references"`. All usages including non-call references (field access, imports, type annotations). |
 | Symbol overview | `trace` | `semantic_path="..."`, `scope="overview"`. Source + callers + callees + references in one call. |
 
@@ -40,8 +40,8 @@ Mistaking `null` for "zero results" leads to dangerous refactoring decisions.
 
 | Parameter | Tool | Default | Purpose |
 |---|---|---|---|
-| `max_references` | `trace` | `50` | Cap total references. In `overview` scope, controls both callers/callees and references. |
-| `max_depth` | `trace` | `3` | BFS traversal depth (clamped 1–5). Use 4-5 for large-scale API changes. `scope="callers"` only. |
+| `max_references` | `trace` | `20` | Cap total references. In `overview` scope, controls both callers/callees and references. |
+| `max_depth` | `trace` | `1` | BFS traversal depth. Hard ceiling 2 — requests above 2 are rejected, not clamped. Delegate deeper traversal to subagents or issue follow-up `trace` calls at each boundary. `scope="callers"` only. |
 | `max_dependencies` | `inspect` | `50` | Cap outgoing dependency entries (with `include_dependencies=true`). |
 
 ### Fallback

@@ -175,7 +175,7 @@ Pathfinder communicates over **stdio** using the MCP protocol. Logs are emitted 
 
 Pathfinder ships with a set of **agent directives** — pre-written rules and skills that teach your AI agent how to use Pathfinder tools correctly, reliably, and efficiently. Without these, the agent falls back to generic file-reading behaviour and misses most of Pathfinder's value.
 
-> **Why this matters:** An AI agent that doesn't know about semantic paths or the difference between `read` for a source file vs a config file will make avoidable mistakes — calling the wrong tool, constructing malformed paths, or wasting context reading entire files for single symbols. The directives encode all of this knowledge directly into the agent's system context.
+> **Why this matters:** An AI agent that doesn't know about semantic paths or which of `locate`/`trace`/`inspect` to reach for will make avoidable mistakes — calling a tool that no longer exists, constructing malformed semantic paths, or misreading a `null` evidence field as a confirmed zero. The directives encode all of this knowledge directly into the agent's system context.
 
 ### What's Included
 
@@ -197,9 +197,9 @@ docs/agent_directives/
 - When to fall back gracefully if Pathfinder is unavailable
 
 **`skills/pathfinder/SKILL.md`** — a detailed on-demand skill the agent activates when it needs deeper guidance. It covers:
-- Step-by-step workflows for exploring, auditing, and debugging codebases
-- Efficient search with `mode` (text/regex/symbol), `filter_mode`, `exclude_glob`, `known_files`, and `group_by_file`
-- Error recovery patterns for `SYMBOL_NOT_FOUND`, LSP degradation, and timeout scenarios
+- The 3-tool surface (`locate`, `trace`, `inspect`) and each tool's key parameters
+- The dual-channel response model and the `ToolStatus`/`Confidence`/`Evidence` tri-state contract (`null` = unknown, `[]` = confirmed zero)
+- Token budget controls (`max_depth`, `max_references`, `max_dependencies`) and the graceful fallback to host tools
 
 ### Setup by Client
 
@@ -416,6 +416,7 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] `trace(scope="overview")` — composite source + callers + callees + references
 - [x] `locate(file, line)` — convert file:line locations to semantic paths
 - [x] 14→7 tool consolidation for cleaner agent interface
+- [x] v6: 7→3 tool consolidation (`locate`, `trace`, `inspect`) with a dual-channel `ToolStatus`/`Confidence`/`Evidence` response contract
 - [ ] Additional language support (C/C++, C#, Kotlin, etc.)
 - [ ] Custom LSP server command overrides via configuration file
 
