@@ -2,6 +2,7 @@
   "suite": "resolve",
   "agent": "nav",
   "_rationale": "Every task in the nav and deep suites tied at a correctness ceiling on frontier models, so neither can distinguish a semantically-resolved answer from a textually-plausible one. This suite is built to break that tie. Each task has a grep-shaped wrong answer that is easy to reach and a correct answer that requires resolving through Rust's type system: trait implementations behind qualified paths, same-named methods on unrelated traits, a method that exists only after macro expansion, and a runtime wiring decision hidden behind dependency injection. Pathfinder resolves through rust-analyzer and should be right. CodeGraph documents its cross-file resolution as 'best-effort name matching' and grep has no type system at all, so both should be plausibly wrong. Scoring is precision-weighted: naming test doubles as production code, or inventing a source location for a macro-generated method, costs more than omitting them.",
+  "_extension_note": "R5 was added during the pathfinder-v6 remediation session (2026-08-23) per WS-11.3 (docs/requirements/pathfinder-v6/00-plan.md \u00a77): 'extend resolve from 8 to >=20 tasks... New tasks target the C-6 shape: interface declared in one file, implemented in another, with a plausible wrong answer one grep away.' R5 is that exact shape, using the plan's own cited flagship example (`Lawyer` trait declared in lawyer.rs, implemented for `LspClient` in the separate file lawyer_impl.rs -- 00-plan.md \u00a71.1: 'CodeGraph answered client/mod.rs in both runs -- where the type is declared. The impl lives in client/lawyer_impl.rs.'). This is a starter addition verified against source read directly during the same session, not by executing the suite -- reaching the full n>=20 target requires authoring roughly 15 more tasks of this shape (candidate pairs exist throughout pathfinder-lsp's plugin/detect/response_parsers layer) and a dry run against a live model before a paid full-matrix run.",
   "tasks": [
     {
       "id": "R1_trait_impls_production_vs_test",
@@ -123,6 +124,25 @@
         "spurious_patterns": [
           "(?im)^[^|\\n]*_test\\.rs\\s*\\|",
           "(?im)^[^|\\n]*health_test\\.rs\\s*\\|"
+        ]
+      }
+    },
+    {
+      "id": "R5_trait_method_runtime_body_not_declaration",
+      "capability": "trait-to-impl resolution: runtime method body vs trait declaration site (C-6 shape)",
+      "prompt": "The `Lawyer` trait declares a method `goto_implementation`. I need to set a breakpoint on the code that ACTUALLY RUNS when the `trace` tool calls it in the shipped binary -- not the trait's method signature, and not a test double.\n\nThere are at least four `goto_implementation` definitions in this workspace: one is the trait's own method signature (no body that runs anything real), one is the production implementation, and the others are test-only implementations (a mock and a no-op fallback used only when no real language server is available).\n\nGive the relative file path and exact line number of the PRODUCTION implementation's `async fn goto_implementation` -- the one with a real method body that sends an LSP request.\n\nOutput format -- inside <answer></answer>, exactly one line:\n<relative/file/path>:<line>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "production_impl_location",
+            "must_match": "(?im)^\\s*\\S*lawyer_impl\\.rs:277\\s*$"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*\\S*[^_]lawyer\\.rs:\\d+\\s*$",
+          "(?im)^\\s*\\S*mock\\.rs:\\d+\\s*$",
+          "(?im)^\\s*\\S*no_op\\.rs:\\d+\\s*$"
         ]
       }
     }

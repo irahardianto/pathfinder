@@ -1,0 +1,60 @@
+{
+  "suite": "warm_path",
+  "agent": "nav",
+  "_rationale": "WS-11.5 (docs/requirements/pathfinder-v6/00-plan.md \u00a77, TS-D6): the cold-start suite measures the wrong axis for the addressing bugs TS-A1/TS-A2/TS-A3 -- every wrong-position query returns `[]` from a fully-warm, fully-ready LSP, and a readiness gate correctly certifies that empty as verified. The kill condition is the same absolute one as cold-start -- 'warm-path confidently-wrong-empty: exactly 0' -- but on the OPPOSITE side of the readiness gate: the LSP has had time to fully index, and the bug (if present) is in the ADDRESSING layer (Tree-sitter position computation), not the readiness layer. Each task forces a warm-up call first, then queries a fixture shape the pathfinder-v6 audit named explicitly: an annotated (`@Override`) declaration, a non-ASCII declaration line, and a cross-file trait/interface implementation.",
+  "_authoring_note": "Targets are the actual conformance fixtures under crates/pathfinder/tests/fixtures/conformance/ (Java) and the live pathfinder-lsp source (the audit's own flagship cross-file-impl example) plus the non-ASCII fixture edited during the pathfinder-v6 remediation session (2026-08-23) specifically to place multi-byte characters ON the declaration line before the symbol name, not on a preceding comment line -- verify this fixture shape still holds against the commit under test before a paid run, since a fixture that regresses back to a preceding-comment-line layout would make WP2 pass vacuously (see docs/requirements/pathfinder-v6/01-findings.md TS-A2 and the conformance test_c12/test_c16 regression tests added the same session, which independently guard the fixture itself against becoming vacuous).",
+  "tasks": [
+    {
+      "id": "WP1_annotated_java_override_method",
+      "capability": "warm-path addressing: annotated declaration must resolve to the impl, not the declaration",
+      "prompt": "Step 1 (warm-up, do not report this): call `locate` on `crates/pathfinder/tests/fixtures/conformance/java/Greeter.java::Greeter` once, to let the language server finish indexing. If it returns `not_ready`, wait a few seconds and retry until it returns `ok` or you have tried 5 times.\n\nStep 2 (the real query): once the language server is warm, call `trace` with `scope=\"callers\"` on `crates/pathfinder/tests/fixtures/conformance/java/GreeterImpl.java::GreeterImpl.greet`. This method is annotated with `@Override` on the line immediately above it -- the method name itself is on its own line, at some column after `public String `.\n\nReport exactly what this second call returned.\n\nOutput format -- inside <answer></answer>, exactly two lines:\nstatus: <the exact top-level `status` value from the trace call in step 2>\nincoming: <`null`, or the number of items if `incoming` is an array>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "warm_never_confidently_empty",
+            "must_match": "(?is)(status:\\s*not_ready.*incoming:\\s*null)|(status:\\s*(ok|degraded)\\s*\\n\\s*incoming:\\s*(0|null))"
+          }
+        ],
+        "spurious_patterns": [],
+        "_grading_note": "There is no independently-known non-zero caller count for this exact method in the fixture repo (it may genuinely have zero callers within the fixture's own small file set), so this task cannot assert a specific non-empty count the way CS2/WP3 do. What it CAN assert, and what actually matters for TS-A1, is that a warm `status: ok` empty result is only trustworthy if the position sent was correct -- which is exactly what the `test_c16_warm_path_zero_fake_empties_all_languages` Rust conformance test (added in the same remediation session) verifies mechanically via MockLawyer's captured call arguments. Treat this bench task as a qualitative cross-check against a REAL jdtls, not a substitute for that mechanical test."
+      }
+    },
+    {
+      "id": "WP2_non_ascii_declaration_line",
+      "capability": "warm-path addressing: non-ASCII bytes before the symbol name must not desync the query position",
+      "prompt": "Step 1 (warm-up, do not report this): call `locate` on `crates/pathfinder/tests/fixtures/conformance/rust/src/types.rs::zero_caller_symbol` once. If it returns `not_ready`, wait a few seconds and retry until it returns `ok` or you have tried 5 times.\n\nStep 2 (the real query): call `locate` on `crates/pathfinder/tests/fixtures/conformance/rust/src/types.rs::non_ascii_hello`. Look at the source file first if you need to see why this declaration line is unusual (hint: there is a block comment containing non-ASCII characters, including emoji, immediately before the function name on the same line).\n\nReport exactly what this second call returned.\n\nOutput format -- inside <answer></answer>, exactly three lines:\nstatus: <the exact top-level `status` value>\nfile: <the `file` field, or `none`>\nline: <the `line` field, or `none`>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "resolved_to_correct_file",
+            "must_match": "(?is)status:\\s*ok\\s*\\n\\s*file:[^\\n]*types\\.rs\\s*\\n\\s*line:\\s*\\d+"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*file:\\s*none\\s*$",
+          "(?is)status:\\s*ok.*file:[^\\n]*(?<!types)\\.rs"
+        ]
+      }
+    },
+    {
+      "id": "WP3_cross_file_impl_lawyer_lspclient",
+      "capability": "warm-path addressing / product thesis: goto-implementation must resolve to the impl file, not the trait declaration file",
+      "prompt": "This codebase has a trait `Lawyer` declared in `crates/pathfinder-lsp/src/lawyer.rs`, and its production implementation is `impl Lawyer for LspClient` in `crates/pathfinder-lsp/src/client/lawyer_impl.rs` -- but `LspClient` itself is declared in a THIRD file, `crates/pathfinder-lsp/src/client/mod.rs`. A name-matching tool that has not resolved through the type system commonly answers this kind of question with the trait declaration site, which is wrong for 'what code actually runs'.\n\nStep 1 (warm-up, do not report this): call `locate` on `crates/pathfinder-lsp/src/lawyer.rs::Lawyer` once. If it returns `not_ready`, wait a few seconds and retry until it returns `ok` or you have tried 5 times.\n\nStep 2 (the real query): call `inspect` on `crates/pathfinder-lsp/src/client/lawyer_impl.rs::LspClient` with `include_dependencies=false`. This queries the `impl Lawyer for LspClient` block directly, in the file where `LspClient` is NOT declared.\n\nReport exactly what this second call returned.\n\nOutput format -- inside <answer></answer>, exactly two lines:\nstatus: <the exact top-level `status` value>\ncontent_is_empty: <`yes` if the returned symbol content/source is empty or absent, `no` if it contains real source code>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "non_empty_or_typed_not_ready",
+            "must_match": "(?is)(status:\\s*not_ready\\s*\\n\\s*content_is_empty:\\s*yes)|(status:\\s*ok\\s*\\n\\s*content_is_empty:\\s*no)"
+          }
+        ],
+        "spurious_patterns": [
+          "(?is)status:\\s*ok\\s*\\n\\s*content_is_empty:\\s*yes"
+        ],
+        "_grading_note": "The forbidden combination (status: ok + content_is_empty: yes) is the exact TS-A3 phantom-0..0-symbol failure mode the pathfinder-v6 audit found on this exact file as its own flagship example, and which the same remediation session's TS agent verified fixed via a live end-to-end trace (see docs/requirements/pathfinder-v6 findings, TS-A3). This task exists to cross-check that fix against a real, warm rust-analyzer rather than only the mocked conformance test."
+      }
+    }
+  ]
+}

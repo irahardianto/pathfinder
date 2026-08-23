@@ -1,0 +1,61 @@
+{
+  "suite": "cold_start",
+  "agent": "nav",
+  "_rationale": "WS-11.4 (docs/requirements/pathfinder-v6/00-plan.md \u00a77): every task is re-run with the first tool call issued within seconds of the MCP server (and therefore the LSP child process behind it) starting cold. The mandate's own kill condition is binary and absolute: 'cold-start confidently-wrong-empty: exactly 0 -- any single occurrence is a hard failure of v6 regardless of every other number' (00-plan.md WS-11.4). This suite does not grade task-solving skill -- it grades one thing: whether Pathfinder, queried the instant a session starts, ever returns `status: ok` with an empty or wrong answer instead of `status: not_ready`. Grading reuses the existing mechanical `resolution` grader by requiring the agent to transcribe the *exact* `status` field and evidence count it observed, never its own interpretation -- a model cannot pass by reasoning its way to the right prose while Pathfinder itself lied underneath it.",
+  "_authoring_note": "Targets were chosen from source verified by direct code reading during the pathfinder-v6 remediation session (2026-08-23), not by executing this suite. Before a paid run: (1) confirm `PathfinderServer::compute_lsp_position`'s exact 6 call sites still hold (definition.rs, references.rs x2, deep_context.rs, impact.rs x2) against the commit under test, since a caller count is the ground truth for CS2's grading; (2) confirm the target functions have not been renamed/moved; (3) dry-run once per task before a full-matrix paid run.",
+  "tasks": [
+    {
+      "id": "CS1_locate_immediately_on_cold_lsp",
+      "capability": "cold-start readiness: locate must never fabricate a definition",
+      "prompt": "Before doing anything else -- no repository exploration, no reading other files first -- call Pathfinder's `locate` tool on the semantic path `crates/pathfinder-treesitter/src/surgeon.rs::to_lsp_character` as your very first tool call of this session.\n\nReport exactly what the tool returned. Do not paraphrase or interpret -- transcribe the literal values.\n\nOutput format -- inside <answer></answer>, exactly three lines:\nstatus: <the exact top-level `status` value from the JSON response, e.g. ok, not_ready, degraded, unavailable>\nfile: <the `file` field from the response, or `none` if absent>\nline: <the `line` field from the response, or `none` if absent>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "not_ready_or_correct",
+            "must_match": "(?is)(status:\\s*not_ready.*(file:\\s*none|line:\\s*none))|(status:\\s*ok\\s*\\n\\s*file:[^\\n]*surgeon\\.rs\\s*\\n\\s*line:\\s*\\d+)"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*status:\\s*ok\\s*$(?!.*surgeon\\.rs)",
+          "(?im)^\\s*file:\\s*none\\s*$(?=.*status:\\s*ok)"
+        ]
+      }
+    },
+    {
+      "id": "CS2_trace_callers_immediately_on_cold_lsp",
+      "capability": "cold-start readiness: trace(scope=callers) must never report a false confirmed-zero",
+      "prompt": "Before doing anything else -- this must be your first tool call -- call Pathfinder's `trace` tool with `scope=\"callers\"` on the semantic path `crates/pathfinder/src/server/tools/navigation/mod.rs::PathfinderServer.compute_lsp_position`.\n\nReport exactly what the tool returned, transcribed literally, not interpreted.\n\nOutput format -- inside <answer></answer>, exactly three lines:\nstatus: <the exact top-level `status` value>\nincoming: <the exact JSON value of the `incoming` field: `null`, or the number of items if it is an array>\nconfidence: <if `incoming` is non-null, the `confidence` value inside it; otherwise `n/a`>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "not_ready_or_verified_nonzero",
+            "must_match": "(?is)(status:\\s*not_ready.*incoming:\\s*null)|(status:\\s*(ok|degraded)\\s*\\n\\s*incoming:\\s*[1-9]\\d*\\s*\\n\\s*confidence:\\s*(verified|heuristic))"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*incoming:\\s*0\\s*$",
+          "(?is)status:\\s*ok.*confidence:\\s*n/a"
+        ]
+      }
+    },
+    {
+      "id": "CS3_references_immediately_on_cold_lsp",
+      "capability": "cold-start readiness: trace(scope=references) must never report a false confirmed-zero",
+      "prompt": "Before doing anything else -- this must be your first tool call -- call Pathfinder's `trace` tool with `scope=\"references\"` on the semantic path `crates/pathfinder-treesitter/src/surgeon.rs::PositionEncoding`.\n\nReport exactly what the tool returned, transcribed literally.\n\nOutput format -- inside <answer></answer>, exactly two lines:\nstatus: <the exact top-level `status` value>\nreferences: <the exact JSON value of the `references` field: `null`, or the number of items if it is an array>\nNothing else inside the tags.",
+      "grade": {
+        "type": "resolution",
+        "expected": [
+          {
+            "key": "not_ready_or_verified_nonzero",
+            "must_match": "(?is)(status:\\s*not_ready.*references:\\s*null)|(status:\\s*(ok|degraded)\\s*\\n\\s*references:\\s*[1-9]\\d*)"
+          }
+        ],
+        "spurious_patterns": [
+          "(?im)^\\s*references:\\s*0\\s*$"
+        ]
+      }
+    }
+  ]
+}
