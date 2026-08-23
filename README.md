@@ -351,7 +351,7 @@ To maximise navigation coverage, install the language server(s) for your project
 
 > **Vue note:** Pathfinder handles Vue SFC parsing internally with Tree-sitter. The `typescript-language-server` validates the `<script>` block — no separate `volar` or `vue-language-server` installation is required.
 
-> **Concurrent LSP handling:** When Pathfinder detects a concurrent LSP instance (e.g., your IDE is already running `gopls`), it automatically isolates build caches to avoid lock contention. Isolated caches are stored under `.pathfinder/` in your project root, which is automatically added to `.gitignore`. Use the `health` tool to check per-language readiness, including `navigation_ready` (LSP navigation works), `indexing_status` (background indexing state), and `degraded_tools` (which tools lose LSP support for a given language).
+> **Concurrent LSP handling:** When Pathfinder detects a concurrent LSP instance (e.g., your IDE is already running `gopls`), it automatically isolates build caches to avoid lock contention. Isolated caches are stored under `.pathfinder/` in your project root, which is automatically added to `.gitignore`. Navigation tools automatically probe readiness and report `ToolStatus::NotReady` or `ToolStatus::Degraded` with actionable recovery guidance.
 
 <!-- OBSERVABILITY -->
 ## Observability
@@ -400,7 +400,7 @@ Pathfinder implements a **3-tier sandbox model**:
 - [x] LSP integration for go-to-definition and call hierarchy navigation
 - [x] LSP lifecycle management (auto-start, crash recovery, idle termination)
 - [x] Proactive capability reporting via `explore` (`capabilities.lsp.per_language`)
-- [x] Two-phase LSP readiness model (navigation vs indexing) with `health` tool
+- [x] Two-phase LSP readiness model (navigation vs indexing) with probe-gated invariants
 - [x] Concurrent LSP cache isolation (Go, TypeScript, Python, Rust)
 - [x] Probe-based readiness fallback with TTL-cached results
 - [x] 3-tier sandbox security model
