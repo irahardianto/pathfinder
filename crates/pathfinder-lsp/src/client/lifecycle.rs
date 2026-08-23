@@ -1451,24 +1451,31 @@ impl super::LspClient {
 }
 
 /// Find a probe target (relative file path, 1-indexed line, 1-indexed col) for a language in a workspace.
+///
+/// Extensions are resolved in two tiers, matching the pattern already used
+/// by `language_to_file_glob` in the navigation tools: prefer the
+/// registered `LanguagePlugin`'s extensions (authoritative — e.g.
+/// `TypeScriptPlugin` also covers `.vue`, `.mjs`, `.cjs`, `.mts`, `.cts`),
+/// falling back to the Tree-sitter `LanguageGrammar` registry for
+/// languages with a grammar but no LSP plugin.
+///
+/// This replaces a hand-rolled per-language-id table that had gone stale
+/// (its `"typescript"` arm undercounted `TypeScriptPlugin`'s real
+/// extensions, and its `"vue"` arm was unreachable dead code — Vue files
+/// are probed under the `"typescript"` language id, since there is no
+/// separate `"vue"` plugin). Languages with neither a plugin nor a grammar
+/// (e.g. `"c"`, `"cpp"`) correctly yield `None`: without a Tree-sitter
+/// grammar, `AstParser::parse_source` below can't validate a probe target
+/// for them anyway.
 pub(crate) fn find_probe_target(
     workspace_root: &Path,
     language_id: &str,
 ) -> Option<(std::path::PathBuf, u32, u32)> {
     let plugin_exts = crate::plugin::plugin_for_language(language_id)
         .map(crate::plugin::LanguagePlugin::file_extensions);
-    let default_exts: &[&str] = match language_id {
-        "rust" => &["rs"],
-        "go" => &["go"],
-        "typescript" => &["ts", "tsx", "js", "jsx"],
-        "python" => &["py"],
-        "java" => &["java"],
-        "c" => &["c", "h"],
-        "cpp" => &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
-        "vue" => &["vue"],
-        _ => &[],
-    };
-    let extensions = plugin_exts.unwrap_or(default_exts);
+    let grammar_exts = pathfinder_treesitter::language::LanguageGrammar::find_by_id(language_id)
+        .map(|g| g.extensions);
+    let extensions = plugin_exts.or(grammar_exts)?;
 
     if extensions.is_empty() {
         return None;

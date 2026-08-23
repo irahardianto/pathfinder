@@ -3117,3 +3117,61 @@ async fn test_ensure_ready_timeout_returns_not_ready_probing() {
         "expected NotReady probing, got: {readiness:?}"
     );
 }
+
+// ── find_probe_target extension resolution ──────────────────────────
+//
+// find_probe_target used to carry its own hand-rolled per-language-id
+// extension table instead of deferring to the plugin/grammar registries.
+// That table had drifted (its "typescript" arm undercounted
+// TypeScriptPlugin's real extension list) and contained an unreachable
+// "vue" arm (there is no separate "vue" LanguagePlugin — Vue files are
+// probed under the "typescript" language id). These tests pin down the
+// registry-driven replacement.
+
+#[test]
+fn test_find_probe_target_typescript_finds_vue_file_via_plugin_extensions() {
+    // TypeScriptPlugin::file_extensions() includes "vue" -- a probe for the
+    // "typescript" language id must be able to find a .vue file, which the
+    // old hardcoded ["ts", "tsx", "js", "jsx"] table could never do.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("App.vue"),
+        "<script setup>\nfunction login() {}\n</script>\n",
+    )
+    .expect("write App.vue");
+
+    let target = find_probe_target(dir.path(), "typescript");
+    assert!(
+        target.is_some(),
+        "expected a probe target for a .vue file under the typescript language id"
+    );
+    let (rel_path, _, _) = target.expect("checked is_some");
+    assert_eq!(rel_path, std::path::PathBuf::from("App.vue"));
+}
+
+#[test]
+fn test_find_probe_target_rust_uses_plugin_extensions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").expect("write main.rs");
+
+    let target = find_probe_target(dir.path(), "rust");
+    assert!(target.is_some());
+}
+
+#[test]
+fn test_find_probe_target_unregistered_language_without_grammar_returns_none() {
+    // "c" has neither a LanguagePlugin nor a Tree-sitter LanguageGrammar
+    // entry in this codebase, so there is no way to validate a probe
+    // target for it -- must fail fast rather than returning a stale
+    // hardcoded extension list.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("main.c"), "int main() { return 0; }\n").expect("write main.c");
+
+    assert_eq!(find_probe_target(dir.path(), "c"), None);
+}
+
+#[test]
+fn test_find_probe_target_unknown_language_id_returns_none() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_eq!(find_probe_target(dir.path(), "not-a-real-language"), None);
+}
