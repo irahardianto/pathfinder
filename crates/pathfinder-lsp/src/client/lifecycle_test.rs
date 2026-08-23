@@ -6,28 +6,48 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+// NOTE: these values are cross-checked against `LanguagePlugin::readiness_budget()`
+// impls in `crate::plugin` (the authoritative source, LSP-B5 Axis 2), not
+// re-hardcoded independently -- that duplication is exactly what caused the
+// previous drift (java/typescript/python silently used the wrong budget for
+// a long time because this function had its own separate hardcoded table).
+
 #[test]
-fn test_indexing_timeout_java_is_120s() {
+fn test_indexing_timeout_java_is_180s() {
+    // JavaPlugin explicitly overrides readiness_budget() to 180s (jdtls is slow to index).
     assert_eq!(
         indexing_timeout_for_language("java"),
-        Duration::from_mins(2)
+        Duration::from_secs(180)
     );
 }
 
 #[test]
-fn test_indexing_timeout_typescript_is_45s() {
+fn test_indexing_timeout_typescript_is_120s_trait_default() {
+    // TypeScriptPlugin does NOT override readiness_budget() -> trait default (120s).
     assert_eq!(
         indexing_timeout_for_language("typescript"),
-        Duration::from_secs(45)
+        Duration::from_secs(120)
     );
+    // "javascript" is not a registered plugin language_id (only "typescript" is) ->
+    // falls through to the same 120s fallback via the "no plugin found" path.
     assert_eq!(
         indexing_timeout_for_language("javascript"),
-        Duration::from_secs(45)
+        Duration::from_secs(120)
+    );
+}
+
+#[test]
+fn test_indexing_timeout_python_is_120s_trait_default() {
+    // PythonPlugin does NOT override readiness_budget() -> trait default (120s).
+    assert_eq!(
+        indexing_timeout_for_language("python"),
+        Duration::from_secs(120)
     );
 }
 
 #[test]
 fn test_indexing_timeout_rust_is_60s() {
+    // RustPlugin explicitly overrides readiness_budget() to 60s.
     assert_eq!(
         indexing_timeout_for_language("rust"),
         Duration::from_mins(1)
@@ -35,15 +55,128 @@ fn test_indexing_timeout_rust_is_60s() {
 }
 
 #[test]
-fn test_indexing_timeout_unknown_is_30s() {
+fn test_indexing_timeout_go_is_30s() {
+    // GoPlugin explicitly overrides readiness_budget() to 30s.
+    assert_eq!(indexing_timeout_for_language("go"), Duration::from_secs(30));
+}
+
+#[test]
+fn test_indexing_timeout_unknown_is_120s_trait_default() {
+    // No plugin registered for these ids -> falls back to the trait default (120s),
+    // NOT the old hardcoded 30s stand-in.
     assert_eq!(
         indexing_timeout_for_language("unknown"),
-        Duration::from_secs(30)
+        Duration::from_secs(120)
     );
     assert_eq!(
         indexing_timeout_for_language("csharp"),
-        Duration::from_secs(30)
+        Duration::from_secs(120)
     );
+}
+
+/// RSP-A10 / plugin-drift fix: a TOML-declared custom language's
+/// `readiness_budget_secs` must actually be honored by
+/// `indexing_timeout_for_language`. Before this fix, a TOML-declared
+/// language id could never match any arm of the old hardcoded match, so it
+/// silently fell through to a fixed 30s regardless of what the user
+/// configured — this proves that regression is closed.
+#[test]
+fn test_indexing_timeout_honors_toml_declared_custom_language_budget() {
+    crate::plugin::reset_registry();
+
+    let toml_content = r#"
+[[language]]
+id = "kotlin_indexing_timeout_test"
+extensions = ["kt_itt"]
+markers = ["build.kt_itt.toml"]
+readiness_budget_secs = 7
+
+[[language.lsp_candidates]]
+binary = "kotlin-language-server"
+args = ["--stdio"]
+"#;
+    crate::plugin::load_toml_plugins(toml_content).expect("load toml plugin");
+
+    assert_eq!(
+        indexing_timeout_for_language("kotlin_indexing_timeout_test"),
+        Duration::from_secs(7),
+        "TOML-declared readiness_budget_secs must flow through, not a hardcoded stand-in"
+    );
+
+    crate::plugin::reset_registry();
+}
+
+// ── isolation_description_for_language: sourced from LanguagePlugin ────────
+//
+// Cross-checked against `LanguagePlugin::isolation_description()` impls in
+// `crate::plugin` for the same reason as the indexing-timeout tests above:
+// this used to be a match duplicated verbatim across
+// `detect_concurrent_lsp_linux` and `detect_concurrent_lsp_macos`.
+
+#[test]
+fn test_isolation_description_matches_plugin_for_known_languages() {
+    assert_eq!(
+        isolation_description_for_language("rust"),
+        "Cargo target directory"
+    );
+    assert_eq!(
+        isolation_description_for_language("go"),
+        "Go build cache (GOCACHE/GOMODCACHE)"
+    );
+    assert_eq!(
+        isolation_description_for_language("typescript"),
+        "TypeScript temp directory (TMPDIR)"
+    );
+    assert_eq!(
+        isolation_description_for_language("python"),
+        "Python bytecode cache (PYTHONPYCACHEPREFIX)"
+    );
+}
+
+#[test]
+fn test_isolation_description_unknown_language_falls_back_to_no() {
+    // No plugin registered at all -> "No" (keeps the log sentence grammatical:
+    // "No build artifact isolation will be applied...").
+    assert_eq!(isolation_description_for_language("unknown"), "No");
+    // "java" has no isolation_description() override -> trait default None -> "No".
+    assert_eq!(isolation_description_for_language("java"), "No");
+}
+
+/// `TomlLanguagePlugin` does not currently expose a configurable
+/// `isolation_description` TOML field (unlike `readiness_budget_secs`), so
+/// this test cannot prove a user-supplied value "flows through" the way the
+/// `indexing_timeout_*` TOML test does. What it *does* prove: for a
+/// dynamically-registered, non-builtin plugin, `plugin_for_language` returns
+/// `Some(plugin)` and the subsequent `.isolation_description()` call
+/// correctly resolves the trait's default (`None`) without panicking --
+/// exercising the `Some(plugin) -> None` branch specifically, which is a
+/// different code path than the "no plugin registered at all" branch
+/// covered by `test_isolation_description_unknown_language_falls_back_to_no`.
+#[test]
+fn test_isolation_description_resolves_through_registry_for_dynamically_registered_plugin() {
+    crate::plugin::reset_registry();
+
+    let toml_content = r#"
+[[language]]
+id = "kotlin_isolation_test"
+extensions = ["kt_custom"]
+markers = ["build.kt_custom.toml"]
+
+[[language.lsp_candidates]]
+binary = "kotlin-language-server"
+args = ["--stdio"]
+"#;
+    crate::plugin::load_toml_plugins(toml_content).expect("load toml plugin");
+
+    // Sanity: the plugin really is registered (Some branch), not silently absent.
+    assert!(crate::plugin::plugin_for_language("kotlin_isolation_test").is_some());
+
+    assert_eq!(
+        isolation_description_for_language("kotlin_isolation_test"),
+        "No"
+    );
+
+    crate::plugin::reset_registry();
 }
 
 #[test]
@@ -914,18 +1047,6 @@ async fn test_warm_start_for_languages_skips_already_running() {
 async fn test_warm_start_for_languages_ignores_unknown() {
     let client = client_with_descriptors(vec!["rust"], HashMap::new());
     let _ = client.warm_start_for_languages(&["unknown_lang".to_owned()]);
-}
-
-#[tokio::test]
-async fn test_touch_language_extends_idle_timer() {
-    let client = client_no_languages();
-    client.touch_language("rust");
-}
-
-#[tokio::test]
-async fn test_touch_language_no_process_is_noop() {
-    let client = client_with_descriptors(vec!["rust"], HashMap::new());
-    client.touch_language("rust");
 }
 
 #[test]
@@ -2319,20 +2440,10 @@ async fn test_request_and_notify_do_not_cleanup_stale_reader() {
     }
 }
 
-// ── Coverage: indexing_timeout_for_language go/python ─────────────
-
-#[test]
-fn test_indexing_timeout_go_is_30s() {
-    assert_eq!(indexing_timeout_for_language("go"), Duration::from_secs(30));
-}
-
-#[test]
-fn test_indexing_timeout_python_is_30s() {
-    assert_eq!(
-        indexing_timeout_for_language("python"),
-        Duration::from_secs(30)
-    );
-}
+// NOTE: indexing_timeout_for_language go/python coverage now lives with the
+// rest of the indexing-timeout tests near the top of this file (they were
+// consolidated when the function switched from a hardcoded match to a
+// plugin-registry lookup).
 
 // ── Coverage: call_hierarchy_request success path ────────────────
 

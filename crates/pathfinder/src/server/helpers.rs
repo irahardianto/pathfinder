@@ -155,8 +155,6 @@ pub(crate) fn format_tool_status_header(
     }
 }
 
-/// Validate evidence consistency against tool status (Contract 2).
-///
 /// Convert an LSP [`pathfinder_lsp::types::Readiness`] state into a [`pathfinder_common::types::ToolStatus`].
 #[allow(dead_code)]
 pub(crate) fn readiness_to_tool_status(
@@ -197,15 +195,43 @@ pub(crate) fn readiness_to_tool_status(
     }
 }
 
+/// Validate evidence consistency against tool status (Contract 2 Rule 4).
+///
+/// `evidence` MUST be the tool's *primary* evidence field (e.g. `references`,
+/// `incoming`/`outgoing`, `dependencies`) — never `heuristic_candidates`, which
+/// is expected and required to be populated exactly when `status` is
+/// `NotReady`.
+///
 /// Enforces the 4 illegal combinations via `debug_assert!` and `tracing::error!`:
 /// 1. `ToolStatus::Ok` with `Confidence::Heuristic` in any field.
 /// 2. `Evidence { confidence: Heuristic, items: [] }` (must be `None`).
-/// 3. `ToolStatus::NotReady` with `Confidence::Verified`.
+/// 3. `ToolStatus::NotReady` with the primary field populated at all (per
+///    Contract 1 Decision 3.4: "`NotReady` MUST NOT carry a plausible-looking
+///    result list" — this must hold for *any* confidence, not only
+///    `Verified`, since a `Heuristic`-confidence primary field under
+///    `NotReady` is exactly the "candidates become the answer, agent never
+///    retries" failure the contract calls its single most important rule).
 /// 4. `ToolStatus::Unavailable` or `ToolStatus::Degraded` with `Confidence::Verified`.
 pub(crate) fn validate_evidence<T>(
     status: &pathfinder_common::types::ToolStatus,
     evidence: Option<&pathfinder_common::types::Evidence<T>>,
 ) {
+    if matches!(
+        status,
+        pathfinder_common::types::ToolStatus::NotReady { .. }
+    ) && evidence.is_some()
+    {
+        tracing::error!(
+            "ILLEGAL STATE: ToolStatus::NotReady must not populate the primary evidence field \
+             (heuristic candidates belong in `heuristic_candidates` only)"
+        );
+        debug_assert!(
+            false,
+            "ToolStatus::NotReady must not populate the primary evidence field \
+             (heuristic candidates belong in `heuristic_candidates` only)"
+        );
+    }
+
     if let Some(ev) = evidence {
         if ev.confidence == pathfinder_common::types::Confidence::Heuristic && ev.items.is_empty() {
             tracing::error!(
@@ -221,19 +247,6 @@ pub(crate) fn validate_evidence<T>(
         {
             tracing::error!("ILLEGAL STATE: ToolStatus::Ok cannot contain Confidence::Heuristic");
             debug_assert!(false, "ToolStatus::Ok cannot contain Confidence::Heuristic");
-        }
-        if matches!(
-            status,
-            pathfinder_common::types::ToolStatus::NotReady { .. }
-        ) && ev.confidence == pathfinder_common::types::Confidence::Verified
-        {
-            tracing::error!(
-                "ILLEGAL STATE: ToolStatus::NotReady cannot contain Confidence::Verified"
-            );
-            debug_assert!(
-                false,
-                "ToolStatus::NotReady cannot contain Confidence::Verified"
-            );
         }
         if matches!(
             status,

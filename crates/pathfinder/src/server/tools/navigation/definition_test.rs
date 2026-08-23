@@ -839,6 +839,55 @@ async fn test_get_definition_multi_strategy_fallback() {
     );
 }
 
+/// RSP-A10: `grep_definition_global` used to hand-roll its own
+/// "unknown language definition" regex, independently of
+/// `candidate_definition_pattern`'s catch-all arm (`generic_definition_pattern`
+/// after this fix). This inspects the *actual query string* sent to the
+/// search engine and proves it is now byte-identical to
+/// `generic_definition_pattern`'s output -- not just "still finds a match",
+/// which a coincidentally-similar hand-rolled regex could also satisfy.
+#[tokio::test]
+async fn test_grep_definition_global_query_matches_generic_definition_pattern() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let scout = Arc::new(MockScout::default());
+    scout.set_result(Ok(pathfinder_search::SearchResult {
+        matches: vec![],
+        total_matches: 0,
+        truncated: false,
+        files_searched: 0,
+    }));
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+    let server = PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        scout.clone(),
+        surgeon,
+        Arc::new(pathfinder_lsp::NoOpLawyer),
+    );
+
+    let budget = super::super::GrepFallbackBudget::new();
+    let _ = server
+        .grep_definition_global("myFunc".to_string(), &budget)
+        .await;
+
+    let calls = scout.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "grep_definition_global must search exactly once"
+    );
+    assert_eq!(
+        calls[0].query,
+        super::super::generic_definition_pattern("myFunc"),
+        "grep_definition_global's query must delegate to generic_definition_pattern, not a separately hand-rolled regex"
+    );
+}
+
 // ── Warmup retry success path ───────────────────────────────────
 
 #[tokio::test]

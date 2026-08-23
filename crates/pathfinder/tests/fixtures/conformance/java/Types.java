@@ -14,8 +14,8 @@ public class Types {
         return true;
     }
 
-    // 🦀 café 🌍 greeting
-    public static String nonAsciiHello() {
+    // Non-ASCII characters before the symbol name, on its own declaration line (TS-A2).
+    public static String /* 🦀 café 🌍 */ nonAsciiHello() {
         return "hello";
     }
 }

@@ -365,6 +365,24 @@ impl<'a> SymbolExtractionContext<'a> {
             return;
         }
 
+        // Python module/class-level simple assignment (`name = value`), e.g.
+        // package-level constants. Deliberately narrow: only a plain
+        // `identifier` left-hand side is handled (not tuple/list unpacking,
+        // not augmented/annotated assignment) — extending this is a
+        // separate, larger change.
+        if self.lang == SupportedLanguage::Python && kind == "expression_statement" {
+            if let Some(sym) = extract_python_simple_assignment(
+                child,
+                self.source,
+                self.lang,
+                self.parent_path,
+                &mut self.name_counts,
+            ) {
+                self.out.push(sym);
+                return;
+            }
+        }
+
         let sym_kind = self.determine_symbol_kind(child, kind);
         if let Some(sk) = sym_kind {
             if let Some(name_node) = Self::resolve_name_node(child) {
@@ -758,6 +776,77 @@ fn extract_single_go_spec<'a>(
             }
         }
     }
+}
+
+/// Extract a Python module/class-level simple assignment (`name = value`) as
+/// a `Constant` symbol. Returns `None` (and extracts nothing) for anything
+/// other than a single plain-`identifier`-target assignment — tuple/list
+/// unpacking (`a, b = ...`), augmented assignment (`x += 1`), annotated
+/// assignment without special-casing, and non-assignment expression
+/// statements (docstrings, bare calls) are all deliberately left unextracted
+/// rather than guessed at.
+fn extract_python_simple_assignment<'a>(
+    expr_stmt: Node<'a>,
+    source: &'a [u8],
+    lang: SupportedLanguage,
+    parent_path: &'a str,
+    name_counts: &mut std::collections::HashMap<String, usize>,
+) -> Option<ExtractedSymbol> {
+    let mut cursor = expr_stmt.walk();
+    let mut named_children = expr_stmt.named_children(&mut cursor);
+    let assignment = named_children.next()?;
+    if named_children.next().is_some() || assignment.kind() != "assignment" {
+        return None;
+    }
+
+    let name_node = assignment.child_by_field_name("left")?;
+    if name_node.kind() != "identifier" {
+        return None;
+    }
+    let name_bytes = source.get(name_node.byte_range())?;
+    let name = std::str::from_utf8(name_bytes).ok()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    // Python's leading-underscore convention (PEP 8), applied directly since
+    // `detect_python_access_level` expects a def/class-shaped node with a
+    // `name` field, not a bare identifier. Mirrors that function's nesting
+    // exactly: dunder names (`__x__`) are Public, `__x` is Private, and a
+    // lone leading `_x` is Protected.
+    let access_level = if name.starts_with("__") {
+        if name.ends_with("__") {
+            crate::surgeon::AccessLevel::Public
+        } else {
+            crate::surgeon::AccessLevel::Private
+        }
+    } else if name.starts_with('_') {
+        crate::surgeon::AccessLevel::Protected
+    } else {
+        crate::surgeon::AccessLevel::Public
+    };
+
+    let (unique_name, suffix) = make_unique_name(name_counts, name);
+    let path = if parent_path.is_empty() {
+        format!("{unique_name}{suffix}")
+    } else {
+        format!("{parent_path}.{unique_name}{suffix}")
+    };
+    let name_point = name_node.start_position();
+    let attached_range = compute_attached_range(expr_stmt, source, lang);
+    Some(ExtractedSymbol {
+        name: unique_name,
+        semantic_path: path,
+        kind: SymbolKind::Constant,
+        byte_range: expr_stmt.byte_range(),
+        attached_range,
+        start_line: expr_stmt.start_position().row,
+        end_line: expr_stmt.end_position().row,
+        name_column: name_point.column,
+        name_point,
+        access_level,
+        children: Vec::default(),
+    })
 }
 
 /// Core recursive extraction function (delegates to `SymbolExtractionContext`).

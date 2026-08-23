@@ -24,15 +24,39 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-#[allow(clippy::match_same_arms)]
+/// Readiness/indexing timeout budget for a language.
+///
+/// Delegates to `LanguagePlugin::readiness_budget()` (Axis 2 of the plugin
+/// trait, `crate::plugin`) — the single authoritative source for this value.
+/// This used to be a hardcoded match here that had drifted out of sync with
+/// the plugin registry (wrong values for `java`/`typescript`/`python`) and
+/// silently ignored any `readiness_budget_secs` a user declared for a custom
+/// language via `.pathfinder.toml`, since a TOML-defined language id could
+/// never match one of this function's hardcoded arms. Falls back to the
+/// trait's own default (120s) only when a language has no registered plugin
+/// at all (e.g. a stale/unknown id passed defensively).
 pub(crate) fn indexing_timeout_for_language(lang: &str) -> Duration {
-    match lang {
-        "java" => Duration::from_mins(2),
-        "typescript" | "javascript" => Duration::from_secs(45),
-        "go" | "python" => Duration::from_secs(30),
-        "rust" => Duration::from_mins(1),
-        _ => Duration::from_secs(30),
-    }
+    crate::plugin::plugin_for_language(lang).map_or(
+        Duration::from_secs(120),
+        crate::plugin::LanguagePlugin::readiness_budget,
+    )
+}
+
+/// Human-readable description of the build-artifact isolation directory used
+/// for a language, for the concurrent-LSP-instance warning log line (e.g.
+/// "Cargo target directory build artifact isolation will be applied...").
+///
+/// Delegates to `LanguagePlugin::isolation_description()` (Axis 11) instead
+/// of a hardcoded match — this used to be duplicated verbatim across
+/// `detect_concurrent_lsp_linux` and `detect_concurrent_lsp_macos`, and (like
+/// `indexing_timeout_for_language` above) silently ignored TOML-declared
+/// custom languages, which could never match a hardcoded arm. Falls back to
+/// "No" (matching the trait default of `None`) so the log sentence
+/// ("No build artifact isolation will be applied...") stays grammatical.
+fn isolation_description_for_language(language_id: &str) -> &'static str {
+    crate::plugin::plugin_for_language(language_id)
+        .and_then(crate::plugin::LanguagePlugin::isolation_description)
+        .unwrap_or("No")
 }
 
 /// Watchers set up for tracking LSP indexing progress and completion.
@@ -895,13 +919,7 @@ impl super::LspClient {
             }
 
             if external_count > 0 {
-                let isolation_desc = match language_id {
-                    "rust" => "Cargo target directory",
-                    "go" => "Go build cache (GOCACHE/GOMODCACHE)",
-                    "typescript" => "TypeScript temp directory (TMPDIR)",
-                    "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
-                    _ => "No",
-                };
+                let isolation_desc = isolation_description_for_language(language_id);
                 tracing::warn!(
                     language = language_id,
                     binary = binary_name,
@@ -966,13 +984,7 @@ impl super::LspClient {
             }
 
             if external_count > 0 {
-                let isolation_desc = match language_id {
-                    "rust" => "Cargo target directory",
-                    "go" => "Go build cache (GOCACHE/GOMODCACHE)",
-                    "typescript" => "TypeScript temp directory (TMPDIR)",
-                    "python" => "Python bytecode cache (PYTHONPYCACHEPREFIX)",
-                    _ => "No",
-                };
+                let isolation_desc = isolation_description_for_language(language_id);
                 tracing::warn!(
                     language = language_id,
                     binary = binary_name,

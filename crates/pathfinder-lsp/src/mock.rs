@@ -142,6 +142,13 @@ pub struct MockLawyer {
     /// Configured result for `ensure_ready`.
     pub readiness_result: Arc<Mutex<Option<crate::types::Readiness>>>,
 
+    // ── position encoding (TS-A2 / LSP-A5) ───────────────────────────────────
+    /// Configured result for `position_encoding`. Defaults to `Utf16` (the
+    /// LSP 3.17 spec default), matching real servers that don't negotiate
+    /// `utf-8`. Set via [`Self::set_position_encoding`] to test the `Utf8`
+    /// path (e.g. simulating clangd) without a real server.
+    pub position_encoding_result: Arc<Mutex<pathfinder_treesitter::surgeon::PositionEncoding>>,
+
     // ── warm_start ────────────────────────────────────────────────────────────
     /// Whether `is_warm_start_complete()` should return `true`.
     /// Defaults to `true` so existing tests that don't set this behave as if
@@ -157,6 +164,7 @@ impl Default for MockLawyer {
             warm_start_complete: true,
             // All other fields default via their own Default implementations.
             readiness_result: Arc::default(),
+            position_encoding_result: Arc::default(),
             goto_definition_result: Arc::default(),
             goto_definition_results: Arc::default(),
             goto_definition_calls: Arc::default(),
@@ -421,10 +429,33 @@ impl MockLawyer {
     pub fn set_readiness(&self, readiness: crate::types::Readiness) {
         self.set_readiness_result(readiness);
     }
+
+    /// Configure the encoding returned by `position_encoding()` (TS-A2 /
+    /// LSP-A5). Defaults to `Utf16`; set to `Utf8` to simulate a server like
+    /// clangd that negotiates byte offsets.
+    pub fn set_position_encoding(
+        &self,
+        encoding: pathfinder_treesitter::surgeon::PositionEncoding,
+    ) {
+        *self
+            .position_encoding_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = encoding;
+    }
 }
 
 #[async_trait]
 impl Lawyer for MockLawyer {
+    fn position_encoding(
+        &self,
+        _language_id: &str,
+    ) -> pathfinder_treesitter::surgeon::PositionEncoding {
+        *self
+            .position_encoding_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     async fn goto_definition(
         &self,
         _workspace_root: &Path,

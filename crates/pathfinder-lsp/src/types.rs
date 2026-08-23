@@ -34,8 +34,11 @@ pub enum IndexingCompletionSource {
 
 /// Language server status for a single LSP language slot.
 ///
-/// Returned by the `explore` tool and validation tools to communicate the
-/// current health of the associated language server process.
+/// # Status (v6)
+/// Not currently returned by any of the three surviving MCP tools
+/// (`locate`/`trace`/`inspect`) — the `explore`/`health` tools this was
+/// designed for were removed as part of the v6 tool-surface reduction. See
+/// [`crate::Lawyer::capability_status`] for the current disposition.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LspLanguageStatus {
     /// Whether validation is enabled.

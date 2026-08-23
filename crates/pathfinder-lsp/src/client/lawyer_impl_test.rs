@@ -574,13 +574,6 @@ async fn test_lawyer_warm_start_for_languages() {
 }
 
 #[tokio::test]
-async fn test_lawyer_touch_language() {
-    let (client, _fake) = make_running_client("rust");
-    let lawyer: &dyn Lawyer = &client;
-    lawyer.touch_language("rust");
-}
-
-#[tokio::test]
 async fn test_lawyer_open_document() {
     let (client, _fake) = make_running_client("rust");
     let workspace = Path::new("/workspace");

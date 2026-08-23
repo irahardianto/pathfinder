@@ -404,6 +404,42 @@ fn test_from_response_json_null_capabilities() {
     );
 }
 
+/// TS-A2 / LSP-A5: an explicit `"utf-8"` `positionEncoding` must be honoured.
+#[test]
+fn test_from_response_json_position_encoding_utf8() {
+    let response = json!({ "capabilities": { "positionEncoding": "utf-8" } });
+    let detected = DetectedCapabilities::from_response_json(&response);
+    assert_eq!(
+        detected.position_encoding,
+        pathfinder_treesitter::surgeon::PositionEncoding::Utf8
+    );
+}
+
+/// TS-A2 / LSP-A5: an absent `positionEncoding` field means `utf-16` per LSP
+/// 3.17 — the field must never be assumed `utf-8` just because it's missing.
+#[test]
+fn test_from_response_json_position_encoding_absent_defaults_to_utf16() {
+    let response = json!({ "capabilities": { "definitionProvider": true } });
+    let detected = DetectedCapabilities::from_response_json(&response);
+    assert_eq!(
+        detected.position_encoding,
+        pathfinder_treesitter::surgeon::PositionEncoding::Utf16
+    );
+}
+
+/// A non-conformant server reporting an encoding outside the client's offered
+/// set (`["utf-8", "utf-16"]`, declared in `process.rs`) must fail safe to the
+/// spec default rather than being trusted or causing a parse error.
+#[test]
+fn test_from_response_json_position_encoding_unexpected_value_defaults_to_utf16() {
+    let response = json!({ "capabilities": { "positionEncoding": "utf-32" } });
+    let detected = DetectedCapabilities::from_response_json(&response);
+    assert_eq!(
+        detected.position_encoding,
+        pathfinder_treesitter::surgeon::PositionEncoding::Utf16
+    );
+}
+
 #[test]
 fn test_apply_unregistration_reverts_definition_provider_dynamic_only() {
     let mut caps = DetectedCapabilities::default();

@@ -767,11 +767,55 @@ pub async fn check_c12(fixture: &LanguageFixture) -> AssertionStatus {
         }
     };
 
-    let def_line = u32::try_from(scope.start_line + 1).unwrap_or(1);
+    // Independently compute the CORRECT position by reading the fixture file
+    // directly and converting the byte column through the reference
+    // `to_lsp_character` function — the same conversion the production code
+    // path (`PathfinderServer::compute_lsp_position`) is expected to apply.
+    // This is deliberately NOT derived by calling the mock with a
+    // self-fulfilling value: the whole point of this assertion is to detect
+    // whether the *actual* LSP call was sent the raw byte column (the TS-A2
+    // bug) instead of this converted value.
+    let abs_path = fixture.root_dir.join(fixture.non_ascii_file);
+    let file_content = match std::fs::read_to_string(&abs_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return AssertionStatus::Failed {
+                reason: format!("failed to read fixture file {}: {e}", abs_path.display()),
+            }
+        }
+    };
+    let Some(name_line_text) = file_content.lines().nth(scope.name_line) else {
+        return AssertionStatus::Failed {
+            reason: format!("fixture file has no line {} (name_line)", scope.name_line),
+        };
+    };
+    let expected_utf16_col = pathfinder_treesitter::surgeon::to_lsp_character(
+        name_line_text.as_bytes(),
+        scope.name_column,
+        pathfinder_treesitter::surgeon::PositionEncoding::Utf16,
+    );
+
+    // Sanity-check the fixture itself: if the byte column and the UTF-16
+    // column are identical, this fixture no longer exercises TS-A2 at all
+    // (e.g. someone accidentally moved the non-ASCII content off the
+    // declaration line again) and every assertion below would pass
+    // vacuously regardless of whether the conversion is wired correctly.
+    let byte_col_u32 = u32::try_from(scope.name_column).unwrap_or(u32::MAX);
+    if expected_utf16_col == byte_col_u32 {
+        return AssertionStatus::Failed {
+            reason: format!(
+                "fixture is vacuous for TS-A2: byte column ({byte_col_u32}) == UTF-16 column \
+                 ({expected_utf16_col}) on line {:?} — no multi-byte character precedes the \
+                 symbol name, so this assertion cannot distinguish correct from buggy behaviour",
+                name_line_text
+            ),
+        };
+    }
+
     lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
         file: fixture.types_file.into(),
-        line: def_line,
-        column: u32::try_from(scope.name_column + 1).unwrap_or(1),
+        line: u32::try_from(scope.name_line + 1).unwrap_or(1),
+        column: expected_utf16_col + 1,
         preview: "non_ascii_hello".into(),
     })));
 
@@ -780,30 +824,52 @@ pub async fn check_c12(fixture: &LanguageFixture) -> AssertionStatus {
         ..Default::default()
     };
 
-    match server.locate_impl(params).await {
-        Ok(call_result) => {
-            if let Some(val) = call_result.structured_content {
-                let file = val.get("file").and_then(|v| v.as_str());
-                let line = val.get("line").and_then(|v| v.as_u64());
-
-                if file.is_some() && line.is_some() {
-                    AssertionStatus::Passed
-                } else {
-                    AssertionStatus::Failed {
-                        reason: format!(
-                            "Non-ASCII declaration locate returned incomplete result: {val:?}"
-                        ),
-                    }
-                }
-            } else {
-                AssertionStatus::Failed {
-                    reason: "Missing structured_content for non-ASCII locate".into(),
-                }
+    let call_result = match server.locate_impl(params).await {
+        Ok(r) => r,
+        Err(e) => {
+            return AssertionStatus::Failed {
+                reason: format!("locate_impl on non-ASCII declaration error: {e:?}"),
             }
         }
-        Err(e) => AssertionStatus::Failed {
-            reason: format!("locate_impl on non-ASCII declaration error: {e:?}"),
-        },
+    };
+
+    // The actual assertion: what position did the production code path send
+    // to `goto_definition`? Must be the converted UTF-16 column, not the raw
+    // tree-sitter byte column.
+    let calls = lawyer.goto_definition_calls();
+    let Some(&(_, actual_line, actual_col)) = calls.last() else {
+        return AssertionStatus::Failed {
+            reason: "goto_definition was never called for the non-ASCII declaration".into(),
+        };
+    };
+    let expected_line = u32::try_from(scope.name_line + 1).unwrap_or(1);
+    if actual_line != expected_line || actual_col != expected_utf16_col + 1 {
+        return AssertionStatus::Failed {
+            reason: format!(
+                "TS-A2: wrong position sent to goto_definition — expected \
+                 (line={expected_line}, char={}) [UTF-16-converted], got \
+                 (line={actual_line}, char={actual_col}) [byte column would have been {}]",
+                expected_utf16_col + 1,
+                byte_col_u32 + 1
+            ),
+        };
+    }
+
+    if let Some(val) = call_result.structured_content {
+        let file = val.get("file").and_then(|v| v.as_str());
+        let line = val.get("line").and_then(|v| v.as_u64());
+
+        if file.is_some() && line.is_some() {
+            AssertionStatus::Passed
+        } else {
+            AssertionStatus::Failed {
+                reason: format!("Non-ASCII declaration locate returned incomplete result: {val:?}"),
+            }
+        }
+    } else {
+        AssertionStatus::Failed {
+            reason: "Missing structured_content for non-ASCII locate".into(),
+        }
     }
 }
 
@@ -1059,7 +1125,12 @@ pub async fn check_c16(fixture: &LanguageFixture) -> AssertionStatus {
             }
         };
 
-        let def_line = u32::try_from(scope.start_line + 1).unwrap_or(1);
+        // Use `name_line` (the identifier's own row), not `start_line` (the
+        // declaration's row, which precedes it for annotated/decorated
+        // symbols) — a mock response built from the wrong row is a plausible
+        // but wrong answer, which is exactly the failure mode C-16 exists to
+        // rule out (TS-A1/TS-D6).
+        let def_line = u32::try_from(scope.name_line + 1).unwrap_or(1);
         lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
             file: parsed_sp.file_path.to_string_lossy().to_string(),
             line: def_line,
@@ -1087,6 +1158,62 @@ pub async fn check_c16(fixture: &LanguageFixture) -> AssertionStatus {
             Err(e) => {
                 return AssertionStatus::Failed {
                     reason: format!("Warm path query failed unexpectedly on '{target}': {e:?}"),
+                };
+            }
+        }
+
+        // TS-A2 / TS-D6: for the non-ASCII target specifically, verify the
+        // *actual* position sent to `goto_definition` was UTF-16-converted,
+        // not the raw tree-sitter byte column. A fully-warm LSP (this
+        // check's whole premise) that receives a byte-column position on a
+        // line with a preceding multi-byte character resolves the wrong
+        // token or nothing — a confidently-wrong-empty this check exists to
+        // catch, and one that a response-presence-only assertion cannot see.
+        if target == fixture.non_ascii_path {
+            let abs_path = fixture.root_dir.join(fixture.non_ascii_file);
+            let file_content = match std::fs::read_to_string(&abs_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    return AssertionStatus::Failed {
+                        reason: format!("failed to read fixture file {}: {e}", abs_path.display()),
+                    }
+                }
+            };
+            let Some(name_line_text) = file_content.lines().nth(scope.name_line) else {
+                return AssertionStatus::Failed {
+                    reason: format!("fixture file has no line {} (name_line)", scope.name_line),
+                };
+            };
+            let expected_utf16_col = pathfinder_treesitter::surgeon::to_lsp_character(
+                name_line_text.as_bytes(),
+                scope.name_column,
+                pathfinder_treesitter::surgeon::PositionEncoding::Utf16,
+            );
+            let byte_col_u32 = u32::try_from(scope.name_column).unwrap_or(u32::MAX);
+            if expected_utf16_col == byte_col_u32 {
+                return AssertionStatus::Failed {
+                    reason: format!(
+                        "fixture is vacuous for TS-A2: byte column == UTF-16 column on line {:?}",
+                        name_line_text
+                    ),
+                };
+            }
+
+            let calls = lawyer.goto_definition_calls();
+            let Some(&(_, actual_line, actual_col)) = calls.last() else {
+                return AssertionStatus::Failed {
+                    reason: "goto_definition was never called for the non-ASCII warm target".into(),
+                };
+            };
+            if actual_col != expected_utf16_col + 1 {
+                return AssertionStatus::Failed {
+                    reason: format!(
+                        "TS-A2 (warm path): wrong position sent to goto_definition on line \
+                         {actual_line} — expected char={} [UTF-16-converted], got char={actual_col} \
+                         [byte column would have been {}]",
+                        expected_utf16_col + 1,
+                        byte_col_u32 + 1
+                    ),
                 };
             }
         }

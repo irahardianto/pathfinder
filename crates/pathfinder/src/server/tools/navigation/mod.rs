@@ -176,6 +176,13 @@ struct LspResolution {
     degraded_reason: Option<DegradedReason>,
     engines: Vec<&'static str>,
     dependencies_truncated: bool,
+    /// Set when `ensure_ready` reported `Readiness::Unavailable` for this
+    /// language *before* `call_hierarchy_prepare` was attempted --
+    /// `(language, install_hint, alternative)`. See the identical field on
+    /// `impact.rs::CallHierarchyState` for the full rationale: this is a
+    /// terminal, config-level fact, not a transient failure, and surfaces as
+    /// `ToolStatus::Unavailable` rather than `ToolStatus::Degraded`.
+    unavailable: Option<(String, String, String)>,
 }
 
 static CALL_PATTERN_FULL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -477,6 +484,29 @@ fn java_resolve_pattern(candidate: &str) -> String {
     )
 }
 
+/// Generic, language-agnostic "definition line" regex for a candidate
+/// identifier, used whenever the target language is unknown or genuinely
+/// ambiguous (e.g. a workspace-wide cross-language grep of last resort).
+///
+/// This used to be hand-duplicated with slightly different keyword sets in
+/// two places (`candidate_definition_pattern`'s catch-all arm below, and
+/// `definition.rs::grep_definition_global`'s workspace-wide fallback) --
+/// centralizing it here means both fallback paths share one, more complete
+/// keyword list (including `enum`/`record` and optional generic type
+/// parameters) instead of silently drifting apart. `candidate` is escaped
+/// internally unless it already looks like an alternation
+/// (`candidate1|candidate2`).
+fn generic_definition_pattern(candidate: &str) -> String {
+    let escaped = if candidate.contains('|') {
+        candidate.to_string()
+    } else {
+        regex::escape(candidate)
+    };
+    format!(
+        r"\b(?:fn|def|function|class|struct|interface|type|enum|record)\s+(?:<[^>]+>\s+)?(?:{escaped})\b"
+    )
+}
+
 /// Build a regex pattern to find a candidate function's definition.
 ///
 /// Supports single candidate identifiers or alternation patterns (`candidate1|candidate2`).
@@ -504,7 +534,7 @@ fn candidate_definition_pattern(language: &str, candidate: &str) -> String {
         }
         "python" => format!(r"(?:async\s+)?def\s+(?:{escaped})\b"),
         "java" => java_resolve_pattern(&escaped),
-        _ => format!(r"\b(?:fn|def|function|class|struct|type|interface)\s+(?:{escaped})\b"),
+        _ => generic_definition_pattern(candidate),
     }
 }
 
@@ -593,6 +623,55 @@ pub(crate) fn definition_patterns(ext: &str, symbol_name: &str) -> Vec<String> {
 }
 
 impl PathfinderServer {
+    /// Compute the 1-indexed `(line, character)` pair to send to a `Lawyer`
+    /// navigation method for the name identifier described by `name_line`
+    /// (0-indexed) and `name_column` (0-indexed **byte** offset within that
+    /// line), correctly converted into the units `language_id`'s LSP server
+    /// actually negotiated (TS-A2 / LSP-A5).
+    ///
+    /// `Lawyer` methods take 1-indexed line/column (`lawyer_impl.rs` converts
+    /// back to 0-indexed for the wire), so the returned character offset is
+    /// the *converted* value plus one — never the raw byte column plus one,
+    /// which silently desyncs on any non-ASCII byte before the name on its
+    /// declaration line.
+    ///
+    /// Reads `file_path` directly to obtain the raw bytes of `name_line`.
+    /// This is intentionally independent of `SymbolScope.content` (which may
+    /// or may not span `name_line` depending on `attached_range` rules per
+    /// language) and does not require `SymbolScope` to carry line text —
+    /// keeping this an internal position-computation detail rather than a
+    /// new agent-facing response field.
+    pub(crate) async fn compute_lsp_position(
+        &self,
+        file_path: &std::path::Path,
+        name_line: usize,
+        name_column: usize,
+        language_id: &str,
+    ) -> (u32, u32) {
+        let line_1indexed = u32::try_from(name_line + 1).unwrap_or(1);
+        let fallback_char = u32::try_from(name_column + 1).unwrap_or(1);
+
+        let abs_path = self.workspace_root.path().join(file_path);
+        let Ok(content) = tokio::fs::read_to_string(&abs_path).await else {
+            // File became unreadable between symbol resolution and this call
+            // (e.g. deleted mid-session). Fall back to the raw byte column —
+            // no worse than before this fix, and the LSP request will most
+            // likely fail cleanly rather than silently misposition.
+            return (line_1indexed, fallback_char);
+        };
+        let Some(line_text) = content.lines().nth(name_line) else {
+            return (line_1indexed, fallback_char);
+        };
+
+        let encoding = self.lawyer.position_encoding(language_id);
+        let utf16_char = pathfinder_treesitter::surgeon::to_lsp_character(
+            line_text.as_bytes(),
+            name_column,
+            encoding,
+        );
+        (line_1indexed, utf16_char.saturating_add(1))
+    }
+
     /// Enrich a flat LSP-derived name into a fully-qualified treesitter semantic path.
     ///
     /// LSP call-hierarchy returns bare symbol names (e.g. `"handle_request"`), but

@@ -295,12 +295,18 @@ fn find_close_tag(slice: &str, tag: &str) -> Option<usize> {
             continue;
         }
 
-        // Check for closing tag
-        if b == b'<'
-            && i + close_bytes.len() <= len
-            && slice[i..i + close_bytes.len()].eq_ignore_ascii_case(&close_target)
-        {
-            return Some(i);
+        // Check for closing tag. `slice.get()` (not indexing) is required here:
+        // `i` always lands on a `<` byte, which is always a valid UTF-8 boundary,
+        // but `i + close_bytes.len()` is an arbitrary byte offset that can split a
+        // multi-byte character (e.g. a `<` comparison/generic followed within
+        // 7-8 bytes by non-ASCII text). Direct `&str` indexing panics on a
+        // non-boundary bound; `get()` returns `None` instead.
+        if b == b'<' {
+            if let Some(candidate) = slice.get(i..i + close_bytes.len()) {
+                if candidate.eq_ignore_ascii_case(&close_target) {
+                    return Some(i);
+                }
+            }
         }
 
         i += 1;

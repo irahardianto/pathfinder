@@ -294,3 +294,70 @@ const processValue = async <T, R>(
         "should capture processValue function"
     );
 }
+
+/// Regression test: `find_close_tag` must not panic when a `<` comparison/generic
+/// is followed within the close-tag's byte length by a multi-byte UTF-8 character.
+/// `</script>` is 9 bytes; placing a 2-byte character (`é`) so that byte offset
+/// `i + 9` lands on its second (continuation) byte previously caused a
+/// "byte index is not a char boundary" panic via direct `&str` indexing.
+#[test]
+fn test_find_close_tag_does_not_panic_on_non_ascii_near_lt() {
+    // 7 ASCII bytes between `<` and `é` puts the naive end-index exactly on
+    // `é`'s continuation byte for the 9-byte `</script>` target.
+    let content = "if (a <bcdefghé) { return true; }\n</script>";
+    let result = find_close_tag(content, "script");
+    let expected = content.find("</script>");
+    assert_eq!(
+        result, expected,
+        "must find the real closing tag, not panic or misfire on the boundary-crossing '<'"
+    );
+
+    // Same shape for `</style>` (8-byte target -> 6 ASCII bytes before the char).
+    let style_content = ".a { content: \"x <bcdefé\"; }\n</style>";
+    let style_result = find_close_tag(style_content, "style");
+    assert_eq!(
+        style_result,
+        style_content.find("</style>"),
+        "must find the real closing tag for style content too"
+    );
+}
+
+/// End-to-end regression for the same hazard through the public `scan_vue_zones`
+/// entry point, with the non-ASCII character landing inside an actual `<script>`
+/// zone of a full SFC (emoji, 4 bytes, well inside typical i18n/comment content).
+#[test]
+fn test_scan_vue_zones_non_ascii_near_lt_does_not_panic() {
+    let sfc = "
+<script setup>
+// A comparison immediately followed by non-ASCII text (emoji comment).
+if (count <maxcount 🎉 more text here) {
+  doSomething();
+}
+</script>
+
+<template>
+  <div>{{ count }}</div>
+</template>
+"
+    .as_bytes();
+
+    let zones = scan_vue_zones(sfc);
+
+    assert!(zones.script.is_some(), "script zone should still be found");
+    assert!(
+        zones.template.is_some(),
+        "template zone should still be found"
+    );
+
+    let script_range = zones.script.unwrap();
+    let script_content =
+        std::str::from_utf8(&sfc[script_range.start_byte..script_range.end_byte]).unwrap();
+    assert!(
+        script_content.contains("doSomething"),
+        "the full script body must be captured, not truncated at the false match"
+    );
+    assert!(
+        !script_content.contains("</script>"),
+        "the zone must not include the closing tag itself"
+    );
+}

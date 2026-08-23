@@ -1792,6 +1792,41 @@ fn test_candidate_definition_pattern_unknown_language() {
     assert!(re.is_match("def myFunc("));
     assert!(re.is_match("function myFunc("));
     assert!(re.is_match("class myFunc {"));
+    // RSP-A10: the catch-all now shares `generic_definition_pattern` with
+    // `definition.rs::grep_definition_global`'s workspace-wide fallback,
+    // which additionally matched `enum`/`record` and generic type params --
+    // proves the merge kept (not dropped) that broader coverage.
+    assert!(re.is_match("enum myFunc {"), "enum must match after merge");
+    assert!(
+        re.is_match("record myFunc("),
+        "record must match after merge"
+    );
+    assert!(
+        re.is_match("function <T> myFunc("),
+        "optional generic type param group between keyword and name must still match"
+    );
+    assert!(
+        re.is_match("function myFunc("),
+        "generic type param group must remain optional -- plain form must still match"
+    );
+}
+
+/// RSP-A10: `candidate_definition_pattern`'s catch-all arm and
+/// `definition.rs::grep_definition_global`'s workspace-wide last-resort
+/// fallback used to hand-roll two independently-drifting regex variants for
+/// the exact same "I don't know the language" scenario. Both now delegate to
+/// `generic_definition_pattern`, so this proves they produce byte-identical
+/// patterns for the same candidate -- the concrete, testable form of "no
+/// longer two copies that can silently diverge."
+#[test]
+fn test_candidate_definition_pattern_unknown_language_matches_generic_definition_pattern() {
+    let via_candidate_definition_pattern =
+        super::candidate_definition_pattern("some_never_registered_language", "myFunc");
+    let via_generic_definition_pattern = super::generic_definition_pattern("myFunc");
+    assert_eq!(
+        via_candidate_definition_pattern, via_generic_definition_pattern,
+        "the catch-all arm must delegate to generic_definition_pattern, not hand-roll its own copy"
+    );
 }
 
 #[test]

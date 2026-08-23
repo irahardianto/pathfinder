@@ -80,6 +80,14 @@ struct CallHierarchyState {
     verification: VerificationStatus,
     references_truncated: bool,
     resolution_block: Option<String>,
+    /// Set when `ensure_ready` reported `Readiness::Unavailable` for this
+    /// language *before* any call-hierarchy resolution was attempted --
+    /// `(language, install_hint, alternative)`. Distinct from `degraded`:
+    /// this is a terminal, config-level fact ("no LSP binary on PATH"), not
+    /// a transient failure, and surfaces as `ToolStatus::Unavailable`
+    /// (which tells the agent not to retry) rather than `ToolStatus::
+    /// Degraded` (which implies retrying might help).
+    unavailable: Option<(String, String, String)>,
 }
 
 impl CallHierarchyState {
@@ -97,6 +105,7 @@ impl CallHierarchyState {
             verification: VerificationStatus::default(),
             references_truncated: false,
             resolution_block: None,
+            unavailable: None,
         }
     }
 }
@@ -111,6 +120,10 @@ struct CallerCalleeContext<'a> {
     symbol_name: &'a str,
     max_depth: u32,
     project_only: bool,
+    /// LSP language id for `semantic_path.file_path`, used to look up the
+    /// negotiated position encoding (TS-A2 / LSP-A5) before every LSP
+    /// handoff below.
+    language_id: &'a str,
 }
 
 /// Parameters for [`PathfinderServer::compute_callers_callees_hint`].
@@ -783,7 +796,7 @@ impl PathfinderServer {
         let declared = format!(
             "{}:{}",
             ctx.semantic_path.file_path.display(),
-            ctx.scope.start_line + 1
+            ctx.scope.name_line + 1
         );
         let mut res_lines = vec![
             "resolution:".to_string(),
@@ -809,13 +822,21 @@ impl PathfinderServer {
         remaining_outgoing: &mut u32,
         state: &mut CallHierarchyState,
     ) -> (bool, usize, usize, Option<DegradedReason>) {
+        let (position_line, position_char) = self
+            .compute_lsp_position(
+                &ctx.semantic_path.file_path,
+                ctx.scope.name_line,
+                ctx.scope.name_column,
+                ctx.language_id,
+            )
+            .await;
         match self
             .lawyer
             .goto_implementation(
                 self.workspace_root.path(),
                 &ctx.semantic_path.file_path,
-                u32::try_from(ctx.scope.start_line + 1).unwrap_or(1),
-                u32::try_from(ctx.scope.name_column + 1).unwrap_or(1),
+                position_line,
+                position_char,
             )
             .await
         {
@@ -931,35 +952,61 @@ impl PathfinderServer {
         state.max_depth_reached = state.max_depth_reached.max(depth_out);
         state.verification.outgoing = true;
 
-        // Check for false negatives when BFS call hierarchy traversal returns 0 callers/callees
-        if state.incoming.as_ref().is_none_or(Vec::is_empty)
-            && state.outgoing.as_ref().is_none_or(Vec::is_empty)
-        {
-            let (grep_in, grep_out) = self
-                .run_grep_fallbacks(
-                    &GrepFallbackParams {
-                        symbol_name: ctx.symbol_name,
-                        definition_path: &ctx.semantic_path.file_path,
-                        scope_content: &ctx.scope.content,
-                        scope_language: &ctx.scope.language,
-                        remaining_outgoing: *remaining_outgoing,
-                        project_only: ctx.project_only,
-                    },
-                    &mut state.files_referenced,
-                )
-                .await;
+        // LSP-A1: check for false negatives whenever EITHER direction's BFS
+        // traversal returned empty — not only when both are. Outgoing calls
+        // resolve from the file-local syntax tree; incoming calls need the
+        // global index, so a mid-index server routinely yields
+        // `incoming=[]` while `outgoing` is already populated. The old
+        // both-empty-only gate never re-checked that lone empty direction,
+        // so it shipped as a BFS-verified "confirmed zero" without ever
+        // being cross-checked. Each direction is re-verified independently:
+        // a direction that already has real BFS results is never re-queried
+        // or overwritten.
+        let incoming_empty = state.incoming.as_ref().is_none_or(Vec::is_empty);
+        let outgoing_empty = state.outgoing.as_ref().is_none_or(Vec::is_empty);
 
-            if grep_in.is_some() || grep_out.is_some() {
-                state.degraded = true;
-                state.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
+        if incoming_empty || outgoing_empty {
+            let budget = super::GrepFallbackBudget::new();
+            let mut any_grep_found = false;
+
+            if incoming_empty {
+                let grep_in = self
+                    .grep_reference_fallback(
+                        ctx.symbol_name,
+                        &ctx.semantic_path.file_path,
+                        &mut state.files_referenced,
+                        &budget,
+                    )
+                    .await;
                 if grep_in.is_some() {
                     state.verification.incoming = false;
                     state.incoming = grep_in;
+                    any_grep_found = true;
                 }
+            }
+
+            if outgoing_empty {
+                let grep_out = self
+                    .grep_outgoing_fallback(GrepOutgoingFallbackParams {
+                        scope_content: &ctx.scope.content,
+                        scope_language: &ctx.scope.language,
+                        definition_path: &ctx.semantic_path.file_path,
+                        max_results: *remaining_outgoing,
+                        project_only: ctx.project_only,
+                        files_referenced: &mut state.files_referenced,
+                        budget: &budget,
+                    })
+                    .await;
                 if grep_out.is_some() {
                     state.verification.outgoing = false;
                     state.outgoing = grep_out;
+                    any_grep_found = true;
                 }
+            }
+
+            if any_grep_found {
+                state.degraded = true;
+                state.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
             }
         }
     }
@@ -978,13 +1025,21 @@ impl PathfinderServer {
         remaining_outgoing: &mut u32,
         state: &mut CallHierarchyState,
     ) {
+        let (position_line, position_char) = self
+            .compute_lsp_position(
+                &ctx.semantic_path.file_path,
+                ctx.scope.name_line,
+                ctx.scope.name_column,
+                ctx.language_id,
+            )
+            .await;
         let probe = self
             .lawyer
             .goto_definition(
                 self.workspace_root.path(),
                 &ctx.semantic_path.file_path,
-                u32::try_from(ctx.scope.name_line + 1).unwrap_or(1),
-                u32::try_from(ctx.scope.name_column + 1).unwrap_or(1),
+                position_line,
+                position_char,
             )
             .await;
 
@@ -1166,15 +1221,25 @@ impl PathfinderServer {
         remaining_outgoing: &mut u32,
         state: &mut CallHierarchyState,
     ) {
+        // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
+        // not the 'pub' keyword, converted into the server's negotiated
+        // position encoding (TS-A2 / LSP-A5). rust-analyzer requires this for
+        // symbol resolution.
+        let (position_line, position_char) = self
+            .compute_lsp_position(
+                &ctx.semantic_path.file_path,
+                ctx.scope.name_line,
+                ctx.scope.name_column,
+                ctx.language_id,
+            )
+            .await;
         let lsp_result = self
             .lawyer
             .call_hierarchy_prepare(
                 self.workspace_root.path(),
                 &ctx.semantic_path.file_path,
-                // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
-                // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
-                u32::try_from(ctx.scope.name_line + 1).unwrap_or(1),
-                u32::try_from(ctx.scope.name_column + 1).unwrap_or(1),
+                position_line,
+                position_char,
             )
             .await;
 
@@ -1648,6 +1713,22 @@ impl PathfinderServer {
         )
     }
 
+    /// Derives `Evidence` for both directions from the raw BFS/grep result
+    /// vectors.
+    ///
+    /// Confidence is intentionally a whole-response decision, not a
+    /// per-direction one: Contract 2 Rule 4 makes `Confidence::Verified`
+    /// under `ToolStatus::Degraded`/`Unavailable` an illegal combination
+    /// (enforced by `validate_evidence`'s `debug_assert!`), specifically so
+    /// an agent reading an admittedly-degraded response can never cherry-pick
+    /// one field and treat it as authoritative. LSP-A1's actual defect is
+    /// therefore **not** here — it is in whether the *degraded/status*
+    /// determination itself correctly distinguishes "both directions
+    /// resolved with the global index warm" from "one direction returned an
+    /// empty result because the global index isn't warm yet" (see
+    /// `VerificationStatus` and the emptiness re-check in
+    /// `handle_call_hierarchy_items`, which must treat *either* direction's
+    /// emptiness as suspect, not only both together).
     fn compute_raw_evidence(
         status: &pathfinder_common::types::ToolStatus,
         incoming: Option<Vec<crate::server::types::ImpactReference>>,
@@ -1659,44 +1740,45 @@ impl PathfinderServer {
         match status {
             pathfinder_common::types::ToolStatus::NotReady { .. } => (None, None),
             pathfinder_common::types::ToolStatus::Degraded { .. }
-            | pathfinder_common::types::ToolStatus::Unavailable { .. } => {
-                let inc = incoming.and_then(|mut v| {
-                    if v.is_empty() {
-                        None
-                    } else {
-                        for item in &mut v {
-                            item.confidence = pathfinder_common::types::Confidence::Heuristic;
-                        }
-                        Some(pathfinder_common::types::Evidence::heuristic(v))
-                    }
-                });
-                let out = outgoing.and_then(|mut v| {
-                    if v.is_empty() {
-                        None
-                    } else {
-                        for item in &mut v {
-                            item.confidence = pathfinder_common::types::Confidence::Heuristic;
-                        }
-                        Some(pathfinder_common::types::Evidence::heuristic(v))
-                    }
-                });
-                (inc, out)
-            }
+            | pathfinder_common::types::ToolStatus::Unavailable { .. } => (
+                Self::direction_evidence(incoming, false),
+                Self::direction_evidence(outgoing, false),
+            ),
             pathfinder_common::types::ToolStatus::Ok => (
-                incoming.map(|mut v| {
-                    for item in &mut v {
-                        item.confidence = pathfinder_common::types::Confidence::Verified;
-                    }
-                    pathfinder_common::types::Evidence::verified(v)
-                }),
-                outgoing.map(|mut v| {
-                    for item in &mut v {
-                        item.confidence = pathfinder_common::types::Confidence::Verified;
-                    }
-                    pathfinder_common::types::Evidence::verified(v)
-                }),
+                Self::direction_evidence(incoming, true),
+                Self::direction_evidence(outgoing, true),
             ),
         }
+    }
+
+    /// Builds one direction's `Evidence` from its raw items and the
+    /// whole-response confidence decided by [`Self::compute_raw_evidence`].
+    ///
+    /// `verified && empty` is a genuine LSP-confirmed zero (`Evidence::
+    /// verified([])`). `!verified && empty` carries no information (Contract
+    /// 2 Rule 2 forbids `Evidence{Heuristic, []}`) and correctly collapses to
+    /// `None` — UNKNOWN, not a confirmed zero.
+    fn direction_evidence(
+        items: Option<Vec<crate::server::types::ImpactReference>>,
+        verified: bool,
+    ) -> Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>> {
+        items.and_then(|mut v| {
+            let confidence = if verified {
+                pathfinder_common::types::Confidence::Verified
+            } else {
+                pathfinder_common::types::Confidence::Heuristic
+            };
+            for item in &mut v {
+                item.confidence = confidence;
+            }
+            if v.is_empty() {
+                verified.then(|| pathfinder_common::types::Evidence::verified(v))
+            } else if verified {
+                Some(pathfinder_common::types::Evidence::verified(v))
+            } else {
+                Some(pathfinder_common::types::Evidence::heuristic(v))
+            }
+        })
     }
 
     fn paginate_call_hierarchy_evidence(
@@ -1718,14 +1800,15 @@ impl PathfinderServer {
                 confidence: ev.confidence,
                 items: Vec::new(),
             });
-            let out = raw_out.map(|ev| pathfinder_common::types::Evidence {
-                confidence: ev.confidence,
-                items: ev
-                    .items
-                    .into_iter()
-                    .skip(out_offset)
-                    .take(max_refs_usize)
-                    .collect(),
+            let out = raw_out.and_then(|ev| {
+                Self::evidence_or_none_if_empty(
+                    ev.confidence,
+                    ev.items
+                        .into_iter()
+                        .skip(out_offset)
+                        .take(max_refs_usize)
+                        .collect(),
+                )
             });
             (inc, out)
         } else {
@@ -1744,11 +1827,38 @@ impl PathfinderServer {
                 confidence: ev.confidence,
                 items: inc_items,
             });
-            let out = raw_out.map(|ev| pathfinder_common::types::Evidence {
-                confidence: ev.confidence,
-                items: ev.items.into_iter().take(rem_budget).collect(),
+            // Contract 2 Rule 2: `Evidence { confidence: Heuristic, items: [] }`
+            // is an illegal state (use `None` instead). The shared
+            // `max_references` budget is split between incoming and outgoing;
+            // when incoming alone consumes the whole budget (e.g. a common
+            // symbol name under a small `max_references`), `rem_budget` can
+            // hit 0 and truncate a genuinely non-empty, still-Heuristic
+            // `raw_out` down to an empty list. Re-clamp to `None` rather than
+            // shipping the illegal shape — the caller must read this as
+            // UNKNOWN (budget-starved), not as a confirmed zero.
+            let out = raw_out.and_then(|ev| {
+                Self::evidence_or_none_if_empty(
+                    ev.confidence,
+                    ev.items.into_iter().take(rem_budget).collect(),
+                )
             });
             (inc, out)
+        }
+    }
+
+    /// Rewraps a confidence/items pair as `Some(Evidence)`, or `None` if
+    /// pagination left the item list empty — never
+    /// `Some(Evidence { confidence: Heuristic, items: [] })`, which Contract 2
+    /// Rule 2 forbids. A `Verified` evidence with zero items is a legitimate,
+    /// distinct signal ("confirmed zero") and is left as-is.
+    fn evidence_or_none_if_empty(
+        confidence: pathfinder_common::types::Confidence,
+        items: Vec<crate::server::types::ImpactReference>,
+    ) -> Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>> {
+        if items.is_empty() && confidence == pathfinder_common::types::Confidence::Heuristic {
+            None
+        } else {
+            Some(pathfinder_common::types::Evidence { confidence, items })
         }
     }
 
@@ -1865,9 +1975,10 @@ impl PathfinderServer {
             engines,
             files_referenced,
             max_depth_reached,
-            verification: _,
+            verification,
             references_truncated,
             resolution_block,
+            unavailable: _,
         } = state;
 
         tracing::info!(
@@ -1881,6 +1992,7 @@ impl PathfinderServer {
             "find_callers_callees: complete"
         );
 
+        let _ = &verification; // consulted upstream in compute_degraded_and_status
         let (raw_inc, raw_out) = Self::compute_raw_evidence(&status, incoming, outgoing);
         let pagination = Self::process_call_hierarchy_pagination(
             raw_inc,
@@ -1960,6 +2072,27 @@ impl PathfinderServer {
 
         let (lsp_readiness, warm_start_in_progress) =
             Self::compute_lsp_readiness(degraded, degraded_reason_cloned);
+
+        // `ensure_ready` reported `Unavailable` before any call-hierarchy
+        // request was attempted -- a terminal, config-level fact, not a
+        // transient failure. Overrides the derived `status` with the
+        // dedicated `ToolStatus::Unavailable` variant (install hint +
+        // alternative, "do not retry") while leaving `degraded`/
+        // `degraded_reason`/`lsp_readiness` as already computed above, since
+        // those legacy fields are still read by the text renderer.
+        if let Some((language, install_hint, alternative)) = state.unavailable.clone() {
+            return CallHierarchyDegradedStatus {
+                degraded,
+                degraded_reason,
+                lsp_readiness,
+                warm_start_in_progress,
+                status: pathfinder_common::types::ToolStatus::Unavailable {
+                    language,
+                    install_hint,
+                    alternative,
+                },
+            };
+        }
 
         let has_results = state.incoming.as_ref().is_some_and(|v| !v.is_empty())
             || state.outgoing.as_ref().is_some_and(|v| !v.is_empty());
@@ -2077,10 +2210,15 @@ impl PathfinderServer {
             .and_then(|e| e.to_str())
             .unwrap_or("");
         let language_id = pathfinder_lsp::language_id_for_extension(ext).unwrap_or("unknown");
-        let _ = self
+        let readiness = self
             .lawyer
             .ensure_ready(language_id, std::time::Duration::from_secs(5))
-            .await;
+            .await
+            .unwrap_or(pathfinder_lsp::types::Readiness::Unavailable {
+                language: language_id.to_string(),
+                install_hint: format!("No LSP configured for {language_id}"),
+                alternative: "Built-in fallback tools".to_string(),
+            });
 
         // `_doc_guard` fires did_close automatically when this function returns.
         let _doc_guard = self.open_document_for_callers_callees(&semantic_path).await;
@@ -2097,16 +2235,35 @@ impl PathfinderServer {
             symbol_name: &symbol_name,
             max_depth,
             project_only,
+            language_id,
         };
 
         let (used_impl_expansion, trait_impl_count, trait_impl_file_count, trait_method_degraded) =
-            self.run_call_hierarchy_resolution(
-                &ctx,
-                &mut remaining_incoming,
-                &mut remaining_outgoing,
-                &mut state,
-            )
-            .await;
+            if let pathfinder_lsp::types::Readiness::Unavailable {
+                language,
+                install_hint,
+                alternative,
+            } = readiness
+            {
+                // ensure_ready already confirmed there is no LSP for this
+                // language -- skip straight to the grep fallback instead of
+                // attempting a call_hierarchy_prepare guaranteed to fail the
+                // same way, and record the terminal Unavailable status
+                // (install hint + alternative, "do not retry") rather than
+                // letting it collapse into the weaker Degraded signal.
+                state.unavailable = Some((language, install_hint, alternative));
+                self.handle_no_lsp_for_callers(&ctx, &mut remaining_outgoing, &mut state)
+                    .await;
+                (false, 0, 0, None)
+            } else {
+                self.run_call_hierarchy_resolution(
+                    &ctx,
+                    &mut remaining_incoming,
+                    &mut remaining_outgoing,
+                    &mut state,
+                )
+                .await
+            };
 
         // Note: `_doc_guard` still alive here; did_close fires at function return.
         let lsp_ms = lsp_start.elapsed().as_millis();

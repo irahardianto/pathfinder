@@ -158,14 +158,47 @@ pub trait Lawyer: Send + Sync {
         content: &str,
     ) -> Result<Box<dyn DocumentLease>, LspError>;
 
+    /// The position encoding negotiated with the language server for
+    /// `language_id` (TS-A2 / LSP-A5).
+    ///
+    /// Callers building a `textDocument/*` request position from a
+    /// Tree-sitter-derived **byte** column MUST convert it through
+    /// [`pathfinder_treesitter::surgeon::to_lsp_character`] using this
+    /// encoding first — sending a raw byte offset to a server that negotiated
+    /// `utf-16` silently mispositions the query on any line with a
+    /// multi-byte character before the target identifier.
+    ///
+    /// Defaults to `Utf16` (the LSP 3.17 spec default when unnegotiated, or
+    /// when the language isn't running) — never assume `Utf8`.
+    fn position_encoding(
+        &self,
+        language_id: &str,
+    ) -> pathfinder_treesitter::surgeon::PositionEncoding {
+        let _ = language_id;
+        pathfinder_treesitter::surgeon::PositionEncoding::Utf16
+    }
+
     /// Retrieve the current LSP process status and capabilities per language.
+    ///
+    /// # Status (v6)
+    /// Not currently called from any of the three surviving MCP tools
+    /// (`locate`/`trace`/`inspect`) — the `health`/`explore` tools that used
+    /// to surface this were removed. Retained as public `Lawyer` API for the
+    /// WS-3.7 residual allowance (a one-line `setup_notice` on a session's
+    /// first tool response when a detected language has no LSP binary on
+    /// PATH) should that be built; not wired up today.
     async fn capability_status(
         &self,
     ) -> std::collections::HashMap<String, crate::types::LspLanguageStatus>;
 
     /// Retrieve languages whose markers were found but whose LSP binaries are not on PATH.
     ///
-    /// Used to surface actionable install guidance in `health` responses.
+    /// # Status (v6)
+    /// Not currently called from any of the three surviving MCP tools — see
+    /// [`Lawyer::capability_status`]'s note. The underlying `missing_languages`
+    /// *field* this wraps is still live and consulted internally by
+    /// `ensure_ready`'s install-hint lookup; only this convenience accessor
+    /// method is unused.
     fn missing_languages(&self) -> Vec<crate::client::MissingLanguage>;
 
     /// IW-4: Force-respawn the LSP process for `language_id`.
@@ -225,9 +258,4 @@ pub trait Lawyer: Send + Sync {
             crate::types::CapabilityReadiness::all(),
         ))
     }
-
-    /// LT-4: Extend idle timer for a language without making an LSP request.
-    ///
-    /// Deprecated: Process supervisor no longer uses idle termination.
-    fn touch_language(&self, _language_id: &str) {}
 }

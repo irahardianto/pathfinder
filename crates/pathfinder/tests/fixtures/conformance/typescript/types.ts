@@ -28,7 +28,7 @@ export class DecoratedService {
   }
 }
 
-// 🦀 café 🌍 greeting
-export function nonAsciiHello(): string {
+// Non-ASCII characters before the symbol name, on its own declaration line (TS-A2).
+export function /* 🦀 café 🌍 */ nonAsciiHello(): string {
   return "hello";
 }

@@ -48,8 +48,15 @@ async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() 
     let val: crate::server::types::ReadWithDeepContextMetadata =
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
+    // `NoOpLawyer` represents "no LSP binary for this language at all" --
+    // `ensure_ready` now reports this up front as `ToolStatus::Unavailable`
+    // (a terminal, config-level fact, "do not retry"), which is more
+    // accurate than `Degraded` for this exact scenario. `degraded`/
+    // `degraded_reason` (asserted below) are unchanged; only the top-level
+    // status/text-header discriminant improved.
     assert!(
-        (text_content.contains("DEGRADED (no_lsp)")
+        (text_content.contains("UNAVAILABLE")
+            || text_content.contains("DEGRADED (no_lsp)")
             || text_content.contains("DEGRADED (grep_fallback_dependencies)"))
             && text_content.contains("Dependencies: UNKNOWN (not verified — do NOT treat as zero)"),
         "text_content: {text_content}"
@@ -59,6 +66,14 @@ async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() 
         val.degraded_reason,
         Some(DegradedReason::NoLsp | DegradedReason::GrepFallbackDependencies)
     ));
+    assert!(
+        matches!(
+            val.status,
+            pathfinder_common::types::ToolStatus::Unavailable { .. }
+        ),
+        "expected ToolStatus::Unavailable for a NoOpLawyer-backed session, got {:?}",
+        val.status
+    );
     assert!(val.dependencies.is_none());
 }
 

@@ -3479,6 +3479,86 @@ var SingleVar = \"single\"
     assert_eq!(single_v.access_level, AccessLevel::Public);
 }
 
+/// A plain module-level `name = value` assignment is now extracted as a
+/// `Constant`, matching Go's const/var support. Verifies PEP 8 leading
+/// underscore -> access level mapping and that a same-line preceding
+/// statement (the shape used to place non-ASCII content before a target
+/// name in the conformance fixture, since Python's grammar has no inline
+/// comment and cannot chain a compound statement after `;`) does not
+/// interfere with extracting the second target.
+#[test]
+fn test_python_module_level_simple_assignment_extracted_as_constant() {
+    use crate::surgeon::AccessLevel;
+    let source = "\
+PUBLIC_CONST = 1
+_protected_const = 2
+__private_const = 3
+__dunder__ = 4
+greeting = \"héllo\"; non_ascii_hello = \"hello\"
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Python);
+
+    let public = symbols
+        .iter()
+        .find(|s| s.name == "PUBLIC_CONST")
+        .expect("PUBLIC_CONST extracted");
+    assert_eq!(public.kind, SymbolKind::Constant);
+    assert_eq!(public.access_level, AccessLevel::Public);
+
+    let protected = symbols
+        .iter()
+        .find(|s| s.name == "_protected_const")
+        .expect("_protected_const extracted");
+    assert_eq!(protected.access_level, AccessLevel::Protected);
+
+    let private = symbols
+        .iter()
+        .find(|s| s.name == "__private_const")
+        .expect("__private_const extracted");
+    assert_eq!(private.access_level, AccessLevel::Private);
+
+    let dunder = symbols
+        .iter()
+        .find(|s| s.name == "__dunder__")
+        .expect("__dunder__ extracted");
+    assert_eq!(dunder.access_level, AccessLevel::Public);
+
+    // The second target on the semicolon-joined line is a fully independent
+    // symbol with its own correct name_column (not shifted by the first
+    // statement's byte length being misattributed).
+    let non_ascii = symbols
+        .iter()
+        .find(|s| s.name == "non_ascii_hello")
+        .expect("non_ascii_hello extracted despite sharing a line with a prior statement");
+    assert_eq!(non_ascii.kind, SymbolKind::Constant);
+    assert_eq!(non_ascii.name_point.row, 4);
+}
+
+/// Negative controls: tuple/list-unpacking targets, augmented assignment,
+/// and bare expression statements (docstrings, calls) must NOT be extracted
+/// by the new module-level-assignment path -- silently guessing at a name
+/// for these would be worse than not extracting them at all.
+#[test]
+fn test_python_module_level_assignment_negative_controls() {
+    let source = "\
+\"\"\"Module docstring.\"\"\"
+a, b = 1, 2
+counter = 0
+counter += 1
+print(\"side effect\")
+";
+    let symbols = parse_and_extract(source, SupportedLanguage::Python);
+
+    assert!(
+        !symbols.iter().any(|s| s.name == "a" || s.name == "b"),
+        "tuple-unpacking targets must not be extracted"
+    );
+    assert!(
+        symbols.iter().filter(|s| s.name == "counter").count() == 1,
+        "augmented assignment must not produce a second 'counter' symbol"
+    );
+}
+
 #[test]
 fn test_attached_range_computation_ts_c1() {
     let rust_source = "

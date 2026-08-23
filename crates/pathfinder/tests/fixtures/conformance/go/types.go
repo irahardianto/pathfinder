@@ -22,8 +22,8 @@ func DecoratedFunction() int {
 	return 100
 }
 
-// NonAsciiHello has non-ASCII characters before declaration.
-// 🦀 café 🌍 greeting
-func NonAsciiHello() string {
+// NonAsciiHello has non-ASCII characters before the symbol name, on its own
+// declaration line (TS-A2).
+func /* 🦀 café 🌍 */ NonAsciiHello() string {
 	return "hello"
 }

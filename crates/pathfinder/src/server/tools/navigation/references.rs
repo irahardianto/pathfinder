@@ -37,7 +37,16 @@ impl PathfinderServer {
         definition_path: &std::path::Path,
         definition_scope: &pathfinder_common::types::SymbolScope,
         params: &crate::server::types::TraceParams,
+        budget: &super::GrepFallbackBudget,
     ) -> Option<(Vec<crate::server::types::ReferenceLocation>, usize)> {
+        // RSP-A10: this fallback previously had no wall-clock bound at all --
+        // every other grep-fallback caller in this tool surface
+        // (impact.rs/definition.rs/deep_context.rs) already shares a
+        // `GrepFallbackBudget`. `acquire_search()` returns `None` once the
+        // shared 5s deadline or 8-search cap is exhausted, in which case
+        // this fallback correctly reports "found nothing" rather than
+        // running an unbounded workspace walk.
+        let deadline = budget.acquire_search()?;
         let query = format!(r"\b{}\b", regex::escape(symbol_name));
 
         // Get file extension for definition_patterns (used as secondary filter only)
@@ -94,7 +103,7 @@ impl PathfinderServer {
             context_lines: 0,
             exclude_glob: vec![],
             offset: params.offset as usize,
-            ..Default::default()
+            deadline: Some(deadline),
         };
 
         let result = match self
@@ -334,6 +343,7 @@ impl PathfinderServer {
                     &semantic_path.file_path,
                     &symbol_scope,
                     &params,
+                    &super::GrepFallbackBudget::new(),
                 )
                 .await
             };
@@ -409,14 +419,23 @@ impl PathfinderServer {
             return Ok(result);
         }
 
+        let (position_line, position_char) = self
+            .compute_lsp_position(
+                &semantic_path.file_path,
+                symbol_scope.name_line,
+                symbol_scope.name_column,
+                language_id,
+            )
+            .await;
+
         let lsp_start = std::time::Instant::now();
         let lsp_result = self
             .lawyer
             .references(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
-                u32::try_from(symbol_scope.name_line + 1).unwrap_or(1),
-                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
+                position_line,
+                position_char,
             )
             .await;
 
@@ -425,8 +444,8 @@ impl PathfinderServer {
             .goto_implementation(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
-                u32::try_from(symbol_scope.name_line + 1).unwrap_or(1),
-                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
+                position_line,
+                position_char,
             )
             .await;
         let lsp_ms = lsp_start.elapsed().as_millis();
@@ -518,7 +537,7 @@ impl PathfinderServer {
                     let declared = format!(
                         "{}:{}",
                         semantic_path.file_path.display(),
-                        symbol_scope.start_line + 1
+                        symbol_scope.name_line + 1
                     );
                     let mut res_lines = vec![
                         "resolution:".to_string(),
@@ -710,6 +729,7 @@ impl PathfinderServer {
                         &semantic_path.file_path,
                         &symbol_scope,
                         &params,
+                        &super::GrepFallbackBudget::new(),
                     )
                     .await
                 };
@@ -834,6 +854,7 @@ impl PathfinderServer {
                         &semantic_path.file_path,
                         &symbol_scope,
                         &params,
+                        &super::GrepFallbackBudget::new(),
                     )
                     .await
                 };
@@ -844,9 +865,37 @@ impl PathfinderServer {
                     DegradedReason::LspErrorGrepFallback
                 };
 
-                // Determine final state based on whether grep fallback succeeded
+                let status = if is_timeout {
+                    pathfinder_common::types::ToolStatus::NotReady {
+                        elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                        retry_after_secs: 15,
+                        eta_secs: None,
+                        phase: "indexing".to_string(),
+                        attempt: params.retry_attempt,
+                        max_attempts: 3,
+                    }
+                } else {
+                    pathfinder_common::types::ToolStatus::Degraded {
+                        reason: default_degraded_reason.to_string(),
+                        retry_after_secs: None,
+                    }
+                };
+                let is_not_ready = matches!(
+                    status,
+                    pathfinder_common::types::ToolStatus::NotReady { .. }
+                );
+
+                // Determine final state based on whether grep fallback succeeded.
+                //
+                // Contract 1 Decision 3.4: under `NotReady`, heuristic candidates
+                // must NEVER populate the primary `references` field — only
+                // `heuristic_candidates`. That rule does not apply to `Degraded`
+                // (Decision 5's table explicitly permits Heuristic-confidence
+                // data in the primary field there), so the primary/candidate
+                // split below is a function of `is_not_ready`, not of whether
+                // grep succeeded.
                 let (
-                    references,
+                    grep_evidence,
                     total_references,
                     files_referenced,
                     degraded_reason,
@@ -859,14 +908,27 @@ impl PathfinderServer {
                         "grep fallback found references after LSP error"
                     );
                     let ref_count = refs.len();
-                    let items: Vec<_> = refs
-                        .iter()
-                        .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
-                        .collect();
-                    let text = format!(
-                        "Grep fallback: found {} references across {} files (heuristic only).\n\nReferences: {}\n{}\n",
-                        ref_count, file_count, ref_count, items.join("\n")
-                    );
+                    let text = if is_not_ready {
+                        format!(
+                            "No verified results are returned because an empty result here \
+                             would be indistinguishable from a verified zero. {ref_count} \
+                             unverified heuristic candidate(s) across {file_count} file(s) are \
+                             available in `heuristic_candidates` — do NOT treat these as the \
+                             answer; they may be false positives (same-named symbols, comments, \
+                             imports). ACTION: wait, then reissue this exact call with \
+                             retry_attempt={}.\n",
+                            params.retry_attempt + 1
+                        )
+                    } else {
+                        let items: Vec<_> = refs
+                            .iter()
+                            .map(|r| format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet))
+                            .collect();
+                        format!(
+                            "Grep fallback: found {} references across {} files (heuristic only).\n\nReferences: {}\n{}\n",
+                            ref_count, file_count, ref_count, items.join("\n")
+                        )
+                    };
                     (
                         Some(pathfinder_common::types::Evidence::heuristic(refs)),
                         Some(ref_count),
@@ -891,28 +953,18 @@ impl PathfinderServer {
                     )
                 };
 
-                let status = if is_timeout {
-                    pathfinder_common::types::ToolStatus::NotReady {
-                        elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
-                        retry_after_secs: 15,
-                        eta_secs: None,
-                        phase: "indexing".to_string(),
-                        attempt: params.retry_attempt,
-                        max_attempts: 3,
-                    }
+                let (primary_references, heuristic_candidates) = if is_not_ready {
+                    (None, grep_evidence.as_ref().map(|ev| ev.items.clone()))
                 } else {
-                    pathfinder_common::types::ToolStatus::Degraded {
-                        reason: degraded_reason.to_string(),
-                        retry_after_secs: None,
-                    }
+                    (grep_evidence, None)
                 };
 
-                crate::server::helpers::validate_evidence(&status, references.as_ref());
+                crate::server::helpers::validate_evidence(&status, primary_references.as_ref());
 
                 let metadata = crate::server::types::FindAllReferencesMetadata {
                     status: status.clone(),
-                    references: references.clone(),
-                    heuristic_candidates: references.as_ref().map(|ev| ev.items.clone()),
+                    references: primary_references,
+                    heuristic_candidates,
                     total_references,
                     truncated: false,
                     next_offset: None,

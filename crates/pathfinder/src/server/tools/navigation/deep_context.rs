@@ -36,6 +36,15 @@ struct EmptyPrepareArgs<'a> {
     engines: &'a mut Vec<&'static str>,
 }
 
+struct CallHierarchyPrepareArgs<'a> {
+    lsp_result: Result<Vec<pathfinder_lsp::types::CallHierarchyItem>, pathfinder_lsp::LspError>,
+    scope: &'a pathfinder_common::types::SymbolScope,
+    dependencies: &'a mut Vec<crate::server::types::DeepContextDependency>,
+    engines: &'a mut Vec<&'static str>,
+    project_only: bool,
+    max_dependencies: u32,
+}
+
 struct DeepContextEvaluatedState {
     lsp_readiness: Option<String>,
     warm_start_in_progress: Option<bool>,
@@ -47,35 +56,155 @@ struct DeepContextEvaluatedState {
 
 impl PathfinderServer {
     /// Resolve LSP call-hierarchy dependencies for a symbol.
+    ///
+    /// `readiness` is `ensure_ready`'s result, computed once by the caller.
+    /// When it is `Unavailable`, `call_hierarchy_prepare` is never attempted
+    /// -- there is no LSP for this language, so the request is guaranteed to
+    /// fail the same way `attempt_grep_fallback`'s caller already handles.
+    /// Handle `Readiness::Unavailable` up front: skip the wasted
+    /// `call_hierarchy_prepare` RPC entirely (there is no LSP process to ask)
+    /// and go straight to the grep fallback, reporting the terminal
+    /// "no LSP for this language" fact via `LspResolution::unavailable`.
+    async fn resolve_lsp_dependencies_when_unavailable(
+        &self,
+        scope: &pathfinder_common::types::SymbolScope,
+        project_only: bool,
+        max_dependencies: u32,
+        language: String,
+        install_hint: String,
+        alternative: String,
+    ) -> LspResolution {
+        let mut dependencies = Vec::new();
+        let mut engines = vec!["tree-sitter"];
+        let (_deg, grep_reason, dependencies_truncated) = self
+            .attempt_grep_fallback(
+                scope,
+                &mut dependencies,
+                &mut engines,
+                project_only,
+                max_dependencies,
+            )
+            .await;
+        // Mirror the Err(NoLspAvailable) arm in `resolve_lsp_dependencies`:
+        // report the more informative `GrepFallbackDependencies` reason when
+        // grep actually found something, `NoLsp` only when it found nothing
+        // either.
+        let degraded_reason = if dependencies.is_empty() {
+            Some(DegradedReason::NoLsp)
+        } else {
+            grep_reason
+        };
+        LspResolution {
+            dependencies,
+            degraded: true,
+            degraded_reason,
+            engines,
+            dependencies_truncated,
+            unavailable: Some((language, install_hint, alternative)),
+        }
+    }
+
     async fn resolve_lsp_dependencies(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
         scope: &pathfinder_common::types::SymbolScope,
         project_only: bool,
         max_dependencies: u32,
+        readiness: pathfinder_lsp::types::Readiness,
     ) -> LspResolution {
+        if let pathfinder_lsp::types::Readiness::Unavailable {
+            language,
+            install_hint,
+            alternative,
+        } = readiness
+        {
+            return self
+                .resolve_lsp_dependencies_when_unavailable(
+                    scope,
+                    project_only,
+                    max_dependencies,
+                    language,
+                    install_hint,
+                    alternative,
+                )
+                .await;
+        }
+
         let mut dependencies = Vec::new();
         let mut engines = vec!["tree-sitter"];
+
+        let ext = semantic_path
+            .file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = pathfinder_lsp::language_id_for_extension(ext).unwrap_or("unknown");
+        let (position_line, position_char) = self
+            .compute_lsp_position(
+                &semantic_path.file_path,
+                scope.name_line,
+                scope.name_column,
+                language_id,
+            )
+            .await;
 
         let lsp_result = self
             .lawyer
             .call_hierarchy_prepare(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
-                u32::try_from(scope.name_line + 1).unwrap_or(1),
-                u32::try_from(scope.name_column + 1).unwrap_or(1),
+                position_line,
+                position_char,
             )
             .await;
 
-        let (degraded, degraded_reason, dependencies_truncated) = match lsp_result {
+        let (degraded, degraded_reason, dependencies_truncated) = self
+            .handle_call_hierarchy_prepare_result(CallHierarchyPrepareArgs {
+                lsp_result,
+                scope,
+                dependencies: &mut dependencies,
+                engines: &mut engines,
+                project_only,
+                max_dependencies,
+            })
+            .await;
+
+        LspResolution {
+            dependencies,
+            degraded,
+            degraded_reason,
+            engines,
+            dependencies_truncated,
+            unavailable: None,
+        }
+    }
+
+    /// Dispatch on the `call_hierarchy_prepare` outcome: populate
+    /// `dependencies`/`engines` in place and return `(degraded,
+    /// degraded_reason, dependencies_truncated)`. Split out of
+    /// `resolve_lsp_dependencies` purely to keep that function under the
+    /// line-count lint threshold — no behavior change.
+    async fn handle_call_hierarchy_prepare_result(
+        &self,
+        args: CallHierarchyPrepareArgs<'_>,
+    ) -> (bool, Option<DegradedReason>, bool) {
+        let CallHierarchyPrepareArgs {
+            lsp_result,
+            scope,
+            dependencies,
+            engines,
+            project_only,
+            max_dependencies,
+        } = args;
+        match lsp_result {
             Ok(items) if !items.is_empty() => {
                 let mut degraded = true;
                 let mut degraded_reason = Some(DegradedReason::NoLsp);
                 let trunc = self
                     .append_outgoing_deps(AppendOutgoingArgs {
                         item: &items[0],
-                        dependencies: &mut dependencies,
-                        engines: &mut engines,
+                        dependencies,
+                        engines,
                         degraded: &mut degraded,
                         degraded_reason: &mut degraded_reason,
                         project_only,
@@ -89,8 +218,8 @@ impl PathfinderServer {
                     scope,
                     project_only,
                     max_dependencies,
-                    dependencies: &mut dependencies,
-                    engines: &mut engines,
+                    dependencies,
+                    engines,
                 })
                 .await
             }
@@ -108,8 +237,8 @@ impl PathfinderServer {
                 let (deg, grep_reason, trunc) = self
                     .attempt_grep_fallback(
                         scope,
-                        &mut dependencies,
-                        &mut engines,
+                        dependencies,
+                        engines,
                         project_only,
                         max_dependencies,
                     )
@@ -121,14 +250,6 @@ impl PathfinderServer {
                 };
                 (deg, final_reason, trunc)
             }
-        };
-
-        LspResolution {
-            dependencies,
-            degraded,
-            degraded_reason,
-            engines,
-            dependencies_truncated,
         }
     }
 
@@ -384,13 +505,24 @@ impl PathfinderServer {
             .and_then(|e| e.to_str())
             .unwrap_or("");
         let language_id = pathfinder_lsp::language_id_for_extension(ext).unwrap_or("unknown");
-        let _ = self
+        let readiness = self
             .lawyer
             .ensure_ready(language_id, std::time::Duration::from_secs(5))
-            .await;
+            .await
+            .unwrap_or(pathfinder_lsp::types::Readiness::Unavailable {
+                language: language_id.to_string(),
+                install_hint: format!("No LSP configured for {language_id}"),
+                alternative: "Built-in fallback tools".to_string(),
+            });
 
         let resolution = self
-            .resolve_lsp_dependencies(&semantic_path, &scope, true, params.max_dependencies)
+            .resolve_lsp_dependencies(
+                &semantic_path,
+                &scope,
+                true,
+                params.max_dependencies,
+                readiness,
+            )
             .await;
 
         let duration_ms = start.elapsed().as_millis();
@@ -499,28 +631,38 @@ impl PathfinderServer {
             Some("treesitter_direct".to_owned())
         };
 
-        let status = if resolution.degraded {
-            if warm_start_in_progress == Some(true) {
-                pathfinder_common::types::ToolStatus::NotReady {
-                    elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
-                    retry_after_secs: 15,
-                    eta_secs: None,
-                    phase: "indexing".to_string(),
-                    attempt: retry_attempt,
-                    max_attempts: 3,
+        let status =
+            if let Some((language, install_hint, alternative)) = resolution.unavailable.clone() {
+                // Terminal, config-level fact reported by `ensure_ready` before
+                // any LSP request was attempted -- takes priority over the
+                // generic degraded/warm-up classification below.
+                pathfinder_common::types::ToolStatus::Unavailable {
+                    language,
+                    install_hint,
+                    alternative,
+                }
+            } else if resolution.degraded {
+                if warm_start_in_progress == Some(true) {
+                    pathfinder_common::types::ToolStatus::NotReady {
+                        elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
+                        retry_after_secs: 15,
+                        eta_secs: None,
+                        phase: "indexing".to_string(),
+                        attempt: retry_attempt,
+                        max_attempts: 3,
+                    }
+                } else {
+                    pathfinder_common::types::ToolStatus::Degraded {
+                        reason: resolution
+                            .degraded_reason
+                            .as_ref()
+                            .map_or_else(|| "degraded".into(), ToString::to_string),
+                        retry_after_secs: None,
+                    }
                 }
             } else {
-                pathfinder_common::types::ToolStatus::Degraded {
-                    reason: resolution
-                        .degraded_reason
-                        .as_ref()
-                        .map_or_else(|| "degraded".into(), ToString::to_string),
-                    retry_after_secs: None,
-                }
-            }
-        } else {
-            pathfinder_common::types::ToolStatus::Ok
-        };
+                pathfinder_common::types::ToolStatus::Ok
+            };
 
         let deps_evidence = if resolution.degraded {
             if resolution.dependencies.is_empty() {

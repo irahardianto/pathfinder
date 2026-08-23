@@ -1156,11 +1156,33 @@ async fn test_find_all_references_lsp_timeout_uses_grep_fallback() {
     assert_eq!(val.warm_start_in_progress, Some(true));
     assert_eq!(val.resolution_strategy, Some("grep_file_scoped".to_owned()));
 
-    // Grep fallback should provide results
-    assert!(val.references.is_some());
-    let refs = val.references.unwrap();
-    assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].file, "src/main.rs");
+    // Contract 1 Decision 3.4: a timeout resolves `status` to `NotReady`, and
+    // `NotReady` MUST NOT carry a plausible-looking result list in the primary
+    // `references` field — grep candidates belong in `heuristic_candidates`
+    // only. Regression coverage for the "references.rs:894-915" defect: this
+    // test used to assert `val.references.is_some()` for this exact scenario,
+    // which was the literal Contract 1 violation this fix closes.
+    assert!(
+        matches!(
+            val.status,
+            pathfinder_common::types::ToolStatus::NotReady { .. }
+        ),
+        "a request timeout must resolve to NotReady, got {:?}",
+        val.status
+    );
+    assert!(
+        val.references.is_none(),
+        "NotReady must never populate the primary `references` field, got {:?}",
+        val.references
+    );
+
+    // The same grep candidates must still be reachable via the opt-in
+    // heuristic channel, so the agent isn't left with nothing.
+    let candidates = val
+        .heuristic_candidates
+        .expect("grep fallback results must surface via heuristic_candidates under NotReady");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].file, "src/main.rs");
 }
 
 #[tokio::test]
@@ -1358,7 +1380,13 @@ async fn test_grep_references_fallback_regex_compilation_warning() {
     };
 
     let res = server
-        .grep_references_fallback("test_symbol", definition_path, &definition_scope, &params)
+        .grep_references_fallback(
+            "test_symbol",
+            definition_path,
+            &definition_scope,
+            &params,
+            &super::super::GrepFallbackBudget::new(),
+        )
         .await;
     assert!(res.is_none());
 }
@@ -1417,7 +1445,13 @@ async fn test_grep_references_fallback_overflows() {
     };
 
     let fallback_res = server
-        .grep_references_fallback("test_symbol", definition_path, &definition_scope, &params)
+        .grep_references_fallback(
+            "test_symbol",
+            definition_path,
+            &definition_scope,
+            &params,
+            &super::super::GrepFallbackBudget::new(),
+        )
         .await;
 
     assert!(fallback_res.is_some());
@@ -1426,6 +1460,89 @@ async fn test_grep_references_fallback_overflows() {
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].line, 1);
     assert_eq!(refs[0].column, 1);
+}
+
+/// RSP-A10: `grep_references_fallback` previously ran with no wall-clock
+/// bound at all — unlike every other grep-fallback caller in this tool
+/// surface (`impact.rs`/`definition.rs`/`deep_context.rs`), it never
+/// consulted a `GrepFallbackBudget`. This proves the budget is now actually
+/// enforced:
+/// an exhausted budget must short-circuit to `None` *before* issuing the
+/// underlying search — verified by asserting the mock scout's `search()`
+/// was never invoked (avoiding the wasted RPC), not merely by checking the
+/// returned value.
+#[tokio::test]
+async fn test_grep_references_fallback_exhausted_budget_skips_search_entirely() {
+    let surgeon = Arc::new(MockSurgeon::default());
+    let lawyer = Arc::new(pathfinder_lsp::MockLawyer::default());
+    let scout = Arc::new(pathfinder_search::MockScout::default());
+
+    let ws_dir = crate::server::tools::navigation::test_helpers::make_temp_workspace();
+    let ws = pathfinder_common::types::WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = pathfinder_common::config::PathfinderConfig::default();
+    let sandbox = pathfinder_common::sandbox::Sandbox::new(ws.path(), &config.sandbox);
+    let server = crate::server::PathfinderServer::with_all_engines(
+        ws,
+        config,
+        sandbox,
+        scout.clone(),
+        surgeon,
+        lawyer,
+    );
+
+    // A queued result exists, so if the budget check were missing/broken,
+    // this call would happily "succeed" and return a match -- proving the
+    // short-circuit is load-bearing, not a no-op.
+    scout.set_result(Ok(pathfinder_search::SearchResult {
+        matches: vec![pathfinder_search::SearchMatch {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 1,
+            content: "fn main() {}".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "hash".to_string(),
+            known: None,
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 1,
+    }));
+
+    let definition_path = std::path::Path::new("src/main.rs");
+    let definition_scope = super::super::test_helpers::make_scope();
+    let params = crate::server::types::TraceParams {
+        semantic_path: "src/main.rs::main".to_string(),
+        max_references: 100,
+        offset: 0,
+        ..Default::default()
+    };
+
+    // max_searches = 0 => acquire_search() returns None immediately.
+    let exhausted_budget =
+        super::super::GrepFallbackBudget::with_budget(std::time::Duration::from_secs(10), 0);
+
+    let fallback_res = server
+        .grep_references_fallback(
+            "test_symbol",
+            definition_path,
+            &definition_scope,
+            &params,
+            &exhausted_budget,
+        )
+        .await;
+
+    assert!(
+        fallback_res.is_none(),
+        "exhausted budget must short-circuit to None"
+    );
+    assert_eq!(
+        scout.call_count(),
+        0,
+        "search() must not be invoked once the shared grep-fallback budget is exhausted"
+    );
 }
 
 #[tokio::test]

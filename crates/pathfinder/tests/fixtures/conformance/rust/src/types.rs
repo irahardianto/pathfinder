@@ -23,8 +23,7 @@ pub fn decorated_function() -> u32 {
     100
 }
 
-/// Non-ASCII characters before symbol name on declaration line.
-// 🦀 café 🌍 greeting
-pub fn non_ascii_hello() -> &'static str {
+/// Non-ASCII characters before the symbol name, on its own declaration line (TS-A2).
+pub fn /* 🦀 café 🌍 */ non_ascii_hello() -> &'static str {
     "hello"
 }

@@ -127,6 +127,20 @@ pub struct DetectedCapabilities {
     /// Incremented by `apply_registration` on each successful registration.
     #[serde(default)]
     pub registrations_received: u32,
+    /// The position encoding negotiated with this server (TS-A2 / LSP-A5).
+    ///
+    /// Parsed from `result.capabilities.positionEncoding` in the `initialize`
+    /// response. Per LSP 3.17, a server that omits this field is using
+    /// `utf-16` (the spec default when unnegotiated) — never assume `utf-8`.
+    /// Drives the byte-column-to-LSP-character conversion applied at every
+    /// Tree-sitter-to-LSP position handoff
+    /// ([`pathfinder_treesitter::surgeon::to_lsp_character`]).
+    ///
+    /// Not serialized: this is a client-side wire-protocol implementation
+    /// detail, not an agent-facing fact (consistent with `static_flags`/
+    /// `static_diagnostics_strategy` above).
+    #[serde(skip)]
+    pub position_encoding: pathfinder_treesitter::surgeon::PositionEncoding,
 }
 
 impl DetectedCapabilities {
@@ -189,6 +203,18 @@ impl DetectedCapabilities {
         let call_hierarchy_provider = is_cap("callHierarchyProvider");
         let formatting_provider = is_cap("documentFormattingProvider");
 
+        // TS-A2 / LSP-A5: per LSP 3.17, `positionEncoding` is negotiated from
+        // the client's offered `general.positionEncodings` (`process.rs`
+        // declares `["utf-8", "utf-16"]`). A server MUST NOT return a value
+        // outside that offered set; if it does anyway (a non-conformant
+        // server, e.g. reporting "utf-32"), fail safe to the spec default
+        // (`utf-16`) rather than assuming byte-for-byte `utf-8`. Absence of
+        // the field also means `utf-16` per spec — never assume `utf-8`.
+        let position_encoding = match caps.get("positionEncoding").and_then(|v| v.as_str()) {
+            Some("utf-8") => pathfinder_treesitter::surgeon::PositionEncoding::Utf8,
+            _ => pathfinder_treesitter::surgeon::PositionEncoding::Utf16,
+        };
+
         Self {
             flags: CapabilityFlags {
                 definition_provider,
@@ -213,6 +239,7 @@ impl DetectedCapabilities {
             static_diagnostics_strategy: diagnostics_strategy,
             // Counts successful dynamic registrations (monotonic counter).
             registrations_received: 0,
+            position_encoding,
         }
     }
 

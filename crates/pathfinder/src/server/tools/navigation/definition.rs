@@ -481,14 +481,29 @@ impl PathfinderServer {
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let _doc_guard = self.open_document_for_definition(semantic_path).await;
 
+        let ext = semantic_path
+            .file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = pathfinder_lsp::language_id_for_extension(ext).unwrap_or("unknown");
+        let (position_line, position_char) = self
+            .compute_lsp_position(
+                &semantic_path.file_path,
+                symbol_scope.name_line,
+                symbol_scope.name_column,
+                language_id,
+            )
+            .await;
+
         let lsp_start = std::time::Instant::now();
         let lsp_result = self
             .lawyer
             .goto_definition(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
-                u32::try_from(symbol_scope.name_line + 1).unwrap_or(1),
-                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
+                position_line,
+                position_char,
             )
             .await;
         let lsp_ms = lsp_start.elapsed().as_millis();
@@ -977,10 +992,10 @@ impl PathfinderServer {
     ) -> Option<GetDefinitionResponse> {
         let deadline = budget.acquire_search()?;
 
-        let name = regex::escape(&symbol_name);
-        let pattern = format!(
-            r"(?:fn|def|function|class|struct|interface|type|enum|record)\s+(?:<[^>]+>\s+)?{name}\b"
-        );
+        // RSP-A10: shared with `candidate_definition_pattern`'s own
+        // catch-all arm (see `generic_definition_pattern`) instead of a
+        // hand-rolled, independently-drifting variant.
+        let pattern = super::generic_definition_pattern(&symbol_name);
 
         let search_result = self
             .scout

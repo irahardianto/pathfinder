@@ -40,6 +40,15 @@ impl Lawyer for LspClient {
         Ok(Box::new(guard))
     }
 
+    fn position_encoding(
+        &self,
+        language_id: &str,
+    ) -> pathfinder_treesitter::surgeon::PositionEncoding {
+        self.capabilities_for(language_id)
+            .map(|caps| caps.position_encoding)
+            .unwrap_or_default()
+    }
+
     async fn goto_definition(
         &self,
         workspace_root: &Path,

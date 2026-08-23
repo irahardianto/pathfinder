@@ -3043,6 +3043,78 @@ async fn test_process_grep_fallback_results_both_some() {
     );
 }
 
+fn make_impact_reference(name: &str) -> crate::server::types::ImpactReference {
+    crate::server::types::ImpactReference {
+        semantic_path: format!("src/lib.rs::{name}"),
+        file: "src/lib.rs".to_string(),
+        line: 1,
+        snippet: format!("fn {name}()"),
+        direction: "incoming_heuristic".to_string(),
+        depth: 0,
+        confidence: pathfinder_common::types::Confidence::Heuristic,
+    }
+}
+
+/// Regression test for the illegal-state pagination bug: when a shared
+/// `max_references` budget is exhausted entirely by `incoming` (e.g. a common
+/// symbol name under grep fallback), the remaining budget for `outgoing` can
+/// hit zero. Contract 2 Rule 2 forbids `Evidence { confidence: Heuristic,
+/// items: [] }` — a budget-starved `Heuristic` evidence must become `None`
+/// (UNKNOWN), never a populated-looking-but-empty `Some(Evidence)`, which
+/// `helpers::validate_evidence` would otherwise flag as an illegal state.
+#[test]
+fn test_paginate_call_hierarchy_evidence_budget_starved_outgoing_becomes_none_not_illegal_empty() {
+    let raw_inc = Some(pathfinder_common::types::Evidence::heuristic(vec![
+        make_impact_reference("a"),
+        make_impact_reference("b"),
+        make_impact_reference("c"),
+        make_impact_reference("d"),
+        make_impact_reference("e"),
+    ]));
+    let raw_out = Some(pathfinder_common::types::Evidence::heuristic(vec![
+        make_impact_reference("f"),
+    ]));
+
+    // max_references=5 with inc_count=5: incoming alone consumes the entire
+    // budget, leaving rem_budget=0 for outgoing.
+    let (paginated_inc, paginated_out) =
+        PathfinderServer::paginate_call_hierarchy_evidence(raw_inc, raw_out, 0, 5, 5);
+
+    assert_eq!(
+        paginated_inc
+            .expect("incoming should keep its full share")
+            .items
+            .len(),
+        5
+    );
+    assert!(
+        paginated_out.is_none(),
+        "budget-starved Heuristic evidence must be None (UNKNOWN), never \
+         Some(Evidence {{ confidence: Heuristic, items: [] }}); got {paginated_out:?}"
+    );
+}
+
+/// A `Verified` evidence with zero items is a legitimate, distinct signal
+/// ("confirmed zero") and must NOT be collapsed to `None` by the same
+/// re-clamp logic — only `Heuristic` + empty is illegal per Contract 2 Rule 2.
+#[test]
+fn test_paginate_call_hierarchy_evidence_verified_empty_out_stays_some() {
+    let raw_inc = Some(pathfinder_common::types::Evidence::verified(vec![
+        make_impact_reference("a"),
+    ]));
+    let raw_out = Some(pathfinder_common::types::Evidence::verified(vec![]));
+
+    let (_paginated_inc, paginated_out) =
+        PathfinderServer::paginate_call_hierarchy_evidence(raw_inc, raw_out, 0, 20, 1);
+
+    let out = paginated_out.expect("a genuine verified-zero must stay Some(Evidence{..,[]})");
+    assert_eq!(
+        out.confidence,
+        pathfinder_common::types::Confidence::Verified
+    );
+    assert!(out.items.is_empty());
+}
+
 // ── ENRICH-1: BFS output semantic paths are hierarchically qualified ─────────
 
 /// When LSP returns a caller whose file+line maps to a method inside a struct/impl,
@@ -3990,10 +4062,93 @@ async fn test_trace_degraded_null_incoming_has_hint_and_unverified() {
     // Contract 2: callers and callees are None (UNKNOWN) when degraded with no fallback matches
     assert!(val.incoming.is_none());
     assert!(val.outgoing.is_none());
-    assert!(matches!(
-        val.status,
-        pathfinder_common::types::ToolStatus::Degraded { .. }
-    ));
+    // `NoOpLawyer` represents "no LSP binary for this language at all" -- a
+    // terminal, config-level fact `ensure_ready` now reports up front as
+    // `ToolStatus::Unavailable` (install hint + "do not retry"), which is
+    // more accurate than `Degraded` ("the server ran but had trouble,
+    // retrying might help") for this exact scenario. `degraded`/`hint`
+    // (asserted above) are unchanged; only the top-level `status`
+    // discriminant improved.
+    assert!(
+        matches!(
+            val.status,
+            pathfinder_common::types::ToolStatus::Unavailable { .. }
+        ),
+        "expected ToolStatus::Unavailable for a NoOpLawyer-backed session, got {:?}",
+        val.status
+    );
+}
+
+/// Regression test: `ensure_ready` reporting `Unavailable` must (a) surface
+/// the full `language`/`install_hint`/`alternative` payload on
+/// `ToolStatus::Unavailable`, and (b) skip `call_hierarchy_prepare` entirely
+/// rather than attempting a request guaranteed to fail the same way. Proven
+/// by configuring `MockLawyer` with a queued `prepare_call_hierarchy_result`
+/// that WOULD produce real data if consumed — the correct behaviour never
+/// touches it.
+#[tokio::test]
+async fn test_find_callers_callees_unavailable_skips_wasted_prepare_call() {
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+
+    let lawyer = Arc::new(MockLawyer::default());
+    lawyer.set_readiness(pathfinder_lsp::types::Readiness::Unavailable {
+        language: "rust".to_string(),
+        install_hint: "install rust-analyzer".to_string(),
+        alternative: "use your host's grep tool".to_string(),
+    });
+    // If `call_hierarchy_prepare` were called despite ensure_ready already
+    // reporting Unavailable, this queued item would make incoming non-empty
+    // and the assertions below would fail.
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![CallHierarchyItem {
+        name: "should_never_be_consumed".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 1,
+        column: 1,
+        data: None,
+    }]));
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    match val.status {
+        pathfinder_common::types::ToolStatus::Unavailable {
+            language,
+            install_hint,
+            alternative,
+        } => {
+            assert_eq!(language, "rust");
+            assert_eq!(install_hint, "install rust-analyzer");
+            assert_eq!(alternative, "use your host's grep tool");
+        }
+        other => panic!("expected ToolStatus::Unavailable, got {other:?}"),
+    }
+
+    // The queued prepare_call_hierarchy_result must never have been consumed
+    // -- confirmed by the fact that no "should_never_be_consumed" item made
+    // it into `incoming` (grep found nothing either, since MockScout is
+    // unconfigured by default here).
+    if let Some(inc) = &val.incoming {
+        assert!(
+            !inc.items.iter().any(|r| r.semantic_path.contains("should_never_be_consumed")),
+            "call_hierarchy_prepare's queued result leaked through -- it should never have been called"
+        );
+    }
 }
 
 /// PATCH-003 DELIVERABLE D Test 2: When `degraded=false` AND `incoming=Some([])`
@@ -4487,6 +4642,131 @@ async fn test_trace_bfs_empty_grep_replacement_is_unverified() {
         "incoming confidence must be Heuristic when grep REPLACED BFS empty result with \
          heuristic matches."
     );
+}
+
+/// LSP-A1 regression: the asymmetric case the original finding named by
+/// example — `incoming=[]` (cold global index) alongside `outgoing=[real
+/// item]` (warm file-local resolution) — must NOT ship `incoming` as a
+/// BFS-verified confirmed-zero just because `outgoing` happened to resolve.
+/// The old both-empty-only gate never re-checked a lone empty direction;
+/// this proves the fix re-checks it via grep, downgrades ONLY that
+/// direction to `Heuristic`, and — just as importantly — leaves the
+/// already-good `outgoing` BFS result untouched at `Confidence::Verified`
+/// rather than also downgrading it (Contract 2 Rule 4 forbids `Verified`
+/// under `Degraded`, so the whole response's `status`/`degraded` still
+/// reports degraded — but the data itself must show which half is real).
+#[tokio::test]
+async fn test_trace_asymmetric_empty_incoming_warm_outgoing_rechecks_only_incoming() {
+    use pathfinder_search::{SearchMatch, SearchResult};
+
+    let surgeon = Arc::new(MockSurgeon::new());
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
+    surgeon
+        .enclosing_symbol_detail_results
+        .lock()
+        .unwrap()
+        .push(Ok(None));
+
+    let ws_dir = make_temp_workspace();
+    let ws = WorkspaceRoot::new(ws_dir.path()).expect("valid root");
+    let config = PathfinderConfig::default();
+    let sandbox = Sandbox::new(ws.path(), &config.sandbox);
+
+    let src = ws_dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("auth.rs"), "fn login() -> bool { true }").unwrap();
+    std::fs::write(src.join("caller.rs"), "fn handle_request() { login(); }").unwrap();
+
+    // Grep finds a real candidate for the empty (incoming) side only.
+    let scout = Arc::new(MockScout::default());
+    scout.set_results(vec![Ok(SearchResult {
+        matches: vec![SearchMatch {
+            file: "src/caller.rs".to_owned(),
+            line: 1,
+            column: 1,
+            content: "fn handle_request() { login(); }".to_owned(),
+            context_before: vec![],
+            context_after: vec![],
+            enclosing_semantic_path: None,
+            is_definition: None,
+            version_hash: "sha256:test".to_owned(),
+            known: Some(false),
+        }],
+        total_matches: 1,
+        truncated: false,
+        files_searched: 0,
+    })]);
+
+    let lawyer = Arc::new(MockLawyer::default());
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
+        file: "src/auth.rs".into(),
+        line: 9,
+        column: 4,
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    // Incoming: genuinely empty (cold global index).
+    lawyer.push_incoming_call_result(Ok(vec![]));
+    // Outgoing: genuinely resolved via the file-local syntax tree.
+    lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
+        item: CallHierarchyItem {
+            name: "helper".into(),
+            kind: "function".into(),
+            detail: None,
+            file: "src/auth.rs".into(),
+            line: 20,
+            column: 4,
+            data: None,
+        },
+        call_sites: vec![],
+    }]));
+
+    let server = PathfinderServer::with_all_engines(ws, config, sandbox, scout, surgeon, lawyer);
+
+    let params = TraceParams {
+        semantic_path: "src/auth.rs::login".to_owned(),
+        max_depth: 1,
+        ..Default::default()
+    };
+
+    let result = server.find_callers_callees_impl(params).await;
+    let call_res = result.expect("should succeed");
+    let val: crate::server::types::FindCallersCalleesMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+
+    let incoming = val
+        .incoming
+        .as_ref()
+        .expect("incoming must be Some — grep re-checked the empty side and found a candidate");
+    assert_eq!(
+        incoming.confidence,
+        pathfinder_common::types::Confidence::Heuristic,
+        "the empty (incoming) direction must be downgraded to Heuristic once grep replaces it, \
+         never left as a BFS-verified confirmed-zero (LSP-A1)"
+    );
+    assert_eq!(incoming.items.len(), 1);
+    assert_eq!(incoming.items[0].file, "src/caller.rs");
+
+    // The already-good outgoing BFS result must survive untouched by the
+    // incoming-side re-check — the fix must not re-query or overwrite a
+    // direction that already has real data.
+    let outgoing = val
+        .outgoing
+        .as_ref()
+        .expect("outgoing must still be populated");
+    assert_eq!(
+        outgoing.items.len(),
+        1,
+        "outgoing's real BFS result must not be replaced"
+    );
+    assert_eq!(outgoing.items[0].semantic_path, "src/auth.rs::helper");
 }
 
 // ── Additional Coverage Tests ──────────────────────────────────────────
