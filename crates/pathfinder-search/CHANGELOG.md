@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.12](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-search-v0.5.11...pathfinder-mcp-search-v0.5.12) - 2026-08-23
+
+### Added
+
+- *(v6)* overhaul Pathfinder into precision 3-tool resolution layer
+
+### Other
+
+- add missing rustdoc ahead of the workspace missing_docs lint
+
 ## [0.5.11](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-search-v0.5.10...pathfinder-mcp-search-v0.5.11) - 2026-07-27
 
 ### Other
