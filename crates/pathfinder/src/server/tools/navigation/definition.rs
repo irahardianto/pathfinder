@@ -14,6 +14,14 @@ use rmcp::model::ErrorData;
 
 use super::{candidate_definition_pattern, definition_patterns, GrepFallbackBudget};
 
+struct NotReadyArgs {
+    elapsed_secs: u32,
+    retry_after_secs: u32,
+    eta_secs: Option<u32>,
+    phase: String,
+    retry_attempt: u32,
+}
+
 impl PathfinderServer {
     /// Applies a context-specific [`DegradedReason`] override to a grep-fallback
     /// response, preserving strategy-specific reasons (e.g.
@@ -37,64 +45,17 @@ impl PathfinderServer {
         def.duration_ms = Some(millis_to_u64(start.elapsed().as_millis()));
     }
 
-    /// Handles the `Ok(None)` LSP outcome: retries once after a brief warmup
-    /// wait, then falls back to grep, then to a `SymbolNotFound` error with
-    /// "did you mean" suggestions.
+    /// Handles the `Ok(None)` LSP outcome: falls back to grep, then to a
+    /// `SymbolNotFound` error with "did you mean" suggestions.
     async fn resolve_lsp_definition_none(
         &self,
         semantic_path: &pathfinder_common::types::SemanticPath,
         semantic_path_str: String,
-        symbol_scope: &pathfinder_common::types::SymbolScope,
+        _symbol_scope: &pathfinder_common::types::SymbolScope,
         start: std::time::Instant,
         tree_sitter_ms: u128,
         lsp_ms: u128,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        // Symbol has no definition (e.g., built-in, external) or LSP is still warming up.
-        //
-        // Retry once after a brief wait: if the LSP just finished indexing
-        // between our did_open and the query, a second attempt often succeeds.
-        // 1s is sufficient — if LSP still isn't ready, grep fallback handles it.
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        let retry_lsp_result = self
-            .lawyer
-            .goto_definition(
-                self.workspace_root.path(),
-                &semantic_path.file_path,
-                u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
-                u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
-            )
-            .await;
-
-        if let Ok(Some(def)) = retry_lsp_result {
-            tracing::info!(
-                tool = "get_definition",
-                file = %def.file,
-                definition_line = def.line,
-                tree_sitter_ms,
-                lsp_ms,
-                duration_ms = start.elapsed().as_millis(),
-                engines_used = ?["tree-sitter", "lsp"],
-                "get_definition: complete (succeeded on retry after warmup wait)"
-            );
-            return Ok(Self::get_def_to_call_result(&GetDefinitionResponse {
-                status: pathfinder_common::types::ToolStatus::Ok,
-                file: def.file,
-                line: def.line,
-                column: def.column,
-                preview: def.preview,
-                degraded: false,
-                degraded_reason: None,
-                actionable_guidance: None,
-                lsp_readiness: Some("warming_up".to_owned()),
-                warm_start_in_progress: Some(true),
-                duration_ms: Some(millis_to_u64(start.elapsed().as_millis())),
-                resolution_strategy: Some("lsp_retry".to_owned()),
-            }));
-        }
-
-        // Re-capture duration after the 1s sleep + retry attempt
-        // so downstream logs reflect the full elapsed time.
         let duration_ms = start.elapsed().as_millis();
 
         tracing::info!(
@@ -137,11 +98,10 @@ impl PathfinderServer {
         );
         let did_you_mean_suggestions = self.compute_did_you_mean(semantic_path).await;
 
-        // Spec 2.4: Check if LSP is still warming up and suggest retry delay
         let retry_after = if self.lawyer.is_warm_start_complete() {
             None
         } else {
-            Some(10u32) // 10 seconds when warmup is in progress
+            Some(10u32)
         };
 
         Err(pathfinder_to_error_data(&PathfinderError::SymbolNotFound {
@@ -441,28 +401,97 @@ impl PathfinderServer {
             .locate_symbol_for_definition(&semantic_path_str, start)
             .await?;
 
-        // IW-3 (DS-1 gap fix): `_doc_guard` is held until the end of this
-        // function; dropping it fires did_close on all exit paths (success,
-        // error, early return).
-        let _doc_guard = self.open_document_for_definition(&semantic_path).await;
+        let ext = semantic_path
+            .file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = pathfinder_lsp::language_id_for_extension(ext).unwrap_or("unknown");
+        let readiness = self
+            .lawyer
+            .ensure_ready(language_id, std::time::Duration::from_secs(5))
+            .await
+            .unwrap_or(pathfinder_lsp::types::Readiness::Unavailable {
+                language: language_id.to_string(),
+                install_hint: format!("No LSP configured for {language_id}"),
+                alternative: "Built-in fallback tools".to_string(),
+            });
 
-        // Query LSP for the definition location at the symbol's start line
+        match readiness {
+            pathfinder_lsp::types::Readiness::Ready(_) => {
+                self.handle_ready_definition(
+                    &semantic_path,
+                    &semantic_path_str,
+                    &symbol_scope,
+                    start,
+                    tree_sitter_ms,
+                )
+                .await
+            }
+            pathfinder_lsp::types::Readiness::NotReady {
+                elapsed_secs,
+                retry_after_secs,
+                eta_secs,
+                phase,
+            } => {
+                self.handle_not_ready_definition(
+                    &semantic_path,
+                    start,
+                    NotReadyArgs {
+                        retry_attempt: params.retry_attempt,
+                        elapsed_secs,
+                        retry_after_secs,
+                        eta_secs,
+                        phase,
+                    },
+                )
+                .await
+            }
+            pathfinder_lsp::types::Readiness::Unavailable {
+                language,
+                install_hint,
+                alternative,
+            } => {
+                self.handle_unavailable_definition(
+                    &semantic_path,
+                    start,
+                    language,
+                    install_hint,
+                    alternative,
+                )
+                .await
+            }
+            pathfinder_lsp::types::Readiness::Degraded {
+                reason,
+                retry_after_secs,
+            } => {
+                self.handle_degraded_definition(&semantic_path, start, reason, retry_after_secs)
+                    .await
+            }
+        }
+    }
+
+    async fn handle_ready_definition(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        semantic_path_str: &str,
+        symbol_scope: &pathfinder_common::types::SymbolScope,
+        start: std::time::Instant,
+        tree_sitter_ms: u128,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let _doc_guard = self.open_document_for_definition(semantic_path).await;
+
         let lsp_start = std::time::Instant::now();
         let lsp_result = self
             .lawyer
             .goto_definition(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
-                // Convert 0-indexed start_line from SymbolScope to 1-indexed for Lawyer
-                u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
-                // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
-                // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
+                u32::try_from(symbol_scope.name_line + 1).unwrap_or(1),
                 u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
             )
             .await;
         let lsp_ms = lsp_start.elapsed().as_millis();
-
-        // Note: `_doc_guard` is still in scope here and will fire did_close on drop.
         let duration_ms = start.elapsed().as_millis();
 
         match lsp_result {
@@ -494,9 +523,9 @@ impl PathfinderServer {
             }
             Ok(None) => {
                 self.resolve_lsp_definition_none(
-                    &semantic_path,
-                    semantic_path_str,
-                    &symbol_scope,
+                    semantic_path,
+                    semantic_path_str.to_owned(),
+                    symbol_scope,
                     start,
                     tree_sitter_ms,
                     lsp_ms,
@@ -504,16 +533,16 @@ impl PathfinderServer {
                 .await
             }
             Err(LspError::NoLspAvailable) => {
-                self.handle_no_lsp_available(&semantic_path, symbol_scope.language, start)
+                self.handle_no_lsp_available(semantic_path, symbol_scope.language.clone(), start)
                     .await
             }
             Err(LspError::Timeout { .. }) => {
-                self.handle_lsp_timeout(&semantic_path, semantic_path_str, start)
+                self.handle_lsp_timeout(semantic_path, semantic_path_str.to_owned(), start)
                     .await
             }
             Err(e) => {
                 self.handle_lsp_generic_error(
-                    &semantic_path,
+                    semantic_path,
                     e,
                     start,
                     tree_sitter_ms,
@@ -523,6 +552,126 @@ impl PathfinderServer {
                 .await
             }
         }
+    }
+
+    async fn handle_not_ready_definition(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        start: std::time::Instant,
+        args: NotReadyArgs,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let status = pathfinder_common::types::ToolStatus::NotReady {
+            elapsed_secs: args.elapsed_secs,
+            retry_after_secs: args.retry_after_secs,
+            eta_secs: args.eta_secs,
+            phase: args.phase,
+            attempt: args.retry_attempt,
+            max_attempts: 3,
+        };
+        if let Some(mut def) = self.fallback_definition_grep(semantic_path).await {
+            Self::apply_fallback_reason(
+                &mut def,
+                DegradedReason::LspWarmupGrepFallback,
+                start,
+                false,
+            );
+            def.status = status;
+            return Ok(Self::get_def_to_call_result(&def));
+        }
+        let duration_ms = start.elapsed().as_millis();
+        let def = GetDefinitionResponse {
+            status,
+            file: String::new(),
+            line: 0,
+            column: 0,
+            preview: String::new(),
+            degraded: true,
+            degraded_reason: Some(DegradedReason::LspWarmupEmptyUnverified),
+            actionable_guidance: Some(DegradedReason::LspWarmupEmptyUnverified.guidance()),
+            lsp_readiness: Some("warming_up".to_owned()),
+            warm_start_in_progress: Some(true),
+            duration_ms: Some(millis_to_u64(duration_ms)),
+            resolution_strategy: Some("not_ready".to_owned()),
+        };
+        Ok(Self::get_def_to_call_result(&def))
+    }
+
+    async fn handle_unavailable_definition(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        start: std::time::Instant,
+        language: String,
+        install_hint: String,
+        alternative: String,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let status = pathfinder_common::types::ToolStatus::Unavailable {
+            language,
+            install_hint,
+            alternative,
+        };
+        if let Some(mut def) = self.fallback_definition_grep(semantic_path).await {
+            Self::apply_fallback_reason(&mut def, DegradedReason::NoLspGrepFallback, start, true);
+            def.status = pathfinder_common::types::ToolStatus::Degraded {
+                reason: "LSP unavailable; using grep fallback".to_string(),
+                retry_after_secs: None,
+            };
+            return Ok(Self::get_def_to_call_result(&def));
+        }
+        let duration_ms = start.elapsed().as_millis();
+        let def = GetDefinitionResponse {
+            status,
+            file: String::new(),
+            line: 0,
+            column: 0,
+            preview: String::new(),
+            degraded: true,
+            degraded_reason: Some(DegradedReason::NoLsp),
+            actionable_guidance: Some(DegradedReason::NoLsp.guidance()),
+            lsp_readiness: Some("unavailable".to_owned()),
+            warm_start_in_progress: Some(false),
+            duration_ms: Some(millis_to_u64(duration_ms)),
+            resolution_strategy: Some("none".to_owned()),
+        };
+        Ok(Self::get_def_to_call_result(&def))
+    }
+
+    async fn handle_degraded_definition(
+        &self,
+        semantic_path: &pathfinder_common::types::SemanticPath,
+        start: std::time::Instant,
+        reason: String,
+        retry_after_secs: Option<u32>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let status = pathfinder_common::types::ToolStatus::Degraded {
+            reason,
+            retry_after_secs,
+        };
+        if let Some(mut def) = self.fallback_definition_grep(semantic_path).await {
+            Self::apply_fallback_reason(
+                &mut def,
+                DegradedReason::LspErrorGrepFallback,
+                start,
+                true,
+            );
+            def.status = status;
+            return Ok(Self::get_def_to_call_result(&def));
+        }
+        let duration_ms = start.elapsed().as_millis();
+        let def = GetDefinitionResponse {
+            status,
+            file: String::new(),
+            line: 0,
+            column: 0,
+            preview: String::new(),
+            degraded: true,
+            degraded_reason: Some(DegradedReason::LspErrorGrepFallback),
+            actionable_guidance: Some(DegradedReason::LspErrorGrepFallback.guidance()),
+            lsp_readiness: Some("degraded".to_owned()),
+            warm_start_in_progress: Some(false),
+            duration_ms: Some(millis_to_u64(duration_ms)),
+            resolution_strategy: Some("none".to_owned()),
+        };
+        Ok(Self::get_def_to_call_result(&def))
     }
 
     /// Convert a `GetDefinitionResponse` into a `CallToolResult` with a

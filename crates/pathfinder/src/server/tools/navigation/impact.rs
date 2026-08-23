@@ -47,6 +47,22 @@ pub(crate) struct GrepFallbackParams<'a> {
 
 /// Mutable accumulator threaded through the call-hierarchy resolution phases
 /// of [`PathfinderServer::find_callers_callees_impl`]. Consolidates state
+#[derive(Default)]
+struct VerificationStatus {
+    incoming: bool,
+    outgoing: bool,
+}
+
+struct CallHierarchyDegradedStatus {
+    degraded: bool,
+    degraded_reason: Option<DegradedReason>,
+    lsp_readiness: Option<String>,
+    warm_start_in_progress: Option<bool>,
+    status: pathfinder_common::types::ToolStatus,
+}
+
+/// Mutable accumulator threaded through the call-hierarchy resolution phases
+/// of [`PathfinderServer::find_callers_callees_impl`]. Consolidates state
 /// that would otherwise require a long list of `&mut` parameters across the
 /// trait-method-expansion and normal-flow helpers.
 ///
@@ -61,10 +77,7 @@ struct CallHierarchyState {
     engines: Vec<&'static str>,
     files_referenced: std::collections::HashSet<String>,
     max_depth_reached: u32,
-    /// Set when the LSP BFS itself produced the current `incoming`/`outgoing`
-    /// values (as opposed to a grep-based heuristic fallback). Used to
-    /// compute `incoming_verified` / `outgoing_verified` accurately.
-    lsp_bfs_ran: bool,
+    verification: VerificationStatus,
     references_truncated: bool,
     resolution_block: Option<String>,
 }
@@ -81,7 +94,7 @@ impl CallHierarchyState {
             engines: vec!["tree-sitter"],
             files_referenced: std::collections::HashSet::new(),
             max_depth_reached: 0,
-            lsp_bfs_ran: false,
+            verification: VerificationStatus::default(),
             references_truncated: false,
             resolution_block: None,
         }
@@ -829,7 +842,8 @@ impl PathfinderServer {
 
                 state.incoming = Some(all_incoming);
                 state.outgoing = Some(all_outgoing);
-                state.lsp_bfs_ran = true;
+                state.verification.incoming = true;
+                state.verification.outgoing = true;
                 state.resolution_block =
                     Some(Self::format_trait_resolution_block(ctx, &impl_locations));
 
@@ -866,9 +880,8 @@ impl PathfinderServer {
     }
 
     /// Handles the `Ok(items)` (non-empty) branch of `call_hierarchy_prepare`:
-    /// runs BFS in both directions from the first returned item, then — if
-    /// both directions come back empty — retries with a grep-based fallback
-    /// to guard against false negatives (e.g. a still-partially-indexed LSP).
+    /// executes incoming and outgoing BFS traversals and runs grep fallbacks
+    /// if both return empty.
     async fn handle_call_hierarchy_items(
         &self,
         items: &[pathfinder_lsp::types::CallHierarchyItem],
@@ -877,14 +890,11 @@ impl PathfinderServer {
         remaining_outgoing: &mut u32,
         state: &mut CallHierarchyState,
     ) {
+        let initial_item = &items[0];
         state.engines.push("lsp");
         state.degraded = false;
         state.degraded_reason = None;
 
-        let initial_item = &items[0];
-        state.files_referenced.insert(initial_item.file.clone());
-
-        // --- INCOMING BFS ---
         let mut in_state = BfsTraverseState {
             files_referenced: &mut state.files_referenced,
             project_only: ctx.project_only,
@@ -900,9 +910,9 @@ impl PathfinderServer {
             )
             .await;
         state.incoming = Some(incoming_refs);
-        state.max_depth_reached = state.max_depth_reached.max(depth_in);
+        state.max_depth_reached = depth_in;
+        state.verification.incoming = true;
 
-        // --- OUTGOING BFS ---
         let mut out_state = BfsTraverseState {
             files_referenced: &mut state.files_referenced,
             project_only: ctx.project_only,
@@ -919,7 +929,7 @@ impl PathfinderServer {
             .await;
         state.outgoing = Some(outgoing_refs);
         state.max_depth_reached = state.max_depth_reached.max(depth_out);
-        state.lsp_bfs_ran = true;
+        state.verification.outgoing = true;
 
         // Check for false negatives when BFS call hierarchy traversal returns 0 callers/callees
         if state.incoming.as_ref().is_none_or(Vec::is_empty)
@@ -943,11 +953,11 @@ impl PathfinderServer {
                 state.degraded = true;
                 state.degraded_reason = Some(DegradedReason::LspWarmupGrepFallback);
                 if grep_in.is_some() {
-                    state.lsp_bfs_ran = false;
+                    state.verification.incoming = false;
                     state.incoming = grep_in;
                 }
                 if grep_out.is_some() {
-                    state.lsp_bfs_ran = false;
+                    state.verification.outgoing = false;
                     state.outgoing = grep_out;
                 }
             }
@@ -973,7 +983,7 @@ impl PathfinderServer {
             .goto_definition(
                 self.workspace_root.path(),
                 &ctx.semantic_path.file_path,
-                u32::try_from(ctx.scope.start_line + 1).unwrap_or(1),
+                u32::try_from(ctx.scope.name_line + 1).unwrap_or(1),
                 u32::try_from(ctx.scope.name_column + 1).unwrap_or(1),
             )
             .await;
@@ -1163,7 +1173,7 @@ impl PathfinderServer {
                 &ctx.semantic_path.file_path,
                 // Position cursor on the symbol's name identifier (e.g., the 'd' in 'dedent'),
                 // not the 'pub' keyword. rust-analyzer requires this for symbol resolution.
-                u32::try_from(ctx.scope.start_line + 1).unwrap_or(1),
+                u32::try_from(ctx.scope.name_line + 1).unwrap_or(1),
                 u32::try_from(ctx.scope.name_column + 1).unwrap_or(1),
             )
             .await;
@@ -1639,39 +1649,52 @@ impl PathfinderServer {
     }
 
     fn compute_raw_evidence(
+        status: &pathfinder_common::types::ToolStatus,
         incoming: Option<Vec<crate::server::types::ImpactReference>>,
         outgoing: Option<Vec<crate::server::types::ImpactReference>>,
-        lsp_bfs_ran: bool,
-        degraded: bool,
     ) -> (
         Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
         Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
     ) {
-        match (incoming, outgoing, lsp_bfs_ran, degraded) {
-            (Some(inc), Some(out), true, false) => (
-                Some(pathfinder_common::types::Evidence::verified(inc)),
-                Some(pathfinder_common::types::Evidence::verified(out)),
-            ),
-            (inc_opt, out_opt, _, true) => {
-                let inc = inc_opt.and_then(|v| {
+        match status {
+            pathfinder_common::types::ToolStatus::NotReady { .. } => (None, None),
+            pathfinder_common::types::ToolStatus::Degraded { .. }
+            | pathfinder_common::types::ToolStatus::Unavailable { .. } => {
+                let inc = incoming.and_then(|mut v| {
                     if v.is_empty() {
                         None
                     } else {
+                        for item in &mut v {
+                            item.confidence = pathfinder_common::types::Confidence::Heuristic;
+                        }
                         Some(pathfinder_common::types::Evidence::heuristic(v))
                     }
                 });
-                let out = out_opt.and_then(|v| {
+                let out = outgoing.and_then(|mut v| {
                     if v.is_empty() {
                         None
                     } else {
+                        for item in &mut v {
+                            item.confidence = pathfinder_common::types::Confidence::Heuristic;
+                        }
                         Some(pathfinder_common::types::Evidence::heuristic(v))
                     }
                 });
                 (inc, out)
             }
-            (inc_opt, out_opt, _, _) => (
-                inc_opt.map(pathfinder_common::types::Evidence::verified),
-                out_opt.map(pathfinder_common::types::Evidence::verified),
+            pathfinder_common::types::ToolStatus::Ok => (
+                incoming.map(|mut v| {
+                    for item in &mut v {
+                        item.confidence = pathfinder_common::types::Confidence::Verified;
+                    }
+                    pathfinder_common::types::Evidence::verified(v)
+                }),
+                outgoing.map(|mut v| {
+                    for item in &mut v {
+                        item.confidence = pathfinder_common::types::Confidence::Verified;
+                    }
+                    pathfinder_common::types::Evidence::verified(v)
+                }),
             ),
         }
     }
@@ -1679,15 +1702,18 @@ impl PathfinderServer {
     fn paginate_call_hierarchy_evidence(
         raw_inc: Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
         raw_out: Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
-        offset_usize: usize,
-        max_refs_usize: usize,
-        total_inc: usize,
+        offset: u32,
+        max_references: u32,
+        inc_count: usize,
     ) -> (
         Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
         Option<pathfinder_common::types::Evidence<crate::server::types::ImpactReference>>,
     ) {
-        if offset_usize >= total_inc {
-            let out_offset = offset_usize - total_inc;
+        let offset_usize = usize::try_from(offset).unwrap_or(0);
+        let max_refs_usize = usize::try_from(max_references).unwrap_or(50);
+
+        if offset_usize >= inc_count {
+            let out_offset = offset_usize - inc_count;
             let inc = raw_inc.map(|ev| pathfinder_common::types::Evidence {
                 confidence: ev.confidence,
                 items: Vec::new(),
@@ -1729,12 +1755,13 @@ impl PathfinderServer {
     fn compute_call_hierarchy_status(
         degraded: bool,
         warm_start_in_progress: Option<bool>,
+        has_results: bool,
         duration_ms: u128,
         retry_attempt: u32,
         degraded_reason_str: Option<&str>,
     ) -> pathfinder_common::types::ToolStatus {
         if degraded {
-            if warm_start_in_progress == Some(true) {
+            if warm_start_in_progress == Some(true) && !has_results {
                 pathfinder_common::types::ToolStatus::NotReady {
                     elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
                     retry_after_secs: 15,
@@ -1778,8 +1805,8 @@ impl PathfinderServer {
         let (paginated_inc, paginated_out) = Self::paginate_call_hierarchy_evidence(
             raw_inc,
             raw_out,
-            offset_usize,
-            max_refs_usize,
+            offset,
+            max_references,
             total_inc,
         );
 
@@ -1797,8 +1824,8 @@ impl PathfinderServer {
         }
     }
 
-    /// Assembles the final [`crate::server::types::FindCallersCalleesMetadata`]
-    /// and human-readable text summary from the accumulated resolution state.
+    /// Assembles the final [`crate::server::types::FindCallersCalleesMetadata`] and human-readable text
+    /// body from the accumulated `state`.
     fn finalize_call_hierarchy_result(
         params: FinalizeCallHierarchyParams,
     ) -> (crate::server::types::FindCallersCalleesMetadata, String) {
@@ -1817,34 +1844,31 @@ impl PathfinderServer {
             retry_attempt,
         } = params;
 
+        let CallHierarchyDegradedStatus {
+            degraded,
+            degraded_reason,
+            lsp_readiness,
+            warm_start_in_progress,
+            status,
+        } = Self::compute_degraded_and_status(
+            &state,
+            trait_method_degraded,
+            duration_ms,
+            retry_attempt,
+        );
+
         let CallHierarchyState {
             incoming,
             outgoing,
-            degraded,
-            degraded_reason,
+            degraded: _,
+            degraded_reason: _,
             engines,
             files_referenced,
             max_depth_reached,
-            lsp_bfs_ran,
+            verification: _,
             references_truncated,
             resolution_block,
         } = state;
-
-        let degraded_reason = trait_method_degraded.or(degraded_reason);
-        let degraded = degraded || trait_method_degraded.is_some();
-        let degraded_reason_cloned = degraded_reason;
-        let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
-
-        let (lsp_readiness, warm_start_in_progress) =
-            Self::compute_lsp_readiness(degraded, degraded_reason_cloned);
-
-        let status = Self::compute_call_hierarchy_status(
-            degraded,
-            warm_start_in_progress,
-            duration_ms,
-            retry_attempt,
-            degraded_reason_str.as_deref(),
-        );
 
         tracing::info!(
             tool = "find_callers_callees",
@@ -1857,9 +1881,7 @@ impl PathfinderServer {
             "find_callers_callees: complete"
         );
 
-        let (raw_inc, raw_out) =
-            Self::compute_raw_evidence(incoming, outgoing, lsp_bfs_ran, degraded);
-
+        let (raw_inc, raw_out) = Self::compute_raw_evidence(&status, incoming, outgoing);
         let pagination = Self::process_call_hierarchy_pagination(
             raw_inc,
             raw_out,
@@ -1887,6 +1909,10 @@ impl PathfinderServer {
             outgoing: &pagination.paginated_out,
         });
 
+        let inc_count = pagination.inc_count;
+        let out_count = pagination.out_count;
+        let total_items = pagination.total_items;
+
         let metadata = Self::build_callers_callees_metadata(CallersCalleesMetaParams {
             status,
             pagination: &pagination,
@@ -1903,13 +1929,56 @@ impl PathfinderServer {
 
         Self::render_final_call_hierarchy(
             metadata,
-            pagination.inc_count,
-            pagination.out_count,
-            pagination.total_items,
+            inc_count,
+            out_count,
+            total_items,
             resolution_block,
-            degraded_reason_cloned,
+            degraded_reason,
             duration_ms,
         )
+    }
+
+    fn compute_degraded_and_status(
+        state: &CallHierarchyState,
+        trait_method_degraded: Option<DegradedReason>,
+        duration_ms: u128,
+        retry_attempt: u32,
+    ) -> CallHierarchyDegradedStatus {
+        let degraded = state.degraded
+            || trait_method_degraded.is_some()
+            || !state.verification.incoming
+            || !state.verification.outgoing;
+        let degraded_reason = trait_method_degraded.or(state.degraded_reason).or(
+            if !state.verification.incoming || !state.verification.outgoing {
+                Some(DegradedReason::GrepFallbackGlobal)
+            } else {
+                None
+            },
+        );
+        let degraded_reason_cloned = degraded_reason;
+        let degraded_reason_str = degraded_reason.as_ref().map(ToString::to_string);
+
+        let (lsp_readiness, warm_start_in_progress) =
+            Self::compute_lsp_readiness(degraded, degraded_reason_cloned);
+
+        let has_results = state.incoming.as_ref().is_some_and(|v| !v.is_empty())
+            || state.outgoing.as_ref().is_some_and(|v| !v.is_empty());
+        let status = Self::compute_call_hierarchy_status(
+            degraded,
+            warm_start_in_progress,
+            has_results,
+            duration_ms,
+            retry_attempt,
+            degraded_reason_str.as_deref(),
+        );
+
+        CallHierarchyDegradedStatus {
+            degraded,
+            degraded_reason,
+            lsp_readiness,
+            warm_start_in_progress,
+            status,
+        }
     }
 
     fn build_callers_callees_metadata(
@@ -1919,6 +1988,7 @@ impl PathfinderServer {
             status: params.status,
             incoming: params.pagination.paginated_inc.clone(),
             outgoing: params.pagination.paginated_out.clone(),
+            heuristic_candidates: None,
             depth_reached: params.max_depth_reached,
             files_referenced: params.files_referenced_len,
             degraded: params.degraded,
@@ -2000,6 +2070,17 @@ impl PathfinderServer {
         let (semantic_path, symbol_name, scope, tree_sitter_ms) = self
             .locate_symbol_for_callers_callees(&params.semantic_path, start)
             .await?;
+
+        let ext = semantic_path
+            .file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = pathfinder_lsp::language_id_for_extension(ext).unwrap_or("unknown");
+        let _ = self
+            .lawyer
+            .ensure_ready(language_id, std::time::Duration::from_secs(5))
+            .await;
 
         // `_doc_guard` fires did_close automatically when this function returns.
         let _doc_guard = self.open_document_for_callers_callees(&semantic_path).await;

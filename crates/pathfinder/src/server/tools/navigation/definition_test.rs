@@ -81,18 +81,17 @@ async fn test_get_definition_degrades_when_no_lsp() {
         semantic_path: Some("src/auth.rs::login".to_owned()),
         ..Default::default()
     };
-    let result = server.get_definition_impl(params).await;
-    // Should return NO_LSP_AVAILABLE error
-    let Err(err) = result else {
-        panic!("expected error but got Ok");
-    };
-    let code = err
-        .data
-        .as_ref()
-        .and_then(|d| d.get("error"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    assert_eq!(code, "NO_LSP_AVAILABLE");
+    let result = server
+        .get_definition_impl(params)
+        .await
+        .expect("structured result returned");
+    let val: crate::server::types::GetDefinitionResponse = serde_json::from_value(
+        result
+            .structured_content
+            .expect("structured_content present"),
+    )
+    .unwrap();
+    assert!(val.degraded);
 }
 
 #[tokio::test]
@@ -844,18 +843,41 @@ async fn test_get_definition_multi_strategy_fallback() {
 
 #[tokio::test]
 async fn test_get_definition_warmup_retry_success() {
-    // LSP returns Ok(None) first (warmup), then Ok(Some(def)) on retry.
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon
         .read_symbol_scope_results
         .lock()
         .unwrap()
-        .push(Ok(make_scope()));
+        .extend([Ok(make_scope()), Ok(make_scope())]);
 
     let lawyer = Arc::new(MockLawyer::default());
-    // First call (via queue): Ok(None) — simulates warmup
-    lawyer.push_goto_definition_result(Ok(None));
-    // Second call (via set, consumed after queue is empty): Ok(Some(def)) for retry
+    lawyer.set_readiness(pathfinder_lsp::types::Readiness::NotReady {
+        elapsed_secs: 5,
+        retry_after_secs: 15,
+        eta_secs: None,
+        phase: "indexing".to_string(),
+    });
+
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+    let params = LocateParams {
+        semantic_path: Some("src/auth.rs::login".to_owned()),
+        retry_attempt: 0,
+        ..Default::default()
+    };
+    let result = server
+        .get_definition_impl(params)
+        .await
+        .expect("first call returns NotReady result");
+    let val = unpack_def(result);
+    assert!(matches!(
+        val.status,
+        pathfinder_common::types::ToolStatus::NotReady { attempt: 0, .. }
+    ));
+
+    // Request 2: LSP is now Ready and returns definition
+    lawyer.set_readiness(pathfinder_lsp::types::Readiness::Ready(
+        pathfinder_lsp::types::CapabilityReadiness::all(),
+    ));
     lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
         file: "src/auth.rs".into(),
         line: 42,
@@ -863,33 +885,20 @@ async fn test_get_definition_warmup_retry_success() {
         preview: "pub fn login() -> bool {".into(),
     })));
 
-    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
-    let params = LocateParams {
+    let params_retry = LocateParams {
         semantic_path: Some("src/auth.rs::login".to_owned()),
+        retry_attempt: 1,
         ..Default::default()
     };
-    let result = server.get_definition_impl(params).await;
-    let call_res = result.expect("should succeed on retry");
-    let val = unpack_def(call_res);
-
-    assert_eq!(val.file, "src/auth.rs");
-    assert_eq!(val.line, 42);
-    assert!(!val.degraded, "should NOT be degraded on retry success");
-    assert_eq!(
-        val.resolution_strategy,
-        Some("lsp_retry".to_owned()),
-        "should indicate retry strategy"
-    );
-    assert_eq!(
-        val.lsp_readiness,
-        Some("warming_up".to_owned()),
-        "should indicate warming_up"
-    );
-    assert_eq!(
-        val.warm_start_in_progress,
-        Some(true),
-        "should indicate warm_start_in_progress"
-    );
+    let result_retry = server
+        .get_definition_impl(params_retry)
+        .await
+        .expect("retry succeeds");
+    let val_retry = unpack_def(result_retry);
+    assert_eq!(val_retry.status, pathfinder_common::types::ToolStatus::Ok);
+    assert_eq!(val_retry.file, "src/auth.rs");
+    assert_eq!(val_retry.line, 42);
+    assert!(!val_retry.degraded);
 }
 
 // ── grep fallback with 2-segment symbol path ───────────────────────────

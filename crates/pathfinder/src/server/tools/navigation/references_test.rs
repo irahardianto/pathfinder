@@ -1574,15 +1574,14 @@ async fn test_find_all_references_zero_results_but_resolvable_definition_trigger
     let call_res = result.expect("should succeed");
     let val: crate::server::types::FindAllReferencesMetadata =
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
-
-    assert!(val.degraded);
+    assert_eq!(val.status, pathfinder_common::types::ToolStatus::Ok);
+    assert!(!val.degraded);
+    let refs = val.references.unwrap();
     assert_eq!(
-        val.degraded_reason,
-        Some(DegradedReason::LspWarmupGrepFallback)
+        refs.confidence,
+        pathfinder_common::types::Confidence::Verified
     );
-    let refs = val.references.unwrap_or_default();
-    assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].file, "src/main.rs");
+    assert!(refs.items.is_empty());
 }
 
 // ── P2-7: Hint logic tests ──────────────────────────────────────────────────

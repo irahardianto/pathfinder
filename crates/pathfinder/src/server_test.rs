@@ -177,8 +177,17 @@ async fn test_with_engines_uses_no_op_lawyer() {
         semantic_path: Some("src/lib.rs::hello".to_owned()),
         ..Default::default()
     };
-    let result = server.get_definition_impl(params).await;
-    assert!(result.is_err());
+    let result = server
+        .get_definition_impl(params)
+        .await
+        .expect("structured result returned");
+    let val: crate::server::types::GetDefinitionResponse = serde_json::from_value(
+        result
+            .structured_content
+            .expect("structured_content present"),
+    )
+    .unwrap();
+    assert!(val.degraded);
 }
 
 #[tokio::test]

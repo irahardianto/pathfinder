@@ -55,7 +55,9 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id)?;
+        let caps = self
+            .wait_for_capability(language_id, |c| c.flags.definition_provider)
+            .await?;
         if !caps.flags.definition_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "definitionProvider".to_owned(),
@@ -113,7 +115,9 @@ impl Lawyer for LspClient {
         let language_id = language_id_for_extension(ext).ok_or(LspError::NoLspAvailable)?;
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id)?;
+        let caps = self
+            .wait_for_capability(language_id, |c| c.flags.call_hierarchy_provider)
+            .await?;
         if !caps.flags.call_hierarchy_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "callHierarchyProvider".to_owned(),
@@ -207,7 +211,9 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id)?;
+        let caps = self
+            .wait_for_capability(language_id, |c| c.flags.references_provider)
+            .await?;
         if !caps.flags.references_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "referencesProvider".to_owned(),
@@ -274,7 +280,9 @@ impl Lawyer for LspClient {
 
         self.ensure_process(language_id).await?;
 
-        let caps = self.capabilities_for(language_id)?;
+        let caps = self
+            .wait_for_capability(language_id, |c| c.flags.implementation_provider)
+            .await?;
         if !caps.flags.implementation_provider {
             return Err(LspError::UnsupportedCapability {
                 capability: "implementationProvider".to_owned(),

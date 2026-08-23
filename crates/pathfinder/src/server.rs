@@ -54,6 +54,8 @@ impl PathfinderServer {
         workspace_root: &WorkspaceRoot,
         config: &PathfinderConfig,
     ) -> Arc<dyn Lawyer> {
+        let _ = pathfinder_lsp::load_workspace_toml_plugins(workspace_root.path()).await;
+
         match LspClient::new(workspace_root.path(), Arc::new(config.clone())).await {
             Ok(client) => {
                 // Kick off background initialization so LSP processes are

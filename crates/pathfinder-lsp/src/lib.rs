@@ -34,6 +34,7 @@ pub mod plugin;
 /// Module containing type definitions for the language server protocol.
 pub mod types;
 
+pub use client::language_id_for_extension;
 pub use client::LspClient;
 pub use clock::{Clock, DefaultClock, MockClock, TokioClock};
 pub use error::LspError;
@@ -46,8 +47,8 @@ pub use types::{
 };
 
 pub use plugin::{
-    all_plugins, plugin_for_extension, plugin_for_language, GoPlugin, JavaPlugin, LanguagePlugin,
-    LspCandidate, PythonPlugin, RustPlugin, TypeScriptPlugin,
+    all_plugins, load_workspace_toml_plugins, plugin_for_extension, plugin_for_language, GoPlugin,
+    JavaPlugin, LanguagePlugin, LspCandidate, PythonPlugin, RustPlugin, TypeScriptPlugin,
 };
 
 #[cfg(test)]

@@ -157,11 +157,51 @@ pub(crate) fn format_tool_status_header(
 
 /// Validate evidence consistency against tool status (Contract 2).
 ///
+/// Convert an LSP [`pathfinder_lsp::types::Readiness`] state into a [`pathfinder_common::types::ToolStatus`].
+#[allow(dead_code)]
+pub(crate) fn readiness_to_tool_status(
+    readiness: &pathfinder_lsp::types::Readiness,
+    attempt: u32,
+) -> pathfinder_common::types::ToolStatus {
+    match readiness {
+        pathfinder_lsp::types::Readiness::Ready(_) => pathfinder_common::types::ToolStatus::Ok,
+        pathfinder_lsp::types::Readiness::NotReady {
+            elapsed_secs,
+            retry_after_secs,
+            eta_secs,
+            phase,
+        } => pathfinder_common::types::ToolStatus::NotReady {
+            elapsed_secs: *elapsed_secs,
+            retry_after_secs: *retry_after_secs,
+            eta_secs: *eta_secs,
+            phase: phase.clone(),
+            attempt,
+            max_attempts: 3,
+        },
+        pathfinder_lsp::types::Readiness::Unavailable {
+            language,
+            install_hint,
+            alternative,
+        } => pathfinder_common::types::ToolStatus::Unavailable {
+            language: language.clone(),
+            install_hint: install_hint.clone(),
+            alternative: alternative.clone(),
+        },
+        pathfinder_lsp::types::Readiness::Degraded {
+            reason,
+            retry_after_secs,
+        } => pathfinder_common::types::ToolStatus::Degraded {
+            reason: reason.clone(),
+            retry_after_secs: *retry_after_secs,
+        },
+    }
+}
+
 /// Enforces the 4 illegal combinations via `debug_assert!` and `tracing::error!`:
 /// 1. `ToolStatus::Ok` with `Confidence::Heuristic` in any field.
 /// 2. `Evidence { confidence: Heuristic, items: [] }` (must be `None`).
 /// 3. `ToolStatus::NotReady` with `Confidence::Verified`.
-/// 4. `ToolStatus::Unavailable` with non-heuristic or empty unverified states.
+/// 4. `ToolStatus::Unavailable` or `ToolStatus::Degraded` with `Confidence::Verified`.
 pub(crate) fn validate_evidence<T>(
     status: &pathfinder_common::types::ToolStatus,
     evidence: Option<&pathfinder_common::types::Evidence<T>>,
@@ -193,6 +233,20 @@ pub(crate) fn validate_evidence<T>(
             debug_assert!(
                 false,
                 "ToolStatus::NotReady cannot contain Confidence::Verified"
+            );
+        }
+        if matches!(
+            status,
+            pathfinder_common::types::ToolStatus::Unavailable { .. }
+                | pathfinder_common::types::ToolStatus::Degraded { .. }
+        ) && ev.confidence == pathfinder_common::types::Confidence::Verified
+        {
+            tracing::error!(
+                "ILLEGAL STATE: ToolStatus::Unavailable / Degraded cannot contain Confidence::Verified"
+            );
+            debug_assert!(
+                false,
+                "ToolStatus::Unavailable / Degraded cannot contain Confidence::Verified"
             );
         }
     }

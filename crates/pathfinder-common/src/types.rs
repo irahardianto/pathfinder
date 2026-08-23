@@ -338,6 +338,11 @@ pub struct SymbolScope {
     pub start_line: usize,
     /// The zero-indexed ending line.
     pub end_line: usize,
+    /// The zero-indexed line where the symbol's **name identifier** appears.
+    ///
+    /// Distinct from `start_line` for symbols with decorators, annotations, or doc comments.
+    #[serde(default)]
+    pub name_line: usize,
     /// The zero-indexed column where the symbol's **name identifier** begins.
     ///
     /// For `pub fn dedent(code: &str)`, this is the column of the `d` in `dedent`

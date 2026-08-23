@@ -28,6 +28,22 @@ pub(super) struct RenderOverviewParams<'a> {
     pub(super) duration_ms: u128,
 }
 
+struct BuildOverviewResponseArgs {
+    status: pathfinder_common::types::ToolStatus,
+    source: Option<crate::server::types::SymbolSource>,
+    impact: Option<crate::server::types::ImpactSummary>,
+    references:
+        Option<pathfinder_common::types::Evidence<crate::server::types::SymbolOverviewReference>>,
+    files_referenced: usize,
+    degraded: bool,
+    impact_degraded: bool,
+    refs_degraded: bool,
+    degraded_reason: Option<DegradedReason>,
+    lsp_readiness: Option<String>,
+    warm_start_in_progress: Option<bool>,
+    hint: Option<String>,
+}
+
 impl PathfinderServer {
     /// Composite tool: returns source + callers/callees + references in one call.
     ///
@@ -177,30 +193,23 @@ impl PathfinderServer {
             degraded_reason.as_ref(),
         );
 
-        if let Some(imp) = &impact {
-            crate::server::helpers::validate_evidence(&status, imp.incoming.as_ref());
-            crate::server::helpers::validate_evidence(&status, imp.outgoing.as_ref());
-        }
-        crate::server::helpers::validate_evidence(&status, references.as_ref());
+        let (impact, references) = Self::normalize_overview_evidence(&status, impact, references);
 
         let hint = impact_hint.or(refs_hint);
-
-        let response = crate::server::types::SymbolOverviewResponse {
-            status: status.clone(),
+        let response = Self::build_overview_response(BuildOverviewResponseArgs {
+            status,
             source,
-            impact: impact.clone(),
-            references: references.clone(),
+            impact,
+            references,
             files_referenced,
             degraded,
             impact_degraded,
-            references_degraded: refs_degraded,
+            refs_degraded,
             degraded_reason,
-            actionable_guidance: degraded_reason.as_ref().map(DegradedReason::guidance),
             lsp_readiness,
             warm_start_in_progress,
-            hint: hint.clone(),
-            resolution_strategy: None,
-        };
+            hint,
+        });
 
         Ok(Self::build_overview_call_result(
             &params,
@@ -208,6 +217,80 @@ impl PathfinderServer {
             &response,
             duration_ms,
         ))
+    }
+
+    fn normalize_overview_evidence(
+        status: &pathfinder_common::types::ToolStatus,
+        impact: Option<crate::server::types::ImpactSummary>,
+        references: Option<
+            pathfinder_common::types::Evidence<crate::server::types::SymbolOverviewReference>,
+        >,
+    ) -> (
+        Option<crate::server::types::ImpactSummary>,
+        Option<pathfinder_common::types::Evidence<crate::server::types::SymbolOverviewReference>>,
+    ) {
+        let (impact, references) = match status {
+            pathfinder_common::types::ToolStatus::NotReady { .. } => (None, None),
+            pathfinder_common::types::ToolStatus::Degraded { .. }
+            | pathfinder_common::types::ToolStatus::Unavailable { .. } => {
+                let imp = impact.map(|mut imp| {
+                    if let Some(ev) = imp.incoming {
+                        imp.incoming = if ev.items.is_empty() {
+                            None
+                        } else {
+                            Some(pathfinder_common::types::Evidence::heuristic(ev.items))
+                        };
+                    }
+                    if let Some(ev) = imp.outgoing {
+                        imp.outgoing = if ev.items.is_empty() {
+                            None
+                        } else {
+                            Some(pathfinder_common::types::Evidence::heuristic(ev.items))
+                        };
+                    }
+                    imp
+                });
+                let refs = references.and_then(|ev| {
+                    if ev.items.is_empty() {
+                        None
+                    } else {
+                        Some(pathfinder_common::types::Evidence::heuristic(ev.items))
+                    }
+                });
+                (imp, refs)
+            }
+            pathfinder_common::types::ToolStatus::Ok => (impact, references),
+        };
+
+        if let Some(imp) = &impact {
+            crate::server::helpers::validate_evidence(status, imp.incoming.as_ref());
+            crate::server::helpers::validate_evidence(status, imp.outgoing.as_ref());
+        }
+        crate::server::helpers::validate_evidence(status, references.as_ref());
+
+        (impact, references)
+    }
+
+    fn build_overview_response(
+        args: BuildOverviewResponseArgs,
+    ) -> crate::server::types::SymbolOverviewResponse {
+        crate::server::types::SymbolOverviewResponse {
+            status: args.status,
+            source: args.source,
+            impact: args.impact,
+            references: args.references,
+            heuristic_candidates: None,
+            files_referenced: args.files_referenced,
+            degraded: args.degraded,
+            impact_degraded: args.impact_degraded,
+            references_degraded: args.refs_degraded,
+            degraded_reason: args.degraded_reason,
+            actionable_guidance: args.degraded_reason.as_ref().map(DegradedReason::guidance),
+            lsp_readiness: args.lsp_readiness,
+            warm_start_in_progress: args.warm_start_in_progress,
+            hint: args.hint,
+            resolution_strategy: None,
+        }
     }
 
     fn build_overview_call_result(
@@ -304,10 +387,7 @@ impl PathfinderServer {
                 let raw = result.structured_content.unwrap_or_default();
                 let meta: crate::server::types::FindCallersCalleesMetadata =
                     serde_json::from_value(raw).unwrap_or_else(|e| {
-                        #[allow(clippy::manual_assert)]
-                        if cfg!(debug_assertions) {
-                            panic!("find_callers_callees metadata deserialization failed: {e}");
-                        }
+                        debug_assert!(false, "find_callers_callees metadata deserialization failed: {e}");
                         tracing::warn!(
                             error = %e,
                             "symbol_overview: find_callers_callees metadata deserialization failed — using degraded default"
@@ -401,10 +481,7 @@ impl PathfinderServer {
                 let raw = result.structured_content.unwrap_or_default();
                 let meta: crate::server::types::FindAllReferencesMetadata =
                     serde_json::from_value(raw).unwrap_or_else(|e| {
-                        #[allow(clippy::manual_assert)]
-                        if cfg!(debug_assertions) {
-                            panic!("find_all_references metadata deserialization failed: {e}");
-                        }
+                        debug_assert!(false, "find_all_references metadata deserialization failed: {e}");
                         tracing::warn!(
                             error = %e,
                             "symbol_overview: find_all_references metadata deserialization failed — using degraded default"

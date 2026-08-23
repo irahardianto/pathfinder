@@ -29,6 +29,9 @@ pub struct SymbolOverviewResponse {
     /// `null` when LSP was unavailable -- references are unknown.
     /// `Some(Evidence { confidence: Verified, items: [] })` (`[]`) when LSP confirmed zero references.
     pub references: Option<Evidence<SymbolOverviewReference>>,
+    /// Heuristic candidates when status is `NotReady`. Never populated when `Ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heuristic_candidates: Option<Vec<SymbolOverviewReference>>,
     /// Total number of files containing references.
     pub files_referenced: usize,
     /// Whether any component was degraded.
@@ -119,320 +122,6 @@ pub struct SymbolOverviewReference {
     pub confidence: Confidence,
 }
 
-// ── Legacy Response Types ───────────────────────────────────────────
-// These response structs are returned by the underlying `_impl` methods
-// and serialized into MCP responses by the `#[tool_router]` handlers in `server.rs`.
-
-/// The response for `search_codebase`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct SearchCodebaseResponse {
-    /// List of search matches.
-    pub matches: Vec<pathfinder_search::SearchMatch>,
-    /// Raw match count from ripgrep **before** `filter_mode` filtering, **after** ripgrep truncation.
-    ///
-    /// When `truncated = true`, this equals `max_results` and ripgrep stopped searching early.
-    /// When `filter_mode` is `"comments_only"` or `"code_only"`, matches that do not
-    /// pass the filter are excluded from `matches` but still counted here.
-    /// Compare with `total_matches` to see how many matches were removed by filtering.
-    pub raw_match_count: usize,
-    /// Total matches in this response (after `filter_mode` filtering).
-    ///
-    /// This always equals `matches.len()` and `returned_count`. Provided for consistency
-    /// with agent expectations: "total" means what you actually get, not ripgrep's pre-filter count.
-    /// Use `raw_match_count` to see ripgrep's count before filtering.
-    /// Use `filtered_count` to see how many matches were removed by `filter_mode`.
-    pub total_matches: usize,
-    /// Number of matches actually returned in this response (after `filter_mode` filtering).
-    ///
-    /// `returned_count == total_matches == matches.len()`. Provided as a convenience field
-    /// and for backward compatibility.
-    pub returned_count: usize,
-    /// Number of matches removed by `filter_mode` filtering.
-    ///
-    /// `filtered_count = raw_match_count - total_matches`.
-    /// When `filter_mode = "All"`, this is always 0.
-    pub filtered_count: usize,
-    /// Number of files that were actually searched.
-    pub files_searched: usize,
-    /// Number of searchable files matching the `path_glob` (excludes binary and gitignored).
-    /// When `files_searched < files_in_scope`, some files were skipped
-    /// due to permission issues or I/O errors.
-    pub files_in_scope: usize,
-    /// Percentage of in-scope files that were actually searched.
-    /// 100% means exhaustive search; lower values indicate skipped files.
-    pub coverage_percent: u8,
-    /// Indicates if the match list was truncated by `max_results`.
-    pub truncated: bool,
-    /// Grouped output — populated when `group_by_file: true`.
-    ///
-    /// Each group represents one file and contains either full matches (for
-    /// unknown files) or minimal matches (for files in `known_files`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_groups: Option<Vec<SearchResultGroup>>,
-    /// Whether the search response is degraded.
-    #[serde(default)]
-    pub degraded: bool,
-    /// Reason for degradation, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded_reason: Option<DegradedReason>,
-    /// When results are truncated, this field provides the `offset` value
-    /// to use for the next page of results. Absent when not truncated.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_offset: Option<u32>,
-    /// Actionable hint when `filter_mode` removes all results.
-    /// Suggests retrying with `filter_mode=all` when matches exist but were filtered out.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-    /// Machine-readable guidance when `degraded` is `true`.
-    /// Tells the agent whether to retry, what fallback tool to use, and whether
-    /// results are trustworthy.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub actionable_guidance: Option<ActionableGuidance>,
-    /// Wall-clock time in milliseconds that this tool call took to complete.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    /// Files skipped because they matched known binary extensions.
-    pub binary_skipped: usize,
-    /// Files skipped because they were excluded by `.gitignore` rules.
-    pub gitignored_skipped: usize,
-    /// Files skipped for other reasons (permission denied, I/O error, etc.).
-    pub other_skipped: usize,
-}
-
-/// A minimal match entry for files already in the agent's context (`known_files`)
-/// when grouped by file.
-///
-/// Omits `file`, `version_hash` (deduplicated at group level), and `content`,
-/// `context_before`, and `context_after` to save tokens.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct GroupedKnownMatch {
-    /// 1-indexed line number.
-    pub line: u64,
-    /// 1-indexed column number.
-    pub column: u64,
-    /// AST symbol enclosing this match (if available).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enclosing_semantic_path: Option<String>,
-    /// Whether this match is at a definition position (fn, struct, class, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_definition: Option<bool>,
-    /// Always `true` — signals this match was suppressed because the file is known.
-    pub known: bool,
-}
-
-/// A group of matches belonging to one file, returned when `group_by_file: true`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct SearchResultGroup {
-    /// File path relative to workspace root.
-    pub file: String,
-    /// Short content fingerprint of the file (7-char hex, derived from SHA-256).
-    /// Shared by all matches in this group.
-    pub version_hash: String,
-    /// Total number of matches in this group (both full and known).
-    ///
-    /// Provided so agents can quickly assess match density without counting sub-arrays.
-    /// Always present regardless of whether `matches` or `known_matches` are serialized.
-    pub total_matches: usize,
-    /// Full matches (for files NOT in `known_files`).
-    ///
-    /// Per-match objects contain only `{ line, column, content, context_before,
-    /// context_after, enclosing_semantic_path }` — `file` and `version_hash` are
-    /// deduplicated at group level to avoid repeating them for every match.
-    ///
-    /// Absent (not just empty) when all matches in this group are for known files.
-    /// Check `total_matches` for the match count regardless of which array is populated.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(skip)]
-    pub matches: Vec<GroupedMatch>,
-    /// Minimal matches (for files in `known_files`).
-    ///
-    /// Absent when no matches in this group are for known files.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(skip)]
-    pub known_matches: Vec<GroupedKnownMatch>,
-}
-/// A single match within a `SearchResultGroup`.
-///
-/// Omits `file` and `version_hash` (deduplicated at group level) to reduce
-/// token usage when many matches belong to the same file.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct GroupedMatch {
-    /// 1-indexed line number of the match.
-    pub line: u64,
-    /// 1-indexed column number of the match start.
-    pub column: u64,
-    /// The full content of the matching line.
-    pub content: String,
-    /// Lines immediately before the match.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub context_before: Vec<String>,
-    /// Lines immediately after the match.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub context_after: Vec<String>,
-    /// AST symbol enclosing this match (if available).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enclosing_semantic_path: Option<String>,
-    /// Whether this match is at a definition position (fn, struct, class, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_definition: Option<bool>,
-}
-
-/// The metadata embedded in `structured_content` for `get_repo_map`.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetRepoMapMetadata {
-    /// Technology stack of the repository.
-    pub tech_stack: Vec<String>,
-    /// The detail mode used for this response: `"structure"`, `"files"`, or `"symbols"`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    /// Number of directories scanned during repository mapping (structure mode only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dirs_scanned: Option<usize>,
-    /// Number of files scanned.
-    pub files_scanned: usize,
-    /// Number of files truncated.
-    pub files_truncated: usize,
-    /// File paths that were truncated due to token budget.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub truncated_paths: Vec<String>,
-    /// Number of files within the configured scope.
-    pub files_in_scope: usize,
-    /// Percentage of files covered by the search.
-    pub coverage_percent: u8,
-    /// Map of file paths to their version hashes.
-    pub version_hashes: std::collections::HashMap<String, String>,
-    /// Absent when visibility filtering is working correctly.
-    /// Present as `true` if the visibility filter could not be applied
-    /// (agents should then treat all symbols as public).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub visibility_degraded: Option<bool>,
-    /// `true` when filtering by `changed_since` fails (e.g., git is unavailable).
-    #[serde(default)]
-    pub degraded: bool,
-    /// Reason for degradation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub degraded_reason: Option<DegradedReason>,
-    /// Machine-readable guidance when `degraded` is `true`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub actionable_guidance: Option<ActionableGuidance>,
-    /// System capabilities available for this repository.
-    pub capabilities: RepoCapabilities,
-    /// Actual `max_tokens` used (may differ from requested due to auto-scaling).
-    pub max_tokens_used: u32,
-    /// Flat map of language ID to status string (`"ready"`, `"warming_up"`, `"unavailable"`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lsp_status: Option<std::collections::HashMap<String, String>>,
-    /// Wall-clock time in milliseconds that this tool call took to complete.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    /// Optional hint for the agent (e.g. suggesting to increase `max_tokens` if coverage < 100).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-    /// Structured recommendation for `max_tokens` to achieve full coverage.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub suggested_max_tokens: Option<u32>,
-}
-
-/// The overall capabilities of the Pathfinder system.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct RepoCapabilities {
-    /// Whether the search engine is supported.
-    pub search: bool,
-    /// LSP-specific capabilities and status.
-    pub lsp: LspCapabilities,
-}
-
-/// LSP status and capabilities.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct LspCapabilities {
-    /// `true` if LSP is generally supported by the system.
-    pub supported: bool,
-    /// Map of language ID to its specific LSP process status.
-    pub per_language: std::collections::HashMap<String, pathfinder_lsp::types::LspLanguageStatus>,
-}
-
-/// The metadata embedded in `structured_content` for `read_symbol_scope`.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadSymbolScopeMetadata {
-    /// Tool status.
-    #[serde(default)]
-    pub status: ToolStatus,
-    /// The extracted symbol source code.
-    ///
-    /// Mirrors `content[0].text` in the MCP response. Provided here so that
-    /// agents consuming `structured_content` directly have the full source
-    /// without needing to inspect the main content array.
-    pub content: String,
-    /// Starting line number of the symbol in the source.
-    pub start_line: usize,
-    /// Ending line number of the symbol in the source.
-    pub end_line: usize,
-    /// Programming language of the source symbol.
-    pub language: String,
-    /// Wall-clock time in milliseconds that this tool call took to complete.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
-
-/// A symbol output for `read_source_file`.
-#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct SourceSymbol {
-    /// Name of the symbol.
-    pub name: String,
-    /// Semantic path of the symbol.
-    pub semantic_path: String,
-    /// Kind of the symbol (e.g., function, struct).
-    pub kind: String,
-    /// Starting line number of the symbol in the source.
-    pub start_line: usize,
-    /// Ending line number of the symbol in the source.
-    pub end_line: usize,
-    /// Child symbols nested within this symbol.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<Self>,
-}
-
-/// The metadata embedded in `structured_content` for `read_source_file`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadSourceFileMetadata {
-    /// Programming language of the source file.
-    pub language: String,
-    /// Clean source content without timing metadata appended.
-    /// Provided so consumers like `read_files` get uncontaminated content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    /// Symbols extracted from the source file.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub symbols: Vec<SourceSymbol>,
-    /// Wall-clock time in milliseconds that this tool call took to complete.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    /// Whether this file's language is not supported for AST parsing.
-    /// When true, content is raw file content and symbols is empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unsupported_language: Option<bool>,
-}
-
-/// The metadata embedded in `structured_content` for `read_file`.
-#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadFileMetadata {
-    /// First line number returned from the file.
-    pub start_line: u32,
-    /// Number of lines returned.
-    pub lines_returned: u32,
-    /// Total number of lines in the file.
-    pub total_lines: u32,
-    /// Total size of the file in bytes.
-    pub file_size_bytes: u64,
-    /// Whether the output was truncated.
-    pub truncated: bool,
-    /// Detected language of the file.
-    pub language: String,
-    /// Wall-clock time in milliseconds that this tool call took to complete.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
-
 // ── Navigation Tool Response Types ─────────────────────────────────
 
 /// A dependency signature extracted for `read_with_deep_context`.
@@ -464,6 +153,9 @@ pub struct ReadWithDeepContextMetadata {
     pub language: String,
     /// Signatures of all symbols called by this one.
     pub dependencies: Option<Evidence<DeepContextDependency>>,
+    /// Heuristic candidates when status is `NotReady`. Never populated when `Ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heuristic_candidates: Option<Vec<DeepContextDependency>>,
     /// `true` when LSP dependency resolution was unavailable (Tree-sitter only).
     #[serde(default)]
     pub degraded: bool,
@@ -507,6 +199,25 @@ pub struct ReadWithDeepContextMetadata {
     /// have access to source alongside dependencies without parsing the text channel.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+}
+
+/// Metadata returned by single symbol inspect (`read_symbol_scope`) when `include_dependencies=false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadSymbolScopeMetadata {
+    /// Tool status.
+    #[serde(default)]
+    pub status: ToolStatus,
+    /// The source code content of the symbol.
+    pub content: String,
+    /// 1-indexed line where the symbol definition begins.
+    pub start_line: usize,
+    /// 1-indexed line where the symbol definition ends.
+    pub end_line: usize,
+    /// Language ID of the file.
+    pub language: String,
+    /// Wall-clock duration of the tool call in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// The response for `get_definition`.
@@ -590,6 +301,9 @@ pub struct FindCallersCalleesMetadata {
     /// `null` when `degraded` (LSP was unavailable and no heuristic fallback matched) -- callees are UNKNOWN.
     /// `Some(Evidence { confidence: Verified, items: [] })` (`[]`) means LSP confirmed zero callees.
     pub outgoing: Option<Evidence<ImpactReference>>,
+    /// Heuristic candidates when status is `NotReady`. Never populated when `Ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heuristic_candidates: Option<Vec<ImpactReference>>,
     /// Number of transitive levels traversed.
     pub depth_reached: u32,
     /// Total files referenced across all incoming and outgoing references.
@@ -686,6 +400,9 @@ pub struct FindAllReferencesMetadata {
     /// `null` when `degraded` is `true` — LSP was unavailable.
     /// `Some(Evidence { confidence: Verified, items: [] })` (`[]`) means LSP confirmed zero references.
     pub references: Option<Evidence<ReferenceLocation>>,
+    /// Heuristic candidates when status is `NotReady`. Never populated when `Ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heuristic_candidates: Option<Vec<ReferenceLocation>>,
     /// Total number of references found (before pagination).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_references: Option<usize>,
@@ -744,174 +461,6 @@ pub struct ReferenceLocation {
     pub confidence: Confidence,
 }
 
-// ── LSP Health Tool Types ────────────────────────────────────────────
-
-/// Structured information about a degraded tool.
-///
-/// Provides detailed information about which tools are degraded and what
-/// fallback behavior agents can expect. Replaces the old `Vec<String>`
-/// format with machine-readable severity and human-readable descriptions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DegradedToolInfo {
-    /// Tool name (e.g., `"trace"`, `"locate"`, `"inspect"`).
-    pub tool: String,
-    /// Severity of degradation:
-    ///
-    /// - `"unavailable"` — tool will error, use alternatives
-    /// - `"grep_fallback"` — tool returns heuristic results, verify manually
-    /// - `"warmup_pending"` — retry after indexing completes
-    /// - `"partial"` — some features work (e.g., definition works but not call hierarchy)
-    pub severity: String,
-    /// Human-readable description of the fallback behavior and limitations.
-    pub description: String,
-}
-
-/// The response for `lsp_health`.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct LspHealthResponse {
-    /// Overall LSP readiness: `"ready"`, `"warming_up"`, or `"unavailable"`.
-    pub status: String,
-    /// Per-language status details.
-    pub languages: Vec<LspLanguageHealth>,
-    /// PATCH-004: Whether `warm_start` has completed.
-    ///
-    /// When `true`, all `warm_start` background tasks have finished (even if
-    /// some languages failed). When `false`, `warm_start` is still in progress.
-    /// This allows distinguishing "still warming up" from "`warm_start` finished
-    /// but LSP didn't report readiness".
-    pub warm_start_complete: bool,
-    /// P2-6: Whether ALL detected languages have finished background indexing.
-    ///
-    /// `true` when every language reports `indexing_status == "complete"` or has
-    /// no indexing information (language unavailable). `false` when any language
-    /// is still indexing. Agents can poll this single field instead of iterating
-    /// the `languages` array.
-    pub indexing_complete: bool,
-    /// Spec 1.3: Known limitations of the current LSP setup.
-    ///
-    /// Populated with actionable limitations that agents should be aware of,
-    /// such as missing capabilities or languages that require manual setup.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub known_limitations: Vec<String>,
-}
-
-/// Per-language LSP health status.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct LspLanguageHealth {
-    /// Language ID (e.g., "rust", "typescript").
-    pub language: String,
-    /// Status of the language server process.
-    ///
-    /// Lifecycle: `unavailable` → `starting` → `warming_up` → `ready`
-    /// A `ready` LSP may be downgraded to `degraded` if a live probe fails.
-    ///
-    /// - `"unavailable"`: No LSP process running or detected
-    /// - `"starting"`: Process exists, no capability info yet (spawn pending or warm start in progress)
-    /// - `"warming_up"`: Process running, `navigation_ready` not yet confirmed
-    /// - `"ready"`: Initialize handshake complete, `navigation_ready=true`,
-    ///   and live probe succeeded (`navigation_verified=Some(true)`)
-    /// - `"degraded"`: Initialize handshake completed (`navigation_ready=true`)
-    ///   but live probe failed (`navigation_verified=Some(false)`).
-    ///   Navigation MAY still work — retry or use with caution.
-    pub status: String,
-    /// Time since LSP process started, formatted as a human-readable string (e.g., "45s").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub uptime: Option<String>,
-    /// How diagnostics work for this language.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub diagnostics_strategy: Option<String>,
-    /// Whether call hierarchy is supported (affects `trace`, `inspect` with dependencies).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_call_hierarchy: Option<bool>,
-    /// Whether diagnostics are supported (affects LSP health quality).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_diagnostics: Option<bool>,
-    /// Whether definition is supported (affects `locate`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_definition: Option<bool>,
-    /// Background indexing status: `"complete"`, `"in_progress"`, or None.
-    ///
-    /// Independent of overall status — an LSP can be "ready" for navigation
-    /// while still indexing in the background.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub indexing_status: Option<String>,
-    /// Which mechanism reported the indexing status (e.g. `"watcher"`, `"probe"`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub indexing_source: Option<String>,
-    /// How long the current/last indexing pass has taken so far, in seconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub indexing_duration_secs: Option<u64>,
-    /// Whether the LSP advertised navigation capabilities during initialize.
-    ///
-    /// This reflects capability negotiation only — it does NOT guarantee
-    /// navigation actually works. For live verification, check `navigation_verified`.
-    ///
-    /// `true` once the LSP initialize handshake completes with `definitionProvider: true`.
-    /// Independent of `indexing_status` — navigation works during indexing but
-    /// results may be partial until indexing completes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub navigation_ready: Option<bool>,
-    /// Whether navigation was verified by a live probe (not just capability
-    /// advertisement). Distinct from `navigation_ready` which reflects
-    /// capability negotiation only.
-    ///
-    /// - `Some(true)`: live probe succeeded — navigation is operational
-    /// - `Some(false)`: live probe failed — navigation may be broken despite
-    ///   `navigation_ready: true`
-    /// - `None`: probe not yet run (freshness unknown)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub navigation_verified: Option<bool>,
-    /// Whether the status was verified by a live probe (rather than just progress notifications).
-    /// When true, the agent can trust the status.
-    #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
-    pub probe_verified: bool,
-    /// Whether navigation (`locate`, `trace`) was confirmed by a live probe.
-    ///
-    /// `true` only when a live `goto_definition` probe request succeeded — meaning the LSP
-    /// returned a real location, not just that it advertised the capability in the initialize
-    /// handshake. Stronger signal than `navigation_ready` alone.
-    ///
-    /// Note: This is an independent signal from `status: "ready"`. An LSP can be in the `"ready"` status
-    /// (handshake completed) even if a live probe has not yet been executed or has failed (in which case
-    /// `navigation_tested` will be `None` or `Some(false)` respectively).
-    ///
-    /// Agents should prefer this over `probe_verified` — it has the same meaning but
-    /// communicates intent more clearly.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub navigation_tested: Option<bool>,
-    /// Whether the call hierarchy capability was verified by a live probe.
-    #[serde(skip_serializing_if = "crate::server::types::is_false", default)]
-    pub call_hierarchy_verified: bool,
-    /// Install guidance when LSP is unavailable.
-    ///
-    /// Provides actionable commands users can run to install their LSP servers.
-    /// `None` when LSP is running or language not detected at all.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub install_hint: Option<String>,
-    /// The LSP server identity (e.g., "rust-analyzer", "Pyright", "gopls").
-    /// Useful for distinguishing which Python LSP is running.
-    /// `None` when the process is not running or server omitted serverInfo.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub server_name: Option<String>,
-    /// Number of dynamic capability registrations received from the LSP server.
-    /// Useful for diagnosing dynamic registration delays (e.g., jdtls).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub registrations_received: Option<u32>,
-    /// Indexing progress percentage (0-100) if the LSP reports it via workDoneProgress.
-    /// `None` when the LSP does not report progress or indexing is complete.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub indexing_progress_percent: Option<u8>,
-    /// Tools that are degraded (using fallback) for this language.
-    ///
-    /// Empty when LSP is fully operational. Lists which tools lose LSP support
-    /// with detailed severity and description for each.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub degraded_tools: Vec<DegradedToolInfo>,
-    /// Seconds since last liveness probe for this language.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_probe_age_secs: Option<u32>,
-}
-
 /// A single symbol found by `find_symbol`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct FoundSymbol {
@@ -955,46 +504,7 @@ pub struct FindSymbolResponse {
     pub hint: Option<String>,
 }
 
-/// Result for a single file in `read_files`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct FileResult {
-    /// File path.
-    pub path: String,
-    /// File content (None if error).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    /// Language of the file (e.g., "rust", "typescript", "toml").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
-    /// Total number of lines in the file (before truncation).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_lines: Option<u32>,
-    /// Short content fingerprint of the file (7-char hex, derived from SHA-256).
-    ///
-    /// Use for change detection: if the hash differs from a previous call, the file
-    /// has been modified. Not a full SHA-256 digest — compare as opaque strings only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version_hash: Option<String>,
-    /// Error message if file could not be read (e.g., "file not found", "sandbox denied").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Response from `read_files`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadFilesResponse {
-    /// Results for each requested file.
-    pub files: Vec<FileResult>,
-    /// Number of files successfully read.
-    pub succeeded: u32,
-    /// Number of files that failed to read.
-    pub failed: u32,
-    /// Time taken in milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
-
-/// Helper to skip serializing false values for `probe_verified`.
+/// Helper to skip serializing false values for boolean fields.
 #[allow(clippy::trivially_copy_pass_by_ref)] // Required by serde's skip_serializing_if signature
 pub(crate) fn is_false(b: &bool) -> bool {
     !b

@@ -221,7 +221,7 @@ static TS_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
 };
 
 static PYTHON_NODE_TYPES: LanguageNodeTypes = LanguageNodeTypes {
-    function_kinds: &["function_definition", "decorated_definition"],
+    function_kinds: &["function_definition"],
     class_kinds: &["class_definition"],
     method_kinds: &[],
     impl_kinds: &[],

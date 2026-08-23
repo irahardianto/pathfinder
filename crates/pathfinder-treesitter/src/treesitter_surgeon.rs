@@ -193,6 +193,7 @@ impl Surgeon for TreeSitterSurgeon {
             content,
             start_line: symbol.start_line,
             end_line: symbol.end_line,
+            name_line: symbol.name_point.row,
             name_column: symbol.name_column,
             language: language_str.to_string(),
             parent_kind: parent_kind.flatten(),

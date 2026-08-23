@@ -297,8 +297,14 @@ pub(super) async fn spawn_and_initialize(
     );
 
     let (id, rx) = params.dispatcher.register(params.language_id);
-    let init_request =
-        build_initialize_request(id, params.project_root, &params.plugins, init_options).await?;
+    let init_request = build_initialize_request(
+        id,
+        params.project_root,
+        params.language_id,
+        &params.plugins,
+        init_options,
+    )
+    .await?;
     write_message(&mut writer, &init_request).await?;
 
     let timeout_secs = params.init_timeout_secs.unwrap_or(INIT_TIMEOUT_SECS);
@@ -762,6 +768,7 @@ fn ensure_pathfinder_in_gitignore(project_root: &Path) {
 async fn build_initialize_request(
     id: u64,
     project_root: &Path,
+    language_id: &str,
     plugins: &[String],
     init_options: serde_json::Value,
 ) -> Result<Value, LspError> {
@@ -811,6 +818,10 @@ async fn build_initialize_request(
                 }
             });
         }
+    }
+
+    if let Some(plugin) = crate::plugin::plugin_for_language(language_id) {
+        initialization_options = plugin.revalidate_at_spawn(initialization_options, project_root);
     }
 
     Ok(RequestDispatcher::make_request(

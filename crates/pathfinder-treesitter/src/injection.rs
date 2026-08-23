@@ -200,6 +200,115 @@ pub fn find_template_zone(source: &[u8]) -> Option<InjectionRange> {
     }
 }
 
+fn find_close_tag(slice: &str, tag: &str) -> Option<usize> {
+    let bytes = slice.as_bytes();
+    let close_target = format!("</{tag}>");
+    let close_bytes = close_target.as_bytes();
+    let mut i = 0;
+    let len = bytes.len();
+
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while i < len {
+        let b = bytes[i];
+
+        // Handle escape characters inside strings
+        if (in_single_quote || in_double_quote || in_backtick) && b == b'\\' {
+            i += 2;
+            continue;
+        }
+
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                in_block_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_single_quote {
+            if b == b'\'' {
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double_quote {
+            if b == b'"' {
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_backtick {
+            if b == b'`' {
+                in_backtick = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Check for comment starts
+        if b == b'/' && i + 1 < len {
+            if bytes[i + 1] == b'/' {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                in_block_comment = true;
+                i += 2;
+                continue;
+            }
+        }
+
+        // Check for string starts
+        if b == b'\'' {
+            in_single_quote = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_double_quote = true;
+            i += 1;
+            continue;
+        }
+        if b == b'`' {
+            in_backtick = true;
+            i += 1;
+            continue;
+        }
+
+        // Check for closing tag
+        if b == b'<'
+            && i + close_bytes.len() <= len
+            && slice[i..i + close_bytes.len()].eq_ignore_ascii_case(&close_target)
+        {
+            return Some(i);
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
 /// Locate all content byte ranges for top-level `<tagname ...>...</tagname>` occurrences.
 #[must_use]
 pub fn find_all_zones(source: &[u8], tag: &str) -> Vec<InjectionRange> {
@@ -247,8 +356,8 @@ pub fn find_all_zones(source: &[u8], tag: &str) -> Vec<InjectionRange> {
             continue;
         }
 
-        // Find matching `</tagname>`
-        let Some(close_rel) = text[content_start..].find(close_tag.as_str()) else {
+        // Find matching `</tagname>` using quote- and comment-aware scan
+        let Some(close_rel) = find_close_tag(&text[content_start..], tag) else {
             search_from = content_start;
             continue;
         };

@@ -240,6 +240,7 @@ fn test_symbol_overview_response_references_serialization_null_vs_empty() {
     let resp = SymbolOverviewResponse {
         status: pathfinder_common::types::ToolStatus::Ok,
         references: None,
+        heuristic_candidates: None,
         source: None,
         impact: None,
         files_referenced: 0,
@@ -400,6 +401,7 @@ fn test_symbol_overview_response_skip_empty_fields() {
         source: None,
         impact: None,
         references: None,
+        heuristic_candidates: None,
         files_referenced: 0,
         degraded: false,
         impact_degraded: false,
@@ -488,22 +490,6 @@ fn test_find_all_references_metadata_default_roundtrip() {
     assert!(!obj.contains_key("duration_ms"));
     assert!(!obj.contains_key("resolution_strategy"));
     assert!(!obj.contains_key("hint"));
-}
-
-#[test]
-fn test_source_symbol_serde_missing_children() {
-    let json_str = r#"{"name":"foo","semantic_path":"foo::bar","kind":"function","start_line":10,"end_line":20}"#;
-    let symbol: SourceSymbol = serde_json::from_str(json_str).expect("deserialize SourceSymbol");
-    assert_eq!(symbol.name, "foo");
-    assert_eq!(symbol.semantic_path, "foo::bar");
-    assert_eq!(symbol.kind, "function");
-    assert_eq!(symbol.start_line, 10);
-    assert_eq!(symbol.end_line, 20);
-    assert!(symbol.children.is_empty());
-
-    // Serialize it back and make sure children is not serialized when empty
-    let serialized = serde_json::to_string(&symbol).expect("serialize SourceSymbol");
-    assert!(!serialized.contains("children"));
 }
 
 /// Verify `FindCallersCalleesMetadata.test_callers` documents absent vs empty array semantics.

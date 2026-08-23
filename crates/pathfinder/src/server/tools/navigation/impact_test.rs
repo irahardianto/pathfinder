@@ -3340,6 +3340,7 @@ async fn test_trace_trait_method_expands_to_implementations() {
         pathfinder_common::types::SymbolScope {
             content: "fn search(&self);".to_string(),
             start_line: 2,
+            name_line: 2,
             end_line: 2,
             name_column: 7,
             language: "rust".to_string(),
@@ -3474,6 +3475,7 @@ async fn test_trace_trait_method_no_impls_falls_back() {
         pathfinder_common::types::SymbolScope {
             content: "fn search(&self);".to_string(),
             start_line: 2,
+            name_line: 2,
             end_line: 2,
             name_column: 7,
             language: "rust".to_string(),
@@ -3608,6 +3610,7 @@ async fn test_trace_trait_method_hint_surfaces_expansion() {
         pathfinder_common::types::SymbolScope {
             content: "fn search(&self);".to_string(),
             start_line: 2,
+            name_line: 2,
             end_line: 2,
             name_column: 7,
             language: "rust".to_string(),
@@ -3723,6 +3726,7 @@ async fn test_trace_trait_method_hint_dedupes_files() {
         pathfinder_common::types::SymbolScope {
             content: "fn search(&self);".to_string(),
             start_line: 2,
+            name_line: 2,
             end_line: 2,
             name_column: 7,
             language: "rust".to_string(),
@@ -3828,6 +3832,7 @@ async fn test_trace_trait_method_goto_implementation_error_marks_degraded() {
         pathfinder_common::types::SymbolScope {
             content: "fn search(&self);".to_string(),
             start_line: 2,
+            name_line: 2,
             end_line: 2,
             name_column: 7,
             language: "rust".to_string(),

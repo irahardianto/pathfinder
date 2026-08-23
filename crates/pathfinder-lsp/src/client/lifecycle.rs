@@ -1118,6 +1118,33 @@ impl super::LspClient {
         }
     }
 
+    pub(crate) async fn wait_for_capability<F>(
+        &self,
+        language_id: &str,
+        check: F,
+    ) -> Result<crate::client::DetectedCapabilities, LspError>
+    where
+        F: Fn(&crate::client::DetectedCapabilities) -> bool,
+    {
+        let mut caps = self.capabilities_for(language_id)?;
+        if check(&caps) {
+            return Ok(caps);
+        }
+
+        // Grace period for dynamic capability registration (e.g. jdtls client/registerCapability)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Ok(c) = self.capabilities_for(language_id) {
+                if check(&c) {
+                    return Ok(c);
+                }
+                caps = c;
+            }
+        }
+        Ok(caps)
+    }
+
     pub(crate) async fn run_readiness_probe(
         &self,
         language_id: String,
@@ -1416,14 +1443,20 @@ pub(crate) fn find_probe_target(
     workspace_root: &Path,
     language_id: &str,
 ) -> Option<(std::path::PathBuf, u32, u32)> {
-    let extensions: &[&str] = match language_id {
+    let plugin_exts = crate::plugin::plugin_for_language(language_id)
+        .map(crate::plugin::LanguagePlugin::file_extensions);
+    let default_exts: &[&str] = match language_id {
         "rust" => &["rs"],
         "go" => &["go"],
         "typescript" => &["ts", "tsx", "js", "jsx"],
         "python" => &["py"],
         "java" => &["java"],
+        "c" => &["c", "h"],
+        "cpp" => &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+        "vue" => &["vue"],
         _ => &[],
     };
+    let extensions = plugin_exts.unwrap_or(default_exts);
 
     if extensions.is_empty() {
         return None;

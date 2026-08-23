@@ -302,13 +302,120 @@ impl PathfinderServer {
             }
         };
 
+        let ext = semantic_path
+            .file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language_id = pathfinder_lsp::language_id_for_extension(ext).unwrap_or("unknown");
+        let readiness = self
+            .lawyer
+            .ensure_ready(language_id, std::time::Duration::from_secs(5))
+            .await
+            .unwrap_or(pathfinder_lsp::types::Readiness::Unavailable {
+                language: language_id.to_string(),
+                install_hint: format!("No LSP configured for {language_id}"),
+                alternative: "Built-in fallback tools".to_string(),
+            });
+
+        if let pathfinder_lsp::types::Readiness::NotReady {
+            elapsed_secs,
+            retry_after_secs,
+            eta_secs,
+            phase,
+        } = readiness
+        {
+            let symbol_name = super::last_symbol_name(&semantic_path).unwrap_or_default();
+            let grep_result = if symbol_name.is_empty() {
+                None
+            } else {
+                self.grep_references_fallback(
+                    &symbol_name,
+                    &semantic_path.file_path,
+                    &symbol_scope,
+                    &params,
+                )
+                .await
+            };
+
+            let offset = usize::try_from(params.offset).unwrap_or(0);
+            let max_results = usize::try_from(params.max_references).unwrap_or(50).max(1);
+
+            let (paginated_refs, files_referenced, total_references) =
+                if let Some((refs, file_count)) = grep_result {
+                    let ref_count = refs.len();
+                    let paginated = refs
+                        .into_iter()
+                        .skip(offset)
+                        .take(max_results)
+                        .collect::<Vec<_>>();
+                    (paginated, file_count, ref_count)
+                } else {
+                    (Vec::new(), 0, 0)
+                };
+
+            let truncated = total_references > offset.saturating_add(max_results);
+            let next_offset = if truncated {
+                Some(u32::try_from(offset.saturating_add(max_results)).unwrap_or(u32::MAX))
+            } else {
+                None
+            };
+            let duration_ms = start.elapsed().as_millis();
+
+            let status = pathfinder_common::types::ToolStatus::NotReady {
+                elapsed_secs,
+                retry_after_secs,
+                eta_secs,
+                phase: phase.clone(),
+                attempt: params.retry_attempt,
+                max_attempts: 3,
+            };
+
+            let metadata = crate::server::types::FindAllReferencesMetadata {
+                status: status.clone(),
+                references: None,
+                heuristic_candidates: if paginated_refs.is_empty() {
+                    None
+                } else {
+                    Some(paginated_refs)
+                },
+                total_references: Some(total_references),
+                truncated,
+                next_offset,
+                files_referenced,
+                degraded: true,
+                degraded_reason: Some(DegradedReason::LspWarmupEmptyUnverified),
+                actionable_guidance: Some(DegradedReason::LspWarmupEmptyUnverified.guidance()),
+                lsp_readiness: Some("warming_up".to_owned()),
+                warm_start_in_progress: Some(true),
+                duration_ms: Some(millis_to_u64(duration_ms)),
+                resolution_strategy: Some("not_ready".to_owned()),
+                hint: None,
+            };
+
+            let mut text_parts = Vec::new();
+            if let Some(header) = crate::server::helpers::format_tool_status_header(&status) {
+                text_parts.push(header);
+            }
+            text_parts.push(format!(
+                "LSP is still warming up (phase: {phase}). Use host grep or retry later.\n[completed in {duration_ms}ms]"
+            ));
+
+            let mut result =
+                rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+                    text_parts.join("\n"),
+                )]);
+            result.structured_content = serialize_metadata(&metadata);
+            return Ok(result);
+        }
+
         let lsp_start = std::time::Instant::now();
         let lsp_result = self
             .lawyer
             .references(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
-                u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
+                u32::try_from(symbol_scope.name_line + 1).unwrap_or(1),
                 u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
             )
             .await;
@@ -318,7 +425,7 @@ impl PathfinderServer {
             .goto_implementation(
                 self.workspace_root.path(),
                 &semantic_path.file_path,
-                u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
+                u32::try_from(symbol_scope.name_line + 1).unwrap_or(1),
                 u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
             )
             .await;
@@ -377,289 +484,6 @@ impl PathfinderServer {
                     .into_iter()
                     .filter(|r| !impl_keys.contains(&(r.file.clone(), r.line, r.column)))
                     .collect();
-
-                if references.is_empty() && implementations.is_empty() {
-                    let probe = self
-                        .lawyer
-                        .goto_definition(
-                            self.workspace_root.path(),
-                            &semantic_path.file_path,
-                            u32::try_from(symbol_scope.start_line + 1).unwrap_or(1),
-                            u32::try_from(symbol_scope.name_column + 1).unwrap_or(1),
-                        )
-                        .await;
-
-                    if matches!(probe, Ok(Some(_))) {
-                        let symbol_name =
-                            super::last_symbol_name(&semantic_path).unwrap_or_default();
-                        let grep_result = if symbol_name.is_empty() {
-                            None
-                        } else {
-                            self.grep_references_fallback(
-                                &symbol_name,
-                                &semantic_path.file_path,
-                                &symbol_scope,
-                                &params,
-                            )
-                            .await
-                        };
-
-                        let offset = usize::try_from(params.offset).unwrap_or(0);
-                        let max_results =
-                            usize::try_from(params.max_references).unwrap_or(50).max(1);
-
-                        let (paginated_refs, files_referenced, total_references) =
-                            if let Some((refs, file_count)) = grep_result {
-                                let ref_count = refs.len();
-                                let paginated = refs
-                                    .into_iter()
-                                    .skip(offset)
-                                    .take(max_results)
-                                    .collect::<Vec<_>>();
-                                (paginated, file_count, ref_count)
-                            } else {
-                                (Vec::new(), 0, 0)
-                            };
-
-                        let truncated = total_references > offset.saturating_add(max_results);
-                        let paginated_len = paginated_refs.len();
-
-                        let summary = if total_references > 0 {
-                            format!("Found {total_references} references across {files_referenced} files (grep fallback).\n\n")
-                        } else {
-                            "LSP confirmed: zero references or implementations for this symbol.\n"
-                                .to_string()
-                        };
-
-                        let references_text = if paginated_refs.is_empty() {
-                            String::new()
-                        } else {
-                            let header = format!("References: {total_references} found\n");
-                            let items: Vec<_> = paginated_refs
-                                .iter()
-                                .map(|r| {
-                                    format!("{}:{}:{}: {}", r.file, r.line, r.column, r.snippet)
-                                })
-                                .collect();
-                            format!("{}{}", header, items.join("\n"))
-                        };
-
-                        let pagination_note = if truncated {
-                            format!(
-                                "\n[showing {} of {} total — use offset={} for next page]\n",
-                                paginated_len,
-                                total_references,
-                                offset.saturating_add(max_results),
-                            )
-                        } else {
-                            String::new()
-                        };
-
-                        let next_offset = if truncated {
-                            Some(
-                                u32::try_from(offset.saturating_add(max_results))
-                                    .unwrap_or(u32::MAX),
-                            )
-                        } else {
-                            None
-                        };
-
-                        let status = pathfinder_common::types::ToolStatus::NotReady {
-                            elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
-                            retry_after_secs: 15,
-                            eta_secs: None,
-                            phase: "indexing".to_string(),
-                            attempt: params.retry_attempt,
-                            max_attempts: 3,
-                        };
-
-                        let evidence = if paginated_refs.is_empty() {
-                            None
-                        } else {
-                            Some(pathfinder_common::types::Evidence::heuristic(
-                                paginated_refs,
-                            ))
-                        };
-
-                        crate::server::helpers::validate_evidence(&status, evidence.as_ref());
-
-                        let metadata = crate::server::types::FindAllReferencesMetadata {
-                            status,
-                            references: evidence,
-                            total_references: Some(total_references),
-                            truncated,
-                            next_offset,
-                            files_referenced,
-                            degraded: true,
-                            degraded_reason: Some(DegradedReason::LspWarmupGrepFallback),
-                            actionable_guidance: Some(
-                                DegradedReason::LspWarmupGrepFallback.guidance(),
-                            ),
-                            lsp_readiness: Some("warming_up".to_owned()),
-                            warm_start_in_progress: Some(true),
-                            duration_ms: Some(millis_to_u64(duration_ms)),
-                            resolution_strategy: Some("grep_file_scoped".to_owned()),
-                            hint: None,
-                        };
-
-                        let mut result =
-                            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                                format!(
-                                    "{}\n{}{}{}\n[completed in {duration_ms}ms]",
-                                    format_degraded_notice(&DegradedReason::LspWarmupGrepFallback),
-                                    summary,
-                                    references_text,
-                                    pagination_note
-                                ),
-                            )]);
-                        result.structured_content = serialize_metadata(&metadata);
-                        return Ok(result);
-                    }
-
-                    // probe returned Ok(None) or Err — LSP either has no definition for this
-                    // symbol (could be a built-in/external) or is still warming up.
-                    //
-                    // If warmup is incomplete, 0 references is unverified — the LSP hasn't
-                    // finished indexing and may be missing real usages. Report degraded to
-                    // prevent agents from concluding the symbol is unused.
-                    if !self.lawyer.is_warm_start_complete() {
-                        tracing::info!(
-                            tool = "find_all_references",
-                            semantic_path = %params.semantic_path,
-                            "find_all_references: LSP returned 0 refs and warmup incomplete — \
-                             reporting as unverified to avoid false confidence"
-                        );
-
-                        let symbol_name =
-                            super::last_symbol_name(&semantic_path).unwrap_or_default();
-                        let grep_result = if symbol_name.is_empty() {
-                            None
-                        } else {
-                            self.grep_references_fallback(
-                                &symbol_name,
-                                &semantic_path.file_path,
-                                &symbol_scope,
-                                &params,
-                            )
-                            .await
-                        };
-
-                        let offset = usize::try_from(params.offset).unwrap_or(0);
-                        let max_results =
-                            usize::try_from(params.max_references).unwrap_or(50).max(1);
-
-                        let (paginated_refs, files_referenced, total_references) =
-                            if let Some((refs, file_count)) = grep_result {
-                                let ref_count = refs.len();
-                                let paginated = refs
-                                    .into_iter()
-                                    .skip(offset)
-                                    .take(max_results)
-                                    .collect::<Vec<_>>();
-                                (paginated, file_count, ref_count)
-                            } else {
-                                (Vec::new(), 0, 0)
-                            };
-
-                        let truncated = total_references > offset.saturating_add(max_results);
-                        let next_offset = if truncated {
-                            Some(
-                                u32::try_from(offset.saturating_add(max_results))
-                                    .unwrap_or(u32::MAX),
-                            )
-                        } else {
-                            None
-                        };
-                        let paginated_len = paginated_refs.len();
-
-                        let references_text = if paginated_refs.is_empty() {
-                            String::new()
-                        } else {
-                            let header = format!(
-                                "References: {total_references} found (heuristic candidates)\n"
-                            );
-                            let items: Vec<_> = paginated_refs
-                                .iter()
-                                .map(|r| {
-                                    format!(
-                                        "{}:{}:{}: {} [HEURISTIC]",
-                                        r.file, r.line, r.column, r.snippet
-                                    )
-                                })
-                                .collect();
-                            format!("{}{}", header, items.join("\n"))
-                        };
-
-                        let pagination_note = if let Some(next) = next_offset {
-                            format!(
-                                "\nShowing {paginated_len} of {total_references} total. Reissue with offset={next} for the rest.\n"
-                            )
-                        } else {
-                            String::new()
-                        };
-
-                        let summary = if total_references > 0 {
-                            format!("Found {total_references} references across {files_referenced} files (grep fallback, LSP still warming up).\n\n")
-                        } else {
-                            "References: UNKNOWN (not verified — do NOT treat as zero). LSP is still indexing. \
-                             Use your host's grep tool to find usages manually, or retry after LSP readiness reports ready.\n"
-                                .to_string()
-                        };
-
-                        let degraded_reason = DegradedReason::LspWarmupEmptyUnverified;
-                        let status = pathfinder_common::types::ToolStatus::NotReady {
-                            elapsed_secs: u32::try_from(duration_ms / 1000).unwrap_or(0),
-                            retry_after_secs: 15,
-                            eta_secs: None,
-                            phase: "indexing".to_string(),
-                            attempt: params.retry_attempt,
-                            max_attempts: 3,
-                        };
-                        let evidence = if paginated_len == 0 {
-                            None
-                        } else {
-                            Some(pathfinder_common::types::Evidence::heuristic(
-                                paginated_refs,
-                            ))
-                        };
-
-                        crate::server::helpers::validate_evidence(&status, evidence.as_ref());
-
-                        let metadata = crate::server::types::FindAllReferencesMetadata {
-                            status: status.clone(),
-                            references: evidence,
-                            total_references: Some(total_references),
-                            truncated,
-                            next_offset,
-                            files_referenced,
-                            degraded: true,
-                            degraded_reason: Some(degraded_reason),
-                            actionable_guidance: Some(degraded_reason.guidance()),
-                            lsp_readiness: Some("warming_up".to_owned()),
-                            warm_start_in_progress: Some(true),
-                            duration_ms: Some(millis_to_u64(duration_ms)),
-                            resolution_strategy: Some("lsp_unverified_warmup".to_owned()),
-                            hint: None,
-                        };
-
-                        let mut text_parts = Vec::new();
-                        if let Some(header) =
-                            crate::server::helpers::format_tool_status_header(&status)
-                        {
-                            text_parts.push(header);
-                        } else {
-                            text_parts.push(format_degraded_notice(&degraded_reason));
-                        }
-                        text_parts.push(format!("{summary}{references_text}{pagination_note}\n[completed in {duration_ms}ms]"));
-
-                        let mut result =
-                            rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
-                                text_parts.join("\n"),
-                            )]);
-                        result.structured_content = serialize_metadata(&metadata);
-                        return Ok(result);
-                    }
-                }
 
                 // Spec 4.4: Apply pagination to each list separately
                 let total_references = references.len() + implementations.len();
@@ -832,6 +656,7 @@ impl PathfinderServer {
                 let metadata = crate::server::types::FindAllReferencesMetadata {
                     status: status.clone(),
                     references: evidence,
+                    heuristic_candidates: None,
                     total_references: Some(total_references),
                     truncated,
                     next_offset,
@@ -950,7 +775,8 @@ impl PathfinderServer {
 
                 let metadata = crate::server::types::FindAllReferencesMetadata {
                     status: status.clone(),
-                    references,
+                    references: references.clone(),
+                    heuristic_candidates: references.as_ref().map(|ev| ev.items.clone()),
                     total_references,
                     truncated: false,
                     next_offset: None,
@@ -1085,7 +911,8 @@ impl PathfinderServer {
 
                 let metadata = crate::server::types::FindAllReferencesMetadata {
                     status: status.clone(),
-                    references,
+                    references: references.clone(),
+                    heuristic_candidates: references.as_ref().map(|ev| ev.items.clone()),
                     total_references,
                     truncated: false,
                     next_offset: None,

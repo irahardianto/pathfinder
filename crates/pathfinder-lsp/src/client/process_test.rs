@@ -27,7 +27,7 @@ async fn test_path_to_file_uri_dir() {
 #[tokio::test]
 async fn test_build_initialize_request_structure() {
     let dir = tempdir().expect("temp dir");
-    let request = build_initialize_request(42, dir.path(), &[], serde_json::Value::Null)
+    let request = build_initialize_request(42, dir.path(), "rust", &[], serde_json::Value::Null)
         .await
         .expect("ok");
 
@@ -62,7 +62,7 @@ async fn test_build_initialize_request_workspace_name() {
     let named_dir = dir.path().join("my_project");
     std::fs::create_dir_all(&named_dir).expect("create dir");
 
-    let request = build_initialize_request(1, &named_dir, &[], serde_json::Value::Null)
+    let request = build_initialize_request(1, &named_dir, "rust", &[], serde_json::Value::Null)
         .await
         .expect("ok");
     let folders = request["params"]["workspaceFolders"]
@@ -74,7 +74,7 @@ async fn test_build_initialize_request_workspace_name() {
 #[tokio::test]
 async fn test_build_initialize_request_capabilities() {
     let dir = tempdir().expect("temp dir");
-    let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+    let request = build_initialize_request(1, dir.path(), "rust", &[], serde_json::Value::Null)
         .await
         .expect("ok");
 
@@ -97,9 +97,15 @@ async fn test_build_initialize_request_capabilities() {
 async fn test_initialize_includes_plugins_when_present() {
     let dir = tempdir().expect("temp dir");
     let plugins = vec!["@vue/typescript-plugin".to_owned()];
-    let request = build_initialize_request(1, dir.path(), &plugins, serde_json::Value::Null)
-        .await
-        .expect("ok");
+    let request = build_initialize_request(
+        1,
+        dir.path(),
+        "typescript",
+        &plugins,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("ok");
 
     let init_opts = &request["params"]["initializationOptions"];
     assert!(
@@ -130,7 +136,7 @@ async fn test_initialize_includes_plugins_when_present() {
 #[tokio::test]
 async fn test_initialize_empty_when_no_plugins() {
     let dir = tempdir().expect("temp dir");
-    let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+    let request = build_initialize_request(1, dir.path(), "rust", &[], serde_json::Value::Null)
         .await
         .expect("ok");
 
@@ -145,9 +151,15 @@ async fn test_initialize_empty_when_no_plugins() {
 async fn test_initialize_includes_vue_file_extension() {
     let dir = tempdir().expect("temp dir");
     let plugins = vec!["@vue/typescript-plugin".to_owned()];
-    let request = build_initialize_request(1, dir.path(), &plugins, serde_json::Value::Null)
-        .await
-        .expect("ok");
+    let request = build_initialize_request(
+        1,
+        dir.path(),
+        "typescript",
+        &plugins,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("ok");
 
     let init_opts = &request["params"]["initializationOptions"];
     let tsserver = &init_opts["tsserver"];
@@ -475,7 +487,7 @@ async fn test_initialize_java_init_options_passed() {
         }
     });
 
-    let request = build_initialize_request(1, dir.path(), &[], java_opts)
+    let request = build_initialize_request(1, dir.path(), "java", &[], java_opts)
         .await
         .expect("ok");
 
@@ -502,13 +514,17 @@ async fn test_initialize_java_init_options_passed() {
 async fn test_initialize_python_init_options_passed() {
     use serde_json::json;
     let dir = tempfile::tempdir().expect("tempdir");
+    let fake_python = dir.path().join("fake_python");
+    std::fs::write(&fake_python, "#!/bin/sh").expect("write");
+    let python_path = fake_python.to_string_lossy().into_owned();
+
     let python_opts = json!({
         "python": {
-            "pythonPath": "/home/user/.venv/bin/python"
+            "pythonPath": python_path
         }
     });
 
-    let request = build_initialize_request(1, dir.path(), &[], python_opts)
+    let request = build_initialize_request(1, dir.path(), "python", &[], python_opts)
         .await
         .expect("ok");
 
@@ -516,7 +532,7 @@ async fn test_initialize_python_init_options_passed() {
     assert!(!init_opts.is_null(), "init_options should be present");
     assert_eq!(
         init_opts["python"]["pythonPath"].as_str(),
-        Some("/home/user/.venv/bin/python"),
+        Some(python_path.as_str()),
         "pythonPath should be passed through to initialize request"
     );
 }
@@ -604,7 +620,7 @@ fn test_revalidate_python_init_options_invalid_path_no_venv() {
 async fn test_build_initialize_request_null_init_options() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+    let request = build_initialize_request(1, dir.path(), "rust", &[], serde_json::Value::Null)
         .await
         .expect("ok");
 
@@ -622,7 +638,7 @@ async fn test_build_initialize_request_with_plugins_and_init_options_merged() {
     let plugins = vec!["@vue/typescript-plugin".to_owned()];
     let init_opts = serde_json::json!({"custom": "value"});
 
-    let request = build_initialize_request(1, dir.path(), &plugins, init_opts)
+    let request = build_initialize_request(1, dir.path(), "typescript", &plugins, init_opts)
         .await
         .expect("ok");
 
@@ -1206,7 +1222,7 @@ fn test_setup_java_env() {
 #[tokio::test]
 async fn test_build_initialize_request_declares_call_hierarchy() {
     let dir = tempdir().expect("temp dir");
-    let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+    let request = build_initialize_request(1, dir.path(), "rust", &[], serde_json::Value::Null)
         .await
         .expect("ok");
 
@@ -1228,7 +1244,7 @@ async fn test_build_initialize_request_declares_call_hierarchy() {
 #[tokio::test]
 async fn test_build_initialize_request_declares_references() {
     let dir = tempdir().expect("temp dir");
-    let request = build_initialize_request(1, dir.path(), &[], serde_json::Value::Null)
+    let request = build_initialize_request(1, dir.path(), "rust", &[], serde_json::Value::Null)
         .await
         .expect("ok");
 

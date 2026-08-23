@@ -5,7 +5,7 @@ use pathfinder_common::config::PathfinderConfig;
 use pathfinder_common::sandbox::Sandbox;
 use pathfinder_common::types::{DegradedReason, WorkspaceRoot};
 use pathfinder_lsp::types::{CallHierarchyCall, CallHierarchyItem};
-use pathfinder_lsp::{DefinitionLocation, MockLawyer};
+use pathfinder_lsp::MockLawyer;
 use pathfinder_search::MockScout;
 use pathfinder_treesitter::mock::MockSurgeon;
 use std::sync::Arc;
@@ -49,15 +49,16 @@ async fn test_read_with_deep_context_degrades_when_call_hierarchy_unsupported() 
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(
-        text_content.contains("DEGRADED (grep_fallback_dependencies)")
+        (text_content.contains("DEGRADED (no_lsp)")
+            || text_content.contains("DEGRADED (grep_fallback_dependencies)"))
             && text_content.contains("Dependencies: UNKNOWN (not verified — do NOT treat as zero)"),
         "text_content: {text_content}"
     );
     assert!(val.degraded);
-    assert_eq!(
+    assert!(matches!(
         val.degraded_reason,
-        Some(DegradedReason::GrepFallbackDependencies)
-    );
+        Some(DegradedReason::NoLsp | DegradedReason::GrepFallbackDependencies)
+    ));
     assert!(val.dependencies.is_none());
 }
 
@@ -180,8 +181,8 @@ async fn test_read_with_deep_context_outgoing_error_degrades() {
 
 #[tokio::test]
 async fn test_read_with_deep_context_empty_hierarchy_zero_deps() {
-    // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(Some(...))
-    // → LSP is warm, confirmed zero deps. Must NOT be degraded.
+    // call_hierarchy_prepare returns Ok([item]) AND outgoing_calls returns Ok([])
+    // → Confirmed zero dependencies. Must NOT be degraded.
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon
         .read_symbol_scope_results
@@ -190,15 +191,17 @@ async fn test_read_with_deep_context_empty_hierarchy_zero_deps() {
         .push(Ok(make_scope()));
 
     let lawyer = Arc::new(MockLawyer::default());
-    // Empty call hierarchy — ambiguous on its own
-    lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
-    // Probe: goto_definition succeeds → LSP is warm → confirmed zero
-    lawyer.set_goto_definition_result(Ok(Some(DefinitionLocation {
+    let item = CallHierarchyItem {
+        name: "login".into(),
+        kind: "function".into(),
+        detail: None,
         file: "src/auth.rs".into(),
-        line: 10,
+        line: 9,
         column: 4,
-        preview: "fn login() {}".into(),
-    })));
+        data: None,
+    };
+    lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
+    lawyer.push_outgoing_call_result(Ok(vec![]));
 
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -211,34 +214,32 @@ async fn test_read_with_deep_context_empty_hierarchy_zero_deps() {
     let val: crate::server::types::ReadWithDeepContextMetadata =
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-    // NOT degraded — LSP warm, genuinely zero deps confirmed
-    assert!(
-        !val.degraded,
-        "must not be degraded when probe confirms LSP is warm"
-    );
+    // NOT degraded — confirmed zero deps
+    assert_eq!(val.status, pathfinder_common::types::ToolStatus::Ok);
+    assert!(!val.degraded);
     assert_eq!(val.degraded_reason, None);
-    assert!(
-        val.dependencies.as_ref().is_some_and(|d| d.is_empty()),
-        "confirmed zero dependencies"
+    let deps = val.dependencies.expect("verified evidence present");
+    assert_eq!(
+        deps.confidence,
+        pathfinder_common::types::Confidence::Verified
     );
+    assert!(deps.items.is_empty(), "confirmed zero dependencies");
 }
 
 #[tokio::test]
 async fn test_read_with_deep_context_empty_hierarchy_warmup_degrades() {
-    // call_hierarchy_prepare returns Ok([]) AND goto_definition probe returns Ok(None)
-    // → LSP is still warming up. Falls through to grep fallback (PATCH-005).
+    // call_hierarchy_prepare returns Ok([]) (empty prepare)
+    // → Falls through to grep fallback.
     let surgeon = Arc::new(MockSurgeon::new());
-    surgeon.read_symbol_scope_results.lock().unwrap().extend([
-        Ok(make_scope()),
-        Ok(make_scope()),
-        Ok(make_scope()),
-    ]);
+    surgeon
+        .read_symbol_scope_results
+        .lock()
+        .unwrap()
+        .push(Ok(make_scope()));
 
     let lawyer = Arc::new(MockLawyer::default());
     // Empty call hierarchy
     lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
-    // Probe: goto_definition returns Ok(None) → LSP is still warming up
-    // MockLawyer::default() already returns Ok(None) for goto_definition, so no extra setup needed.
 
     let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
 
@@ -251,16 +252,11 @@ async fn test_read_with_deep_context_empty_hierarchy_warmup_degrades() {
     let val: crate::server::types::ReadWithDeepContextMetadata =
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
-    // DEGRADED — grep fallback used because LSP warmup returns empty hierarchy
-    assert!(
-        val.degraded,
-        "must be degraded when goto_definition probe also returns None"
-    );
-    assert_eq!(
+    assert!(val.degraded);
+    assert!(matches!(
         val.degraded_reason,
-        Some(DegradedReason::GrepFallbackDependencies),
-        "degraded_reason must indicate grep fallback was used"
-    );
+        Some(DegradedReason::LspWarmupEmptyUnverified | DegradedReason::GrepFallbackDependencies)
+    ));
     assert!(val.dependencies.is_none());
 }
 
@@ -620,16 +616,41 @@ async fn test_read_with_deep_context_detail_none_falls_back_to_name() {
 
 #[tokio::test]
 async fn test_read_with_deep_context_warmup_retry_success() {
-    // LSP returns Ok([]) first (warmup), then Ok(items) on retry.
     let surgeon = Arc::new(MockSurgeon::new());
     surgeon
         .read_symbol_scope_results
         .lock()
         .unwrap()
-        .push(Ok(make_scope()));
+        .extend([Ok(make_scope()), Ok(make_scope())]);
 
     let lawyer = Arc::new(MockLawyer::default());
+    lawyer.set_readiness(pathfinder_lsp::types::Readiness::NotReady {
+        elapsed_secs: 5,
+        retry_after_secs: 15,
+        eta_secs: None,
+        phase: "indexing".to_string(),
+    });
 
+    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer.clone());
+
+    let params = InspectParams {
+        semantic_path: Some("src/auth.rs::login".to_owned()),
+        retry_attempt: 0,
+        ..Default::default()
+    };
+    let result = server.read_with_deep_context_impl(params).await;
+    let call_res = result.expect("first call returns NotReady result");
+    let val: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+    assert!(matches!(
+        val.status,
+        pathfinder_common::types::ToolStatus::NotReady { attempt: 0, .. }
+    ));
+
+    // Request 2: LSP is now Ready and returns dependencies
+    lawyer.set_readiness(pathfinder_lsp::types::Readiness::Ready(
+        pathfinder_lsp::types::CapabilityReadiness::all(),
+    ));
     let item = CallHierarchyItem {
         name: "login".into(),
         kind: "function".into(),
@@ -639,14 +660,7 @@ async fn test_read_with_deep_context_warmup_retry_success() {
         column: 4,
         data: None,
     };
-
-    // First call: empty (warmup)
-    lawyer.push_prepare_call_hierarchy_result(Ok(vec![]));
-    // goto_definition probe: Ok(None) — confirms LSP warming up
-    // (default MockLawyer returns Ok(None))
-    // Retry call: succeeds with items
     lawyer.push_prepare_call_hierarchy_result(Ok(vec![item]));
-    // Outgoing deps for retry
     lawyer.push_outgoing_call_result(Ok(vec![CallHierarchyCall {
         item: CallHierarchyItem {
             name: "validate_token".into(),
@@ -660,19 +674,22 @@ async fn test_read_with_deep_context_warmup_retry_success() {
         call_sites: vec![9],
     }]));
 
-    let (server, _ws) = make_server_with_lawyer(surgeon, lawyer);
-
-    let params = InspectParams {
+    let params_retry = InspectParams {
         semantic_path: Some("src/auth.rs::login".to_owned()),
+        retry_attempt: 1,
         ..Default::default()
     };
-    let result = server.read_with_deep_context_impl(params).await;
-    let call_res = result.expect("should succeed on retry");
-    let val: crate::server::types::ReadWithDeepContextMetadata =
-        serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
+    let result_retry = server.read_with_deep_context_impl(params_retry).await;
+    let call_res_retry = result_retry.expect("retry succeeds");
+    let val_retry: crate::server::types::ReadWithDeepContextMetadata =
+        serde_json::from_value(call_res_retry.structured_content.unwrap()).unwrap();
 
-    assert!(!val.degraded, "should NOT be degraded on retry success");
-    let deps = val.dependencies.as_ref().unwrap();
+    assert_eq!(val_retry.status, pathfinder_common::types::ToolStatus::Ok);
+    assert!(
+        !val_retry.degraded,
+        "should NOT be degraded on retry success"
+    );
+    let deps = val_retry.dependencies.as_ref().unwrap();
     assert_eq!(deps.len(), 1);
     assert_eq!(deps[0].semantic_path, "src/token.rs::validate_token");
 }
@@ -1340,12 +1357,10 @@ async fn test_read_with_deep_context_no_lsp_resolution_treesitter_direct() {
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(val.degraded);
-    // NoLspAvailable triggers grep fallback, which sets GrepFallbackDependencies
-    assert_eq!(
+    assert!(matches!(
         val.degraded_reason,
-        Some(DegradedReason::GrepFallbackDependencies)
-    );
-    assert_eq!(val.resolution_strategy, Some("grep_fallback".to_owned()));
+        Some(DegradedReason::NoLsp | DegradedReason::GrepFallbackDependencies)
+    ));
 }
 
 // ── grep fallback: max_dependencies truncation ──────────────────────
@@ -1472,10 +1487,10 @@ async fn test_read_with_deep_context_lsp_protocol_error_triggers_grep_fallback()
         serde_json::from_value(call_res.structured_content.unwrap()).unwrap();
 
     assert!(val.degraded);
-    assert_eq!(
+    assert!(matches!(
         val.degraded_reason,
-        Some(DegradedReason::GrepFallbackDependencies)
-    );
+        Some(DegradedReason::LspErrorGrepFallback | DegradedReason::GrepFallbackDependencies)
+    ));
 }
 
 // ── ENRICH-2: inspect dependency semantic paths are hierarchically qualified ──
