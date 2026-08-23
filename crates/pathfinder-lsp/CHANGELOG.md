@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.13.0...pathfinder-mcp-lsp-v0.13.1) - 2026-08-23
+
+### Added
+
+- *(navigation)* integrate position encoding negotiation and syntax extraction
+- *(navigation)* unify Pathfinder v6 response contracts and LSP readiness
+- *(v6)* overhaul Pathfinder into precision 3-tool resolution layer
+
+### Fixed
+
+- *(lsp)* drive probe target extensions from plugin and grammar registries
+- *(lsp)* resolve mock binary resolution and procfs liveness across environments
+- *(docs)* resolve broken intra-doc links and invalid HTML tags
+
+### Other
+
+- *(mock-lsp)* implement scriptable lifecycle harness, canned indexing, and clock abstraction
+- *(lsp)* handle uninitialized ts language server in integration test
+- add missing rustdoc ahead of the workspace missing_docs lint
+- *(lsp)* decompose find_marker to fix cognitive complexity
+
 ## [0.13.0](https://github.com/irahardianto/pathfinder/compare/pathfinder-mcp-lsp-v0.12.8...pathfinder-mcp-lsp-v0.13.0) - 2026-07-27
 
 ### Fixed

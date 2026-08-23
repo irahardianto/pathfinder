@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.3](https://github.com/irahardianto/pathfinder/compare/v0.23.2...v0.23.3) - 2026-08-23
+
+### Added
+
+- *(navigation)* integrate position encoding negotiation and syntax extraction
+- *(navigation)* unify Pathfinder v6 response contracts and LSP readiness
+- *(v6)* overhaul Pathfinder into precision 3-tool resolution layer
+
+### Fixed
+
+- *(navigation)* drive symbol search extensions from grammar registry
+- *(lints)* resolve unused_async_trait_impl for clippy 1.98
+- *(docs)* resolve broken intra-doc links and invalid HTML tags
+- *(lsp)* drive probe target extensions from plugin and grammar registries
+- *(lsp)* resolve mock binary resolution and procfs liveness across environments
+
+### Other
+
+- refine budget constraints and tool routing in agent directives
+- update tool routing directives and contracts for Pathfinder v6
+- *(readme)* document git hooks setup and workspace lint policy
+- add missing rustdoc ahead of the workspace missing_docs lint
+- *(navigation)* decompose find_callers_callees_impl for cognitive complexity
+- *(navigation)* decompose get_definition_impl for cognitive complexity
+- *(search)* decompose find_symbol_impl_inner and its test
+- *(deps)* remove unused url dependency from pathfinder-mcp
+- *(mock-lsp)* implement scriptable lifecycle harness, canned indexing, and clock abstraction
+- *(lsp)* handle uninitialized ts language server in integration test
+- *(lsp)* decompose find_marker to fix cognitive complexity
+
 ## [0.23.2](https://github.com/irahardianto/pathfinder/compare/v0.23.1...v0.23.2) - 2026-07-27
 
 ### Fixed
