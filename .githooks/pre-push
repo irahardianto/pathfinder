@@ -3,11 +3,16 @@
 # push instead of on every commit (testing-strategy.md "Never commit broken
 # tests" extended to the full suite before it reaches CI/a shared branch).
 #
-# Mirrors .github/workflows/ci.yml's "Integration Tests" job: builds the
-# test-mock-lsp fixture binary (nextest only builds test targets, not
-# production binaries — see ci.yml's comment on this), then runs the
-# `--features integration` suite which spawns real subprocesses (mock LSP,
-# git, file watcher).
+# Gates:
+#   1. integration-tests — mirrors .github/workflows/ci.yml's "Integration
+#      Tests" job: builds the test-mock-lsp fixture binary (nextest only builds
+#      test targets, not production binaries — see ci.yml's comment on this),
+#      then runs the `--features integration` suite which spawns real
+#      subprocesses (mock LSP, git, file watcher).
+#   2. osv-scanner — dependency vulnerability scan (mirrors ci.yml's
+#      "OSV Scanner" job). Excludes test fixture directories that contain
+#      conformance manifest files (e.g. go.mod) with intentionally old
+#      versions. Gracefully degrades if osv-scanner is not installed.
 #
 # Skip (emergencies only): PATHFINDER_HOOK_SKIP_PUSH=1 git push ...
 # Per git-workflow-principles.md this should not be routine practice.
@@ -24,38 +29,86 @@ else
   C_CYN=$'\033[36m'; C_DIM=$'\033[2m'; C_RST=$'\033[0m'
 fi
 
+FAILED=0
+
 printf '%sPathfinder pre-push gate%s\n' "$C_CYN" "$C_RST"
 
 if [[ "${PATHFINDER_HOOK_SKIP_PUSH:-0}" == "1" ]]; then
-  printf '%s[SKIP]%s integration-tests — PATHFINDER_HOOK_SKIP_PUSH=1\n' "$C_DIM" "$C_RST"
+  printf '%s[SKIP]%s all gates — PATHFINDER_HOOK_SKIP_PUSH=1\n' "$C_DIM" "$C_RST"
   exit 0
 fi
 
-if [[ ! -f Cargo.toml ]] || ! command -v cargo >/dev/null 2>&1; then
-  printf '%s[SKIP]%s integration-tests — no workspace Cargo.toml or cargo\n' "$C_DIM" "$C_RST"
-  exit 0
-fi
+# =============================================================================
+# Gate 1: Integration Tests
+# =============================================================================
+gate_integration_tests() {
+  if [[ ! -f Cargo.toml ]] || ! command -v cargo >/dev/null 2>&1; then
+    printf '%s[SKIP]%s integration-tests — no workspace Cargo.toml or cargo\n' "$C_DIM" "$C_RST"
+    return 0
+  fi
 
-printf '  Building test-mock-lsp fixture binary...\n'
-if ! cargo build -p test-mock-lsp 2>&1 | tail -20; then
-  printf '%s[FAIL]%s integration-tests — failed to build test-mock-lsp\n' "$C_RED" "$C_RST" >&2
+  printf '  Building test-mock-lsp fixture binary...\n'
+  if ! cargo build -p test-mock-lsp 2>&1 | tail -20; then
+    printf '%s[FAIL]%s integration-tests — failed to build test-mock-lsp\n' "$C_RED" "$C_RST" >&2
+    return 1
+  fi
+
+  local runner
+  if command -v cargo-nextest >/dev/null 2>&1; then
+    runner="cargo nextest run --workspace --features integration --test-threads 4"
+  else
+    printf '%s[WARN]%s cargo-nextest not installed — falling back to cargo test (slower, less parallel)\n' "$C_YEL" "$C_RST"
+    runner="cargo test --workspace --features integration"
+  fi
+
+  printf '  Running: %s\n' "$runner"
+  if $runner; then
+    printf '%s  [ok]  integration-tests%s\n' "$C_GRN" "$C_RST"
+    return 0
+  fi
+
+  printf '%s[FAIL]%s integration-tests — never push broken tests (testing-strategy.md)\n' "$C_RED" "$C_RST" >&2
+  return 1
+}
+
+# =============================================================================
+# Gate 2: OSV Scanner (dependency vulnerability audit)
+# security-mandate.md — complements cargo-audit (Rust-only / RustSec) with
+# multi-ecosystem coverage via OSV. Mirrors ci.yml's osv-scanner job.
+# =============================================================================
+gate_osv_scanner() {
+  if ! command -v osv-scanner >/dev/null 2>&1; then
+    printf '%s[WARN]%s osv-scanner not installed — install: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest  or  brew install osv-scanner (security-mandate.md)\n' \
+      "$C_YEL" "$C_RST" >&2
+    return 0
+  fi
+
+  printf '  Running osv-scanner...\n'
+  local out
+  # --exclude: skip test fixture directories containing conformance manifest
+  # files with intentionally pinned (old) versions — not real dependencies.
+  if out="$(osv-scanner scan -r --exclude crates/pathfinder/tests/fixtures/ ./ 2>&1)"; then
+    printf '%s  [ok]  osv-scanner — no known vulnerabilities%s\n' "$C_GRN" "$C_RST"
+    return 0
+  fi
+
+  printf '%s\n' "$out" >&2
+  printf '%s[FAIL]%s osv-scanner — known vulnerabilities found, update dependencies (security-mandate.md)\n' "$C_RED" "$C_RST" >&2
+  return 1
+}
+
+# =============================================================================
+# RUN GATES
+# =============================================================================
+gate_integration_tests || FAILED=1
+gate_osv_scanner       || FAILED=1
+
+# --- summary ----------------------------------------------------------------
+if [[ $FAILED -eq 1 ]]; then
+  printf '\n%sPush blocked.%s Fix the failures above.\n' "$C_RED" "$C_RST" >&2
+  printf '  Bypass (emergencies only): PATHFINDER_HOOK_SKIP_PUSH=1 git push ...\n' >&2
   exit 1
 fi
 
-if command -v cargo-nextest >/dev/null 2>&1; then
-  RUNNER="cargo nextest run --workspace --features integration --test-threads 4"
-else
-  printf '%s[WARN]%s cargo-nextest not installed — falling back to cargo test (slower, less parallel)\n' "$C_YEL" "$C_RST"
-  RUNNER="cargo test --workspace --features integration"
-fi
-
-printf '  Running: %s\n' "$RUNNER"
-if $RUNNER; then
-  printf '%s[ok]%s  integration-tests — %s\n' "$C_GRN" "$C_RST" "$RUNNER"
-  printf '%sAll gates passed.%s\n' "$C_GRN" "$C_RST"
-  exit 0
-fi
-
-printf '%s[FAIL]%s integration-tests — never push broken tests (testing-strategy.md)\n' "$C_RED" "$C_RST" >&2
-printf '  Bypass (emergencies only): PATHFINDER_HOOK_SKIP_PUSH=1 git push ...\n' >&2
-exit 1
+printf '%sAll gates passed.%s\n' "$C_GRN" "$C_RST"
+exit 0

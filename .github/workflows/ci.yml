@@ -244,6 +244,7 @@ jobs:
     with:
       scan-args: |-
         --recursive
+        --exclude crates/pathfinder/tests/fixtures/
         ./
 
   # ──────────────────────────────────────────────
