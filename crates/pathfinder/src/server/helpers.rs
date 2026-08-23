@@ -1,13 +1,12 @@
 //! Shared helper functions for Pathfinder MCP tool handlers.
 //!
-//! Contains error conversion utilities and the file-language detector
-//! used by `read` (config file mode).
+//! Contains error conversion and response-formatting utilities shared
+//! across the `inspect`, `locate`, and `trace` tool handlers.
 
 use pathfinder_common::error::PathfinderError;
 use pathfinder_common::types::{SemanticPath, TrustLevel};
 use rmcp::model::{ErrorCode, ErrorData};
 use std::fmt::Write;
-use std::path::Path;
 
 /// Spec 5.1: Convert a `Duration::as_millis()` (u128) to u64 for JSON responses.
 /// Millisecond timestamps will never overflow u64 in practice.
@@ -303,32 +302,6 @@ pub(crate) fn format_degraded_notice(reason: &pathfinder_common::types::Degraded
     }
 
     parts.join(" — ")
-}
-
-// ── Language Detection ──────────────────────────────────────────────
-
-/// Detect the language of a file from its extension.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn language_from_path(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("ts" | "tsx") => "typescript",
-        Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
-        Some("rs") => "rust",
-        Some("go") => "go",
-        Some("py") => "python",
-        Some("java") => "java",
-        Some("json") => "json",
-        Some("yaml" | "yml") => "yaml",
-        Some("toml") => "toml",
-        Some("md" | "mdx") => "markdown",
-        Some("sh" | "bash") => "shell",
-        Some("dockerfile") | None
-            if path.file_name().and_then(|n| n.to_str()) == Some("Dockerfile") =>
-        {
-            "dockerfile"
-        }
-        _ => "text",
-    }
 }
 
 // ── Semantic-Path Helpers ───────────────────────────────────────────

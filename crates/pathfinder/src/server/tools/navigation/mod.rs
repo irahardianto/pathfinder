@@ -432,6 +432,17 @@ fn keywords_for_language(language: &str) -> &'static [&'static str] {
 /// Map language ID to file glob pattern, driven from plugin and grammar registries.
 ///
 /// Used by candidate resolution and grep fallbacks to search for definition files.
+///
+/// The named fast-path arms below are a deliberate **cross-grammar
+/// widening**, not just a precision shortcut duplicating the registry: they
+/// encode "related file kinds a definition could plausibly live in" for a
+/// language, which `LanguageGrammar` has no axis to express. For example
+/// `typescript` widens to include `tsx` (a distinct `LanguageGrammar` entry
+/// with its own `id`), and `vue` widens to `{vue,ts,tsx,js,jsx,mjs,cjs}`
+/// because Vue SFCs commonly import colocated `.ts`/`.js` composables —
+/// `mjs`/`cjs` don't even have a `LanguageGrammar` entry. Only the
+/// registry-driven fallback arm below is a plain 1:1 reflection of the
+/// plugin/grammar extension lists.
 fn language_to_file_glob(language: &str) -> String {
     match language {
         "rust" => "**/*.rs".to_string(),
@@ -752,7 +763,6 @@ impl PathfinderServer {
                             // PATCH-002-C: filter to function kind to narrow cross-file results
                             // (avoids matching unrelated structs/enums named "search")
                             kind: Some("function".to_string()),
-                            path_glob: "**/*".to_owned(),
                             max_results: 20,
                         };
                         match self.find_symbol_impl_inner(find_params).await {

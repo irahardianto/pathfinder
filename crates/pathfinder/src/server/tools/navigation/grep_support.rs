@@ -9,7 +9,7 @@ use crate::server::PathfinderServer;
 use futures::StreamExt as _;
 use pathfinder_common::types::FilterMode;
 use pathfinder_search::{SearchMatch, SearchParams as ScoutSearchParams};
-use pathfinder_treesitter::language::SupportedLanguage;
+use pathfinder_treesitter::language::{LanguageGrammar, SupportedLanguage};
 use pathfinder_treesitter::surgeon::SymbolKind;
 use rmcp::model::ErrorData;
 use std::path::Path;
@@ -44,7 +44,6 @@ const DEFINITION_KEYWORDS: &[&str] = &[
 pub struct FindSymbolParams {
     pub query: String,
     pub kind: Option<String>,
-    pub path_glob: String,
     pub max_results: u32,
 }
 
@@ -180,51 +179,42 @@ fn validate_find_symbol_params(params: &FindSymbolParams) -> Result<(), ErrorDat
     Ok(())
 }
 
-/// Returns `true` when `path_glob` already scopes the search to a single
-/// known source-file extension.
-fn glob_has_ext_filter(path_glob: &str) -> bool {
-    infer_single_ext_from_glob(path_glob).is_some()
-        || path_glob.contains("*.rs")
-        || path_glob.contains("*.ts")
-        || path_glob.contains("*.tsx")
-        || path_glob.contains("*.js")
-        || path_glob.contains("*.jsx")
-        || path_glob.contains("*.py")
-        || path_glob.contains("*.go")
-        || path_glob.contains("*.java")
-}
+/// Languages searched by cross-file symbol lookup (the `locate` "did you
+/// mean" fallback in `mod.rs`).
+///
+/// Extensions are resolved from the canonical `LanguageGrammar` registry
+/// (WS-8) instead of being hand-duplicated here. This used to be a
+/// hardcoded 8-extension list (`rs`, `ts`, `tsx`, `js`, `jsx`, `py`, `go`,
+/// `java`) that silently omitted `vue` even though `definition_patterns`
+/// has a dedicated Vue arm — cross-file symbol suggestions could never
+/// surface a match defined in a `.vue` file. Driving it from the registry
+/// means adding a language to `LanguageGrammar::GRAMMARS` is enough; no
+/// second list to remember to update.
+const SEARCHABLE_LANGUAGES: &[&str] = &[
+    "rust",
+    "go",
+    "typescript",
+    "tsx",
+    "javascript",
+    "python",
+    "java",
+    "vue",
+];
 
-/// Determines which (extension, glob) pairs to search.
-fn resolve_search_extensions(path_glob: &str) -> Vec<(&'static str, String)> {
-    if let Some(ext) = infer_single_ext_from_glob(path_glob) {
-        return vec![(ext, path_glob.to_string())];
-    }
-    if glob_has_ext_filter(path_glob) {
-        return vec![("any", path_glob.to_string())];
-    }
-    vec![
-        ("rs", String::from("**/*.rs")),
-        ("ts", String::from("**/*.ts")),
-        ("tsx", String::from("**/*.tsx")),
-        ("js", String::from("**/*.js")),
-        ("jsx", String::from("**/*.jsx")),
-        ("py", String::from("**/*.py")),
-        ("go", String::from("**/*.go")),
-        ("java", String::from("**/*.java")),
-    ]
-}
-
-/// Computes directory prefix for post-search filtering.
-fn compute_user_path_prefix(path_glob: &str, has_ext_filter: bool) -> Option<String> {
-    if has_ext_filter || path_glob.is_empty() || path_glob == "**/*" {
-        return None;
-    }
-    let trimmed = path_glob.trim_end_matches("/**").trim_end_matches("/*");
-    if trimmed.is_empty() || trimmed == "." {
-        None
-    } else {
-        Some(format!("{trimmed}/"))
-    }
+/// Builds the fixed set of `(extension, glob)` pairs searched by cross-file
+/// symbol lookup — one entry per file extension of each language in
+/// `SEARCHABLE_LANGUAGES`, resolved via `LanguageGrammar`.
+fn resolve_search_extensions() -> Vec<(&'static str, String)> {
+    SEARCHABLE_LANGUAGES
+        .iter()
+        .filter_map(|&lang_id| LanguageGrammar::find_by_id(lang_id))
+        .flat_map(|grammar| {
+            grammar
+                .extensions
+                .iter()
+                .map(|ext| (*ext, format!("**/*.{ext}")))
+        })
+        .collect()
 }
 
 /// Builds search params for definition patterns.
@@ -356,24 +346,20 @@ impl PathfinderServer {
             tool = "find_symbol_inner",
             query = %params.query,
             kind = ?params.kind,
-            path_glob = %params.path_glob,
             max_results = params.max_results,
             "find_symbol_inner: start"
         );
 
         validate_find_symbol_params(&params)?;
 
-        let has_ext_filter = glob_has_ext_filter(&params.path_glob);
-        let extensions = resolve_search_extensions(&params.path_glob);
-        let user_path_prefix = compute_user_path_prefix(&params.path_glob, has_ext_filter);
+        let extensions = resolve_search_extensions();
         let search_params_list =
             build_search_params_list(self.workspace_root.path(), extensions, &params.query);
 
         let search_results = self.run_parallel_searches(search_params_list).await;
 
         let pre_dedup_count: usize = search_results.iter().map(|r| r.matches.len()).sum();
-        let matches_to_enrich =
-            self.filter_and_dedup_matches(search_results, user_path_prefix.as_deref());
+        let matches_to_enrich = self.filter_and_dedup_matches(search_results);
         let dedup_eliminated = pre_dedup_count.saturating_sub(matches_to_enrich.len());
 
         tracing::debug!(
@@ -489,7 +475,6 @@ impl PathfinderServer {
     fn filter_and_dedup_matches(
         &self,
         search_results: Vec<pathfinder_search::SearchResult>,
-        user_path_prefix: Option<&str>,
     ) -> Vec<MatchToEnrich> {
         let canonical_root = self
             .workspace_root
@@ -500,7 +485,7 @@ impl PathfinderServer {
         let mut matches_to_enrich: Vec<MatchToEnrich> = Vec::new();
         for result in search_results {
             for m in result.matches {
-                if !self.is_admissible_match(&m, user_path_prefix, &canonical_root) {
+                if !self.is_admissible_match(&m, &canonical_root) {
                     continue;
                 }
                 matches_to_enrich.push(MatchToEnrich {
@@ -519,7 +504,6 @@ impl PathfinderServer {
     fn is_admissible_match(
         &self,
         m: &pathfinder_search::SearchMatch,
-        user_path_prefix: Option<&str>,
         canonical_root: &Path,
     ) -> bool {
         if m.file.contains("..") || m.file.starts_with('/') || m.file.starts_with('\\') {
@@ -545,12 +529,6 @@ impl PathfinderServer {
                 "sandbox denied access to file"
             );
             return false;
-        }
-
-        if let Some(prefix) = user_path_prefix {
-            if !m.file.starts_with(prefix) {
-                return false;
-            }
         }
 
         true
@@ -790,38 +768,7 @@ fn is_workspace_file_path(path: &Path, workspace_root: &Path, canonical_root: &P
     full_path.starts_with(canonical_root)
 }
 
-fn infer_single_ext_from_glob(glob: &str) -> Option<&'static str> {
-    if glob.contains('{') {
-        return None;
-    }
-
-    let known: &[(&str, &'static str)] = &[
-        ("*.tsx", "tsx"),
-        ("*.jsx", "jsx"),
-        ("*.rs", "rs"),
-        ("*.ts", "ts"),
-        ("*.js", "js"),
-        ("*.py", "py"),
-        ("*.go", "go"),
-        ("*.java", "java"),
-        ("*.vue", "vue"),
-    ];
-
-    let mut matched: Option<&'static str> = None;
-    for (marker, ext) in known {
-        let found = glob.match_indices(marker).any(|(pos, _)| {
-            let after_pos = pos + marker.len();
-            !glob[after_pos..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic())
-        });
-        if found {
-            if matched.is_some() {
-                return None;
-            }
-            matched = Some(ext);
-        }
-    }
-    matched
-}
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[path = "grep_support_test.rs"]
+mod tests;
