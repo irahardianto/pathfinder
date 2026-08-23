@@ -85,9 +85,10 @@ gate_osv_scanner() {
 
   printf '  Running osv-scanner...\n'
   local out
-  # --exclude: skip test fixture directories containing conformance manifest
-  # files with intentionally pinned (old) versions — not real dependencies.
-  if out="$(osv-scanner scan -r --exclude crates/pathfinder/tests/fixtures/ ./ 2>&1)"; then
+  # Scan Cargo.lock directly: targets the workspace lockfile and avoids false
+  # positives on test fixture manifests with intentionally pinned versions.
+  # Compatible with both osv-scanner v1 and v2 CLI syntax.
+  if out="$(osv-scanner scan -L Cargo.lock 2>&1)" || out="$(osv-scanner -L Cargo.lock 2>&1)"; then
     printf '%s  [ok]  osv-scanner — no known vulnerabilities%s\n' "$C_GRN" "$C_RST"
     return 0
   fi

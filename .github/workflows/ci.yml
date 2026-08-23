@@ -243,9 +243,7 @@ jobs:
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.3.5
     with:
       scan-args: |-
-        --recursive
-        --exclude crates/pathfinder/tests/fixtures/
-        ./
+        --lockfile=Cargo.lock
 
   # ──────────────────────────────────────────────
   # Release — Step 1: Open/update the release PR
