@@ -27,7 +27,7 @@ pathfinder-common = { version = "0.9.3", path = "../pathfinder-common", package 
 pathfinder-lsp = { version = "0.13.1", path = "../pathfinder-lsp", package = "pathfinder-mcp-lsp" }
 pathfinder-search = { version = "0.5.12", path = "../pathfinder-search", package = "pathfinder-mcp-search" }
 pathfinder-treesitter = { version = "0.12.3", path = "../pathfinder-treesitter", package = "pathfinder-mcp-treesitter" }
-rmcp = { version = ">=1.4.0, <2", features = ["server", "macros", "transport-io"] }
+rmcp = { version = ">=1.4.0, <3", features = ["server", "macros", "transport-io"] }
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
